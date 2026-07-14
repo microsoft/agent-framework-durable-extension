@@ -1,0 +1,64 @@
+name: .NET Build and Test
+
+on:
+  pull_request:
+    paths:
+      - "dotnet/**"
+      - ".github/workflows/dotnet-build-and-test.yml"
+  push:
+    branches: [main]
+    paths:
+      - "dotnet/**"
+      - ".github/workflows/dotnet-build-and-test.yml"
+  workflow_dispatch:
+
+jobs:
+  build-test-pack:
+    name: Build, unit test, and pack
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: dotnet/global.json
+
+      - name: Restore
+        working-directory: dotnet
+        run: dotnet restore agent-framework-durable-extension.slnx
+
+      - name: Build
+        working-directory: dotnet
+        run: dotnet build agent-framework-durable-extension.slnx --configuration Release --no-restore
+
+      - name: Run DurableTask unit tests
+        working-directory: dotnet
+        run: dotnet test --project tests/Microsoft.Agents.AI.DurableTask.UnitTests/Microsoft.Agents.AI.DurableTask.UnitTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
+
+      - name: Run Azure Functions unit tests
+        working-directory: dotnet
+        run: dotnet test --project tests/Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests/Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
+
+      - name: Pack DurableTask
+        working-directory: dotnet
+        run: dotnet pack src/Microsoft.Agents.AI.DurableTask/Microsoft.Agents.AI.DurableTask.csproj --configuration Release --no-build --output ../artifacts/packages
+
+      - name: Pack Azure Functions hosting
+        working-directory: dotnet
+        run: dotnet pack src/Microsoft.Agents.AI.Hosting.AzureFunctions/Microsoft.Agents.AI.Hosting.AzureFunctions.csproj --configuration Release --no-build --output ../artifacts/packages
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-packages
+          path: artifacts/packages/*
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-test-results
+          path: artifacts/test-results/*
