@@ -228,6 +228,9 @@ PublishScripts/
 *.snupkg
 # The packages folder can be ignored because of Package Restore
 **/[Pp]ackages/*
+# except the standalone Python package workspace
+!python/packages/
+!python/packages/**
 # except build/, which is used as an MSBuild target.
 !**/[Pp]ackages/build/
 # Uncomment if necessary however generally it will be regenerated when needed
@@ -353,6 +356,21 @@ paket-files/
 # Python Tools for Visual Studio (PTVS)
 **/__pycache__/
 *.pyc
+.venv/
+**/.venv/
+dist/
+**/dist/
+.mypy_cache/
+**/.mypy_cache/
+.pytest_cache/
+**/.pytest_cache/
+.ruff_cache/
+**/.ruff_cache/
+.pyright/
+**/.pyright/
+.coverage
+htmlcov/
+**/htmlcov/
 
 # Cake - Uncomment if you are using it
 #tools/**
