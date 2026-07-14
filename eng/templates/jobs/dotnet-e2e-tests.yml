@@ -1,0 +1,62 @@
+jobs:
+  - job: DotNetE2E
+    displayName: '.NET E2E tests'
+    timeoutInMinutes: 90
+    pool:
+      name: 1es-pool-azfunc
+      image: 1es-ubuntu-22.04
+      os: linux
+    variables:
+      DURABLE_TASK_SCHEDULER_CONNECTION_STRING: 'Endpoint=http://localhost:8080;TaskHub=default;Authentication=None'
+      AzureWebJobsStorage: 'UseDevelopmentStorage=true'
+      REDIS_CONNECTION_STRING: 'localhost:6379'
+      NUGET_CERT_REVOCATION_MODE: offline
+    steps:
+      - checkout: self
+
+      - task: UseDotNet@2
+        displayName: 'Use .NET SDK from global.json'
+        inputs:
+          packageType: sdk
+          useGlobalJson: true
+          workingDirectory: dotnet
+
+      - template: setup-integration-infra.yml
+
+      - bash: dotnet restore agent-framework-durable-extension.slnx
+        workingDirectory: dotnet
+        displayName: 'Restore .NET solution'
+
+      - bash: dotnet build agent-framework-durable-extension.slnx --configuration Release --no-restore
+        workingDirectory: dotnet
+        displayName: 'Build .NET solution'
+
+      - bash: |
+          mkdir -p ../artifacts/test-results
+          dotnet test tests/Microsoft.Agents.AI.DurableTask.IntegrationTests/Microsoft.Agents.AI.DurableTask.IntegrationTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
+        workingDirectory: dotnet
+        displayName: 'Run DurableTask integration tests'
+        env:
+          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+          AZURE_OPENAI_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
+          AZURE_OPENAI_CHAT_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
+          AZURE_OPENAI_API_KEY: $(AZURE_OPENAI_API_KEY)
+
+      - bash: |
+          mkdir -p ../artifacts/test-results
+          dotnet test tests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
+        workingDirectory: dotnet
+        displayName: 'Run Azure Functions integration tests'
+        env:
+          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+          AZURE_OPENAI_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
+          AZURE_OPENAI_CHAT_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
+          AZURE_OPENAI_API_KEY: $(AZURE_OPENAI_API_KEY)
+
+      - task: PublishTestResults@2
+        condition: always()
+        inputs:
+          testResultsFormat: VSTest
+          testResultsFiles: 'artifacts/test-results/**/*.trx'
+          failTaskOnFailedTests: true
+        displayName: 'Publish .NET test results'

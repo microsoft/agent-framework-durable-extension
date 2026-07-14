@@ -1,0 +1,95 @@
+parameters:
+  - name: artifactName
+    type: string
+    default: 'agent-framework-durable-extension-packages'
+  - name: publishDotNet
+    type: boolean
+    default: false
+  - name: publishPython
+    type: boolean
+    default: false
+
+jobs:
+  - job: ValidateRelease
+    displayName: '(Manual) Validate package release'
+    condition: or(${{ eq(parameters.publishDotNet, true) }}, ${{ eq(parameters.publishPython, true) }})
+    pool: server
+    steps:
+      - task: ManualValidation@1
+        displayName: 'Approve package publish'
+        inputs:
+          notifyUsers: ''
+          instructions: |
+            Review package artifacts from the BuildPackages stage.
+            Confirm package versions are correct and have not already been published.
+            Resume only when ready to publish selected package types.
+
+  - job: PublishDotNet
+    dependsOn: ValidateRelease
+    condition: and(succeeded(), ${{ eq(parameters.publishDotNet, true) }})
+    displayName: 'Publish .NET packages'
+    pool:
+      name: 1es-pool-azfunc
+      image: 1es-ubuntu-22.04
+      os: linux
+    steps:
+      - checkout: none
+
+      - task: UseDotNet@2
+        displayName: 'Use .NET SDK 10.0.x'
+        inputs:
+          packageType: sdk
+          version: 10.0.x
+
+      - download: current
+        artifact: ${{ parameters.artifactName }}
+
+      - bash: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          packages=("$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet"/*.nupkg)
+          if [ ${#packages[@]} -eq 0 ]; then
+            echo "No .nupkg files found"
+            exit 1
+          fi
+
+          for package in "${packages[@]}"; do
+            dotnet nuget push "$package" --source https://api.nuget.org/v3/index.json --api-key "$NUGET_API_KEY" --skip-duplicate
+          done
+
+          symbols=("$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet"/*.snupkg)
+          for symbols_package in "${symbols[@]}"; do
+            dotnet nuget push "$symbols_package" --source https://api.nuget.org/v3/index.json --api-key "$NUGET_API_KEY" --skip-duplicate
+          done
+        displayName: 'Push .NET packages to NuGet'
+        env:
+          NUGET_API_KEY: $(NUGET_API_KEY)
+
+  - job: PublishPython
+    dependsOn: ValidateRelease
+    condition: and(succeeded(), ${{ eq(parameters.publishPython, true) }})
+    displayName: 'Publish Python package'
+    pool:
+      name: 1es-pool-azfunc
+      image: 1es-ubuntu-22.04
+      os: linux
+    steps:
+      - checkout: none
+
+      - download: current
+        artifact: ${{ parameters.artifactName }}
+
+      - task: UsePythonVersion@0
+        displayName: 'Use Python 3.13'
+        inputs:
+          versionSpec: '3.13'
+
+      - bash: |
+          set -euo pipefail
+          python -m pip install --upgrade pip twine
+          python -m twine upload --non-interactive "$(Pipeline.Workspace)/${{ parameters.artifactName }}/python"/*
+        displayName: 'Upload Python package to PyPI'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: $(PYPI_TOKEN)

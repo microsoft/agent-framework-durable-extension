@@ -42,11 +42,11 @@ jobs:
 
       - name: Run DurableTask integration tests
         working-directory: dotnet
-        run: dotnet test --project tests/Microsoft.Agents.AI.DurableTask.IntegrationTests/Microsoft.Agents.AI.DurableTask.IntegrationTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
+        run: dotnet test tests/Microsoft.Agents.AI.DurableTask.IntegrationTests/Microsoft.Agents.AI.DurableTask.IntegrationTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
 
       - name: Run Azure Functions integration tests
         working-directory: dotnet
-        run: dotnet test --project tests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
+        run: dotnet test tests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
 
       - name: Upload test results
         if: always()
