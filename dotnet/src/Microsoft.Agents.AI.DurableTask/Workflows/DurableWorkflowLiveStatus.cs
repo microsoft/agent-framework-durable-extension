@@ -32,7 +32,7 @@ internal sealed class DurableWorkflowLiveStatus
     /// </summary>
     /// <remarks>
     /// This may be a bounded trailing window of the workflow's full event sequence rather than
-    /// every event emitted so far. Durable Functions caps custom status at 16&#160;KB (UTF-16), so
+    /// every event emitted so far. The Durable Task SDK caps custom status at 16&#160;KB (UTF-16), so
     /// older events are omitted once the cumulative size would exceed that ceiling. <see cref="EventsStartIndex"/>
     /// gives the absolute position of the first element here, and the complete, untrimmed event log
     /// is always available from the workflow output (<see cref="DurableWorkflowResult.Events"/>) at completion.

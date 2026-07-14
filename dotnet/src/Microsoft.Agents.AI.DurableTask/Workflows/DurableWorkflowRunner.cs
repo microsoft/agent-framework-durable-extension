@@ -71,7 +71,7 @@ internal sealed class DurableWorkflowRunner
 {
     private const int MaxSupersteps = 100;
 
-    // Durable Functions caps orchestration custom status at 16 KB (UTF-16), i.e. 8192 .NET chars.
+    // The Durable Task SDK caps orchestration custom status at 16 KB (UTF-16), i.e. 8192 .NET chars.
     // We target a value comfortably below that so the JSON envelope, the eventsStartIndex field, and
     // small estimation differences (e.g. the real serializer vs. our per-element estimate) cannot push
     // the payload over the hard limit.
@@ -499,7 +499,7 @@ internal sealed class DurableWorkflowRunner
     /// <remarks>
     /// <para>
     /// Custom status is the only orchestration state readable by external clients while the
-    /// orchestration is still running. Durable Functions caps it at 16&#160;KB (UTF-16), so the
+    /// orchestration is still running. The Durable Task SDK caps it at 16&#160;KB (UTF-16), so the
     /// full cumulative event log cannot always be published live: a workflow with enough
     /// executors and/or large typed outputs would otherwise overflow the cap and fail the
     /// orchestration (see issue #5745).
