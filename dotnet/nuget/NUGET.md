@@ -11,11 +11,11 @@ These packages add Durable Task support to Microsoft Agent Framework application
 
 - Durable agent state backed by Durable Task.
 - Durable workflow execution for long-running orchestration patterns.
-- Console app and Azure Functions hosting options.
-- Local development support with the Durable Task Scheduler emulator.
+- ASP.NET and Azure Functions hosting options.
+- Integration with the [Azure Durable Task Scheduler](https://learn.microsoft.com/azure/durable-task/scheduler/durable-task-scheduler).
 
 ## Getting started
 
 - See the [repository README](https://github.com/microsoft/agent-framework-durable-extension) for build and test instructions.
-- See the [durable agents documentation](https://github.com/microsoft/agent-framework-durable-extension/tree/main/docs/features/durable-agents) for usage guidance.
 - See the `dotnet/samples` directory for console app and Azure Functions examples.
+- See the [official documentation](https://learn.microsoft.com/azure/durable-task/sdks/durable-agents-microsoft-agent-framework) for additional information.
