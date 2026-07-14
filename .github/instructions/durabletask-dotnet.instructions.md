@@ -1,12 +1,11 @@
 ---
-applyTo: "dotnet/src/Microsoft.Agents.AI.DurableTask/**,dotnet/src/Microsoft.Agents.AI.Hosting.AzureFunctions/**"
+applyTo: "dotnet/src/**"
 ---
 
 # Durable Task area code instructions
 
 The following guidelines apply to pull requests that modify files under
-`dotnet/src/Microsoft.Agents.AI.DurableTask/**` or
-`dotnet/src/Microsoft.Agents.AI.Hosting.AzureFunctions/**`:
+`dotnet/src/**`:
 
 ## CHANGELOG.md
 

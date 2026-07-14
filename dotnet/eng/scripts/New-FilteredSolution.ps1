@@ -16,7 +16,7 @@
     Path to the source .slnx solution file.
 
 .PARAMETER TargetFramework
-    The target framework to filter by (e.g., net10.0, net472).
+    The target framework to filter by (e.g., net10.0).
 
 .PARAMETER Configuration
     Optional MSBuild configuration used when querying TargetFrameworks. Defaults to Debug.
@@ -38,8 +38,8 @@
 
 .EXAMPLE
     # Generate a filtered solution and run tests
-    $filtered = ./dotnet/eng/scripts/New-FilteredSolution.ps1 -Solution dotnet/agent-framework-durable-extension.slnx -TargetFramework net472
-    dotnet test --solution $filtered --no-build -f net472
+    $filtered = ./dotnet/eng/scripts/New-FilteredSolution.ps1 -Solution dotnet/agent-framework-durable-extension.slnx -TargetFramework net10.0
+    dotnet test --solution $filtered --no-build -f net10.0
 
 .EXAMPLE
     # Generate a solution with only unit test projects
@@ -47,7 +47,7 @@
 
 .EXAMPLE
     # Inline usage with dotnet test (PowerShell)
-    dotnet test --solution (./dotnet/eng/scripts/New-FilteredSolution.ps1 -Solution dotnet/agent-framework-durable-extension.slnx -TargetFramework net472) --no-build -f net472
+    dotnet test --solution (./dotnet/eng/scripts/New-FilteredSolution.ps1 -Solution dotnet/agent-framework-durable-extension.slnx -TargetFramework net10.0) --no-build -f net10.0
 
 .EXAMPLE
     # Generate integration tests excluding DurableTask and AzureFunctions

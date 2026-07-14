@@ -988,7 +988,7 @@ public sealed class SamplesValidation(ITestOutputHelper outputHelper) : IAsyncLi
 
     private static string GetTargetFramework()
     {
-        // Get the target framework by looking at the path of the current file. It should be something like /path/to/project/bin/Debug/net8.0/...
+        // Get the target framework by looking at the path of the current file. It should be something like /path/to/project/bin/Debug/net10.0/...
         string filePath = new Uri(typeof(SamplesValidation).Assembly.Location).LocalPath;
         string directory = Path.GetDirectoryName(filePath)!;
         string tfm = Path.GetFileName(directory);

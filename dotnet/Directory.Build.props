@@ -9,8 +9,8 @@
     <Nullable>enable</Nullable>
     <NoWarn>$(NoWarn);NU5128;CS8002</NoWarn>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <TargetFrameworksCore>net10.0;net9.0;net8.0</TargetFrameworksCore>
-    <TargetFrameworks>$(TargetFrameworksCore);netstandard2.0;net472</TargetFrameworks>
+    <TargetFrameworksCore>net10.0</TargetFrameworksCore>
+    <TargetFrameworks>$(TargetFrameworksCore)</TargetFrameworks>
     <IsAotCompatible Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net7.0'))">true</IsAotCompatible>
     <Configurations>Debug;Release;Publish</Configurations>
   </PropertyGroup>
@@ -27,11 +27,6 @@
 
   <PropertyGroup Condition="'$(Configuration)'=='Publish'">
     <Optimize>True</Optimize>
-  </PropertyGroup>
-
-  <!-- .NET Framework/.NET Standard don't properly support nullable reference types, suppress any warnings for those TFMs -->
-  <PropertyGroup Condition=" '$(TargetFramework)' == 'netstandard2.0' OR '$(TargetFramework)' == 'net472' ">
-    <NoWarn>$(NoWarn);nullable</NoWarn>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -58,6 +53,5 @@
   </ItemGroup>
 
   <!-- Common properties -->
-  <Import Project="$(MSBuildThisFileDirectory)\eng\MSBuild\LegacySupport.props" />
   <Import Project="$(MSBuildThisFileDirectory)\eng\MSBuild\Shared.props" />
 </Project>

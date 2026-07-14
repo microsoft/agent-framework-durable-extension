@@ -1,21 +1,21 @@
-# About Microsoft Agent Framework
+# Durable Task extension for Microsoft Agent Framework
 
-Microsoft Agent Framework is a comprehensive .NET library for building, orchestrating, and deploying AI agents and multi-agent workflows. The framework provides everything from simple chat agents to complex multi-agent systems with graph-based orchestration capabilities.
+These packages add Durable Task support to Microsoft Agent Framework applications.
 
-## Key Features
+## Packages
 
-- **Multi-Agent Orchestration**: Coordinate multiple agents using sequential, concurrent, group chat, and handoff patterns
-- **Graph-based Workflows**: Connect agents and functions with streaming, checkpointing, and human-in-the-loop capabilities, with both imperative or declarative workflow support
-- **Multiple Provider Support**: Seamlessly integrate with various LLM providers with more being added continuously
-- **Extensible Middleware**: Flexible request/response processing with custom pipelines and exception handling
-- **Built-in Observability**: OpenTelemetry integration for distributed tracing, monitoring, and debugging
-- **Cross-Platform**: Compatible with .NET 8.0, .NET Standard 2.0, and .NET Framework for broad deployment options
+- `Microsoft.Agents.AI.DurableTask` provides durable execution for agents and workflows hosted in console or worker-style applications.
+- `Microsoft.Agents.AI.Hosting.AzureFunctions` provides Azure Functions hosting support for durable agents and workflows.
 
-Whether you're building simple AI assistants or complex multi-agent systems, Microsoft Agent Framework provides the tools and abstractions needed to create robust, scalable AI applications in .NET.
+## Key features
 
-# Getting Started ⚡
+- Durable agent state backed by Durable Task.
+- Durable workflow execution for long-running orchestration patterns.
+- Console app and Azure Functions hosting options.
+- Local development support with the Durable Task Scheduler emulator.
 
-- Learn more at the [documentation site](https://learn.microsoft.com/agent-framework/overview/agent-framework-overview).
-- Join the [Discord community](https://discord.gg/b5zjErwbQM).
-- Follow the team on [Semantic Kernel blog](https://devblogs.microsoft.com/semantic-kernel/).
-- Check out the [GitHub repository](https://github.com/microsoft/agent-framework-durable-extension) for the latest updates.
+## Getting started
+
+- See the [repository README](https://github.com/microsoft/agent-framework-durable-extension) for build and test instructions.
+- See the [durable agents documentation](https://github.com/microsoft/agent-framework-durable-extension/tree/main/docs/features/durable-agents) for usage guidance.
+- See the `dotnet/samples` directory for console app and Azure Functions examples.
