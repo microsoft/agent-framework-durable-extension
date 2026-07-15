@@ -36,11 +36,11 @@ jobs:
 
       - name: Run DurableTask unit tests
         working-directory: dotnet
-        run: dotnet test --project tests/Microsoft.Agents.AI.DurableTask.UnitTests/Microsoft.Agents.AI.DurableTask.UnitTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
+        run: dotnet test tests/Microsoft.Agents.AI.DurableTask.UnitTests/Microsoft.Agents.AI.DurableTask.UnitTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
 
       - name: Run Azure Functions unit tests
         working-directory: dotnet
-        run: dotnet test --project tests/Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests/Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
+        run: dotnet test tests/Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests/Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
 
       - name: Pack DurableTask
         working-directory: dotnet

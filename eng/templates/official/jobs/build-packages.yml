@@ -1,0 +1,84 @@
+parameters:
+  - name: artifactName
+    type: string
+    default: 'agent-framework-durable-extension-packages'
+
+jobs:
+  - job: BuildPackages
+    displayName: 'Build package artifacts'
+    pool:
+      name: 1es-pool-azfunc
+      image: 1es-ubuntu-22.04
+      os: linux
+    templateContext:
+      outputParentDirectory: $(Build.ArtifactStagingDirectory)
+      outputs:
+        - output: pipelineArtifact
+          targetPath: $(Build.ArtifactStagingDirectory)/packages
+          artifactName: ${{ parameters.artifactName }}
+    steps:
+      - checkout: self
+
+      - task: UseDotNet@2
+        displayName: 'Use .NET SDK from global.json'
+        inputs:
+          packageType: sdk
+          useGlobalJson: true
+          workingDirectory: dotnet
+
+      - task: UsePythonVersion@0
+        displayName: 'Use Python 3.13'
+        inputs:
+          versionSpec: '3.13'
+
+      - bash: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "##vso[task.prependpath]$HOME/.local/bin"
+        displayName: 'Install uv'
+
+      - bash: dotnet restore agent-framework-durable-extension.slnx
+        workingDirectory: dotnet
+        displayName: 'Restore .NET solution'
+
+      - bash: dotnet build agent-framework-durable-extension.slnx --configuration Release --no-restore
+        workingDirectory: dotnet
+        displayName: 'Build .NET solution'
+
+      - bash: |
+          mkdir -p ../artifacts/test-results
+          dotnet test tests/Microsoft.Agents.AI.DurableTask.UnitTests/Microsoft.Agents.AI.DurableTask.UnitTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
+          dotnet test tests/Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests/Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
+        workingDirectory: dotnet
+        displayName: 'Run .NET unit tests'
+
+      - bash: |
+          mkdir -p "$(Build.ArtifactStagingDirectory)/packages/dotnet"
+          dotnet pack src/Microsoft.Agents.AI.DurableTask/Microsoft.Agents.AI.DurableTask.csproj --configuration Release --no-build --output "$(Build.ArtifactStagingDirectory)/packages/dotnet"
+          dotnet pack src/Microsoft.Agents.AI.Hosting.AzureFunctions/Microsoft.Agents.AI.Hosting.AzureFunctions.csproj --configuration Release --no-build --output "$(Build.ArtifactStagingDirectory)/packages/dotnet"
+        workingDirectory: dotnet
+        displayName: 'Pack .NET packages'
+
+      - bash: uv sync --all-packages --group dev --group test
+        workingDirectory: python
+        displayName: 'Sync Python workspace'
+
+      - bash: uv run ruff check packages/durabletask
+        workingDirectory: python
+        displayName: 'Run Python lint'
+
+      - bash: uv run mypy --config-file packages/durabletask/pyproject.toml packages/durabletask/agent_framework_durabletask
+        workingDirectory: python
+        displayName: 'Run Python type check'
+
+      - bash: uv run pytest -m "not integration" packages/durabletask/tests
+        workingDirectory: python
+        displayName: 'Run Python unit tests'
+
+      - bash: |
+          mkdir -p "$(Build.ArtifactStagingDirectory)/packages/python"
+          uv build packages/durabletask --out-dir "$(Build.ArtifactStagingDirectory)/packages/python"
+        workingDirectory: python
+        displayName: 'Build Python package'
+
+      - bash: find "$(Build.ArtifactStagingDirectory)/packages" -type f | sort
+        displayName: 'List package artifacts'

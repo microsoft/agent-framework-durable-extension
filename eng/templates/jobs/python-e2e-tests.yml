@@ -1,0 +1,49 @@
+jobs:
+  - job: PythonE2E
+    displayName: 'Python E2E tests'
+    timeoutInMinutes: 90
+    pool:
+      name: 1es-pool-azfunc
+      image: 1es-ubuntu-22.04
+      os: linux
+    variables:
+      DURABLE_TASK_SCHEDULER_CONNECTION_STRING: 'Endpoint=http://localhost:8080;TaskHub=default;Authentication=None'
+      REDIS_CONNECTION_STRING: 'redis://localhost:6379'
+    steps:
+      - checkout: self
+
+      - task: UsePythonVersion@0
+        displayName: 'Use Python 3.13'
+        inputs:
+          versionSpec: '3.13'
+
+      - bash: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "##vso[task.prependpath]$HOME/.local/bin"
+        displayName: 'Install uv'
+
+      - template: setup-integration-infra.yml
+
+      - bash: uv sync --all-packages --group dev --group test
+        workingDirectory: python
+        displayName: 'Sync Python workspace'
+
+      - bash: |
+          mkdir -p ../artifacts/test-results
+          uv run pytest packages/durabletask/tests/integration_tests -m integration -n logical --dist worksteal --timeout 480 --junitxml ../artifacts/test-results/python-integration.xml
+        workingDirectory: python
+        displayName: 'Run Python integration tests'
+        env:
+          FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
+          FOUNDRY_MODEL: $(FOUNDRY_MODEL)
+          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+          AZURE_OPENAI_MODEL: $(AZURE_OPENAI_MODEL)
+          AZURE_OPENAI_API_KEY: $(AZURE_OPENAI_API_KEY)
+
+      - task: PublishTestResults@2
+        condition: always()
+        inputs:
+          testResultsFormat: JUnit
+          testResultsFiles: 'artifacts/test-results/python-integration.xml'
+          failTaskOnFailedTests: true
+        displayName: 'Publish Python test results'
