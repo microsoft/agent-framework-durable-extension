@@ -3,9 +3,11 @@
 ## [Unreleased]
 
 - Bound the live workflow status to a trailing event window so multi-executor workflows with large typed outputs no longer overflow the Durable Task 16&#160;KB custom status cap ([#6775](https://github.com/microsoft/agent-framework/pull/6775))
+- Fixed `WorkflowOutputEvent` streaming deserialization to read `executorId` instead of the renamed `sourceId` property, with fallback for backward compatibility ([#6896](https://github.com/microsoft/agent-framework/pull/6896))
 - Fix issue with resuming checkpoint after package version upgrade ([#6670](https://github.com/microsoft/agent-framework/pull/6670))
 - Bind MCP threadId to the current agent and guard cross-agent session dispatch ([#6531](https://github.com/microsoft/agent-framework/pull/6531))
 - Added support for durable workflows ([#4436](https://github.com/microsoft/agent-framework/pull/4436))
+- Added support for `AddSwitch` and target-selecting fan-out edges in the durable workflow runner ([#6749](https://github.com/microsoft/agent-framework/pull/6749))
 
 ## v1.0.0-preview.260219.1
 

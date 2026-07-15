@@ -1,0 +1,40 @@
+steps:
+  - bash: |
+      set -euo pipefail
+
+      if [ "$(docker ps -aq -f name=dts-emulator)" ]; then
+        docker rm -f dts-emulator
+      fi
+
+      docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 -e DTS_USE_DYNAMIC_TASK_HUBS=true mcr.microsoft.com/dts/dts-emulator:latest
+      timeout 60 bash -c 'until curl --silent --show-error http://localhost:8082 >/dev/null; do sleep 2; done'
+    displayName: 'Start Durable Task Scheduler emulator'
+
+  - bash: |
+      set -euo pipefail
+
+      if [ "$(docker ps -aq -f name=azurite)" ]; then
+        docker rm -f azurite
+      fi
+
+      docker run -d --name azurite -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite
+      timeout 60 bash -c 'until curl --silent --show-error http://localhost:10000/devstoreaccount1 >/dev/null; do sleep 2; done'
+    displayName: 'Start Azurite'
+
+  - bash: |
+      set -euo pipefail
+
+      if [ "$(docker ps -aq -f name=redis)" ]; then
+        docker rm -f redis
+      fi
+
+      docker run -d --name redis -p 6379:6379 redis:latest
+      timeout 60 bash -c 'until docker exec redis redis-cli ping | grep -q PONG; do sleep 2; done'
+    displayName: 'Start Redis'
+
+  - bash: |
+      set -euo pipefail
+
+      npm install -g azure-functions-core-tools@4 --unsafe-perm true
+      func --version
+    displayName: 'Install Azure Functions Core Tools'
