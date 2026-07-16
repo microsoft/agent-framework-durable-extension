@@ -38,14 +38,16 @@ steps:
       timeout 60 bash -c 'until docker exec redis redis-cli ping | grep -q PONG; do sleep 2; done'
     displayName: 'Start Redis'
 
-  - task: UseNode@1
-    displayName: 'Use Node.js 22'
-    inputs:
-      version: '22.x'
-
   - bash: |
       set -euo pipefail
 
-      npm install -g azure-functions-core-tools@4 --unsafe-perm true
+      # Azure Functions Core Tools. The governed 1ES pool cannot reach npmjs.org,
+      # so install from Microsoft's package feed (packages.microsoft.com) instead
+      # of npm. This is Microsoft's documented Linux install path for func v4.
+      ubuntu_version="$(lsb_release -rs)"
+      wget -q "https://packages.microsoft.com/config/ubuntu/${ubuntu_version}/packages-microsoft-prod.deb" -O /tmp/packages-microsoft-prod.deb
+      sudo dpkg -i /tmp/packages-microsoft-prod.deb
+      sudo apt-get update
+      sudo apt-get install -y azure-functions-core-tools-4
       func --version
     displayName: 'Install Azure Functions Core Tools'
