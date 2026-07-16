@@ -10,11 +10,6 @@ jobs:
       DURABLE_TASK_SCHEDULER_CONNECTION_STRING: 'Endpoint=http://localhost:8080;TaskHub=default;Authentication=None'
       AzureWebJobsStorage: 'UseDevelopmentStorage=true'
       REDIS_CONNECTION_STRING: 'localhost:6379'
-      # The agent OS disk (/) is nearly full from the base image, Docker images, and
-      # Azure Functions Core Tools. Keep the NuGet package cache and temp files on the
-      # roomier work volume so the .NET restore/build does not exhaust /.
-      NUGET_PACKAGES: $(Agent.TempDirectory)/.nuget/packages
-      TMPDIR: $(Agent.TempDirectory)
     steps:
       - checkout: self
 

@@ -44,9 +44,17 @@ steps:
       # Azure Functions Core Tools. The governed 1ES pool cannot reach npmjs.org,
       # so install from Microsoft's package feed (packages.microsoft.com) instead
       # of npm. This is Microsoft's documented Linux install path for func v4.
-      ubuntu_version="$(lsb_release -rs)"
-      wget -q "https://packages.microsoft.com/config/ubuntu/${ubuntu_version}/packages-microsoft-prod.deb" -O /tmp/packages-microsoft-prod.deb
-      sudo dpkg -i /tmp/packages-microsoft-prod.deb
+      #
+      # The 1ES image usually already has the Microsoft feed configured, so only add
+      # it when missing. This avoids downgrading the image's packages-microsoft-prod
+      # and skips a redundant download.
+      if ! grep -rqi "packages.microsoft.com" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+        ubuntu_version="$(lsb_release -rs)"
+        wget -q "https://packages.microsoft.com/config/ubuntu/${ubuntu_version}/packages-microsoft-prod.deb" -O /tmp/packages-microsoft-prod.deb
+        sudo dpkg -i /tmp/packages-microsoft-prod.deb
+        rm -f /tmp/packages-microsoft-prod.deb
+      fi
+
       sudo apt-get update
       sudo apt-get install -y azure-functions-core-tools-4
       func --version
