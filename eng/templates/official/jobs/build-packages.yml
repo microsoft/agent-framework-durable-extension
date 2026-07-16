@@ -30,7 +30,10 @@ jobs:
       - pwsh: python -m pip install --upgrade uv
         displayName: 'Install uv'
 
-      - pwsh: dotnet restore agent-framework-durable-extension.slnx
+      - task: NuGetAuthenticate@1
+        displayName: 'Authenticate to Azure Artifacts feed'
+
+      - pwsh: dotnet restore agent-framework-durable-extension.slnx --configfile "$(Build.SourcesDirectory)/eng/nuget.ci.config"
         workingDirectory: dotnet
         displayName: 'Restore .NET solution'
 
@@ -61,9 +64,16 @@ jobs:
         workingDirectory: dotnet
         displayName: 'Pack .NET packages'
 
+      - task: PipAuthenticate@1
+        displayName: 'Authenticate to Azure Artifacts feed'
+        inputs:
+          artifactFeeds: 'internal/PythonSDK_Internal_PublicPackages'
+
       - pwsh: uv sync --all-packages --group dev --group test
         workingDirectory: python
         displayName: 'Sync Python workspace'
+        env:
+          UV_INDEX_URL: $(PIP_INDEX_URL)
 
       - pwsh: uv run ruff check packages/durabletask
         workingDirectory: python

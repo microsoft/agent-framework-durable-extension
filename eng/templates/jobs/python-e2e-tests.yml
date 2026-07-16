@@ -19,11 +19,20 @@ jobs:
 
       - template: setup-integration-infra.yml
 
+      - task: PipAuthenticate@1
+        displayName: 'Authenticate to Azure Artifacts feed'
+        inputs:
+          artifactFeeds: 'internal/PythonSDK_Internal_PublicPackages'
+
       - bash: |
           uv python install 3.13
           uv sync --python 3.13 --all-packages --group dev --group test
         workingDirectory: python
         displayName: 'Sync Python workspace'
+        env:
+          # PipAuthenticate sets PIP_INDEX_URL (with a token) for the internal feed.
+          # uv reads UV_INDEX_URL first, so point it at the same authenticated URL.
+          UV_INDEX_URL: $(PIP_INDEX_URL)
 
       - task: AzureCLI@2
         displayName: 'Run Python integration tests'
@@ -34,7 +43,7 @@ jobs:
           workingDirectory: $(Build.SourcesDirectory)/python
           inlineScript: |
             mkdir -p ../artifacts/test-results
-            uv run pytest packages/durabletask/tests/integration_tests \
+            uv run --no-sync pytest packages/durabletask/tests/integration_tests \
               -m integration \
               -n logical \
               --dist worksteal \

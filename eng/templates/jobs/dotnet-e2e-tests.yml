@@ -22,7 +22,10 @@ jobs:
 
       - template: setup-integration-infra.yml
 
-      - bash: dotnet restore agent-framework-durable-extension.slnx
+      - task: NuGetAuthenticate@1
+        displayName: 'Authenticate to Azure Artifacts feed'
+
+      - bash: dotnet restore agent-framework-durable-extension.slnx --configfile "$(Build.SourcesDirectory)/eng/nuget.ci.config"
         workingDirectory: dotnet
         displayName: 'Restore .NET solution'
 
