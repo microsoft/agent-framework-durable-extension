@@ -7,8 +7,12 @@ pr: none
 parameters:
   - name: linuxImage
     type: string
-    default: '1es-azurelinux-3'
+    default: '1es-ubuntu-22.04'
     displayName: '1ES Hosted Pools Linux image'
+  - name: windowsImage
+    type: string
+    default: '1es-windows-2022'
+    displayName: '1ES Hosted Pools Windows image (for SDL source analysis)'
   - name: azureServiceConnection
     type: string
     default: 'agent-framework-durable-extension-e2e'
@@ -42,10 +46,19 @@ extends:
   parameters:
     pool:
       name: 1es-pool-azfunc
-      # This image must be added to the hosted pool before enabling this pipeline.
-      # CoreAI's preferred base image is 1ES PT - Starter Azure Linux 3 Gen2.
+      # 1es-ubuntu-22.04 is a 1ES-compliant image already in the pool and provides
+      # Docker and Azure CLI, which the tests need. CoreAI recommends migrating to
+      # an Azure Linux 3 image later for better vulnerability servicing.
       image: ${{ parameters.linuxImage }}
       os: linux
+
+    # The SDL source-analysis stage only runs on Windows. Because the build pool
+    # is Linux, 1ES requires a Windows image in the same pool for that stage.
+    sdl:
+      sourceAnalysisPool:
+        name: 1es-pool-azfunc
+        image: ${{ parameters.windowsImage }}
+        os: windows
 
     stages:
       - stage: E2E
