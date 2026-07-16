@@ -1,5 +1,18 @@
+# This pipeline runs on a schedule and on manual runs only. It is not triggered by
+# commits or pull requests, so it can run from the Azure Repos mirror without a
+# GitHub connection. Trigger a manual run and pick a branch to test changes.
 trigger: none
 pr: none
+
+parameters:
+  - name: linuxImage
+    type: string
+    default: '1es-azurelinux-3'
+    displayName: '1ES Hosted Pools Linux image'
+  - name: azureServiceConnection
+    type: string
+    default: 'agent-framework-durable-extension-e2e'
+    displayName: 'Azure Resource Manager service connection'
 
 schedules:
   - cron: '0 8 * * *'
@@ -21,25 +34,26 @@ resources:
       ref: refs/tags/release
 
 variables:
-  - template: ci/variables/build.yml@eng
-  - template: ci/variables/cfs.yml@eng
+  - template: /ci/variables/cfs.yml@eng
   - group: agent-framework-durable-extension-e2e
 
 extends:
-  template: v1/1ES.Official.PipelineTemplate.yml@1es
+  template: v1/1ES.Unofficial.PipelineTemplate.yml@1es
   parameters:
     pool:
       name: 1es-pool-azfunc
-      image: 1es-ubuntu-22.04
+      # This image must be added to the hosted pool before enabling this pipeline.
+      # CoreAI's preferred base image is 1ES PT - Starter Azure Linux 3 Gen2.
+      image: ${{ parameters.linuxImage }}
       os: linux
 
     stages:
-      - stage: DotNetE2E
-        displayName: '.NET E2E tests'
+      - stage: E2E
+        displayName: 'End-to-end tests'
         jobs:
           - template: /eng/templates/jobs/dotnet-e2e-tests.yml@self
-
-      - stage: PythonE2E
-        displayName: 'Python E2E tests'
-        jobs:
+            parameters:
+              azureServiceConnection: ${{ parameters.azureServiceConnection }}
           - template: /eng/templates/jobs/python-e2e-tests.yml@self
+            parameters:
+              azureServiceConnection: ${{ parameters.azureServiceConnection }}

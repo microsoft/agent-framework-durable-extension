@@ -1,4 +1,7 @@
 steps:
+  - bash: docker version
+    displayName: 'Check Docker'
+
   - bash: |
       set -euo pipefail
 
@@ -31,6 +34,11 @@ steps:
       docker run -d --name redis -p 6379:6379 redis:latest
       timeout 60 bash -c 'until docker exec redis redis-cli ping | grep -q PONG; do sleep 2; done'
     displayName: 'Start Redis'
+
+  - task: UseNode@1
+    displayName: 'Use Node.js 22'
+    inputs:
+      version: '22.x'
 
   - bash: |
       set -euo pipefail

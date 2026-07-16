@@ -8,6 +8,12 @@ parameters:
   - name: publishPython
     type: boolean
     default: false
+  - name: nugetServiceConnection
+    type: string
+    default: 'agent-framework-durable-extension-nuget-org'
+  - name: pypiServiceConnection
+    type: string
+    default: 'agent-framework-durable-extension-pypi'
 
 jobs:
   - job: ValidateRelease
@@ -28,52 +34,24 @@ jobs:
     dependsOn: ValidateRelease
     condition: and(succeeded(), ${{ eq(parameters.publishDotNet, true) }})
     displayName: 'Publish .NET packages'
-    pool:
-      name: 1es-pool-azfunc
-      image: 1es-ubuntu-22.04
-      os: linux
     steps:
       - checkout: none
-
-      - task: UseDotNet@2
-        displayName: 'Use .NET SDK 10.0.x'
-        inputs:
-          packageType: sdk
-          version: 10.0.x
 
       - download: current
         artifact: ${{ parameters.artifactName }}
 
-      - bash: |
-          set -euo pipefail
-          shopt -s nullglob
-
-          packages=("$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet"/*.nupkg)
-          if [ ${#packages[@]} -eq 0 ]; then
-            echo "No .nupkg files found"
-            exit 1
-          fi
-
-          for package in "${packages[@]}"; do
-            dotnet nuget push "$package" --source https://api.nuget.org/v3/index.json --api-key "$NUGET_API_KEY" --skip-duplicate
-          done
-
-          symbols=("$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet"/*.snupkg)
-          for symbols_package in "${symbols[@]}"; do
-            dotnet nuget push "$symbols_package" --source https://api.nuget.org/v3/index.json --api-key "$NUGET_API_KEY" --skip-duplicate
-          done
-        displayName: 'Push .NET packages to NuGet'
-        env:
-          NUGET_API_KEY: $(NUGET_API_KEY)
+      - task: NuGetCommand@2
+        displayName: 'Push .NET packages to NuGet.org'
+        inputs:
+          command: push
+          packagesToPush: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet/*.nupkg'
+          nuGetFeedType: external
+          publishFeedCredentials: ${{ parameters.nugetServiceConnection }}
 
   - job: PublishPython
     dependsOn: ValidateRelease
     condition: and(succeeded(), ${{ eq(parameters.publishPython, true) }})
     displayName: 'Publish Python package'
-    pool:
-      name: 1es-pool-azfunc
-      image: 1es-ubuntu-22.04
-      os: linux
     steps:
       - checkout: none
 
@@ -85,11 +63,24 @@ jobs:
         inputs:
           versionSpec: '3.13'
 
-      - bash: |
-          set -euo pipefail
-          python -m pip install --upgrade pip twine
-          python -m twine upload --non-interactive "$(Pipeline.Workspace)/${{ parameters.artifactName }}/python"/*
+      - pwsh: python -m pip install --upgrade pip twine
+        displayName: 'Install Twine'
+
+      - task: TwineAuthenticate@1
+        displayName: 'Authenticate to PyPI'
+        inputs:
+          pythonUploadServiceConnection: ${{ parameters.pypiServiceConnection }}
+
+      - pwsh: |
+          $packages = Get-ChildItem -File "$(Pipeline.Workspace)/${{ parameters.artifactName }}/python" |
+            Where-Object { $_.Name.EndsWith(".whl") -or $_.Name.EndsWith(".tar.gz") }
+          if ($packages.Count -eq 0) {
+            throw "No Python packages were found."
+          }
+
+          python -m twine upload `
+            --non-interactive `
+            --repository "${{ parameters.pypiServiceConnection }}" `
+            --config-file "$(PYPIRC_PATH)" `
+            @($packages.FullName)
         displayName: 'Upload Python package to PyPI'
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: $(PYPI_TOKEN)
