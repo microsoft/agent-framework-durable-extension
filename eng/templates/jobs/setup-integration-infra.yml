@@ -50,4 +50,9 @@ steps:
       sudo apt-get update
       sudo apt-get install -y azure-functions-core-tools-4
       func --version
+
+      # Reclaim disk on the OS volume (/): the apt cache and package lists are no
+      # longer needed after install, and the agent OS disk is space-constrained.
+      sudo apt-get clean
+      sudo rm -rf /var/lib/apt/lists/*
     displayName: 'Install Azure Functions Core Tools'

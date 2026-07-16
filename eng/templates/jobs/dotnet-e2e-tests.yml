@@ -10,6 +10,11 @@ jobs:
       DURABLE_TASK_SCHEDULER_CONNECTION_STRING: 'Endpoint=http://localhost:8080;TaskHub=default;Authentication=None'
       AzureWebJobsStorage: 'UseDevelopmentStorage=true'
       REDIS_CONNECTION_STRING: 'localhost:6379'
+      # The agent OS disk (/) is nearly full from the base image, Docker images, and
+      # Azure Functions Core Tools. Keep the NuGet package cache and temp files on the
+      # roomier work volume so the .NET restore/build does not exhaust /.
+      NUGET_PACKAGES: $(Agent.TempDirectory)/.nuget/packages
+      TMPDIR: $(Agent.TempDirectory)
     steps:
       - checkout: self
 
@@ -28,13 +33,23 @@ jobs:
       - task: NuGetAuthenticate@1
         displayName: 'Authenticate to Azure Artifacts feed'
 
-      - bash: dotnet restore agent-framework-durable-extension.slnx
-        workingDirectory: dotnet
-        displayName: 'Restore .NET solution'
+      - bash: df -h
+        displayName: 'Disk space (baseline)'
 
-      - bash: dotnet build agent-framework-durable-extension.slnx --configuration Release --no-restore
+      # Build only the integration test projects. The tests build the specific
+      # samples they exercise at runtime, so building the full solution (32 sample
+      # projects, many of them Azure Functions apps with large bin output) upfront
+      # is unnecessary and exhausts the agent's disk.
+      - bash: |
+          set -euo pipefail
+          dotnet build tests/Microsoft.Agents.AI.DurableTask.IntegrationTests/Microsoft.Agents.AI.DurableTask.IntegrationTests.csproj --configuration Release
+          dotnet build tests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests.csproj --configuration Release
         workingDirectory: dotnet
-        displayName: 'Build .NET solution'
+        displayName: 'Build integration test projects'
+
+      - bash: df -h
+        condition: always()
+        displayName: 'Disk space (after build)'
 
       - task: AzureCLI@2
         displayName: 'Run DurableTask integration tests'
@@ -55,6 +70,10 @@ jobs:
           AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
           AZURE_OPENAI_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
           AZURE_OPENAI_CHAT_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
+
+      - bash: df -h
+        condition: always()
+        displayName: 'Disk space (after DurableTask tests)'
 
       - task: AzureCLI@2
         displayName: 'Run Azure Functions integration tests'
