@@ -30,10 +30,13 @@ jobs:
       - pwsh: python -m pip install --upgrade uv
         displayName: 'Install uv'
 
+      - pwsh: Copy-Item "$(Build.SourcesDirectory)/eng/nuget.ci.config" "$(Build.SourcesDirectory)/dotnet/nuget.config" -Force
+        displayName: 'Point NuGet at internal Azure Artifacts feed'
+
       - task: NuGetAuthenticate@1
         displayName: 'Authenticate to Azure Artifacts feed'
 
-      - pwsh: dotnet restore agent-framework-durable-extension.slnx --configfile "$(Build.SourcesDirectory)/eng/nuget.ci.config"
+      - pwsh: dotnet restore agent-framework-durable-extension.slnx
         workingDirectory: dotnet
         displayName: 'Restore .NET solution'
 

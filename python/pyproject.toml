@@ -49,6 +49,10 @@ test = [
     "azure-monitor-opentelemetry",
     "mcp[ws]",
     "redis",
+    # Model provider packages used by the sample workers that the integration
+    # tests launch as subprocesses (agent_framework.openai / agent_framework.foundry).
+    "agent-framework-openai>=1.10.1,<2",
+    "agent-framework-foundry>=1.10.1,<2",
 ]
 
 [tool.uv]
