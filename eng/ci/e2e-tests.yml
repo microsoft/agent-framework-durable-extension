@@ -42,7 +42,7 @@ variables:
   - group: agent-framework-durable-extension-e2e
 
 extends:
-  template: v1/1ES.Unofficial.PipelineTemplate.yml@1es
+  template: v1/1ES.Official.PipelineTemplate.yml@1es
   parameters:
     pool:
       name: 1es-pool-azfunc
