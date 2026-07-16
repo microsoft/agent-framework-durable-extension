@@ -31,7 +31,9 @@ steps:
         docker rm -f redis
       fi
 
-      docker run -d --name redis -p 6379:6379 redis:latest
+      # Docker Hub is not reachable from the governed 1ES pool, so pull Redis from
+      # Microsoft's Docker Hub mirror on MCR (same source style as the images above).
+      docker run -d --name redis -p 6379:6379 mcr.microsoft.com/mirror/docker/library/redis:latest
       timeout 60 bash -c 'until docker exec redis redis-cli ping | grep -q PONG; do sleep 2; done'
     displayName: 'Start Redis'
 
