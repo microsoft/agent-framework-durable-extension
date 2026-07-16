@@ -70,7 +70,7 @@ jobs:
       - task: PipAuthenticate@1
         displayName: 'Authenticate to Azure Artifacts feed'
         inputs:
-          artifactFeeds: 'internal/PythonSDK_Internal_PublicPackages'
+          artifactFeeds: 'internal/upstream'
 
       - pwsh: uv sync --all-packages --group dev --group test
         workingDirectory: python

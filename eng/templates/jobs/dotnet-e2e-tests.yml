@@ -13,6 +13,11 @@ jobs:
     steps:
       - checkout: self
 
+      # Disk usage baseline, before we add anything (Docker images, func, packages). This
+      # shows how much the pool image itself leaves free on the single OS disk.
+      - bash: df -h
+        displayName: 'Disk space (image baseline)'
+
       - task: UseDotNet@2
         displayName: 'Use .NET SDK from global.json'
         inputs:
@@ -29,7 +34,7 @@ jobs:
         displayName: 'Authenticate to Azure Artifacts feed'
 
       - bash: df -h
-        displayName: 'Disk space (baseline)'
+        displayName: 'Disk space (after infra setup)'
 
       # Build only the integration test projects. The tests build the specific
       # samples they exercise at runtime, so building the full solution (32 sample
@@ -41,6 +46,14 @@ jobs:
           dotnet build tests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests.csproj --configuration Release
         workingDirectory: dotnet
         displayName: 'Build integration test projects'
+
+      # Reclaim disk: the NuGet http-cache holds compressed downloads that are no
+      # longer needed once packages are extracted into the global packages folder.
+      # The global packages folder itself is kept for the runtime sample builds.
+      - bash: |
+          dotnet nuget locals http-cache --clear
+          dotnet nuget locals temp --clear
+        displayName: 'Clear NuGet download caches'
 
       - bash: df -h
         condition: always()
