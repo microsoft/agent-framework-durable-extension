@@ -3,8 +3,8 @@ parameters:
     type: string
 
 jobs:
-  - job: PythonE2E
-    displayName: 'Python E2E tests'
+  - job: PythonIntegration
+    displayName: 'Python integration tests'
     timeoutInMinutes: 90
     variables:
       DURABLE_TASK_SCHEDULER_CONNECTION_STRING: 'Endpoint=http://localhost:8080;TaskHub=default;Authentication=None'

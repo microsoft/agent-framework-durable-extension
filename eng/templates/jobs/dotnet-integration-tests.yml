@@ -3,8 +3,8 @@ parameters:
     type: string
 
 jobs:
-  - job: DotNetE2E
-    displayName: '.NET E2E tests'
+  - job: DotNetIntegration
+    displayName: '.NET integration tests'
     timeoutInMinutes: 90
     variables:
       DURABLE_TASK_SCHEDULER_CONNECTION_STRING: 'Endpoint=http://localhost:8080;TaskHub=default;Authentication=None'

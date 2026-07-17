@@ -1,8 +1,15 @@
-# This pipeline runs on a schedule and on manual runs only. It is not triggered by
-# commits or pull requests, so it can run from the Azure Repos mirror without a
-# GitHub connection. Trigger a manual run and pick a branch to test changes.
+# This pipeline is connected to the GitHub repository so it can validate pull
+# requests. It does not run as a CI build on push (trigger: none); it runs on PRs
+# targeting main and on a daily schedule. Pull requests from forks are prevented
+# from running by the Azure DevOps org/project setting "Limit building pull requests
+# from forked GitHub repositories" (set to Disable), so only team-authored PRs run
+# and secrets are never exposed to forks.
 trigger: none
-pr: none
+
+pr:
+  branches:
+    include:
+      - main
 
 parameters:
   - name: linuxImage
@@ -23,7 +30,7 @@ parameters:
 
 schedules:
   - cron: '0 8 * * *'
-    displayName: 'Daily E2E tests'
+    displayName: 'Daily integration tests'
     branches:
       include:
         - main
@@ -64,12 +71,12 @@ extends:
         os: windows
 
     stages:
-      - stage: E2E
-        displayName: 'End-to-end tests'
+      - stage: IntegrationTests
+        displayName: 'Integration tests'
         jobs:
-          - template: /eng/templates/jobs/dotnet-e2e-tests.yml@self
+          - template: /eng/templates/jobs/dotnet-integration-tests.yml@self
             parameters:
               azureServiceConnection: ${{ parameters.azureServiceConnection }}
-          - template: /eng/templates/jobs/python-e2e-tests.yml@self
+          - template: /eng/templates/jobs/python-integration-tests.yml@self
             parameters:
               azureServiceConnection: ${{ parameters.azureServiceConnection }}
