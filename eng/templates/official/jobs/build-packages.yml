@@ -27,6 +27,14 @@ jobs:
         inputs:
           versionSpec: '3.13'
 
+      # Authenticate to the internal feed before installing uv. The governed pool
+      # cannot reach PyPI directly, so pip must use the authenticated feed (via the
+      # PIP_INDEX_URL this task sets) to install uv.
+      - task: PipAuthenticate@1
+        displayName: 'Authenticate to Azure Artifacts feed'
+        inputs:
+          artifactFeeds: 'internal/upstream'
+
       - pwsh: python -m pip install --upgrade uv
         displayName: 'Install uv'
 
@@ -66,11 +74,6 @@ jobs:
           dotnet pack src/Microsoft.Agents.AI.Hosting.AzureFunctions/Microsoft.Agents.AI.Hosting.AzureFunctions.csproj --configuration Release --no-build --output "$(Build.ArtifactStagingDirectory)/packages/dotnet"
         workingDirectory: dotnet
         displayName: 'Pack .NET packages'
-
-      - task: PipAuthenticate@1
-        displayName: 'Authenticate to Azure Artifacts feed'
-        inputs:
-          artifactFeeds: 'internal/upstream'
 
       - pwsh: uv sync --all-packages --group dev --group test
         workingDirectory: python

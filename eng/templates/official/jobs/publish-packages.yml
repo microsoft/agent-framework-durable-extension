@@ -40,6 +40,12 @@ jobs:
       - download: current
         artifact: ${{ parameters.artifactName }}
 
+      # Note on reruns: NuGetCommand@2's skip-duplicate (allowPackageConflicts) only
+      # applies to Azure Artifacts feeds, not external registries like NuGet.org, so it
+      # is not set here. A rerun that re-pushes an already-published version will fail
+      # with HTTP 409. Releases bump the package version each time, and publishing is
+      # gated behind the manual validation above, so this is expected: on a partial
+      # failure, bump the version or remove the already-published package before rerunning.
       - task: NuGetCommand@2
         displayName: 'Push .NET packages to NuGet.org'
         inputs:

@@ -8,7 +8,10 @@ parameters:
   - name: linuxImage
     type: string
     default: '1es-ubuntu-22.04'
-    displayName: '1ES Hosted Pools Linux image'
+    # Must be an Ubuntu/Debian-based image: the integration infrastructure setup
+    # uses apt-get, dpkg, and the Ubuntu packages.microsoft.com feed. A non-Ubuntu
+    # image (e.g. Azure Linux 3) would require reworking that setup step.
+    displayName: '1ES Hosted Pools Linux image (Ubuntu-based)'
   - name: windowsImage
     type: string
     default: '1es-windows-2022'
