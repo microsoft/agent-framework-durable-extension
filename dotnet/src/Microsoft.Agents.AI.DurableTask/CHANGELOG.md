@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Wrap RequestPort external responses in a controlled `DurableExecutorOutput` envelope so that only the `result` property is populated during deserialization ([#20](https://github.com/microsoft/agent-framework-durable-extension/pull/20))
 - Bound the live workflow status to a trailing event window so multi-executor workflows with large typed outputs no longer overflow the Durable Task 16&#160;KB custom status cap ([#6775](https://github.com/microsoft/agent-framework/pull/6775))
 - Fixed `WorkflowOutputEvent` streaming deserialization to read `executorId` instead of the renamed `sourceId` property, with fallback for backward compatibility ([#6896](https://github.com/microsoft/agent-framework/pull/6896))
 - Fix issue with resuming checkpoint after package version upgrade ([#6670](https://github.com/microsoft/agent-framework/pull/6670))

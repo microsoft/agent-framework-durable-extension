@@ -129,10 +129,26 @@ internal static class DurableExecutorDispatcher
 
         logger.LogReceivedExternalEvent(eventName);
 
-        // Wrap the external response in a DurableExecutorOutput envelope so that
-        // ProcessSuperstepResults handles it consistently with activity results.
-        DurableExecutorOutput output = new() { Result = response };
-        return JsonSerializer.Serialize(output, DurableWorkflowJsonContext.Default.DurableExecutorOutput);
+        return CreateExecutorOutputEnvelope(response);
+    }
+
+    /// <summary>
+    /// Instead of blindly taking the incoming JSON to produce the output of the executor,
+    /// builds a <see cref="DurableExecutorOutput"/>-compatible JSON envelope where only
+    /// the <c>result</c> property is set from the response value.
+    /// Other properties are serialized with their defaults (empty collections).
+    /// This prevents the incoming JSON payload from inadvertently populating other properties
+    /// of <see cref="DurableExecutorOutput"/> during deserialization.
+    /// </summary>
+    /// <example>
+    /// For input <c>{"Approved":true,"Comments":"ok"}</c>, produces:
+    /// <c>{"result":"{\"Approved\":true,\"Comments\":\"ok\"}","stateUpdates":{},"clearedScopes":[],"events":[],"sentMessages":[]}</c>
+    /// </example>
+    internal static string CreateExecutorOutputEnvelope(string response)
+    {
+        return JsonSerializer.Serialize(
+            new DurableExecutorOutput { Result = response },
+            DurableWorkflowJsonContext.Default.DurableExecutorOutput);
     }
 
     /// <summary>
