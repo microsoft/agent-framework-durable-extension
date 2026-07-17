@@ -1,0 +1,118 @@
+parameters:
+  - name: artifactName
+    type: string
+    default: 'agent-framework-durable-extension-packages'
+
+jobs:
+  - job: BuildPackages
+    displayName: 'Build package artifacts'
+    templateContext:
+      outputParentDirectory: $(Build.ArtifactStagingDirectory)
+      outputs:
+        - output: pipelineArtifact
+          targetPath: $(Build.ArtifactStagingDirectory)/packages
+          artifactName: ${{ parameters.artifactName }}
+    steps:
+      - checkout: self
+
+      - task: UseDotNet@2
+        displayName: 'Use .NET SDK from global.json'
+        inputs:
+          packageType: sdk
+          useGlobalJson: true
+          workingDirectory: dotnet
+
+      - task: UsePythonVersion@0
+        displayName: 'Use Python 3.13'
+        inputs:
+          versionSpec: '3.13'
+
+      # Authenticate to the internal feed before installing uv. The governed pool
+      # cannot reach PyPI directly, so pip must use the authenticated feed (via the
+      # PIP_INDEX_URL this task sets) to install uv.
+      - task: PipAuthenticate@1
+        displayName: 'Authenticate to Azure Artifacts feed'
+        inputs:
+          artifactFeeds: 'internal/upstream'
+
+      - pwsh: python -m pip install uv==0.11.28
+        displayName: 'Install uv'
+
+      - pwsh: Copy-Item "$(Build.SourcesDirectory)/eng/nuget.ci.config" "$(Build.SourcesDirectory)/dotnet/nuget.config" -Force
+        displayName: 'Point NuGet at internal Azure Artifacts feed'
+
+      - task: NuGetAuthenticate@1
+        displayName: 'Authenticate to Azure Artifacts feed'
+
+      - pwsh: dotnet restore agent-framework-durable-extension.slnx
+        workingDirectory: dotnet
+        displayName: 'Restore .NET solution'
+
+      - pwsh: dotnet build agent-framework-durable-extension.slnx --configuration Release --no-restore
+        workingDirectory: dotnet
+        displayName: 'Build .NET solution'
+
+      - pwsh: |
+          New-Item -ItemType Directory -Force -Path ../artifacts/test-results | Out-Null
+          dotnet test tests/Microsoft.Agents.AI.DurableTask.UnitTests/Microsoft.Agents.AI.DurableTask.UnitTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
+          dotnet test tests/Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests/Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests.csproj --configuration Release --no-build --report-xunit-trx --results-directory ../artifacts/test-results
+        workingDirectory: dotnet
+        displayName: 'Run .NET unit tests'
+
+      - task: PublishTestResults@2
+        condition: always()
+        displayName: 'Publish .NET test results'
+        inputs:
+          testResultsFormat: VSTest
+          testResultsFiles: 'artifacts/test-results/**/*.trx'
+          searchFolder: $(Build.SourcesDirectory)
+          failTaskOnFailedTests: true
+
+      - pwsh: |
+          New-Item -ItemType Directory -Force -Path "$(Build.ArtifactStagingDirectory)/packages/dotnet" | Out-Null
+          dotnet pack src/Microsoft.Agents.AI.DurableTask/Microsoft.Agents.AI.DurableTask.csproj --configuration Release --no-build --output "$(Build.ArtifactStagingDirectory)/packages/dotnet"
+          dotnet pack src/Microsoft.Agents.AI.Hosting.AzureFunctions/Microsoft.Agents.AI.Hosting.AzureFunctions.csproj --configuration Release --no-build --output "$(Build.ArtifactStagingDirectory)/packages/dotnet"
+        workingDirectory: dotnet
+        displayName: 'Pack .NET packages'
+
+      - pwsh: uv sync --all-packages --group dev --group test
+        workingDirectory: python
+        displayName: 'Sync Python workspace'
+        env:
+          UV_INDEX_URL: $(PIP_INDEX_URL)
+
+      - pwsh: uv run ruff check packages/durabletask
+        workingDirectory: python
+        displayName: 'Run Python lint'
+
+      - pwsh: uv run mypy --config-file packages/durabletask/pyproject.toml packages/durabletask/agent_framework_durabletask
+        workingDirectory: python
+        displayName: 'Run Python type check'
+
+      - pwsh: |
+          New-Item -ItemType Directory -Force -Path ../artifacts/test-results | Out-Null
+          uv run pytest -m "not integration" packages/durabletask/tests --junitxml ../artifacts/test-results/python-unit.xml
+        workingDirectory: python
+        displayName: 'Run Python unit tests'
+
+      - task: PublishTestResults@2
+        condition: always()
+        displayName: 'Publish Python test results'
+        inputs:
+          testResultsFormat: JUnit
+          testResultsFiles: 'artifacts/test-results/python-unit.xml'
+          searchFolder: $(Build.SourcesDirectory)
+          failTaskOnFailedTests: true
+
+      - pwsh: |
+          New-Item -ItemType Directory -Force -Path "$(Build.ArtifactStagingDirectory)/packages/python" | Out-Null
+          uv build packages/durabletask --out-dir "$(Build.ArtifactStagingDirectory)/packages/python"
+        workingDirectory: python
+        displayName: 'Build Python package'
+        env:
+          # uv build resolves the build backend (flit-core) in an isolated environment.
+          # The governed pool blocks PyPI, so point uv at the authenticated internal feed.
+          UV_INDEX_URL: $(PIP_INDEX_URL)
+
+      - pwsh: Get-ChildItem -Recurse "$(Build.ArtifactStagingDirectory)/packages" | Select-Object -ExpandProperty FullName
+        displayName: 'List package artifacts'

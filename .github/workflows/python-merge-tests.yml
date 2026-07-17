@@ -1,0 +1,61 @@
+name: Python Build and Test
+
+on:
+  pull_request:
+    paths:
+      - "python/**"
+      - ".github/workflows/python-merge-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "python/**"
+      - ".github/workflows/python-merge-tests.yml"
+  workflow_dispatch:
+
+jobs:
+  build-test-package:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Sync workspace
+        working-directory: python
+        run: uv sync --all-packages --group dev --group test
+
+      - name: Ruff
+        working-directory: python
+        run: uv run ruff check packages/durabletask
+
+      - name: MyPy
+        working-directory: python
+        run: uv run mypy --config-file packages/durabletask/pyproject.toml packages/durabletask/agent_framework_durabletask
+
+      - name: Unit tests
+        working-directory: python
+        run: uv run pytest -m "not integration" packages/durabletask/tests --cov=agent_framework_durabletask --cov-report=term-missing:skip-covered
+
+      - name: Build package
+        working-directory: python
+        run: uv build packages/durabletask --out-dir dist
+
+      - name: Upload package
+        if: matrix.python-version == '3.13'
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package
+          path: python/dist/*

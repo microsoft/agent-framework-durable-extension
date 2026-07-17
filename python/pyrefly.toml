@@ -1,0 +1,8 @@
+# Pyrefly runs over the Durable Task tests + samples (not source -- Pyright owns source).
+# Relaxed profile: surface real public-API type errors without forcing test/sample
+# authors to fully annotate their code.
+project-includes = ["packages/durabletask/tests", "samples"]
+
+[errors]
+# Test/mock-heavy code legitimately accesses attributes dynamically.
+missing-attribute = false

@@ -1,0 +1,68 @@
+steps:
+  - bash: docker version
+    displayName: 'Check Docker'
+
+  - bash: |
+      set -euo pipefail
+
+      if [ "$(docker ps -aq -f name=dts-emulator)" ]; then
+        docker rm -f dts-emulator
+      fi
+
+      docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 -e DTS_USE_DYNAMIC_TASK_HUBS=true mcr.microsoft.com/dts/dts-emulator:latest
+      timeout 60 bash -c 'until curl --silent --show-error http://localhost:8082 >/dev/null; do sleep 2; done'
+    displayName: 'Start Durable Task Scheduler emulator'
+
+  - bash: |
+      set -euo pipefail
+
+      if [ "$(docker ps -aq -f name=azurite)" ]; then
+        docker rm -f azurite
+      fi
+
+      docker run -d --name azurite -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite
+      timeout 60 bash -c 'until curl --silent --show-error http://localhost:10000/devstoreaccount1 >/dev/null; do sleep 2; done'
+    displayName: 'Start Azurite'
+
+  - bash: |
+      set -euo pipefail
+
+      if [ "$(docker ps -aq -f name=redis)" ]; then
+        docker rm -f redis
+      fi
+
+      # Docker Hub is not reachable from the governed 1ES pool, so pull Redis from
+      # Microsoft's Docker Hub mirror on MCR. The mirror only publishes specific
+      # version tags (6, 7, 7.0, 7.2) and no 'latest' tag.
+      docker run -d --name redis -p 6379:6379 mcr.microsoft.com/mirror/docker/library/redis:7
+      timeout 60 bash -c 'until docker exec redis redis-cli ping | grep -q PONG; do sleep 2; done'
+    displayName: 'Start Redis'
+
+  - bash: |
+      set -euo pipefail
+
+      # Azure Functions Core Tools. The governed 1ES pool cannot reach npmjs.org,
+      # so install from Microsoft's package feed (packages.microsoft.com) instead
+      # of npm. This is Microsoft's documented Linux install path for func v4.
+      #
+      # The 1ES image usually already has the Microsoft feed configured, so only add
+      # it when missing. This avoids downgrading the image's packages-microsoft-prod
+      # and skips a redundant download.
+      if ! grep -rqi "packages.microsoft.com" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+        # Read the Ubuntu version from /etc/os-release rather than lsb_release, which
+        # is not guaranteed to be installed on minimal images.
+        ubuntu_version="$(. /etc/os-release && echo "$VERSION_ID")"
+        wget -q "https://packages.microsoft.com/config/ubuntu/${ubuntu_version}/packages-microsoft-prod.deb" -O /tmp/packages-microsoft-prod.deb
+        sudo dpkg -i /tmp/packages-microsoft-prod.deb
+        rm -f /tmp/packages-microsoft-prod.deb
+      fi
+
+      sudo apt-get update
+      sudo apt-get install -y azure-functions-core-tools-4
+      func --version
+
+      # Reclaim disk on the OS volume (/): the apt cache and package lists are no
+      # longer needed after install, and the agent OS disk is space-constrained.
+      sudo apt-get clean
+      sudo rm -rf /var/lib/apt/lists/*
+    displayName: 'Install Azure Functions Core Tools'

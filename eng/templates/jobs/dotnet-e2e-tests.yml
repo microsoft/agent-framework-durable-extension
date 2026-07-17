@@ -1,0 +1,112 @@
+parameters:
+  - name: azureServiceConnection
+    type: string
+
+jobs:
+  - job: DotNetE2E
+    displayName: '.NET E2E tests'
+    timeoutInMinutes: 90
+    variables:
+      DURABLE_TASK_SCHEDULER_CONNECTION_STRING: 'Endpoint=http://localhost:8080;TaskHub=default;Authentication=None'
+      AzureWebJobsStorage: 'UseDevelopmentStorage=true'
+      REDIS_CONNECTION_STRING: 'localhost:6379'
+    steps:
+      - checkout: self
+
+      # Disk usage baseline, before we add anything (Docker images, func, packages). This
+      # shows how much the pool image itself leaves free on the single OS disk.
+      - bash: df -h
+        displayName: 'Disk space (image baseline)'
+
+      - task: UseDotNet@2
+        displayName: 'Use .NET SDK from global.json'
+        inputs:
+          packageType: sdk
+          useGlobalJson: true
+          workingDirectory: dotnet
+
+      - template: setup-integration-infra.yml
+
+      - bash: cp "$(Build.SourcesDirectory)/eng/nuget.ci.config" "$(Build.SourcesDirectory)/dotnet/nuget.config"
+        displayName: 'Point NuGet at internal Azure Artifacts feed'
+
+      - task: NuGetAuthenticate@1
+        displayName: 'Authenticate to Azure Artifacts feed'
+
+      - bash: df -h
+        displayName: 'Disk space (after infra setup)'
+
+      # Build only the integration test projects. The tests build the specific
+      # samples they exercise at runtime, so building the full solution (32 sample
+      # projects, many of them Azure Functions apps with large bin output) upfront
+      # is unnecessary and exhausts the agent's disk.
+      - bash: |
+          set -euo pipefail
+          dotnet build tests/Microsoft.Agents.AI.DurableTask.IntegrationTests/Microsoft.Agents.AI.DurableTask.IntegrationTests.csproj --configuration Release
+          dotnet build tests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests.csproj --configuration Release
+        workingDirectory: dotnet
+        displayName: 'Build integration test projects'
+
+      # Reclaim disk: the NuGet http-cache holds compressed downloads that are no
+      # longer needed once packages are extracted into the global packages folder.
+      # The global packages folder itself is kept for the runtime sample builds.
+      - bash: |
+          dotnet nuget locals http-cache --clear
+          dotnet nuget locals temp --clear
+        displayName: 'Clear NuGet download caches'
+
+      - bash: df -h
+        condition: always()
+        displayName: 'Disk space (after build)'
+
+      - task: AzureCLI@2
+        displayName: 'Run DurableTask integration tests'
+        inputs:
+          azureSubscription: ${{ parameters.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          workingDirectory: $(Build.SourcesDirectory)/dotnet
+          inlineScript: |
+            mkdir -p ../artifacts/test-results
+            dotnet test tests/Microsoft.Agents.AI.DurableTask.IntegrationTests/Microsoft.Agents.AI.DurableTask.IntegrationTests.csproj \
+              --configuration Release \
+              --no-build \
+              --filter-not-trait Category=IntegrationDisabled \
+              --report-xunit-trx \
+              --results-directory ../artifacts/test-results
+        env:
+          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+          AZURE_OPENAI_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
+          AZURE_OPENAI_CHAT_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
+
+      - bash: df -h
+        condition: always()
+        displayName: 'Disk space (after DurableTask tests)'
+
+      - task: AzureCLI@2
+        displayName: 'Run Azure Functions integration tests'
+        inputs:
+          azureSubscription: ${{ parameters.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          workingDirectory: $(Build.SourcesDirectory)/dotnet
+          inlineScript: |
+            mkdir -p ../artifacts/test-results
+            dotnet test tests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests.csproj \
+              --configuration Release \
+              --no-build \
+              --report-xunit-trx \
+              --results-directory ../artifacts/test-results
+        env:
+          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+          AZURE_OPENAI_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
+          AZURE_OPENAI_CHAT_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
+
+      - task: PublishTestResults@2
+        condition: always()
+        inputs:
+          testResultsFormat: VSTest
+          testResultsFiles: 'artifacts/test-results/**/*.trx'
+          searchFolder: $(Build.SourcesDirectory)
+          failTaskOnFailedTests: true
+        displayName: 'Publish .NET test results'

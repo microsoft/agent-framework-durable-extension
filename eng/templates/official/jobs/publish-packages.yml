@@ -1,0 +1,117 @@
+parameters:
+  - name: artifactName
+    type: string
+    default: 'agent-framework-durable-extension-packages'
+  - name: publishDotNet
+    type: boolean
+    default: false
+  - name: publishPython
+    type: boolean
+    default: false
+  - name: nugetServiceConnection
+    type: string
+    default: 'agent-framework-durable-extension-nuget-org'
+  - name: pypiServiceConnection
+    type: string
+    default: 'agent-framework-durable-extension-pypi'
+
+jobs:
+  - job: ValidateRelease
+    displayName: '(Manual) Validate package release'
+    condition: or(${{ eq(parameters.publishDotNet, true) }}, ${{ eq(parameters.publishPython, true) }})
+    pool: server
+    steps:
+      - task: ManualValidation@1
+        displayName: 'Approve package publish'
+        inputs:
+          notifyUsers: ''
+          instructions: |
+            Review package artifacts from the BuildPackages stage.
+            Confirm package versions are correct and have not already been published.
+            Resume only when ready to publish selected package types.
+
+  - job: PublishDotNet
+    dependsOn: ValidateRelease
+    condition: and(succeeded(), ${{ eq(parameters.publishDotNet, true) }})
+    displayName: 'Publish .NET packages'
+    steps:
+      - checkout: none
+
+      - download: current
+        artifact: ${{ parameters.artifactName }}
+
+      # Note on reruns: NuGetCommand@2's skip-duplicate (allowPackageConflicts) only
+      # applies to Azure Artifacts feeds, not external registries like NuGet.org, so it
+      # is not set here. A rerun that re-pushes an already-published version will fail
+      # with HTTP 409. Releases bump the package version each time, and publishing is
+      # gated behind the manual validation above, so this is expected: on a partial
+      # failure, bump the version or remove the already-published package before rerunning.
+      - task: NuGetCommand@2
+        displayName: 'Push .NET packages to NuGet.org'
+        inputs:
+          command: push
+          packagesToPush: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet/*.nupkg'
+          nuGetFeedType: external
+          publishFeedCredentials: ${{ parameters.nugetServiceConnection }}
+
+      # NuGetCommand@2 does not auto-push co-located symbol packages, so publish the
+      # .snupkg files explicitly. The repo produces symbol packages (IncludeSymbols +
+      # SymbolPackageFormat=snupkg in dotnet/nuget/nuget-package.props); without this
+      # step, symbols would silently stop reaching NuGet.org's symbol server.
+      - task: NuGetCommand@2
+        displayName: 'Push .NET symbol packages to NuGet.org'
+        inputs:
+          command: push
+          packagesToPush: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet/*.snupkg'
+          nuGetFeedType: external
+          publishFeedCredentials: ${{ parameters.nugetServiceConnection }}
+
+  - job: PublishPython
+    dependsOn: ValidateRelease
+    condition: and(succeeded(), ${{ eq(parameters.publishPython, true) }})
+    displayName: 'Publish Python package'
+    steps:
+      - checkout: none
+
+      - download: current
+        artifact: ${{ parameters.artifactName }}
+
+      - task: UsePythonVersion@0
+        displayName: 'Use Python 3.13'
+        inputs:
+          versionSpec: '3.13'
+
+      # Authenticate to the internal feed before installing twine. The governed pool
+      # cannot reach PyPI directly, so pip must install twine from the authenticated
+      # feed (via the PIP_INDEX_URL this task sets).
+      - task: PipAuthenticate@1
+        displayName: 'Authenticate to Azure Artifacts feed'
+        inputs:
+          artifactFeeds: 'internal/upstream'
+
+      - pwsh: python -m pip install --upgrade pip twine
+        displayName: 'Install Twine'
+
+      - task: TwineAuthenticate@1
+        displayName: 'Authenticate to PyPI'
+        inputs:
+          pythonUploadServiceConnection: ${{ parameters.pypiServiceConnection }}
+
+      # TwineAuthenticate writes a .pypirc whose repository section is named after the
+      # service connection, so `--repository` must be that same service connection name
+      # (this matches the documented pattern for external PyPI upload connections).
+      - pwsh: |
+          # Force array context with @(...) so .Count is reliable even when
+          # Get-ChildItem returns nothing ($null) or a single item.
+          $packages = @(Get-ChildItem -File "$(Pipeline.Workspace)/${{ parameters.artifactName }}/python" |
+            Where-Object { $_.Name.EndsWith(".whl") -or $_.Name.EndsWith(".tar.gz") })
+          if ($packages.Count -eq 0) {
+            throw "No Python packages were found."
+          }
+
+          python -m twine upload `
+            --non-interactive `
+            --repository "${{ parameters.pypiServiceConnection }}" `
+            --config-file "$(PYPIRC_PATH)" `
+            @($packages.FullName)
+        displayName: 'Upload Python package to PyPI'
