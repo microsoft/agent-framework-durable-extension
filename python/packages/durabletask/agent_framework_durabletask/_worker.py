@@ -10,7 +10,7 @@ as durable orchestrations with automatically generated activity functions.
 from __future__ import annotations
 
 import logging
-from typing import Any, cast
+from typing import Any
 
 from agent_framework import SupportsAgentRun, Workflow
 from durabletask.task import ActivityContext, OrchestrationContext
@@ -157,7 +157,7 @@ class DurableAIAgentWorker:
             The worker will block until stopped.
         """
         logger.info("[DurableAIAgentWorker] Starting worker with %d registered agents", len(self._registered_agents))
-        cast(Any, self._worker).start()
+        self._worker.start()
 
     def stop(self) -> None:
         """Stop the worker gracefully.
@@ -166,7 +166,7 @@ class DurableAIAgentWorker:
             This method delegates to the underlying worker's stop method.
         """
         logger.info("[DurableAIAgentWorker] Stopping worker")
-        cast(Any, self._worker).stop()
+        self._worker.stop()
 
     @property
     def registered_agent_names(self) -> list[str]:

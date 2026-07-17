@@ -1,10 +1,9 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Runner context for activity execution within durable orchestrations.
+"""Runner context for Azure Functions activity execution.
 
-This module provides the :class:`CapturingRunnerContext` class that captures
-messages and events produced during executor execution within activities.
-It is host-agnostic and works on any durable task host.
+This module provides the CapturingRunnerContext class that captures messages
+and events produced during executor execution within Azure Functions activities.
 """
 
 from __future__ import annotations
@@ -23,56 +22,55 @@ from agent_framework import (
 from agent_framework._workflows._runner_context import YieldOutputClassifier, YieldOutputEventType
 from agent_framework._workflows._state import State
 
-# Keys of the host-metadata mapping the durable host attaches to each executor (as the
-# activity's ``host_context`` input, surfaced here via ``set_host_metadata``). These form
-# a cross-package contract: the orchestrator writes them and
-# ``WorkflowHitlContext.from_context`` in agent-framework-azurefunctions reads them back by
-# the same names, so they live here as shared constants to keep producer and consumer from
-# drifting silently (a rename would just make HITL URLs stop being built, with no error).
-HOST_METADATA_INSTANCE_ID = "instance_id"
-HOST_METADATA_WORKFLOW_NAME = "workflow_name"
-HOST_METADATA_REQUEST_PATH_PREFIX = "request_path_prefix"
-
 
 class CapturingRunnerContext(RunnerContext):
-    """A RunnerContext that captures messages and events for durable activities.
+    """A RunnerContext implementation that captures messages and events for Azure Functions activities.
 
-    This context captures all messages and events produced during execution
-    without requiring durable entity storage, allowing the results to be
-    returned to the orchestrator.
+    This context is designed for executing standard Executors within Azure Functions activities.
+    It captures all messages and events produced during execution without requiring durable
+    entity storage, allowing the results to be returned to the orchestrator.
 
-    Checkpointing is not supported — the orchestrator manages state.
+    Unlike InProcRunnerContext, this implementation does NOT support checkpointing
+    (always returns False for has_checkpointing). The orchestrator manages state
+    coordination; this context just captures execution output.
     """
 
     def __init__(self) -> None:
+        """Initialize the capturing runner context."""
         self._messages: dict[str, list[WorkflowMessage]] = {}
         self._event_queue: asyncio.Queue[WorkflowEvent] = asyncio.Queue()
         self._pending_request_info_events: dict[str, WorkflowEvent[Any]] = {}
         self._workflow_id: str | None = None
         self._streaming: bool = False
         self._yield_output_classifier: YieldOutputClassifier = lambda _executor_id: "output"
-        self._host_metadata: dict[str, Any] | None = None
 
-    # -- Messaging ------------------------------------------------------------
+    # region Messaging
 
     async def send_message(self, message: WorkflowMessage) -> None:
+        """Capture a message sent by an executor."""
         self._messages.setdefault(message.source_id, [])
         self._messages[message.source_id].append(message)
 
     async def drain_messages(self) -> dict[str, list[WorkflowMessage]]:
+        """Drain and return all captured messages."""
         messages = copy(self._messages)
         self._messages.clear()
         return messages
 
     async def has_messages(self) -> bool:
+        """Check if there are any captured messages."""
         return bool(self._messages)
 
-    # -- Events ---------------------------------------------------------------
+    # endregion Messaging
+
+    # region Events
 
     async def add_event(self, event: WorkflowEvent) -> None:
+        """Capture an event produced during execution."""
         await self._event_queue.put(event)
 
     async def drain_events(self) -> list[WorkflowEvent]:
+        """Drain all currently queued events without blocking."""
         events: list[WorkflowEvent] = []
         while True:
             try:
@@ -82,20 +80,27 @@ class CapturingRunnerContext(RunnerContext):
         return events
 
     async def has_events(self) -> bool:
+        """Check if there are any queued events."""
         return not self._event_queue.empty()
 
     async def next_event(self) -> WorkflowEvent:
+        """Wait for and return the next event."""
         return await self._event_queue.get()
 
-    # -- Checkpointing (not supported) ----------------------------------------
+    # endregion Events
+
+    # region Checkpointing (not supported in activity context)
 
     def has_checkpointing(self) -> bool:
+        """Checkpointing is not supported in activity context."""
         return False
 
     def set_runtime_checkpoint_storage(self, storage: CheckpointStorage) -> None:
+        """No-op: checkpointing not supported in activity context."""
         pass
 
     def clear_runtime_checkpoint_storage(self) -> None:
+        """No-op: checkpointing not supported in activity context."""
         pass
 
     async def create_checkpoint(
@@ -107,71 +112,70 @@ class CapturingRunnerContext(RunnerContext):
         iteration_count: int,
         metadata: dict[str, Any] | None = None,
     ) -> str:
-        raise NotImplementedError("Checkpointing is not supported in activity context")
+        """Checkpointing not supported in activity context."""
+        raise NotImplementedError("Checkpointing is not supported in Azure Functions activity context")
 
     async def load_checkpoint(self, checkpoint_id: str) -> WorkflowCheckpoint | None:
-        raise NotImplementedError("Checkpointing is not supported in activity context")
+        """Checkpointing not supported in activity context."""
+        raise NotImplementedError("Checkpointing is not supported in Azure Functions activity context")
 
     async def apply_checkpoint(self, checkpoint: WorkflowCheckpoint) -> None:
-        raise NotImplementedError("Checkpointing is not supported in activity context")
+        """Checkpointing not supported in activity context."""
+        raise NotImplementedError("Checkpointing is not supported in Azure Functions activity context")
 
-    # -- Workflow configuration -----------------------------------------------
+    # endregion Checkpointing
+
+    # region Workflow Configuration
 
     def set_workflow_id(self, workflow_id: str) -> None:
+        """Set the workflow ID."""
         self._workflow_id = workflow_id
 
     def reset_for_new_run(self) -> None:
+        """Reset the context for a new run."""
         self._messages.clear()
         self._event_queue = asyncio.Queue()
         self._pending_request_info_events.clear()
         self._streaming = False
 
     def set_streaming(self, streaming: bool) -> None:
+        """Set streaming mode (not used in activity context)."""
         self._streaming = streaming
 
     def is_streaming(self) -> bool:
+        """Check if streaming mode is enabled (always False in activity context)."""
         return self._streaming
 
-    # -- Host metadata --------------------------------------------------------
-
-    @property
-    def host_metadata(self) -> dict[str, Any] | None:
-        """Orchestration metadata injected by the durable host, or ``None`` in-process.
-
-        The durable orchestrator populates this from its own context (e.g. the
-        orchestration ``instance_id`` and ``workflow_name``) so an executor can
-        address the running orchestration -- for example to build a human-in-the-loop
-        respond URL and notify a reviewer -- without the caller threading those ids by
-        hand. It is ``None`` when the same executor runs in-process (no durable host),
-        so host-specific helpers can degrade gracefully.
-        """
-        return self._host_metadata
-
-    def set_host_metadata(self, metadata: dict[str, Any] | None) -> None:
-        """Set the orchestration metadata for this activity execution."""
-        self._host_metadata = metadata
-
-    # -- Yield-output classification -------------------------------------------
-
     def set_yield_output_classifier(self, classifier: YieldOutputClassifier) -> None:
-        """Set the classifier used by ``WorkflowContext.yield_output()``."""
+        """Set the classifier used by WorkflowContext.yield_output()."""
         self._yield_output_classifier = classifier
 
     def classify_yielded_output(self, executor_id: str) -> YieldOutputEventType | None:
         """Classify an executor's yield_output payload as output, intermediate, or hidden."""
         return self._yield_output_classifier(executor_id)
 
-    # -- Request Info Events --------------------------------------------------
+    # endregion Workflow Configuration
+
+    # region Request Info Events
 
     async def add_request_info_event(self, event: WorkflowEvent[Any]) -> None:
+        """Add a request_info WorkflowEvent and track it for correlation."""
         self._pending_request_info_events[event.request_id] = event
         await self.add_event(event)
 
     async def send_request_info_response(self, request_id: str, response: Any) -> None:
+        """Send a response correlated to a pending request.
+
+        Note: This is not supported in activity context since human-in-the-loop
+        scenarios require orchestrator-level coordination.
+        """
         raise NotImplementedError(
-            "send_request_info_response is not supported in activity context. "
+            "send_request_info_response is not supported in Azure Functions activity context. "
             "Human-in-the-loop scenarios should be handled at the orchestrator level."
         )
 
     async def get_pending_request_info_events(self) -> dict[str, WorkflowEvent[Any]]:
+        """Get the mapping of request IDs to their corresponding request_info events."""
         return dict(self._pending_request_info_events)
+
+    # endregion Request Info Events
