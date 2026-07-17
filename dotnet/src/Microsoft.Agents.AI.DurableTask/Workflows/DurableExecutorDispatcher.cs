@@ -129,7 +129,10 @@ internal static class DurableExecutorDispatcher
 
         logger.LogReceivedExternalEvent(eventName);
 
-        return response;
+        // Wrap the external response in a DurableExecutorOutput envelope so that
+        // ProcessSuperstepResults handles it consistently with activity results.
+        DurableExecutorOutput output = new() { Result = response };
+        return JsonSerializer.Serialize(output, DurableWorkflowJsonContext.Default.DurableExecutorOutput);
     }
 
     /// <summary>
