@@ -41,6 +41,43 @@ steps:
   - bash: |
       set -euo pipefail
 
+      # Azure CLI (az). The minimal 1ES image does not ship Azure CLI, which the
+      # AzureCLI@2 test tasks require for keyless service-connection auth. Install
+      # it from Microsoft's dedicated azure-cli apt feed on packages.microsoft.com,
+      # which is reachable from the governed pool. We avoid the default
+      # aka.ms/InstallAzureCLIDeb script because it redirects to Azure blob storage,
+      # which the pool may not reach. This mirrors Microsoft's documented manual
+      # apt install. Skip entirely when az is already present (fuller images).
+      if ! command -v az >/dev/null 2>&1; then
+        sudo apt-get update
+        sudo apt-get install -y ca-certificates curl apt-transport-https gnupg
+        sudo mkdir -p /etc/apt/keyrings
+        curl -sLS https://packages.microsoft.com/keys/microsoft.asc \
+          | sudo gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
+        sudo chmod go+r /etc/apt/keyrings/microsoft.gpg
+
+        # Ubuntu codename (e.g. 'noble' for 24.04). Read from /etc/os-release rather
+        # than lsb_release, which may be absent on minimal images.
+        az_dist="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+        arch="$(dpkg --print-architecture)"
+
+        printf 'Types: deb\nURIs: https://packages.microsoft.com/repos/azure-cli/\nSuites: %s\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/microsoft.gpg\n' \
+          "$az_dist" "$arch" | sudo tee /etc/apt/sources.list.d/azure-cli.sources
+
+        sudo apt-get update
+        sudo apt-get install -y azure-cli
+
+        # Reclaim disk on the space-constrained OS volume.
+        sudo apt-get clean
+        sudo rm -rf /var/lib/apt/lists/*
+      fi
+
+      az version
+    displayName: 'Install Azure CLI'
+
+  - bash: |
+      set -euo pipefail
+
       # Azure Functions Core Tools. The governed 1ES pool cannot reach npmjs.org,
       # so install from Microsoft's package feed (packages.microsoft.com) instead
       # of npm. This is Microsoft's documented Linux install path for func v4.
