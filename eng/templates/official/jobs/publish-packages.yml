@@ -101,8 +101,10 @@ jobs:
       # service connection, so `--repository` must be that same service connection name
       # (this matches the documented pattern for external PyPI upload connections).
       - pwsh: |
-          $packages = Get-ChildItem -File "$(Pipeline.Workspace)/${{ parameters.artifactName }}/python" |
-            Where-Object { $_.Name.EndsWith(".whl") -or $_.Name.EndsWith(".tar.gz") }
+          # Force array context with @(...) so .Count is reliable even when
+          # Get-ChildItem returns nothing ($null) or a single item.
+          $packages = @(Get-ChildItem -File "$(Pipeline.Workspace)/${{ parameters.artifactName }}/python" |
+            Where-Object { $_.Name.EndsWith(".whl") -or $_.Name.EndsWith(".tar.gz") })
           if ($packages.Count -eq 0) {
             throw "No Python packages were found."
           }
