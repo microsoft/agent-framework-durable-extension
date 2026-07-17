@@ -1,6 +1,6 @@
 [project]
-name = "agent-framework-durabletask"
-description = "Durable Task integration for Microsoft Agent Framework."
+name = "agent-framework-azurefunctions"
+description = "Azure Functions integration for Microsoft Agent Framework."
 authors = [{ name = "Microsoft", email = "af-support@microsoft.com"}]
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,14 +23,9 @@ classifiers = [
 ]
 dependencies = [
     "agent-framework-core>=1.11.0,<2",
-    "durabletask>=1.5.0,<2",
-    "durabletask-azuremanaged>=1.4.0,<2",
-    "python-dateutil>=2.8.0,<3",
-]
-
-[dependency-groups]
-dev = [
-    "types-python-dateutil==2.9.0.20260518",
+    "agent-framework-durabletask>=1.0.0b260709,<2",
+    "azure-functions>=1.24.0,<2",
+    "azure-functions-durable>=1.3.1,<2",
 ]
 
 [tool.uv]
@@ -53,14 +48,10 @@ asyncio_default_fixture_loop_scope = "function"
 filterwarnings = [
     "ignore:Support for class-based `config` is deprecated:DeprecationWarning:pydantic.*"
 ]
-timeout = 120
+timeout = 300
 markers = [
-    "integration: marks tests as integration tests",
-    "integration_test: marks tests as integration tests (alternative marker)",
-    "sample: marks tests as sample tests",
-    "requires_azure_openai: marks tests that require Azure OpenAI",
-    "requires_dts: marks tests that require Durable Task Scheduler",
-    "requires_redis: marks tests that require Redis"
+    "integration: marks tests as integration tests (require running function app)",
+    "orchestration: marks tests that use orchestrations (require Azurite)",
 ]
 
 [tool.ruff]
@@ -73,10 +64,10 @@ omit = [
 
 [tool.pyright]
 extends = "../../pyproject.toml"
-include = ["agent_framework_durabletask"]
+include = ["agent_framework_azurefunctions"]
 
 [tool.bandit]
-targets = ["agent_framework_durabletask"]
+targets = ["agent_framework_azurefunctions"]
 exclude_dirs = ["tests"]
 
 [tool.poe]
@@ -89,7 +80,7 @@ cmd = "mypy --config-file $POE_ROOT/pyproject.toml tests"
 
 [tool.poe.tasks.test]
 help = "Run the default unit test suite for this package."
-cmd = 'pytest -m "not integration" --cov=agent_framework_durabletask --cov-report=term-missing:skip-covered tests'
+cmd = 'pytest -m "not integration" --cov=agent_framework_azurefunctions --cov-report=term-missing:skip-covered tests'
 
 [build-system]
 requires = ["flit-core >= 3.11,<4.0"]

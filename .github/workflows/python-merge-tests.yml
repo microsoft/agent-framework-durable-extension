@@ -39,19 +39,29 @@ jobs:
 
       - name: Ruff
         working-directory: python
-        run: uv run ruff check packages/durabletask
+        run: uv run ruff check packages/durabletask packages/azurefunctions
 
-      - name: MyPy
+      - name: Pyright (source)
         working-directory: python
-        run: uv run mypy --config-file packages/durabletask/pyproject.toml packages/durabletask/agent_framework_durabletask
+        run: |
+          uv run pyright -p packages/durabletask/pyproject.toml
+          uv run pyright -p packages/azurefunctions/pyproject.toml
+
+      - name: MyPy (tests)
+        working-directory: python
+        run: |
+          uv run mypy --config-file pyproject.toml packages/durabletask/tests
+          uv run mypy --config-file pyproject.toml packages/azurefunctions/tests
 
       - name: Unit tests
         working-directory: python
-        run: uv run pytest -m "not integration" packages/durabletask/tests --cov=agent_framework_durabletask --cov-report=term-missing:skip-covered
+        run: uv run pytest -m "not integration" packages/durabletask/tests packages/azurefunctions/tests --cov=agent_framework_durabletask --cov=agent_framework_azurefunctions --cov-report=term-missing:skip-covered
 
       - name: Build package
         working-directory: python
-        run: uv build packages/durabletask --out-dir dist
+        run: |
+          uv build packages/durabletask --out-dir dist
+          uv build packages/azurefunctions --out-dir dist
 
       - name: Upload package
         if: matrix.python-version == '3.13'

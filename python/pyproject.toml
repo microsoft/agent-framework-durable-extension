@@ -69,10 +69,11 @@ environments = [
 ]
 
 [tool.uv.workspace]
-members = ["packages/durabletask"]
+members = ["packages/durabletask", "packages/azurefunctions"]
 
 [tool.uv.sources]
 agent-framework-durabletask = { workspace = true }
+agent-framework-azurefunctions = { workspace = true }
 
 [tool.ruff]
 line-length = 120
@@ -139,7 +140,7 @@ notice-rgx = "^# Copyright \\(c\\) Microsoft\\. All rights reserved\\."
 min-file-size = 1
 
 [tool.pytest.ini_options]
-testpaths = ["packages/durabletask/tests"]
+testpaths = ["packages/durabletask/tests", "packages/azurefunctions/tests"]
 norecursedirs = ["**/lab/**"]
 addopts = "-ra -q -r fEX"
 asyncio_mode = "auto"
@@ -172,8 +173,12 @@ reportUnnecessaryCast = "error"
 reportUnnecessaryTypeIgnoreComment = "error"
 
 [tool.mypy]
+# Type-checks tests only. Package sources are checked by Pyright (strict), matching the
+# Agent Framework repo, which uses Pyright for source and relaxed mypy/ty for tests.
+# ``follow_imports = "silent"`` lets mypy use the sources for context without reporting on them.
 plugins = ["pydantic.mypy"]
 python_version = "3.10"
+follow_imports = "silent"
 ignore_missing_imports = true
 check_untyped_defs = true
 disallow_untyped_defs = false
@@ -193,7 +198,7 @@ follow_imports_for_stubs = true
 unused-type-ignore-comment = "ignore"
 
 [tool.bandit]
-targets = ["agent_framework_durabletask"]
+targets = ["agent_framework_durabletask", "agent_framework_azurefunctions"]
 exclude_dirs = ["tests", "samples"]
 
 [tool.poe]
@@ -204,28 +209,28 @@ help = "Install the Durable Task workspace package and dependency groups."
 cmd = "uv sync --all-packages --group dev --group test"
 
 [tool.poe.tasks.lint]
-help = "Run Ruff checks for the Durable Task package and samples."
-cmd = "ruff check packages/durabletask samples"
+help = "Run Ruff checks for the packages and samples."
+cmd = "ruff check packages/durabletask packages/azurefunctions samples"
 
 [tool.poe.tasks.format]
-help = "Run Ruff formatting for the Durable Task package and samples."
-cmd = "ruff format packages/durabletask samples"
-
-[tool.poe.tasks.mypy]
-help = "Run MyPy for the Durable Task package source."
-cmd = "mypy --config-file packages/durabletask/pyproject.toml packages/durabletask/agent_framework_durabletask"
+help = "Run Ruff formatting for the packages and samples."
+cmd = "ruff format packages/durabletask packages/azurefunctions samples"
 
 [tool.poe.tasks.pyright]
-help = "Run Pyright for the Durable Task package source."
-cmd = "pyright -p packages/durabletask/pyproject.toml"
+help = "Run Pyright for the package sources."
+shell = "pyright -p packages/durabletask/pyproject.toml && pyright -p packages/azurefunctions/pyproject.toml"
+
+[tool.poe.tasks.mypy]
+help = "Run MyPy for the package tests."
+shell = "mypy --config-file pyproject.toml packages/durabletask/tests && mypy --config-file pyproject.toml packages/azurefunctions/tests"
 
 [tool.poe.tasks.test]
-help = "Run the Durable Task unit tests."
-cmd = "pytest -m \"not integration\" packages/durabletask/tests"
+help = "Run the unit tests."
+cmd = "pytest -m \"not integration\" packages/durabletask/tests packages/azurefunctions/tests"
 
 [tool.poe.tasks.build]
-help = "Build the Durable Task package distributions."
-cmd = "uv build packages/durabletask --out-dir dist"
+help = "Build the package distributions."
+shell = "uv build packages/durabletask --out-dir dist && uv build packages/azurefunctions --out-dir dist"
 
 [tool.poe.tasks.clean-dist]
 help = "Remove generated Python package artifacts."

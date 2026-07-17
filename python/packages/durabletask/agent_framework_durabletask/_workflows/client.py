@@ -417,7 +417,7 @@ class DurableWorkflowClient:
         subworkflows = status_dict.get("subworkflows")
         if isinstance(subworkflows, dict):
             for executor_id, child_ids in cast(dict[str, Any], subworkflows).items():
-                children: list[Any] = child_ids if isinstance(child_ids, list) else []
+                children: list[Any] = cast("list[Any]", child_ids) if isinstance(child_ids, list) else []
                 for ordinal, child_instance_id in enumerate(children):
                     if not isinstance(child_instance_id, str):
                         continue
@@ -520,7 +520,7 @@ class DurableWorkflowClient:
         children_raw = cast(dict[str, Any], subworkflows).get(executor_id)
         if not isinstance(children_raw, list):
             return None
-        children = children_raw
+        children = cast("list[Any]", children_raw)
         if ordinal < 0 or ordinal >= len(children):
             return None
         child = children[ordinal]
