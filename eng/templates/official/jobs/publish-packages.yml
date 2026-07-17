@@ -48,6 +48,18 @@ jobs:
           nuGetFeedType: external
           publishFeedCredentials: ${{ parameters.nugetServiceConnection }}
 
+      # NuGetCommand@2 does not auto-push co-located symbol packages, so publish the
+      # .snupkg files explicitly. The repo produces symbol packages (IncludeSymbols +
+      # SymbolPackageFormat=snupkg in dotnet/nuget/nuget-package.props); without this
+      # step, symbols would silently stop reaching NuGet.org's symbol server.
+      - task: NuGetCommand@2
+        displayName: 'Push .NET symbol packages to NuGet.org'
+        inputs:
+          command: push
+          packagesToPush: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet/*.snupkg'
+          nuGetFeedType: external
+          publishFeedCredentials: ${{ parameters.nugetServiceConnection }}
+
   - job: PublishPython
     dependsOn: ValidateRelease
     condition: and(succeeded(), ${{ eq(parameters.publishPython, true) }})
@@ -71,6 +83,9 @@ jobs:
         inputs:
           pythonUploadServiceConnection: ${{ parameters.pypiServiceConnection }}
 
+      # TwineAuthenticate writes a .pypirc whose repository section is named after the
+      # service connection, so `--repository` must be that same service connection name
+      # (this matches the documented pattern for external PyPI upload connections).
       - pwsh: |
           $packages = Get-ChildItem -File "$(Pipeline.Workspace)/${{ parameters.artifactName }}/python" |
             Where-Object { $_.Name.EndsWith(".whl") -or $_.Name.EndsWith(".tar.gz") }
