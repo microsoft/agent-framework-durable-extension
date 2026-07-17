@@ -109,6 +109,10 @@ jobs:
           uv build packages/durabletask --out-dir "$(Build.ArtifactStagingDirectory)/packages/python"
         workingDirectory: python
         displayName: 'Build Python package'
+        env:
+          # uv build resolves the build backend (flit-core) in an isolated environment.
+          # The governed pool blocks PyPI, so point uv at the authenticated internal feed.
+          UV_INDEX_URL: $(PIP_INDEX_URL)
 
       - pwsh: Get-ChildItem -Recurse "$(Build.ArtifactStagingDirectory)/packages" | Select-Object -ExpandProperty FullName
         displayName: 'List package artifacts'

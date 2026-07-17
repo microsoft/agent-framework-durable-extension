@@ -28,6 +28,7 @@ jobs:
           artifactFeeds: 'internal/upstream'
 
       - bash: |
+          set -euo pipefail
           uv python install 3.13
           uv sync --python 3.13 --all-packages --group dev --group test
         workingDirectory: python
