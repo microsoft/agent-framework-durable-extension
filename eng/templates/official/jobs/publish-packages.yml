@@ -81,6 +81,14 @@ jobs:
         inputs:
           versionSpec: '3.13'
 
+      # Authenticate to the internal feed before installing twine. The governed pool
+      # cannot reach PyPI directly, so pip must install twine from the authenticated
+      # feed (via the PIP_INDEX_URL this task sets).
+      - task: PipAuthenticate@1
+        displayName: 'Authenticate to Azure Artifacts feed'
+        inputs:
+          artifactFeeds: 'internal/upstream'
+
       - pwsh: python -m pip install --upgrade pip twine
         displayName: 'Install Twine'
 

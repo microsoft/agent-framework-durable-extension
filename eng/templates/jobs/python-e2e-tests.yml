@@ -13,6 +13,7 @@ jobs:
       - checkout: self
 
       - bash: |
+          set -euo pipefail
           # Pin uv to the version declared in python/pyproject.toml for reproducible
           # CI. Astral publishes a versioned install script at astral.sh/uv/<version>.
           curl -LsSf https://astral.sh/uv/0.11.28/install.sh | sh
