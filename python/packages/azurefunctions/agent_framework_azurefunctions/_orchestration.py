@@ -165,9 +165,6 @@ class AzureFunctionsAgentExecutor(DurableAgentExecutor[AgentTask]):
 
         Returns:
             RunRequest: The current run request
-
-        Raises:
-            ValueError: If wait_for_response=False (not supported in orchestrations)
         """
         # Create a copy to avoid modifying the caller's dict
 
