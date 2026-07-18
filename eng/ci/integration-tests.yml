@@ -59,9 +59,10 @@ extends:
     pool:
       name: 1es-pool-azfunc
       # The Linux image is selected via the linuxImage parameter. It must be a
-      # 1ES-compliant Ubuntu image in the pool that provides Docker and Azure CLI.
-      # CoreAI recommends migrating to an Azure Linux 3 image later for better
-      # vulnerability servicing.
+      # 1ES-compliant Ubuntu image in the pool that provides Docker. Azure CLI and
+      # Azure Functions Core Tools are installed by the integration infra setup, so
+      # they are not required to be preinstalled on the image. CoreAI recommends
+      # migrating to an Azure Linux 3 image later for better vulnerability servicing.
       image: ${{ parameters.linuxImage }}
       os: linux
 

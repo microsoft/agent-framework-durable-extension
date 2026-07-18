@@ -49,12 +49,19 @@ steps:
       # which the pool may not reach. This mirrors Microsoft's documented manual
       # apt install. Skip entirely when az is already present (fuller images).
       if ! command -v az >/dev/null 2>&1; then
-        sudo apt-get update
-        sudo apt-get install -y ca-certificates curl apt-transport-https gnupg
         sudo mkdir -p /etc/apt/keyrings
-        curl -sLS https://packages.microsoft.com/keys/microsoft.asc \
-          | sudo gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
-        sudo chmod go+r /etc/apt/keyrings/microsoft.gpg
+
+        # The 1ES image already trusts packages.microsoft.com and ships the Microsoft
+        # signing key at /etc/apt/keyrings/microsoft.gpg. Only import it when missing:
+        # re-importing over an existing keyring makes gpg prompt to overwrite, which
+        # fails in the agent because there is no tty ("cannot open '/dev/tty'").
+        # gnupg/curl are present on the image, so no prerequisite apt install is
+        # needed (apt-transport-https is also deprecated and gone on Ubuntu 24.04).
+        if [ ! -f /etc/apt/keyrings/microsoft.gpg ]; then
+          curl -sLS https://packages.microsoft.com/keys/microsoft.asc \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
+          sudo chmod go+r /etc/apt/keyrings/microsoft.gpg
+        fi
 
         # Ubuntu codename (e.g. 'noble' for 24.04). Read from /etc/os-release rather
         # than lsb_release, which may be absent on minimal images.
