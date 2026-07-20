@@ -64,9 +64,16 @@ steps:
         fi
 
         # Ubuntu codename (e.g. 'noble' for 24.04). Read from /etc/os-release rather
-        # than lsb_release, which may be absent on minimal images.
+        # Ubuntu codename (e.g. 'noble' for 24.04). Read from /etc/os-release rather
+        # than lsb_release, which may be absent on minimal images. Use safe default
+        # expansions so this does not trip 'set -u' if the field is absent, falling
+        # back to UBUNTU_CODENAME, and fail with a clear message if neither is set.
         az_dist="$(. /etc/os-release && echo "${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}")"
-        if [ -z "$az_dist" ]; then echo "Could not determine distro codename from /etc/os-release" >&2; exit 1; fi
+        if [ -z "$az_dist" ]; then
+          echo "Could not determine Ubuntu codename from /etc/os-release (VERSION_CODENAME/UBUNTU_CODENAME missing)." >&2
+          exit 1
+        fi
+        arch="$(dpkg --print-architecture)"
         arch="$(dpkg --print-architecture)"
 
         printf 'Types: deb\nURIs: https://packages.microsoft.com/repos/azure-cli/\nSuites: %s\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/microsoft.gpg\n' \
@@ -90,10 +97,18 @@ steps:
       # so install from Microsoft's package feed (packages.microsoft.com) instead
       # of npm. This is Microsoft's documented Linux install path for func v4.
       #
-      # The 1ES image usually already has the Microsoft feed configured, so only add
-      # it when missing. This avoids downgrading the image's packages-microsoft-prod
-      # and skips a redundant download.
-      if ! grep -rqi "packages.microsoft.com" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+      # The 1ES image usually already has the packages-microsoft-prod feed
+      # configured, so only add it when missing. This avoids downgrading the image's
+      # packages-microsoft-prod and skips a redundant download.
+      #
+      # Match the *prod* feed specifically, not just any packages.microsoft.com
+      # reference: the Azure CLI step above adds an azure-cli.sources file that also
+      # points at packages.microsoft.com, but that feed only carries azure-cli, not
+      # the Core Tools. A broad grep would falsely conclude the prod feed is present
+      # and skip installing it, breaking func on a truly minimal image. The prod feed
+      # URLs contain 'prod' (e.g. .../ubuntu/24.04/prod, .../microsoft-ubuntu-*-prod)
+      # whereas the azure-cli feed (.../repos/azure-cli/) does not.
+      if ! grep -rqiE "packages\.microsoft\.com/[^[:space:]]*prod" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
         # Read the Ubuntu version from /etc/os-release rather than lsb_release, which
         # is not guaranteed to be installed on minimal images.
         ubuntu_version="$(. /etc/os-release && echo "$VERSION_ID")"

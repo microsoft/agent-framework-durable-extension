@@ -15,9 +15,10 @@ parameters:
   - name: linuxImage
     type: string
     default: '1es-ubuntu-24.04-min'
-    # Must be an Ubuntu/Debian-based image: the integration infrastructure setup
-    # uses apt-get, dpkg, and the Ubuntu packages.microsoft.com feed. A non-Ubuntu
-    # image (e.g. Azure Linux 3) would require reworking that setup step.
+    # Must be an Ubuntu-based image: the integration infrastructure setup uses
+    # apt-get, dpkg, and the Ubuntu-specific packages.microsoft.com/config/ubuntu
+    # feed. A non-Ubuntu image (e.g. Debian or Azure Linux 3) would require reworking
+    # that setup step, since the feed path is keyed to the Ubuntu version.
     # 1es-ubuntu-24.04-min is a lightweight image with Docker and more free disk
     # space, chosen to avoid the disk exhaustion seen on 1es-ubuntu-22.04.
     displayName: '1ES Hosted Pools Linux image (Ubuntu-based)'
