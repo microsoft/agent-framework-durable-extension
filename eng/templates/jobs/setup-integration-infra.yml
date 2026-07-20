@@ -65,7 +65,8 @@ steps:
 
         # Ubuntu codename (e.g. 'noble' for 24.04). Read from /etc/os-release rather
         # than lsb_release, which may be absent on minimal images.
-        az_dist="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+        az_dist="$(. /etc/os-release && echo "${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}")"
+        if [ -z "$az_dist" ]; then echo "Could not determine distro codename from /etc/os-release" >&2; exit 1; fi
         arch="$(dpkg --print-architecture)"
 
         printf 'Types: deb\nURIs: https://packages.microsoft.com/repos/azure-cli/\nSuites: %s\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/microsoft.gpg\n' \
