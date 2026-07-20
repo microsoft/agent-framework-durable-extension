@@ -14,10 +14,13 @@ pr:
 parameters:
   - name: linuxImage
     type: string
-    default: '1es-ubuntu-22.04'
-    # Must be an Ubuntu/Debian-based image: the integration infrastructure setup
-    # uses apt-get, dpkg, and the Ubuntu packages.microsoft.com feed. A non-Ubuntu
-    # image (e.g. Azure Linux 3) would require reworking that setup step.
+    default: '1es-ubuntu-24.04-min'
+    # Must be an Ubuntu-based image: the integration infrastructure setup uses
+    # apt-get, dpkg, and the Ubuntu-specific packages.microsoft.com/config/ubuntu
+    # feed. A non-Ubuntu image (e.g. Debian or Azure Linux 3) would require reworking
+    # that setup step, since the feed path is keyed to the Ubuntu version.
+    # 1es-ubuntu-24.04-min is a lightweight image with Docker and more free disk
+    # space, chosen to avoid the disk exhaustion seen on 1es-ubuntu-22.04.
     displayName: '1ES Hosted Pools Linux image (Ubuntu-based)'
   - name: windowsImage
     type: string
@@ -56,9 +59,11 @@ extends:
   parameters:
     pool:
       name: 1es-pool-azfunc
-      # 1es-ubuntu-22.04 is a 1ES-compliant image already in the pool and provides
-      # Docker and Azure CLI, which the tests need. CoreAI recommends migrating to
-      # an Azure Linux 3 image later for better vulnerability servicing.
+      # The Linux image is selected via the linuxImage parameter. It must be a
+      # 1ES-compliant Ubuntu image in the pool that provides Docker. Azure CLI and
+      # Azure Functions Core Tools are installed by the integration infra setup, so
+      # they are not required to be preinstalled on the image. CoreAI recommends
+      # migrating to an Azure Linux 3 image later for better vulnerability servicing.
       image: ${{ parameters.linuxImage }}
       os: linux
 

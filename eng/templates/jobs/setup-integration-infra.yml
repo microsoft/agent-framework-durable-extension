@@ -41,14 +41,74 @@ steps:
   - bash: |
       set -euo pipefail
 
+      # Azure CLI (az). The minimal 1ES image does not ship Azure CLI, which the
+      # AzureCLI@2 test tasks require for keyless service-connection auth. Install
+      # it from Microsoft's dedicated azure-cli apt feed on packages.microsoft.com,
+      # which is reachable from the governed pool. We avoid the default
+      # aka.ms/InstallAzureCLIDeb script because it redirects to Azure blob storage,
+      # which the pool may not reach. This mirrors Microsoft's documented manual
+      # apt install. Skip entirely when az is already present (fuller images).
+      if ! command -v az >/dev/null 2>&1; then
+        sudo mkdir -p /etc/apt/keyrings
+
+        # The 1ES image already trusts packages.microsoft.com and ships the Microsoft
+        # signing key at /etc/apt/keyrings/microsoft.gpg. Only import it when missing:
+        # re-importing over an existing keyring makes gpg prompt to overwrite, which
+        # fails in the agent because there is no tty ("cannot open '/dev/tty'").
+        # gnupg/curl are present on the image, so no prerequisite apt install is
+        # needed (apt-transport-https is also deprecated and gone on Ubuntu 24.04).
+        if [ ! -f /etc/apt/keyrings/microsoft.gpg ]; then
+          # --fail makes curl exit non-zero on an HTTP error instead of piping an
+          # HTML error page into gpg --dearmor, which would fail less clearly.
+          curl --fail -sLS https://packages.microsoft.com/keys/microsoft.asc \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
+          sudo chmod go+r /etc/apt/keyrings/microsoft.gpg
+        fi
+
+        # Ubuntu codename (e.g. 'noble' for 24.04). Read from /etc/os-release rather
+        # than lsb_release, which may be absent on minimal images. Use safe default
+        # expansions so this does not trip 'set -u' if the field is absent, falling
+        # back to UBUNTU_CODENAME, and fail with a clear message if neither is set.
+        az_dist="$(. /etc/os-release && echo "${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}")"
+        if [ -z "$az_dist" ]; then
+          echo "Could not determine Ubuntu codename from /etc/os-release (VERSION_CODENAME/UBUNTU_CODENAME missing)." >&2
+          exit 1
+        fi
+        arch="$(dpkg --print-architecture)"
+
+        printf 'Types: deb\nURIs: https://packages.microsoft.com/repos/azure-cli/\nSuites: %s\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/microsoft.gpg\n' \
+          "$az_dist" "$arch" | sudo tee /etc/apt/sources.list.d/azure-cli.sources
+
+        sudo apt-get update
+        sudo apt-get install -y azure-cli
+
+        # Reclaim disk on the space-constrained OS volume.
+        sudo apt-get clean
+        sudo rm -rf /var/lib/apt/lists/*
+      fi
+
+      az version
+    displayName: 'Install Azure CLI'
+
+  - bash: |
+      set -euo pipefail
+
       # Azure Functions Core Tools. The governed 1ES pool cannot reach npmjs.org,
       # so install from Microsoft's package feed (packages.microsoft.com) instead
       # of npm. This is Microsoft's documented Linux install path for func v4.
       #
-      # The 1ES image usually already has the Microsoft feed configured, so only add
-      # it when missing. This avoids downgrading the image's packages-microsoft-prod
-      # and skips a redundant download.
-      if ! grep -rqi "packages.microsoft.com" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+      # The 1ES image usually already has the packages-microsoft-prod feed
+      # configured, so only add it when missing. This avoids downgrading the image's
+      # packages-microsoft-prod and skips a redundant download.
+      #
+      # Match the *prod* feed specifically, not just any packages.microsoft.com
+      # reference: the Azure CLI step above adds an azure-cli.sources file that also
+      # points at packages.microsoft.com, but that feed only carries azure-cli, not
+      # the Core Tools. A broad grep would falsely conclude the prod feed is present
+      # and skip installing it, breaking func on a truly minimal image. The prod feed
+      # URLs contain 'prod' (e.g. .../ubuntu/24.04/prod, .../microsoft-ubuntu-*-prod)
+      # whereas the azure-cli feed (.../repos/azure-cli/) does not.
+      if ! grep -rqiE "packages\.microsoft\.com/[^[:space:]]*prod" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
         # Read the Ubuntu version from /etc/os-release rather than lsb_release, which
         # is not guaranteed to be installed on minimal images.
         ubuntu_version="$(. /etc/os-release && echo "$VERSION_ID")"
