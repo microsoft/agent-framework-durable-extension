@@ -64,7 +64,6 @@ steps:
         fi
 
         # Ubuntu codename (e.g. 'noble' for 24.04). Read from /etc/os-release rather
-        # Ubuntu codename (e.g. 'noble' for 24.04). Read from /etc/os-release rather
         # than lsb_release, which may be absent on minimal images. Use safe default
         # expansions so this does not trip 'set -u' if the field is absent, falling
         # back to UBUNTU_CODENAME, and fail with a clear message if neither is set.
@@ -73,7 +72,6 @@ steps:
           echo "Could not determine Ubuntu codename from /etc/os-release (VERSION_CODENAME/UBUNTU_CODENAME missing)." >&2
           exit 1
         fi
-        arch="$(dpkg --print-architecture)"
         arch="$(dpkg --print-architecture)"
 
         printf 'Types: deb\nURIs: https://packages.microsoft.com/repos/azure-cli/\nSuites: %s\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/microsoft.gpg\n' \
