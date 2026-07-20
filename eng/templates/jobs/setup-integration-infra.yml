@@ -58,7 +58,9 @@ steps:
         # gnupg/curl are present on the image, so no prerequisite apt install is
         # needed (apt-transport-https is also deprecated and gone on Ubuntu 24.04).
         if [ ! -f /etc/apt/keyrings/microsoft.gpg ]; then
-          curl -sLS https://packages.microsoft.com/keys/microsoft.asc \
+          # --fail makes curl exit non-zero on an HTTP error instead of piping an
+          # HTML error page into gpg --dearmor, which would fail less clearly.
+          curl --fail -sLS https://packages.microsoft.com/keys/microsoft.asc \
             | sudo gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
           sudo chmod go+r /etc/apt/keyrings/microsoft.gpg
         fi
