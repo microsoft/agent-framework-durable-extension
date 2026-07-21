@@ -14,7 +14,8 @@ runs:
           echo "Starting Durable Task Scheduler Emulator"
           docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 -e DTS_USE_DYNAMIC_TASK_HUBS=true mcr.microsoft.com/dts/dts-emulator:latest
           echo "Waiting for Durable Task Scheduler Emulator to be ready"
-          timeout 30 bash -c 'until curl --fail --silent --show-error http://localhost:8080/healthz; do sleep 1; done'
+          # The emulator has no health endpoint and returns HTTP 400 once its listener is ready.
+          timeout 30 bash -c 'until curl --silent --show-error --output /dev/null http://localhost:8080/healthz; do sleep 1; done'
           echo "Durable Task Scheduler Emulator is ready"
       - name: Start Azurite (Azure Storage emulator)
         shell: bash
