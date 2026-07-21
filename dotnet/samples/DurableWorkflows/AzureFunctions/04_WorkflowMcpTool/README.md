@@ -4,7 +4,7 @@ This sample demonstrates how to expose durable workflows as [MCP (Model Context 
 
 ## Key Concepts Demonstrated
 
-- **Workflow as MCP Tool**: Expose workflows as callable MCP tools using `exposeMcpToolTrigger: true`
+- **Workflow as MCP Tool**: Expose workflows as callable MCP tools using `enableMcpToolTrigger: true`
 - **MCP Server Hosting**: The Azure Functions host automatically generates a remote MCP endpoint at `/runtime/webhooks/mcp`
 - **String and POCO Results**: Shows workflows returning both plain strings and structured JSON objects
 

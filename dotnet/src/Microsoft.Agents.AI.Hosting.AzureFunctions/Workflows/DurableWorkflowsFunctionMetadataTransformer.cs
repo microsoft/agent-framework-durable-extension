@@ -116,7 +116,7 @@ internal sealed class DurableWorkflowsFunctionMetadataTransformer : IFunctionMet
                 }
             }
 
-            // Register an MCP tool trigger if opted in via AddWorkflow(exposeMcpToolTrigger: true).
+            // Register an MCP tool trigger if opted in via AddWorkflow(enableMcpToolTrigger: true).
             if (this._options.IsMcpToolTriggerEnabled(workflow.Key))
             {
                 string mcpToolFunctionName = $"{BuiltInFunctions.McpToolPrefix}{workflow.Key}";
