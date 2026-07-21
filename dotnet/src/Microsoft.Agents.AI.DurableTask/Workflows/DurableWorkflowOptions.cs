@@ -62,21 +62,6 @@ public sealed class DurableWorkflowOptions
     }
 
     /// <summary>
-    /// Adds a collection of workflows to the current instance.
-    /// </summary>
-    /// <param name="workflows">The collection of <see cref="Workflow"/> objects to add.</param>
-    /// <exception cref="ArgumentNullException">Thrown when <paramref name="workflows"/> is null.</exception>
-    public void AddWorkflows(params Workflow[] workflows)
-    {
-        ArgumentNullException.ThrowIfNull(workflows);
-
-        foreach (Workflow workflow in workflows)
-        {
-            this.AddWorkflow(workflow);
-        }
-    }
-
-    /// <summary>
     /// Registers all executors from a workflow, including AI agents if agent options are available.
     /// </summary>
     private void RegisterWorkflowExecutors(Workflow workflow)

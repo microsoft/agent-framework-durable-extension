@@ -74,23 +74,6 @@ public sealed class DurableAgentsOptions
     }
 
     /// <summary>
-    /// Adds a list of AI agents to the options.
-    /// </summary>
-    /// <param name="agents">The list of agents to add.</param>
-    /// <returns>The options instance.</returns>
-    /// <exception cref="ArgumentNullException">Thrown when <paramref name="agents"/> is null.</exception>
-    public DurableAgentsOptions AddAIAgents(params IEnumerable<AIAgent> agents)
-    {
-        ArgumentNullException.ThrowIfNull(agents);
-        foreach (AIAgent agent in agents)
-        {
-            this.AddAIAgent(agent);
-        }
-
-        return this;
-    }
-
-    /// <summary>
     /// Adds an AI agent to the options.
     /// </summary>
     /// <param name="agent">The agent to add.</param>

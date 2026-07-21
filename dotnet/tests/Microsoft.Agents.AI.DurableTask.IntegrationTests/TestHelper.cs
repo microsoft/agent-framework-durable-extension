@@ -51,7 +51,13 @@ internal sealed class TestHelper : IDisposable
     {
         return BuildAndStartTestHelper(
             outputHelper,
-            options => options.AddAIAgents(agents),
+            options =>
+            {
+                foreach (AIAgent agent in agents)
+                {
+                    options.AddAIAgent(agent);
+                }
+            },
             durableTaskRegistry);
     }
 

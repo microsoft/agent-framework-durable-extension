@@ -47,6 +47,11 @@ Workflow batchCancelOrders = new WorkflowBuilder(batchCancelProcessor)
 using IHost app = FunctionsApplication
     .CreateBuilder(args)
     .ConfigureFunctionsWebApplication()
-    .ConfigureDurableWorkflows(workflows => workflows.AddWorkflows(cancelOrder, orderStatus, batchCancelOrders))
+    .ConfigureDurableWorkflows(workflows =>
+    {
+        workflows.AddWorkflow(cancelOrder);
+        workflows.AddWorkflow(orderStatus);
+        workflows.AddWorkflow(batchCancelOrders);
+    })
     .Build();
 app.Run();
