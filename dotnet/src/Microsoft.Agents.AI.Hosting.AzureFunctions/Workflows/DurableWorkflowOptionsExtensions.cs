@@ -15,14 +15,14 @@ public static class DurableWorkflowOptionsExtensions
     /// </summary>
     /// <param name="options">The workflow options to add the workflow to.</param>
     /// <param name="workflow">The workflow instance to add.</param>
-    /// <param name="exposeStatusEndpoint">If <see langword="true"/>, a GET endpoint is generated at <c>workflows/{name}/status/{runId}</c>.</param>
-    public static void AddWorkflow(this DurableWorkflowOptions options, Workflow workflow, bool exposeStatusEndpoint)
+    /// <param name="enableStatusEndpoint">If <see langword="true"/>, a GET endpoint is generated at <c>workflows/{name}/status/{runId}</c>.</param>
+    public static void AddWorkflow(this DurableWorkflowOptions options, Workflow workflow, bool enableStatusEndpoint)
     {
         ArgumentNullException.ThrowIfNull(options);
 
         options.AddWorkflow(workflow);
 
-        if (exposeStatusEndpoint && options.ParentOptions is FunctionsDurableOptions functionsOptions)
+        if (enableStatusEndpoint && options.ParentOptions is FunctionsDurableOptions functionsOptions)
         {
             functionsOptions.EnableStatusEndpoint(workflow.Name!);
         }
@@ -33,9 +33,9 @@ public static class DurableWorkflowOptionsExtensions
     /// </summary>
     /// <param name="options">The workflow options to add the workflow to.</param>
     /// <param name="workflow">The workflow instance to add.</param>
-    /// <param name="exposeStatusEndpoint">If <see langword="true"/>, a GET endpoint is generated at <c>workflows/{name}/status/{runId}</c>.</param>
-    /// <param name="exposeMcpToolTrigger">If <see langword="true"/>, an MCP tool trigger is generated for the workflow.</param>
-    public static void AddWorkflow(this DurableWorkflowOptions options, Workflow workflow, bool exposeStatusEndpoint, bool exposeMcpToolTrigger)
+    /// <param name="enableStatusEndpoint">If <see langword="true"/>, a GET endpoint is generated at <c>workflows/{name}/status/{runId}</c>.</param>
+    /// <param name="enableMcpToolTrigger">If <see langword="true"/>, an MCP tool trigger is generated for the workflow.</param>
+    public static void AddWorkflow(this DurableWorkflowOptions options, Workflow workflow, bool enableStatusEndpoint, bool enableMcpToolTrigger)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -43,12 +43,12 @@ public static class DurableWorkflowOptionsExtensions
 
         if (options.ParentOptions is FunctionsDurableOptions functionsOptions)
         {
-            if (exposeStatusEndpoint)
+            if (enableStatusEndpoint)
             {
                 functionsOptions.EnableStatusEndpoint(workflow.Name!);
             }
 
-            if (exposeMcpToolTrigger)
+            if (enableMcpToolTrigger)
             {
                 functionsOptions.EnableMcpToolTrigger(workflow.Name!);
             }

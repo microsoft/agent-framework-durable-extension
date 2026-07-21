@@ -46,6 +46,6 @@ Workflow expenseApproval = new WorkflowBuilder(createRequest)
 using IHost app = FunctionsApplication
     .CreateBuilder(args)
     .ConfigureFunctionsWebApplication()
-    .ConfigureDurableWorkflows(workflows => workflows.AddWorkflow(expenseApproval, exposeStatusEndpoint: true))
+    .ConfigureDurableWorkflows(workflows => workflows.AddWorkflow(expenseApproval, enableStatusEndpoint: true))
     .Build();
 app.Run();

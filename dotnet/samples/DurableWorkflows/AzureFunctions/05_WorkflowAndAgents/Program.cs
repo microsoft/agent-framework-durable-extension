@@ -61,7 +61,7 @@ using IHost app = FunctionsApplication
         options.Agents.AddAIAgent(assistant, enableHttpTrigger: true, enableMcpToolTrigger: true);
 
         // Register the workflow with an HTTP endpoint and MCP tool trigger
-        options.Workflows.AddWorkflow(translateWorkflow, exposeStatusEndpoint: false, exposeMcpToolTrigger: true);
+        options.Workflows.AddWorkflow(translateWorkflow, enableStatusEndpoint: false, enableMcpToolTrigger: true);
     })
     .Build();
 app.Run();

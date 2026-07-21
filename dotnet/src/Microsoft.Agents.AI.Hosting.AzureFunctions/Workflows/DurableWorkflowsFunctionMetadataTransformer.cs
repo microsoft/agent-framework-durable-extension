@@ -86,7 +86,7 @@ internal sealed class DurableWorkflowsFunctionMetadataTransformer : IFunctionMet
                     BuiltInFunctions.RunWorkflowOrchestrationHttpFunctionEntryPoint));
             }
 
-            // Register a status endpoint if opted in via AddWorkflow(exposeStatusEndpoint: true).
+            // Register a status endpoint if opted in via AddWorkflow(enableStatusEndpoint: true).
             if (this._options.IsStatusEndpointEnabled(workflow.Key))
             {
                 string statusFunctionName = $"{BuiltInFunctions.HttpPrefix}{workflow.Key}{BuiltInFunctions.StatusFunctionSuffix}";
@@ -116,7 +116,7 @@ internal sealed class DurableWorkflowsFunctionMetadataTransformer : IFunctionMet
                 }
             }
 
-            // Register an MCP tool trigger if opted in via AddWorkflow(exposeMcpToolTrigger: true).
+            // Register an MCP tool trigger if opted in via AddWorkflow(enableStatusEndpoint: ..., enableMcpToolTrigger: true).
             if (this._options.IsMcpToolTriggerEnabled(workflow.Key))
             {
                 string mcpToolFunctionName = $"{BuiltInFunctions.McpToolPrefix}{workflow.Key}";

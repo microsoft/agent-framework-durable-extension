@@ -1,7 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 // This sample demonstrates how to expose a durable workflow as an MCP (Model Context Protocol) tool.
-// When using AddWorkflow with exposeMcpToolTrigger: true, the Functions host will automatically
+// When using AddWorkflow with enableMcpToolTrigger: true, the Functions host will automatically
 // generate a remote MCP endpoint for the app at /runtime/webhooks/mcp with a workflow-specific
 // tool name. MCP-compatible clients can then invoke the workflow as a tool.
 
@@ -37,8 +37,8 @@ using IHost app = FunctionsApplication
     .ConfigureDurableWorkflows(workflows =>
     {
         // Expose both workflows as MCP tool triggers.
-        workflows.AddWorkflow(translateWorkflow, exposeStatusEndpoint: false, exposeMcpToolTrigger: true);
-        workflows.AddWorkflow(orderLookupWorkflow, exposeStatusEndpoint: false, exposeMcpToolTrigger: true);
+        workflows.AddWorkflow(translateWorkflow, enableStatusEndpoint: false, enableMcpToolTrigger: true);
+        workflows.AddWorkflow(orderLookupWorkflow, enableStatusEndpoint: false, enableMcpToolTrigger: true);
     })
     .Build();
 app.Run();
