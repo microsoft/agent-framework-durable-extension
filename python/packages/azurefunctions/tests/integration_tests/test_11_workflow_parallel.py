@@ -23,7 +23,7 @@ Usage:
 
 import pytest
 
-# Must match the workflow name in samples/04-hosting/azure_functions/11_workflow_parallel/function_app.py
+# Must match the workflow name in samples/azure_functions/11_workflow_parallel/function_app.py
 WORKFLOW_NAME = "parallel_review"
 
 # Module-level markers - applied to all tests in this file

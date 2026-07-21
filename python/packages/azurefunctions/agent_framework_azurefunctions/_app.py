@@ -152,7 +152,7 @@ class AgentFunctionApp(DFAppBase):
 
     .. code-block:: python
 
-        from agent_framework.azure import AgentFunctionApp
+        from agent_framework_azurefunctions import AgentFunctionApp
         from agent_framework.openai import OpenAIChatCompletionClient
 
         # Create agents with unique names
@@ -504,6 +504,7 @@ class AgentFunctionApp(DFAppBase):
             # keys, so stripping them here keeps untrusted input off the orchestrator's
             # trusted-deserialization path (see strip_subworkflow_markers).
             client_input = strip_subworkflow_markers(client_input)
+            client_input = strip_pickle_markers(client_input)
 
             instance_id = await client.start_new(orchestrator_name, client_input=client_input)
 

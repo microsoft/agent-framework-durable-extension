@@ -21,7 +21,7 @@ Usage:
 
 import pytest
 
-# Must match the workflow name in samples/04-hosting/azure_functions/09_workflow_shared_state/function_app.py
+# Must match the workflow name in samples/azure_functions/09_workflow_shared_state/function_app.py
 WORKFLOW_NAME = "email_triage_shared_state"
 
 # Module-level markers - applied to all tests in this file

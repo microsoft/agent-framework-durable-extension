@@ -9,7 +9,7 @@ Hosting agents as Azure Functions.
 ## Usage
 
 ```python
-from agent_framework.azure import AgentFunctionApp
+from agent_framework_azurefunctions import AgentFunctionApp
 
 app = AgentFunctionApp(agents=[my_agent])
 ```
@@ -17,7 +17,7 @@ app = AgentFunctionApp(agents=[my_agent])
 ## Import Path
 
 ```python
-from agent_framework.azure import AgentFunctionApp
+from agent_framework_azurefunctions import AgentFunctionApp
 # or directly:
 from agent_framework_azurefunctions import AgentFunctionApp
 ```
