@@ -137,7 +137,7 @@ class SpamHandlerExecutor(Executor):
         agent_response: AgentExecutorResponse,
         ctx: WorkflowContext[Never, str],
     ) -> None:
-        spam_result = SpamDetectionResult.model_validate_json(agent_response.agent_run_response.text)
+        spam_result = SpamDetectionResult.model_validate_json(agent_response.agent_response.text)
         await ctx.yield_output(f"Email marked as spam: {spam_result.reason}")
 ```
 
@@ -145,10 +145,9 @@ class SpamHandlerExecutor(Executor):
 
 This sample also supports running standalone for local development:
 
-```python
-# Change launch(durable=True) to launch(durable=False) in function_app.py
-# Then run:
-python function_app.py
+```bash
+cp .env.sample .env
+python function_app.py --maf
 ```
 
 This starts the DevUI at `http://localhost:8094` for interactive testing.

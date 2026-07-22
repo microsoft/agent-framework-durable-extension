@@ -94,7 +94,7 @@ Note: StockAdvisor does not have HTTP endpoints and is only accessible via MCP t
 **MCP Tool Responses** will be visible in:
 - The terminal where `func start` is running
 - Your MCP client interface
-- The DTS dashboard at `http://localhost:8080` (if using Durable Task Scheduler)
+- The DTS dashboard at `http://localhost:8082` (if using Durable Task Scheduler)
 
 ## Health Check
 

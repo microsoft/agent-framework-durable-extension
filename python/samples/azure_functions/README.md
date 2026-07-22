@@ -25,6 +25,8 @@ Install and verify these tools before [Environment Setup](#environment-setup):
 
 - **[Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local?tabs=windows%2Cpython%2Cv2&pivots=programming-language-python#install-the-azure-functions-core-tools)** – run samples locally with `func start`
 - **[Azurite](https://learn.microsoft.com/azure/storage/common/storage-install-azurite)** – local storage emulator; must be running before `func start`
+- **[Docker](https://docs.docker.com/get-docker/)** – run the local Durable Task Scheduler emulator
+- **[Durable Task Scheduler emulator](https://learn.microsoft.com/azure/durable-task/scheduler/develop-with-durable-task-scheduler#durable-task-scheduler-emulator)** – local durable task backend; must be running before `func start`
 - **[uv](https://docs.astral.sh/uv/)** – create virtual environments (recommended, especially on Windows)
 - **[Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli)** – authenticate with `az login` for `AzureCliCredential`
 
@@ -61,15 +63,21 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```bash
 func --version
 azurite --version
+docker --version
 uv --version
 az account show
 ```
 
-Start Azurite in a separate terminal before `func start`:
+Start the Durable Task Scheduler emulator and Azurite before `func start`:
 
 ```bash
+docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 \
+  mcr.microsoft.com/dts/dts-emulator:latest
 azurite
 ```
+
+The scheduler endpoint is `http://localhost:8080`; its dashboard is available at
+`http://localhost:8082`.
 
 ## Environment Setup
 
@@ -78,6 +86,8 @@ azurite
 - Install [Azure Functions Core Tools 4.x](https://learn.microsoft.com/azure/azure-functions/functions-run-local?tabs=windows%2Cpython%2Cv2&pivots=programming-language-python#install-the-azure-functions-core-tools)
 
 - Install [Azurite storage emulator](https://learn.microsoft.com/azure/storage/common/storage-install-azurite?toc=%2Fazure%2Fstorage%2Fblobs%2Ftoc.json&bc=%2Fazure%2Fstorage%2Fblobs%2Fbreadcrumb%2Ftoc.json&tabs=visual-studio%2Cblob-storage)
+
+- Install [Docker](https://docs.docker.com/get-docker/) and run the [Durable Task Scheduler emulator](https://learn.microsoft.com/azure/durable-task/scheduler/develop-with-durable-task-scheduler#durable-task-scheduler-emulator)
 
 - Create a [Microsoft Foundry project](https://learn.microsoft.com/azure/ai-foundry/) with an OpenAI model deployment. Note the Foundry project endpoint and deployment name, and ensure you can authenticate with `AzureCliCredential`.
 
@@ -108,7 +118,7 @@ source .venv/bin/activate
 
 ### 3. Running the samples
 
-- [Start the Azurite emulator](https://learn.microsoft.com/azure/storage/common/storage-install-azurite?tabs=npm%2Cblob-storage#run-azurite)
+- Start the Durable Task Scheduler emulator and [Azurite](https://learn.microsoft.com/azure/storage/common/storage-install-azurite?tabs=npm%2Cblob-storage#run-azurite) as shown above.
 
 - Inside each sample:
   - Install Python dependencies – from the sample directory, run `pip install -r requirements.txt` (or the equivalent in your active virtual environment).

@@ -27,10 +27,10 @@ This sample showcases three different parallel execution patterns:
 │  Pattern 2: Two Agents in Parallel (Entities)                            │
 │  ─────────────────────────────────────────────                           │
 │                                                                          │
-│     [prepare_for_agents] ──┬──> [SentimentAgent] ──────┐                 │
-│                            │                           │                 │
-│                            └──> [KeywordAgent] ────────┴──> [prepare_for_│
-│                                                              mixed]      │
+│     [prepare_for_agents] ──┬──> [SentimentAnalysisAgent] ─┐             │
+│                            └──> [KeywordExtractionAgent] ─┴─┐           │
+│                                                             ▼           │
+│                                                   [prepare_for_mixed]   │
 │                                                                          │
 │  Pattern 3: Mixed Agent + Executor in Parallel                           │
 │  ────────────────────────────────────────────────                        │
