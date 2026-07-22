@@ -319,6 +319,7 @@ def _format_sse_event(event_type: str, data: str, event_id: str | None = None) -
     if event_id:
         lines.append(f"id: {event_id}")
     lines.append(f"event: {event_type}")
-    lines.append(f"data: {data}")
+    normalized_data = data.replace("\r\n", "\n").replace("\r", "\n")
+    lines.extend(f"data: {line}" for line in normalized_data.split("\n"))
     lines.append("")
     return "\n".join(lines) + "\n"

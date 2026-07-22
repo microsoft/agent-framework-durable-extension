@@ -42,7 +42,7 @@ from typing_extensions import Never
 logger = logging.getLogger(__name__)
 
 FOUNDRY_PROJECT_ENDPOINT_ENV = "FOUNDRY_PROJECT_ENDPOINT"
-AZURE_OPENAI_DEPLOYMENT_ENV = "FOUNDRY_MODEL"
+FOUNDRY_MODEL_ENV = "FOUNDRY_MODEL"
 SPAM_AGENT_NAME = "SpamDetectionAgent"
 EMAIL_AGENT_NAME = "EmailAssistantAgent"
 
@@ -93,9 +93,9 @@ def _build_client_kwargs() -> dict[str, Any]:
     if not project_endpoint:
         raise RuntimeError(f"{FOUNDRY_PROJECT_ENDPOINT_ENV} environment variable is required.")
 
-    model = os.getenv(AZURE_OPENAI_DEPLOYMENT_ENV)
+    model = os.getenv(FOUNDRY_MODEL_ENV)
     if not model:
-        raise RuntimeError(f"{AZURE_OPENAI_DEPLOYMENT_ENV} environment variable is required.")
+        raise RuntimeError(f"{FOUNDRY_MODEL_ENV} environment variable is required.")
 
     return {
         "project_endpoint": project_endpoint,
