@@ -50,6 +50,8 @@ SpamDetectionAgent → [branch based on is_spam]:
    ```
 
 2. Configure `local.settings.json`:
+   - Set `FOUNDRY_PROJECT_ENDPOINT` to your Microsoft Foundry project endpoint.
+   - Set `FOUNDRY_MODEL` to your deployed model name.
 
 3. Install dependencies:
    ```bash

@@ -106,9 +106,9 @@ The sample can run locally without Azure Functions infrastructure using DevUI:
    pip install -r requirements.txt
    ```
 
-4. Run in DevUI mode (set `durable=False` in `function_app.py`):
+4. Run in DevUI mode:
    ```bash
-   python function_app.py
+   python function_app.py --maf
    ```
 
 5. Open `http://localhost:8095` and provide input:
