@@ -29,8 +29,10 @@ jobs:
 
       - bash: |
           set -euo pipefail
-          uv python install 3.13
-          uv sync --python 3.13 --all-packages --group dev --group test
+          # Core Tools 4.12.1 predates the Python 3.13 proxy-worker fix for
+          # monorepo-level virtual environments (azure-functions-python-worker#1833).
+          uv python install 3.12
+          uv sync --python 3.12 --all-packages --group dev --group test
         workingDirectory: python
         displayName: 'Sync Python workspace'
         env:

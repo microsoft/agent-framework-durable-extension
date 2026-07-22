@@ -371,14 +371,6 @@ def _start_function_app(sample_path: Path, port: int) -> subprocess.Popen[Any]:
     # use the task hub name to separate orchestration state.
     env["TASKHUB_NAME"] = f"test{uuid.uuid4().hex[:8]}"
 
-    # The Azure Functions Python worker's dependency isolation mechanism crashes
-    # on Python 3.13 with a SIGSEGV in the protobuf C extension (google._upb).
-    # Disabling isolation lets the worker load dependencies from the app's own
-    # environment, which avoids the crash.
-    # See: https://github.com/Azure/azure-functions-python-worker/issues/1797
-    if sys.version_info >= (3, 13):
-        env.setdefault("PYTHON_ISOLATE_WORKER_DEPENDENCIES", "0")
-
     # On Windows, use CREATE_NEW_PROCESS_GROUP to allow proper termination
     # shell=True only on Windows to handle PATH resolution
     if sys.platform == "win32":
