@@ -19,8 +19,8 @@ from collections.abc import Generator
 from typing import Any, cast
 
 from agent_framework import Agent, AgentResponse
-from agent_framework.azure import DurableAIAgentOrchestrationContext, DurableAIAgentWorker
 from agent_framework.openai import OpenAIChatCompletionClient
+from agent_framework_durabletask import DurableAIAgentOrchestrationContext, DurableAIAgentWorker
 from azure.identity import AzureCliCredential
 from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential
 from azure.identity.aio import get_bearer_token_provider as get_async_bearer_token_provider

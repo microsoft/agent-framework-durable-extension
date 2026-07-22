@@ -50,7 +50,7 @@ from agent_framework import (
     handler,
     response_handler,
 )
-from agent_framework.azure import DurableAIAgentWorker
+from agent_framework_durabletask import DurableAIAgentWorker
 from azure.identity import AzureCliCredential
 from dotenv import load_dotenv
 from durabletask.azuremanaged.worker import DurableTaskSchedulerWorker

@@ -34,7 +34,7 @@ pytestmark = [
     pytest.mark.usefixtures("function_app_for_test"),
 ]
 
-# Must match the workflow name in samples/04-hosting/azure_functions/12_workflow_hitl/function_app.py
+# Must match the workflow name in samples/azure_functions/12_workflow_hitl/function_app.py
 WORKFLOW_NAME = "content_moderation"
 
 

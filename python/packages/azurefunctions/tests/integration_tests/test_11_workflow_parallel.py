@@ -23,7 +23,7 @@ Usage:
 
 import pytest
 
-# Must match the workflow name in samples/04-hosting/azure_functions/11_workflow_parallel/function_app.py
+# Must match the workflow name in samples/azure_functions/11_workflow_parallel/function_app.py
 WORKFLOW_NAME = "parallel_review"
 
 # Module-level markers - applied to all tests in this file
@@ -45,7 +45,6 @@ class TestWorkflowParallel:
         self.base_url = base_url
         self.helper = sample_helper
 
-    @pytest.mark.skip(reason="Flaky in CI: times out / crashes the xdist runner; temporarily disabled.")
     def test_parallel_workflow_end_to_end(self) -> None:
         """Run the parallel workflow end-to-end: start, check status, verify completion.
 

@@ -19,12 +19,12 @@ from datetime import timedelta
 
 import redis.asyncio as aioredis
 from agent_framework import Agent, AgentResponseUpdate
-from agent_framework.azure import (
+from agent_framework.foundry import FoundryChatClient
+from agent_framework_durabletask import (
     AgentCallbackContext,
     AgentResponseCallbackProtocol,
     DurableAIAgentWorker,
 )
-from agent_framework.foundry import FoundryChatClient
 from azure.identity import AzureCliCredential
 from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential
 from dotenv import load_dotenv

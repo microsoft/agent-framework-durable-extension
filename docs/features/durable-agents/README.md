@@ -57,7 +57,7 @@ Key types:
 
 ### Python
 
-The core Python implementation is in the `agent-framework-durabletask` package (`python/packages/durabletask`). Azure Functions hosting for Python remains in the external `agent-framework-azurefunctions` package.
+The core Python implementation is in the `agent-framework-durabletask` package (`python/packages/durabletask`). Azure Functions hosting for Python is provided by the `agent-framework-azurefunctions` package (`python/packages/azurefunctions`).
 
 Key types:
 

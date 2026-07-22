@@ -1,0 +1,17 @@
+# Agent Framework packages
+# To use the deployed version, uncomment the lines below and comment out the local installation lines
+# agent-framework-openai
+# agent-framework-azurefunctions
+
+# Local installation (for development and testing)
+# Each package must be listed explicitly because pip doesn't resolve uv workspace sources.
+# Without explicit entries, pip would fetch transitive dependencies from PyPI instead of local source.
+agent-framework-openai>=1.10.1,<2  # OpenAI support from PyPI (pulls in core)
+-e ../../../packages/durabletask  # Durable Task support - dependency of azurefunctions
+-e ../../../packages/azurefunctions  # Azure Functions integration - the main package for this sample
+
+# Azure authentication
+azure-identity
+
+# Local environment loading
+python-dotenv

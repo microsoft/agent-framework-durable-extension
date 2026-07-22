@@ -18,8 +18,8 @@ import os
 from collections.abc import Generator
 
 from agent_framework import Agent, AgentResponse
-from agent_framework.azure import DurableAIAgentOrchestrationContext, DurableAIAgentWorker
 from agent_framework.foundry import FoundryChatClient
+from agent_framework_durabletask import DurableAIAgentOrchestrationContext, DurableAIAgentWorker
 from azure.identity import AzureCliCredential
 from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential
 from dotenv import load_dotenv

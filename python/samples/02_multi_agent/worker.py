@@ -18,8 +18,8 @@ import os
 from typing import Any
 
 from agent_framework import Agent, tool
-from agent_framework.azure import DurableAIAgentWorker
 from agent_framework.openai import OpenAIChatCompletionClient
+from agent_framework_durabletask import DurableAIAgentWorker
 from azure.identity import AzureCliCredential
 from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential
 from dotenv import load_dotenv
