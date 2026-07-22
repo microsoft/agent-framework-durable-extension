@@ -90,6 +90,23 @@ def test_every_sample_has_integration_coverage() -> None:
     )
 
 
+def test_integration_pipelines_run_azure_functions_suite() -> None:
+    """Require every Python integration pipeline to execute the Azure Functions suite."""
+    repo_root = Path(__file__).resolve().parents[4]
+    pipeline_paths = [
+        repo_root / ".github" / "workflows" / "python-integration-tests.yml",
+        repo_root / "eng" / "templates" / "jobs" / "python-integration-tests.yml",
+    ]
+    expected_command = "pytest packages/azurefunctions/tests/integration_tests"
+
+    missing_invocations = [
+        str(path.relative_to(repo_root))
+        for path in pipeline_paths
+        if expected_command not in path.read_text(encoding="utf-8")
+    ]
+    assert not missing_invocations, f"Azure Functions integration suite is not invoked by: {missing_invocations}"
+
+
 def test_skip_guard_detects_decorators_and_module_markers(tmp_path: Path) -> None:
     """Detect called, bare, and module-level unconditional skip markers."""
     test_file = tmp_path / "test_sample.py"
