@@ -83,7 +83,7 @@ responses = yield context.task_all(agent_tasks)  # Both agents run concurrently!
 
 ## Prerequisites
 
-1. **Azure OpenAI** - Endpoint and deployment configured
+1. **Azure AI Foundry** - Project endpoint and model configured
 2. **DTS Emulator** - For durable task scheduling (recommended)
 3. **Azurite** - For Azure Functions internal storage
 
@@ -98,8 +98,8 @@ The sample can run locally without Azure Functions infrastructure using DevUI:
    cp .env.template .env
    ```
 
-2. Configure `.env` with your Azure OpenAI credentials (`AZURE_OPENAI_ENDPOINT` and
-   `AZURE_OPENAI_MODEL`)
+2. Configure `.env` with your Azure AI Foundry settings (`FOUNDRY_PROJECT_ENDPOINT` and
+   `FOUNDRY_MODEL`)
 
 3. Install dependencies:
    ```bash
@@ -126,7 +126,7 @@ The sample can run locally without Azure Functions infrastructure using DevUI:
    cp local.settings.json.sample local.settings.json
    ```
 
-2. Configure `local.settings.json` with your Azure OpenAI credentials
+2. Configure `local.settings.json` with your Azure AI Foundry configuration
 
 3. Install dependencies:
    ```bash

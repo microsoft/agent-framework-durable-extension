@@ -76,7 +76,7 @@ Integration tests require local infrastructure:
 - Azurite
 - Redis
 - Azure Functions Core Tools for Azure Functions samples/tests
-- Azure OpenAI environment variables for model-backed tests
+- Foundry environment variables for model-backed tests
 
 Common environment variables:
 
@@ -86,10 +86,6 @@ AzureWebJobsStorage=UseDevelopmentStorage=true
 REDIS_CONNECTION_STRING=redis://localhost:6379
 FOUNDRY_PROJECT_ENDPOINT=<foundry-project-endpoint>
 FOUNDRY_MODEL=<foundry-model>
-AZURE_OPENAI_ENDPOINT=<endpoint>
-AZURE_OPENAI_DEPLOYMENT_NAME=<deployment>
-AZURE_OPENAI_MODEL=<deployment>
-AZURE_OPENAI_API_KEY=<key>
 ```
 
 The `.github/actions/azure-functions-integration-setup` action starts the emulator dependencies in CI.

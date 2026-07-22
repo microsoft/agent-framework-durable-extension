@@ -29,7 +29,6 @@ load_dotenv(Path(__file__).parent / ".env")
 # Configure logging to reduce noise during tests
 logging.basicConfig(level=logging.WARNING)
 
-_AZURE_OPENAI_SAMPLES = {"02_multi_agent", "06_multi_agent_orchestration_conditionals"}
 _NO_LLM_SAMPLES = {"12_subworkflow_hitl"}
 
 
@@ -289,7 +288,7 @@ def pytest_configure(config: pytest.Config) -> None:
     """Register custom markers."""
     config.addinivalue_line("markers", "integration_test: mark test as integration test")
     config.addinivalue_line("markers", "requires_dts: mark test as requiring DTS emulator")
-    config.addinivalue_line("markers", "requires_azure_openai: mark test as requiring Azure OpenAI")
+    config.addinivalue_line("markers", "requires_foundry: mark test as requiring Azure AI Foundry")
     config.addinivalue_line("markers", "requires_redis: mark test as requiring Redis")
     config.addinivalue_line(
         "markers",
@@ -301,12 +300,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     """Skip tests based on markers and environment availability."""
     foundry_vars = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"]
     foundry_available = all(os.getenv(var) for var in foundry_vars)
-    azure_openai_vars = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_MODEL"]
-    azure_openai_available = all(os.getenv(var) for var in azure_openai_vars)
     skip_foundry = pytest.mark.skip(reason=f"Missing required environment variables: {', '.join(foundry_vars)}")
-    skip_azure_openai = pytest.mark.skip(
-        reason=f"Missing required environment variables: {', '.join(azure_openai_vars)}"
-    )
 
     # Check DTS availability
     dts_available = _check_dts_available()
@@ -317,16 +311,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     skip_redis = pytest.mark.skip(reason="Redis is not available at redis://localhost:6379")
 
     for item in items:
-        sample_marker = item.get_closest_marker("sample")
-        sample_name = sample_marker.args[0] if sample_marker and sample_marker.args else None
-        if (
-            "requires_azure_openai" in item.keywords
-            and sample_name not in _AZURE_OPENAI_SAMPLES
-            and not foundry_available
-        ):
+        if "requires_foundry" in item.keywords and not foundry_available:
             item.add_marker(skip_foundry)
-        if sample_name in _AZURE_OPENAI_SAMPLES and not azure_openai_available:
-            item.add_marker(skip_azure_openai)
         if "requires_dts" in item.keywords and not dts_available:
             item.add_marker(skip_dts)
         if "requires_redis" in item.keywords and not redis_available:
@@ -364,10 +350,7 @@ def check_sample_env(request: pytest.FixtureRequest) -> None:
     # Samples that host no AI agents need no model credentials (only the DTS emulator).
     if sample_name in _NO_LLM_SAMPLES:
         return
-    if sample_name in _AZURE_OPENAI_SAMPLES:
-        required_vars = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_MODEL"]
-    else:
-        required_vars = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"]
+    required_vars = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"]
     missing = [var for var in required_vars if not os.getenv(var)]
 
     if missing:

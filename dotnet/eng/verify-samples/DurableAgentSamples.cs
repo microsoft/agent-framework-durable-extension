@@ -16,7 +16,7 @@ internal static class DurableAgentSamples
         {
             Name = "DurableAgents_Console_01_SingleAgent",
             ProjectPath = "samples/DurableAgents/ConsoleApps/01_SingleAgent",
-            RequiredEnvironmentVariables = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT_NAME"],
+            RequiredEnvironmentVariables = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"],
             Inputs = ["Tell me a joke about a pirate", "exit"],
             ExpectedOutputDescription =
             [
@@ -28,7 +28,7 @@ internal static class DurableAgentSamples
         {
             Name = "DurableAgents_Console_02_AgentOrchestration_Chaining",
             ProjectPath = "samples/DurableAgents/ConsoleApps/02_AgentOrchestration_Chaining",
-            RequiredEnvironmentVariables = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT_NAME"],
+            RequiredEnvironmentVariables = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"],
             ExpectedOutputDescription =
             [
                 "The output should show a durable orchestration that chains agent calls.",
@@ -39,7 +39,7 @@ internal static class DurableAgentSamples
         {
             Name = "DurableAgents_Console_03_AgentOrchestration_Concurrency",
             ProjectPath = "samples/DurableAgents/ConsoleApps/03_AgentOrchestration_Concurrency",
-            RequiredEnvironmentVariables = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT_NAME"],
+            RequiredEnvironmentVariables = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"],
             ExpectedOutputDescription =
             [
                 "The output should show multiple durable agents running concurrently in an orchestration.",
@@ -50,7 +50,7 @@ internal static class DurableAgentSamples
         {
             Name = "DurableAgents_Console_04_AgentOrchestration_Conditionals",
             ProjectPath = "samples/DurableAgents/ConsoleApps/04_AgentOrchestration_Conditionals",
-            RequiredEnvironmentVariables = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT_NAME"],
+            RequiredEnvironmentVariables = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"],
             ExpectedOutputDescription =
             [
                 "The output should show conditional orchestration behavior based on agent output.",
@@ -61,7 +61,7 @@ internal static class DurableAgentSamples
         {
             Name = "DurableAgents_Console_05_AgentOrchestration_HITL",
             ProjectPath = "samples/DurableAgents/ConsoleApps/05_AgentOrchestration_HITL",
-            RequiredEnvironmentVariables = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT_NAME"],
+            RequiredEnvironmentVariables = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"],
             Inputs = ["approve", "exit"],
             ExpectedOutputDescription =
             [
@@ -73,7 +73,7 @@ internal static class DurableAgentSamples
         {
             Name = "DurableAgents_Console_06_LongRunningTools",
             ProjectPath = "samples/DurableAgents/ConsoleApps/06_LongRunningTools",
-            RequiredEnvironmentVariables = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT_NAME"],
+            RequiredEnvironmentVariables = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"],
             ExpectedOutputDescription =
             [
                 "The output should show a durable orchestration started from an agent tool call.",
@@ -84,7 +84,7 @@ internal static class DurableAgentSamples
         {
             Name = "DurableAgents_Console_07_ReliableStreaming",
             ProjectPath = "samples/DurableAgents/ConsoleApps/07_ReliableStreaming",
-            RequiredEnvironmentVariables = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT_NAME", "REDIS_CONNECTION_STRING"],
+            RequiredEnvironmentVariables = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL", "REDIS_CONNECTION_STRING"],
             ExpectedOutputDescription =
             [
                 "The output should show reliable streaming for durable agent responses.",

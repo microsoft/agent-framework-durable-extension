@@ -1,20 +1,21 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Host multiple Azure OpenAI-powered agents inside a single Azure Functions app.
+"""Host multiple Azure AI Foundry-powered agents inside a single Azure Functions app.
 
 Components used in this sample:
-- OpenAIChatCompletionClient configured for Azure OpenAI.
+- FoundryChatClient configured for Azure AI Foundry.
 - AgentFunctionApp to register multiple agents and expose dedicated HTTP endpoints.
 - Custom tool functions to demonstrate tool invocation from different agents.
 
-Prerequisites: set `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_MODEL`, then sign in
+Prerequisites: set `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`, then sign in
 with Azure CLI before starting the Functions host."""
 
 import logging
+import os
 from typing import Any
 
 from agent_framework import Agent, tool
-from agent_framework.openai import OpenAIChatCompletionClient
+from agent_framework.foundry import FoundryChatClient
 from agent_framework_azurefunctions import AgentFunctionApp
 from azure.identity.aio import AzureCliCredential
 from dotenv import load_dotenv
@@ -60,7 +61,9 @@ def calculate_tip(bill_amount: float, tip_percentage: float = 15.0) -> dict[str,
 
 
 # 1. Create multiple agents, each with its own instruction set and tools.
-client = OpenAIChatCompletionClient(
+client = FoundryChatClient(
+    project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
+    model=os.environ["FOUNDRY_MODEL"],
     credential=AzureCliCredential(),
 )
 

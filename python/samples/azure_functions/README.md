@@ -123,7 +123,7 @@ source .venv/bin/activate
 - Inside each sample:
   - Install Python dependencies – from the sample directory, run `pip install -r requirements.txt` (or the equivalent in your active virtual environment).
   - Copy the supplied `local.settings.json.template` or `local.settings.json.sample` to `local.settings.json`.
-  - Configure the provider variables in that file (`FOUNDRY_*` or `AZURE_OPENAI_*`). The samples use `AzureCliCredential`, so ensure you're logged in via `az login`.
+  - Configure the Foundry variables in that file (`FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`). The samples use `AzureCliCredential`, so ensure you're logged in via `az login`.
     - Keep `TASKHUB_NAME` set to `default` unless you plan to change the durable task hub name.
   - Run the command `func start` from the root of the sample
   - Follow each sample's README for scenario-specific steps, and use its `demo.http` file (or provided curl examples) to trigger the hosted HTTP endpoints.

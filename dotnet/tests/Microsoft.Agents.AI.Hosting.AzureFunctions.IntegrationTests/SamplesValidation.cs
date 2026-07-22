@@ -838,20 +838,15 @@ public sealed class SamplesValidation(ITestOutputHelper outputHelper) : IAsyncLi
             RedirectStandardError = true,
         };
 
-        string openAiEndpoint = s_configuration["AZURE_OPENAI_ENDPOINT"] ??
-            throw new InvalidOperationException("The required AZURE_OPENAI_ENDPOINT env variable is not set.");
-        string openAiDeployment = s_configuration["AZURE_OPENAI_DEPLOYMENT_NAME"] ??
-            throw new InvalidOperationException("The required AZURE_OPENAI_DEPLOYMENT_NAME env variable is not set.");
-        string? openAiApiKey = s_configuration["AZURE_OPENAI_API_KEY"];
+        string projectEndpoint = s_configuration["FOUNDRY_PROJECT_ENDPOINT"] ??
+            throw new InvalidOperationException("The required FOUNDRY_PROJECT_ENDPOINT env variable is not set.");
+        string model = s_configuration["FOUNDRY_MODEL"] ??
+            throw new InvalidOperationException("The required FOUNDRY_MODEL env variable is not set.");
 
         // Set required environment variables for the function app (see local.settings.json for required settings)
         startInfo.EnvironmentVariables["FUNCTIONS_WORKER_RUNTIME"] = "dotnet-isolated";
-        startInfo.EnvironmentVariables["AZURE_OPENAI_ENDPOINT"] = openAiEndpoint;
-        startInfo.EnvironmentVariables["AZURE_OPENAI_DEPLOYMENT_NAME"] = openAiDeployment;
-        if (!string.IsNullOrEmpty(openAiApiKey))
-        {
-            startInfo.EnvironmentVariables["AZURE_OPENAI_API_KEY"] = openAiApiKey;
-        }
+        startInfo.EnvironmentVariables["FOUNDRY_PROJECT_ENDPOINT"] = projectEndpoint;
+        startInfo.EnvironmentVariables["FOUNDRY_MODEL"] = model;
 
         startInfo.EnvironmentVariables["DURABLE_TASK_SCHEDULER_CONNECTION_STRING"] =
             $"Endpoint=http://localhost:{DtsPort};TaskHub={taskHubName};Authentication=None";

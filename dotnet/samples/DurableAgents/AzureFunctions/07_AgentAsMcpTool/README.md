@@ -32,14 +32,13 @@ For this sample, you'll also need to install [node.js](https://nodejs.org/en/dow
 
 ## Configuration
 
-Update your `local.settings.json` with your Azure OpenAI credentials:
+Update your `local.settings.json` with your Foundry project configuration:
 
 ```json
 {
   "Values": {
-    "AZURE_OPENAI_ENDPOINT": "https://your-resource.openai.azure.com/",
-    "AZURE_OPENAI_DEPLOYMENT_NAME": "your-deployment-name",
-    "AZURE_OPENAI_API_KEY": "your-api-key-if-not-using-rbac"
+    "FOUNDRY_PROJECT_ENDPOINT": "https://your-foundry-resource.services.ai.azure.com/api/projects/default-project",
+    "FOUNDRY_MODEL": "your-deployment-name"
   }
 }
 ```

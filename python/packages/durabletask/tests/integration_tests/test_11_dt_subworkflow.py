@@ -33,7 +33,7 @@ pytestmark = [
     pytest.mark.sample("11_subworkflow"),
     pytest.mark.integration_test,
     pytest.mark.requires_dts,
-    pytest.mark.requires_azure_openai,
+    pytest.mark.requires_foundry,
 ]
 
 
