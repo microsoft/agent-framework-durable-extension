@@ -21,7 +21,7 @@ Key architectural points:
 - Mixed agent/executor fan-outs execute concurrently
 
 Prerequisites:
-- Configure `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_MODEL`
+- Configure `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`
 - Sign in with Azure CLI (`az login`) for `AzureCliCredential`
 - Ensure Azurite and the Durable Task Scheduler emulator are running
 """
@@ -41,9 +41,9 @@ from agent_framework import (
     executor,
     handler,
 )
-from agent_framework.openai import OpenAIChatCompletionClient, OpenAIChatCompletionOptions
+from agent_framework.foundry import FoundryChatClient, FoundryChatOptions
 from agent_framework_azurefunctions import AgentFunctionApp
-from azure.identity.aio import AzureCliCredential, get_bearer_token_provider
+from azure.identity.aio import AzureCliCredential
 from pydantic import BaseModel
 from typing_extensions import Never
 
@@ -302,11 +302,10 @@ def _create_workflow() -> Workflow:
                        └─> statistics_processor ─┤
                                                  └──> final_report
     """
-    credential = AzureCliCredential()
-
-    chat_client = OpenAIChatCompletionClient(
-        model=os.environ["AZURE_OPENAI_MODEL"],
-        credential=get_bearer_token_provider(credential, "https://cognitiveservices.azure.com/.default"),
+    chat_client = FoundryChatClient(
+        project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
+        model=os.environ["FOUNDRY_MODEL"],
+        credential=AzureCliCredential(),
     )
 
     # Create agents for parallel analysis
@@ -318,7 +317,7 @@ def _create_workflow() -> Workflow:
             "Return JSON with fields: sentiment (positive/negative/neutral), "
             "confidence (0.0-1.0), and explanation (brief reasoning)."
         ),
-        default_options=OpenAIChatCompletionOptions[Any](response_format=SentimentResult),
+        default_options=FoundryChatOptions[Any](response_format=SentimentResult),
     )
 
     keyword_agent = Agent(
@@ -329,7 +328,7 @@ def _create_workflow() -> Workflow:
             "from the given text. Return JSON with fields: keywords (list of strings), "
             "and categories (list of topic categories)."
         ),
-        default_options=OpenAIChatCompletionOptions[Any](response_format=KeywordResult),
+        default_options=FoundryChatOptions[Any](response_format=KeywordResult),
     )
 
     # Create summary agent for Pattern 3 (mixed parallel)
@@ -341,7 +340,7 @@ def _create_workflow() -> Workflow:
             "provide a concise summary. Return JSON with fields: summary (brief text), "
             "and key_points (list of main takeaways)."
         ),
-        default_options=OpenAIChatCompletionOptions[Any](response_format=SummaryResult),
+        default_options=FoundryChatOptions[Any](response_format=SummaryResult),
     )
 
     # Create executor instances

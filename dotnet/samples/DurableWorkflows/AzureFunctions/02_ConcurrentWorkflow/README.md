@@ -27,9 +27,8 @@ See the [README.md](../../README.md) file in the parent directory for more infor
 
 This sample requires Azure OpenAI. Set the following environment variables:
 
-- `AZURE_OPENAI_ENDPOINT` — Your Azure OpenAI endpoint URL.
-- `AZURE_OPENAI_DEPLOYMENT_NAME` — The name of your chat model deployment.
-- `AZURE_OPENAI_API_KEY` (optional) — Your Azure OpenAI API key. If not set, Azure CLI credentials are used.
+- `FOUNDRY_PROJECT_ENDPOINT` — Your Foundry project endpoint URL.
+- `FOUNDRY_MODEL` — The Foundry model deployment name.
 
 ## Running the Sample
 

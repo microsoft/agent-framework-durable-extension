@@ -7,7 +7,7 @@ orchestration function that routes execution based on spam detection results. Ac
 handle side effects (spam handling and email sending).
 
 Prerequisites:
-- Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_MODEL
+- Set FOUNDRY_PROJECT_ENDPOINT and FOUNDRY_MODEL
 - Sign in with Azure CLI for AzureCliCredential authentication
 - Start a Durable Task Scheduler (e.g., using Docker)
 """
@@ -19,11 +19,10 @@ from collections.abc import Generator
 from typing import Any, cast
 
 from agent_framework import Agent, AgentResponse
-from agent_framework.openai import OpenAIChatCompletionClient
+from agent_framework.foundry import FoundryChatClient
 from agent_framework_durabletask import DurableAIAgentOrchestrationContext, DurableAIAgentWorker
 from azure.identity import AzureCliCredential
 from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential
-from azure.identity.aio import get_bearer_token_provider as get_async_bearer_token_provider
 from dotenv import load_dotenv
 from durabletask.azuremanaged.worker import DurableTaskSchedulerWorker
 from durabletask.task import ActivityContext, OrchestrationContext, Task
@@ -68,11 +67,10 @@ def create_spam_agent() -> "Agent":
         Agent: The configured Spam Detection agent
     """
     return Agent(
-        client=OpenAIChatCompletionClient(
-            model=os.environ["AZURE_OPENAI_MODEL"],
-            credential=get_async_bearer_token_provider(
-                AsyncAzureCliCredential(), "https://cognitiveservices.azure.com/.default"
-            ),
+        client=FoundryChatClient(
+            project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
+            model=os.environ["FOUNDRY_MODEL"],
+            credential=AsyncAzureCliCredential(),
         ),
         name=SPAM_AGENT_NAME,
         instructions="You are a spam detection assistant that identifies spam emails.",
@@ -86,11 +84,10 @@ def create_email_agent() -> "Agent":
         Agent: The configured Email Assistant agent
     """
     return Agent(
-        client=OpenAIChatCompletionClient(
-            model=os.environ["AZURE_OPENAI_MODEL"],
-            credential=get_async_bearer_token_provider(
-                AsyncAzureCliCredential(), "https://cognitiveservices.azure.com/.default"
-            ),
+        client=FoundryChatClient(
+            project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
+            model=os.environ["FOUNDRY_MODEL"],
+            credential=AsyncAzureCliCredential(),
         ),
         name=EMAIL_AGENT_NAME,
         instructions="You are an email assistant that helps users draft responses to emails with professionalism.",

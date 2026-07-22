@@ -57,10 +57,9 @@ See the [README.md](../../README.md) file in the parent directory for informatio
 # Durable Task Scheduler (optional, defaults to localhost)
 DURABLE_TASK_SCHEDULER_CONNECTION_STRING="Endpoint=http://localhost:8080;TaskHub=default;Authentication=None"
 
-# Azure OpenAI (required)
-AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
-AZURE_OPENAI_DEPLOYMENT_NAME="gpt-5.4-mini"
-AZURE_OPENAI_API_KEY="your-key"  # Optional if using Azure CLI credentials
+# Foundry project (required)
+FOUNDRY_PROJECT_ENDPOINT="https://your-foundry-resource.services.ai.azure.com/api/projects/default-project"
+FOUNDRY_MODEL="gpt-5.4-mini"
 ```
 
 ## Running the Sample

@@ -28,7 +28,7 @@ internal static class DurableWorkflowSamples
         {
             Name = "DurableWorkflows_Console_02_ConcurrentWorkflow",
             ProjectPath = "samples/DurableWorkflows/ConsoleApps/02_ConcurrentWorkflow",
-            RequiredEnvironmentVariables = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT_NAME"],
+            RequiredEnvironmentVariables = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"],
             Inputs = ["What is water?", "exit"],
             ExpectedOutputDescription =
             [
@@ -52,7 +52,7 @@ internal static class DurableWorkflowSamples
         {
             Name = "DurableWorkflows_Console_04_WorkflowAndAgents",
             ProjectPath = "samples/DurableWorkflows/ConsoleApps/04_WorkflowAndAgents",
-            RequiredEnvironmentVariables = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT_NAME"],
+            RequiredEnvironmentVariables = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"],
             ExpectedOutputDescription =
             [
                 "The output should show durable workflow and durable agent registration working together.",

@@ -7,7 +7,7 @@ with their own specialized tools. This demonstrates how to host multiple agents
 with different capabilities in a single worker process.
 
 Prerequisites:
-- Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_MODEL
+- Set FOUNDRY_PROJECT_ENDPOINT and FOUNDRY_MODEL
 - Sign in with Azure CLI for AzureCliCredential authentication
 - Start a Durable Task Scheduler (e.g., using Docker)
 """
@@ -18,7 +18,7 @@ import os
 from typing import Any
 
 from agent_framework import Agent, tool
-from agent_framework.openai import OpenAIChatCompletionClient
+from agent_framework.foundry import FoundryChatClient
 from agent_framework_durabletask import DurableAIAgentWorker
 from azure.identity import AzureCliCredential
 from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential
@@ -74,7 +74,9 @@ def create_weather_agent():
         Agent: The configured Weather agent with weather tool
     """
     return Agent(
-        client=OpenAIChatCompletionClient(
+        client=FoundryChatClient(
+            project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
+            model=os.environ["FOUNDRY_MODEL"],
             credential=AsyncAzureCliCredential(),
         ),
         name=WEATHER_AGENT_NAME,
@@ -90,7 +92,9 @@ def create_math_agent():
         Agent: The configured Math agent with calculation tools
     """
     return Agent(
-        client=OpenAIChatCompletionClient(
+        client=FoundryChatClient(
+            project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
+            model=os.environ["FOUNDRY_MODEL"],
             credential=AsyncAzureCliCredential(),
         ),
         name=MATH_AGENT_NAME,

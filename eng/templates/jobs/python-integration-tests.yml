@@ -51,8 +51,7 @@ jobs:
           missing=()
           for variable in \
             FOUNDRY_PROJECT_ENDPOINT \
-            FOUNDRY_MODEL \
-            AZURE_OPENAI_ENDPOINT
+            FOUNDRY_MODEL
           do
             value="${!variable}"
             if is_missing "$value"; then
@@ -60,27 +59,14 @@ jobs:
             fi
           done
 
-          azure_openai_model="$AZURE_OPENAI_MODEL"
-          if is_missing "$azure_openai_model"; then
-            azure_openai_model="$AZURE_OPENAI_DEPLOYMENT_NAME"
-          fi
-          if is_missing "$azure_openai_model"; then
-            missing+=("AZURE_OPENAI_MODEL or AZURE_OPENAI_DEPLOYMENT_NAME")
-          fi
-
           if (( ${#missing[@]} )); then
             echo "Missing required integration configuration: ${missing[*]}" >&2
             exit 1
           fi
-
-          echo "##vso[task.setvariable variable=RESOLVED_AZURE_OPENAI_MODEL]$azure_openai_model"
         displayName: 'Validate Python integration configuration'
         env:
           FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
           FOUNDRY_MODEL: $(FOUNDRY_MODEL)
-          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
-          AZURE_OPENAI_MODEL: $(AZURE_OPENAI_MODEL)
-          AZURE_OPENAI_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
 
       - task: AzureCLI@2
         displayName: 'Run Durable Task integration tests'
@@ -101,8 +87,6 @@ jobs:
         env:
           FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
           FOUNDRY_MODEL: $(FOUNDRY_MODEL)
-          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
-          AZURE_OPENAI_MODEL: $(RESOLVED_AZURE_OPENAI_MODEL)
 
       - task: AzureCLI@2
         displayName: 'Run Azure Functions integration tests'
@@ -122,8 +106,6 @@ jobs:
         env:
           FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
           FOUNDRY_MODEL: $(FOUNDRY_MODEL)
-          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
-          AZURE_OPENAI_MODEL: $(RESOLVED_AZURE_OPENAI_MODEL)
           AzureWebJobsStorage: 'UseDevelopmentStorage=true'
           FUNCTIONS_WORKER_RUNTIME: 'python'
 
