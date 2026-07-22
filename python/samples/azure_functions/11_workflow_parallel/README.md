@@ -123,7 +123,6 @@ The sample can run locally without Azure Functions infrastructure using DevUI:
 
 1. Copy configuration files:
    ```bash
-   cp .env.template .env
    cp local.settings.json.sample local.settings.json
    ```
 

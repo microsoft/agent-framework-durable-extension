@@ -111,22 +111,6 @@ class AggregatedResults:
     processor_results: list[ProcessorResult]
 
 
-@dataclass
-class AgentAnalysis:
-    """Analysis result from an agent."""
-
-    agent_name: str
-    result: str
-
-
-@dataclass
-class FinalReport:
-    """Final combined report."""
-
-    document_id: str
-    analyses: list[AgentAnalysis]
-
-
 # ============================================================================
 # Executor Definitions (Activities - run in parallel when pending together)
 # ============================================================================
