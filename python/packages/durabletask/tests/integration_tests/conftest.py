@@ -29,6 +29,9 @@ load_dotenv(Path(__file__).parent / ".env")
 # Configure logging to reduce noise during tests
 logging.basicConfig(level=logging.WARNING)
 
+_AZURE_OPENAI_SAMPLES = {"02_multi_agent", "06_multi_agent_orchestration_conditionals"}
+_NO_LLM_SAMPLES = {"12_subworkflow_hitl"}
+
 
 class AgentClientFactoryProtocol(Protocol):
     """Protocol for the agent client factory fixture."""
@@ -314,11 +317,15 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     skip_redis = pytest.mark.skip(reason="Redis is not available at redis://localhost:6379")
 
     for item in items:
-        if "requires_azure_openai" in item.keywords and not foundry_available:
-            item.add_marker(skip_foundry)
         sample_marker = item.get_closest_marker("sample")
         sample_name = sample_marker.args[0] if sample_marker and sample_marker.args else None
-        if sample_name == "06_multi_agent_orchestration_conditionals" and not azure_openai_available:
+        if (
+            "requires_azure_openai" in item.keywords
+            and sample_name not in _AZURE_OPENAI_SAMPLES
+            and not foundry_available
+        ):
+            item.add_marker(skip_foundry)
+        if sample_name in _AZURE_OPENAI_SAMPLES and not azure_openai_available:
             item.add_marker(skip_azure_openai)
         if "requires_dts" in item.keywords and not dts_available:
             item.add_marker(skip_dts)
@@ -355,10 +362,9 @@ def check_sample_env(request: pytest.FixtureRequest) -> None:
 
     sample_name = cast(str, sample_marker.args[0])  # type: ignore[union-attr]
     # Samples that host no AI agents need no model credentials (only the DTS emulator).
-    no_llm_samples = {"12_subworkflow_hitl"}
-    if sample_name in no_llm_samples:
+    if sample_name in _NO_LLM_SAMPLES:
         return
-    if sample_name == "06_multi_agent_orchestration_conditionals":
+    if sample_name in _AZURE_OPENAI_SAMPLES:
         required_vars = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_MODEL"]
     else:
         required_vars = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"]

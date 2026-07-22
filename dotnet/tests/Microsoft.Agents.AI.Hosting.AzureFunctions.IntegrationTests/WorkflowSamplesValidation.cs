@@ -631,6 +631,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
         startInfo.EnvironmentVariables["FUNCTIONS_WORKER_RUNTIME"] = "dotnet-isolated";
         startInfo.EnvironmentVariables["DURABLE_TASK_SCHEDULER_CONNECTION_STRING"] =
             $"Endpoint=http://localhost:{DtsPort};TaskHub={taskHubName};Authentication=None";
+        startInfo.EnvironmentVariables["AzureFunctionsJobHost__extensions__durableTask__hubName"] = taskHubName;
         startInfo.EnvironmentVariables["AzureWebJobsStorage"] = "UseDevelopmentStorage=true";
 
         Process process = new() { StartInfo = startInfo };
