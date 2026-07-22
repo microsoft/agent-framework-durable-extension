@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: "0 9 * * *"
 
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   integration-tests:
     name: Durable Task integration tests
@@ -14,11 +18,16 @@ jobs:
     env:
       DURABLE_TASK_SCHEDULER_CONNECTION_STRING: Endpoint=http://localhost:8080;TaskHub=default;Authentication=None
       REDIS_CONNECTION_STRING: redis://localhost:6379
+      AzureWebJobsStorage: UseDevelopmentStorage=true
+      FUNCTIONS_WORKER_RUNTIME: python
       FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
       FOUNDRY_MODEL: ${{ secrets.FOUNDRY_MODEL }}
       AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
       AZURE_OPENAI_MODEL: ${{ secrets.AZURE_OPENAI_MODEL || secrets.AZURE_OPENAI_DEPLOYMENT_NAME }}
       AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
     steps:
       - name: Checkout
@@ -31,6 +40,36 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
+
+      - name: Validate integration configuration
+        shell: bash
+        run: |
+          missing=()
+          for variable in \
+            FOUNDRY_PROJECT_ENDPOINT \
+            FOUNDRY_MODEL \
+            AZURE_OPENAI_ENDPOINT \
+            AZURE_OPENAI_MODEL \
+            AZURE_CLIENT_ID \
+            AZURE_TENANT_ID \
+            AZURE_SUBSCRIPTION_ID
+          do
+            if [[ -z "${!variable}" ]]; then
+              missing+=("${variable}")
+            fi
+          done
+
+          if (( ${#missing[@]} )); then
+            echo "::error::Missing required integration configuration: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Start integration infrastructure
         uses: ./.github/actions/azure-functions-integration-setup

@@ -53,7 +53,6 @@ logger = logging.getLogger(__name__)
 SENTIMENT_AGENT_NAME = "SentimentAnalysisAgent"
 KEYWORD_AGENT_NAME = "KeywordExtractionAgent"
 SUMMARY_AGENT_NAME = "SummaryAgent"
-RECOMMENDATION_AGENT_NAME = "RecommendationAgent"
 
 
 # ============================================================================
@@ -81,13 +80,6 @@ class SummaryResult(BaseModel):
 
     summary: str
     key_points: list[str]
-
-
-class RecommendationResult(BaseModel):
-    """Result from recommendation engine."""
-
-    recommendations: list[str]
-    priority: str
 
 
 @dataclass
@@ -177,11 +169,9 @@ async def format_analyzer_processor(doc: DocumentInput, ctx: WorkflowContext[Pro
     """Analyze document format - runs as an activity in parallel with word_count."""
     logger.info("[format_analyzer_processor] Processing document: %s", doc.document_id)
 
-    # Simple format analysis
-    lines = doc.content.split("\n")
-    word_count = len(lines)  # Using line count as "word count" for this processor
-    char_count = sum(len(line) for line in lines)
-    has_numbers = doc.content.count(".") > 0  # Check for sentences
+    word_count = len(doc.content.split())
+    char_count = len(doc.content)
+    has_numbers = any(character.isdigit() for character in doc.content)
 
     result = ProcessorResult(
         processor_name="format_analyzer",
@@ -298,31 +288,6 @@ class FinalReportExecutor(Executor):
 
         final_report = "\n".join(report_parts)
         await ctx.yield_output(final_report)
-
-
-class MixedResultCollector(Executor):
-    """Collector for mixed agent/executor results."""
-
-    @handler
-    async def collect_mixed_results(
-        self,
-        results: list[Any],
-        ctx: WorkflowContext[Never, str],
-    ) -> None:
-        """Collect and format results from mixed parallel execution."""
-        logger.info("[mixed_collector] Collecting %d mixed results", len(results))
-
-        output_parts = ["=== Mixed Parallel Execution Results ===\n"]
-
-        for result in results:
-            if isinstance(result, AgentExecutorResponse):
-                output_parts.append(f"[Agent: {result.executor_id}]")
-                output_parts.append(result.agent_response.text if result.agent_response else "No response")
-            elif isinstance(result, ProcessorResult):
-                output_parts.append(f"[Processor: {result.processor_name}]")
-                output_parts.append(f"  Words: {result.word_count}, Chars: {result.char_count}")
-
-        await ctx.yield_output("\n".join(output_parts))
 
 
 # ============================================================================

@@ -7,7 +7,8 @@ Components used in this sample:
 - AgentFunctionApp to expose orchestration and HTTP triggers.
 - Durable Functions orchestration that executes agent calls in parallel and aggregates results.
 
-Prerequisites: configure `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL`, and sign in with Azure CLI before starting the Functions host."""
+Prerequisites: configure `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`, then sign
+in with Azure CLI before starting the Functions host."""
 
 import json
 import logging
@@ -89,7 +90,7 @@ def multi_agent_concurrent_orchestration(context: DurableOrchestrationContext) -
     physicist_result = cast(AgentResponse, task_results[0])
     chemist_result = cast(AgentResponse, task_results[1])
 
-    return {
+    return {  # noqa: B901 - Durable orchestrators return their final output.
         "physicist": physicist_result.text,
         "chemist": chemist_result.text,
     }

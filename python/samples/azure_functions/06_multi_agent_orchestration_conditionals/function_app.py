@@ -119,7 +119,7 @@ def spam_detection_orchestration(context: DurableOrchestrationContext) -> Genera
 
     if spam_result.is_spam:
         result = yield context.call_activity("handle_spam_email", spam_result.reason)  # type: ignore[misc]
-        return result
+        return result  # noqa: B901 - Durable orchestrators return their final output.
 
     email_session = email_agent.create_session()
 
@@ -142,7 +142,7 @@ def spam_detection_orchestration(context: DurableOrchestrationContext) -> Genera
         raise ValueError("Failed to parse email response") from ex
 
     result = yield context.call_activity("send_email", email_result.response)  # type: ignore[misc]
-    return result
+    return result  # noqa: B901 - Durable orchestrators return their final output.
 
 
 # 5. HTTP starter endpoint launches the orchestration for each email payload.

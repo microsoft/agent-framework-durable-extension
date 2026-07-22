@@ -7,7 +7,8 @@ Components used in this sample:
 - AgentFunctionApp to register multiple agents and expose dedicated HTTP endpoints.
 - Custom tool functions to demonstrate tool invocation from different agents.
 
-Prerequisites: set `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_MODEL`, and sign in with Azure CLI before starting the Functions host."""
+Prerequisites: set `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_MODEL`, then sign in
+with Azure CLI before starting the Functions host."""
 
 import logging
 from typing import Any

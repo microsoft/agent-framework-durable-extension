@@ -12,3 +12,6 @@ agent-framework-foundry>=1.10.1,<2  # Foundry support from PyPI (pulls in core)
 
 # Azure authentication
 azure-identity
+
+# Local environment loading
+python-dotenv

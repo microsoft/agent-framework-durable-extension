@@ -341,9 +341,10 @@ def _load_and_validate_env(sample_path: Path) -> None:
     # Samples that host no AI agents need no model credentials (only the DTS emulator
     # and Azurite). The suite-level gate still requires *some* LLM config to be present.
     no_llm_samples = {"13_subworkflow_hitl"}
+    azure_openai_samples = {"02_multi_agent", "11_workflow_parallel"}
     if sample_path.name in no_llm_samples:
         pass
-    elif sample_path.name == "11_workflow_parallel":
+    elif sample_path.name in azure_openai_samples:
         required_env_vars.extend(["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_MODEL"])
     else:
         required_env_vars.extend(["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"])

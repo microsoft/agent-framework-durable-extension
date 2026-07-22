@@ -35,9 +35,8 @@ class TestSampleMultiAgent:
         self.math_base_url = f"{base_url}/api/agents/MathAgent"
         self.helper = sample_helper
 
-    @pytest.mark.skip(reason="Flaky in CI: times out / crashes the xdist runner; temporarily disabled.")
-    def test_weather_agent(self) -> None:
-        """Test WeatherAgent endpoint."""
+    def test_weather_and_math_agents(self) -> None:
+        """Test both agent endpoints with one function host."""
         response = self.helper.post_json(
             f"{self.weather_base_url}/run",
             {"message": "What is the weather in Seattle?"},
@@ -47,8 +46,6 @@ class TestSampleMultiAgent:
         assert data["status"] == "success"
         assert "response" in data
 
-    def test_math_agent(self) -> None:
-        """Test MathAgent endpoint."""
         response = self.helper.post_json(
             f"{self.math_base_url}/run",
             {"message": "Calculate a 20% tip on a $50 bill", "wait_for_response": False},

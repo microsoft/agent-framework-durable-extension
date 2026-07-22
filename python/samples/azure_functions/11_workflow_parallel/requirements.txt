@@ -12,3 +12,6 @@ agent-framework-openai>=1.10.1,<2  # OpenAI support from PyPI (pulls in core)
 
 # Azure authentication
 azure-identity
+
+# Local environment loading
+python-dotenv

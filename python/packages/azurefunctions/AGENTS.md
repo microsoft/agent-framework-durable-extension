@@ -16,8 +16,8 @@ app = AgentFunctionApp(agents=[my_agent])
 
 ## Import Path
 
+Use the direct package import:
+
 ```python
-from agent_framework_azurefunctions import AgentFunctionApp
-# or directly:
 from agent_framework_azurefunctions import AgentFunctionApp
 ```

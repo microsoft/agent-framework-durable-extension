@@ -7,7 +7,8 @@ Components used in this sample:
 - AgentFunctionApp with Durable orchestration, HTTP triggers, and activity triggers.
 - External events that pause the workflow until a human decision arrives or times out.
 
-Prerequisites: configure `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL`, and sign in with Azure CLI before running `func start`."""
+Prerequisites: configure `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`, then sign in
+with Azure CLI before running `func start`."""
 
 import json
 import logging
@@ -51,7 +52,8 @@ class HumanApproval(BaseModel):
 def _create_writer_agent() -> Any:
     instructions = (
         "You are a professional content writer who creates high-quality articles on various topics. "
-        "You write engaging, informative, and well-structured content that follows best practices for readability and accuracy. "
+        "You write engaging, informative, and well-structured content that follows best practices "
+        "for readability and accuracy. "
         "Return your response as JSON with 'title' and 'content' fields."
     )
 
@@ -142,7 +144,9 @@ def content_generation_hitl_orchestration(context: DurableOrchestrationContext) 
                 context.set_custom_status(
                     f"Content published successfully at {context.current_utc_datetime:%Y-%m-%dT%H:%M:%S}"
                 )
-                return {"content": content.content}
+                return {  # noqa: B901 - Durable orchestrators return their final output.
+                    "content": content.content
+                }
 
             context.set_custom_status("Content rejected by human reviewer. Incorporating feedback and regenerating...")
 
@@ -151,7 +155,8 @@ def content_generation_hitl_orchestration(context: DurableOrchestrationContext) 
                 break
 
             rewrite_prompt = (
-                "The content was rejected by a human reviewer. Please rewrite the article incorporating their feedback.\n\n"
+                "The content was rejected by a human reviewer. "
+                "Please rewrite the article incorporating their feedback.\n\n"
                 f"Human Feedback: {approval_payload.feedback or 'No feedback provided.'}"
             )
             rewritten_raw = yield writer.run(

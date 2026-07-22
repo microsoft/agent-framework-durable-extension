@@ -7,7 +7,8 @@ Components used in this sample:
 - AgentFunctionApp to surface HTTP and orchestration triggers via the Azure Functions extension.
 - Durable Functions orchestration to run sequential agent invocations on the same conversation session.
 
-Prerequisites: configure `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL`, and sign in with Azure CLI before starting the Functions host."""
+Prerequisites: configure `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`, then sign
+in with Azure CLI before starting the Functions host."""
 
 import json
 import logging
@@ -72,7 +73,7 @@ def single_agent_orchestration(context: DurableOrchestrationContext) -> Generato
         session=writer_session,
     )
 
-    return refined.text
+    return refined.text  # noqa: B901 - Durable orchestrators return their final output.
 
 
 # 5. HTTP endpoint to kick off the orchestration and return the status query URI.

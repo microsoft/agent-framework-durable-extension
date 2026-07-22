@@ -1,19 +1,14 @@
 # Copyright (c) Microsoft. All rights reserved.
-"""Workflow Execution within Durable Functions Orchestrator.
+"""Run an Agent Framework workflow with Azure Durable Functions.
 
-This sample demonstrates running agent framework WorkflowBuilder workflows inside
-a Durable Functions orchestrator by manually traversing the workflow graph and
-delegating execution to Durable Entities (for agents) and Activities (for other logic).
+This sample builds a conditional email-processing workflow with ``WorkflowBuilder``
+and passes the resulting ``Workflow`` directly to ``AgentFunctionApp``. The durable
+hosting extension dispatches agent nodes through durable entities and executor nodes
+through activities without requiring application code to traverse the graph.
 
-Key architectural points:
-- AgentFunctionApp registers agents as DurableAIAgents.
-- WorkflowBuilder uses `DurableAgentDefinition` (a placeholder) to define the graph.
-- The orchestrator (`workflow_orchestration`) iterates through the workflow graph.
-- When an agent node is encountered, it calls the corresponding `DurableAIAgent` entity.
-- When a standard executor node is encountered, it calls an Activity (`ExecuteExecutor`).
-
-This approach allows using the rich structure of `WorkflowBuilder` while leveraging
-the statefulness and durability of `DurableAIAgent`s.
+The workflow routes spam to a handler executor and non-spam messages through an email
+assistant and sender executor. State is carried by typed messages rather than shared
+workflow state.
 
 Prerequisites:
 - Configure `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`
