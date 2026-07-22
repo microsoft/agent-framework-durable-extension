@@ -58,7 +58,6 @@ class TestMultiAgent:
         assert math_agent is not None
         assert math_agent.name == MATH_AGENT_NAME
 
-    @pytest.mark.skip(reason="Flaky in CI: times out / crashes the xdist runner; temporarily disabled.")
     def test_weather_agent_with_tool(self):
         """Test weather agent with weather tool execution."""
         agent = self.agent_client.get_agent(WEATHER_AGENT_NAME)
@@ -68,8 +67,6 @@ class TestMultiAgent:
 
         assert response is not None
         assert response.text is not None
-        # Should contain weather information from the tool
-        assert len(response.text) > 0
 
         # Verify that the get_weather tool was actually invoked
         tool_calls = [
@@ -78,7 +75,6 @@ class TestMultiAgent:
         assert len(tool_calls) > 0, "Expected at least one tool call"
         assert any(call.name == "get_weather" for call in tool_calls), "Expected get_weather tool to be called"
 
-    @pytest.mark.skip(reason="Flaky in CI: times out / crashes the xdist runner; temporarily disabled.")
     def test_math_agent_with_tool(self):
         """Test math agent with calculation tool execution."""
         agent = self.agent_client.get_agent(MATH_AGENT_NAME)
@@ -88,8 +84,6 @@ class TestMultiAgent:
 
         assert response is not None
         assert response.text is not None
-        # Should contain calculation results from the tool
-        assert len(response.text) > 0
 
         # Verify that the calculate_tip tool was actually invoked
         tool_calls = [

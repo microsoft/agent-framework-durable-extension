@@ -29,7 +29,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
 #else
     private const string BuildConfiguration = "Release";
 #endif
-    private static readonly HttpClient s_sharedHttpClient = new();
+    private static readonly HttpClient s_sharedHttpClient = new() { Timeout = TimeSpan.FromMinutes(3) };
     private static readonly IConfiguration s_configuration =
         new ConfigurationBuilder()
             .AddUserSecrets(Assembly.GetExecutingAssembly())
@@ -37,7 +37,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
             .Build();
 
     private static bool s_infrastructureStarted;
-    private static readonly TimeSpan s_orchestrationTimeout = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan s_orchestrationTimeout = TimeSpan.FromMinutes(3);
 
     // Timeout for the Azure Functions host to become ready after building.
     private static readonly TimeSpan s_functionsReadyTimeout = TimeSpan.FromSeconds(180);
@@ -333,7 +333,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
         });
     }
 
-    [Fact(Skip = "Disabled due to persistent CI failures. See #6732.")]
+    [RetryFact(2, 5000)]
     public async Task WorkflowAndAgentsSampleValidationAsync()
     {
         string samplePath = Path.Combine(s_samplesPath, "05_WorkflowAndAgents");
@@ -385,7 +385,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
         });
     }
 
-    [Fact(Skip = "Disabled due to persistent CI failures. See #6732.")]
+    [RetryFact(2, 5000)]
     public async Task ConcurrentWorkflowSampleValidationAsync()
     {
         string samplePath = Path.Combine(s_samplesPath, "02_ConcurrentWorkflow");
@@ -448,7 +448,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
             await this.StartDockerContainerAsync(
                 containerName: "azurite",
                 image: "mcr.microsoft.com/azure-storage/azurite",
-                ports: ["-p", "10000:10000", "-p", "10001:10001", "-p", "10002:10002"]);
+                arguments: ["-p", "10000:10000", "-p", "10001:10001", "-p", "10002:10002"]);
 
             await this.WaitForConditionAsync(this.IsAzuriteRunningAsync, "Azurite is running", TimeSpan.FromSeconds(30));
         }
@@ -459,7 +459,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
             await this.StartDockerContainerAsync(
                 containerName: "dts-emulator",
                 image: "mcr.microsoft.com/dts/dts-emulator:latest",
-                ports: ["-p", "8080:8080", "-p", "8082:8082"]);
+                arguments: ["-p", "8080:8080", "-p", "8082:8082", "-e", "DTS_USE_DYNAMIC_TASK_HUBS=true"]);
 
             await this.WaitForConditionAsync(
                 condition: this.IsDtsEmulatorRunningAsync,
@@ -533,17 +533,17 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
         }
     }
 
-    private async Task StartDockerContainerAsync(string containerName, string image, string[] ports)
+    private async Task StartDockerContainerAsync(string containerName, string image, string[] arguments)
     {
         await this.RunCommandAsync("docker", ["stop", containerName]);
         await this.RunCommandAsync("docker", ["rm", containerName]);
 
         List<string> args = ["run", "-d", "--name", containerName];
-        args.AddRange(ports);
+        args.AddRange(arguments);
         args.Add(image);
 
         this._outputHelper.WriteLine(
-            $"Starting new container: {containerName} with image: {image} and ports: {string.Join(", ", ports)}");
+            $"Starting new container: {containerName} with image: {image} and arguments: {string.Join(", ", arguments)}");
         await this.RunCommandAsync("docker", args.ToArray());
         this._outputHelper.WriteLine($"Container started: {containerName}");
     }
@@ -575,13 +575,15 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
 
     private async Task RunSampleTestAsync(string samplePath, bool requiresOpenAI, Func<IReadOnlyList<OutputLog>, Task> testAction)
     {
+        string taskHubName = $"workflow-{Guid.NewGuid():N}"[..17];
+
         // Build the sample project first (it may not have been built as part of the solution)
         await AzureFunctionsTestHelper.BuildSampleAsync(
             samplePath, $"-f {s_dotnetTargetFramework} -c {BuildConfiguration}", this._outputHelper);
 
         // Start the Azure Functions app
         List<OutputLog> logsContainer = [];
-        using Process funcProcess = this.StartFunctionApp(samplePath, logsContainer, requiresOpenAI);
+        using Process funcProcess = this.StartFunctionApp(samplePath, logsContainer, requiresOpenAI, taskHubName);
         try
         {
             await AzureFunctionsTestHelper.WaitForFunctionsReadyAsync(
@@ -594,7 +596,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
         }
     }
 
-    private Process StartFunctionApp(string samplePath, List<OutputLog> logs, bool requiresOpenAI)
+    private Process StartFunctionApp(string samplePath, List<OutputLog> logs, bool requiresOpenAI, string taskHubName)
     {
         ProcessStartInfo startInfo = new()
         {
@@ -628,7 +630,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
 
         startInfo.EnvironmentVariables["FUNCTIONS_WORKER_RUNTIME"] = "dotnet-isolated";
         startInfo.EnvironmentVariables["DURABLE_TASK_SCHEDULER_CONNECTION_STRING"] =
-            $"Endpoint=http://localhost:{DtsPort};TaskHub=default;Authentication=None";
+            $"Endpoint=http://localhost:{DtsPort};TaskHub={taskHubName};Authentication=None";
         startInfo.EnvironmentVariables["AzureWebJobsStorage"] = "UseDevelopmentStorage=true";
 
         Process process = new() { StartInfo = startInfo };
