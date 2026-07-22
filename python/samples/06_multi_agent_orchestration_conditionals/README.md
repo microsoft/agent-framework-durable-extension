@@ -14,7 +14,7 @@ This sample demonstrates conditional orchestration logic with two agents that an
 
 See the [README.md](../README.md) file in the parent directory for more information on how to configure the environment, including how to install and run common sample dependencies.
 
-This sample uses Azure OpenAI credentials:
+This sample uses Azure AI Foundry configuration:
 
 - `FOUNDRY_PROJECT_ENDPOINT`
 - `FOUNDRY_MODEL`

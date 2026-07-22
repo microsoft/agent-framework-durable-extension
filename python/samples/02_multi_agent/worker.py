@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Worker process for hosting multiple Azure OpenAI agents with different tools using Durable Task.
+"""Worker process for hosting multiple Azure AI Foundry agents with different tools using Durable Task.
 
 This worker registers two agents - a weather assistant and a math assistant - each
 with their own specialized tools. This demonstrates how to host multiple agents
@@ -68,7 +68,7 @@ def calculate_tip(bill_amount: float, tip_percentage: float = 15.0) -> dict[str,
 
 
 def create_weather_agent():
-    """Create the Weather agent using Azure OpenAI.
+    """Create the Weather agent using Azure AI Foundry.
 
     Returns:
         Agent: The configured Weather agent with weather tool
@@ -86,7 +86,7 @@ def create_weather_agent():
 
 
 def create_math_agent():
-    """Create the Math agent using Azure OpenAI.
+    """Create the Math agent using Azure AI Foundry.
 
     Returns:
         Agent: The configured Math agent with calculation tools

@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Host multiple Azure OpenAI-powered agents inside a single Azure Functions app.
+"""Host multiple Azure AI Foundry-powered agents inside a single Azure Functions app.
 
 Components used in this sample:
 - FoundryChatClient configured for Azure AI Foundry.

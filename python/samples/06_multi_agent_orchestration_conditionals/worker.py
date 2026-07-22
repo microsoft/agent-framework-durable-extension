@@ -61,7 +61,7 @@ class EmailPayload(BaseModel):
 
 
 def create_spam_agent() -> "Agent":
-    """Create the Spam Detection agent using Azure OpenAI.
+    """Create the Spam Detection agent using Azure AI Foundry.
 
     Returns:
         Agent: The configured Spam Detection agent
@@ -78,7 +78,7 @@ def create_spam_agent() -> "Agent":
 
 
 def create_email_agent() -> "Agent":
-    """Create the Email Assistant agent using Azure OpenAI.
+    """Create the Email Assistant agent using Azure AI Foundry.
 
     Returns:
         Agent: The configured Email Assistant agent

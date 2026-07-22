@@ -25,7 +25,7 @@ This sample defines a single workflow:
 
 See the [README.md](../../README.md) file in the parent directory for more information on how to configure the environment, including how to install and run common sample dependencies.
 
-This sample requires Azure OpenAI. Set the following environment variables:
+This sample requires Azure AI Foundry. Set the following environment variables:
 
 - `FOUNDRY_PROJECT_ENDPOINT` — Your Foundry project endpoint URL.
 - `FOUNDRY_MODEL` — The Foundry model deployment name.
