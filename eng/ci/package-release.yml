@@ -18,10 +18,10 @@ parameters:
     type: string
     default: 'agent-framework-durable-extension-nuget-org'
     displayName: 'NuGet.org service connection'
-  - name: pypiServiceConnection
+  - name: esrpMainPublisher
     type: string
-    default: 'agent-framework-durable-extension-pypi'
-    displayName: 'PyPI service connection'
+    default: 'agent-framework-durable-extension'
+    displayName: 'ESRP main publisher label (PyPI release)'
 
 resources:
   repositories:
@@ -63,4 +63,4 @@ extends:
               publishDotNet: ${{ parameters.publishDotNet }}
               publishPython: ${{ parameters.publishPython }}
               nugetServiceConnection: ${{ parameters.nugetServiceConnection }}
-              pypiServiceConnection: ${{ parameters.pypiServiceConnection }}
+              esrpMainPublisher: ${{ parameters.esrpMainPublisher }}

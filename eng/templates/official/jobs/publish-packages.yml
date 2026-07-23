@@ -11,9 +11,38 @@ parameters:
   - name: nugetServiceConnection
     type: string
     default: 'agent-framework-durable-extension-nuget-org'
-  - name: pypiServiceConnection
+  # ESRP is the sanctioned Microsoft release path for PyPI (there is no 1ES PyPI
+  # output and the governed pool cannot reach pypi.org). These defaults reuse the
+  # Durable Task team's existing ESRP registration, matching the sibling
+  # microsoft/durabletask-python pipeline. Credentials are never in the repo: ESRP
+  # authenticates via a managed identity and a Key Vault signing certificate.
+  - name: esrpServiceConnection
     type: string
-    default: 'agent-framework-durable-extension-pypi'
+    default: 'dtfx-internal-esrp-prod'
+  - name: esrpKeyVaultName
+    type: string
+    default: 'durable-esrp-akv'
+  - name: esrpSignCertName
+    type: string
+    default: 'dts-esrp-cert'
+  - name: esrpClientId
+    type: string
+    default: '0b3ed1a4-0727-4a50-b82a-02c2bd9dec89'
+  - name: esrpDomainTenantId
+    type: string
+    default: '33e01921-4d64-4f8c-a055-5bdaffd5e33d'
+  # ESRP release label. It is NOT bound to the target registry: durabletask-python
+  # publishes Python packages with a "durabletask-java" value against this same ESRP
+  # registration, confirming it is a free-form label. Set to this project's name.
+  - name: esrpMainPublisher
+    type: string
+    default: 'agent-framework-durable-extension'
+  # ADO environment used to satisfy the 1ES release-job requirement. Defaults to the
+  # Durable Task team's existing PyPI production environment so it resolves without
+  # provisioning a new one; switch to a dedicated environment later if desired.
+  - name: pypiEnvironment
+    type: string
+    default: 'durabletask-pypi-prod'
 
 jobs:
   - job: ValidateRelease
@@ -73,59 +102,40 @@ jobs:
     dependsOn: ValidateRelease
     condition: and(succeeded(), ${{ eq(parameters.publishPython, true) }})
     displayName: 'Publish Python package'
-    # NOTE: This job publishes to PyPI directly via `twine upload`. That works for a
-    # standard-network agent, but the governed 1ES pool cannot reach upload.pypi.org,
-    # and direct twine upload is not the sanctioned Microsoft release path. The
-    # recommended approach (used by the sibling microsoft/durabletask-python project)
-    # is the ESRP Release task (EsrpRelease@9 with contenttype: PyPi) inside a
-    # templateContext releaseJob gated by an ADO environment, reusing the Durable Task
-    # team's ESRP service connection / key vault / signing cert. ESRP can also publish
-    # NuGet (contenttype: NuGet), so both package types could eventually be unified
-    # under it. This is left as direct twine for now because publishing is disabled by
-    # default (publishPython=false) and the dry run never runs this job; replace with
-    # the ESRP releaseJob before enabling a real Python release.
+    # Publishes to PyPI through ESRP, the sanctioned Microsoft release path (used by
+    # the sibling microsoft/durabletask-python project), reusing the Durable Task
+    # team's ESRP registration. ESRP authenticates with a managed identity + Key Vault
+    # signing certificate, so no PyPI credentials live in this repo. 1ES requires
+    # production release work to run in a releaseJob bound to an environment.
+    templateContext:
+      type: releaseJob
+      isProduction: true
+      environment: ${{ parameters.pypiEnvironment }}
     steps:
       - checkout: none
 
       - download: current
         artifact: ${{ parameters.artifactName }}
 
-      - task: UsePythonVersion@0
-        displayName: 'Use Python 3.13'
+      - task: EsrpRelease@9
+        displayName: 'ESRP release Python package to PyPI'
         inputs:
-          versionSpec: '3.13'
-
-      # Authenticate to the internal feed before installing twine. The governed pool
-      # cannot reach PyPI directly, so pip must install twine from the authenticated
-      # feed (via the PIP_INDEX_URL this task sets).
-      - task: PipAuthenticate@1
-        displayName: 'Authenticate to Azure Artifacts feed'
-        inputs:
-          artifactFeeds: 'internal/upstream'
-
-      - pwsh: python -m pip install --upgrade pip twine
-        displayName: 'Install Twine'
-
-      - task: TwineAuthenticate@1
-        displayName: 'Authenticate to PyPI'
-        inputs:
-          pythonUploadServiceConnection: ${{ parameters.pypiServiceConnection }}
-
-      # TwineAuthenticate writes a .pypirc whose repository section is named after the
-      # service connection, so `--repository` must be that same service connection name
-      # (this matches the documented pattern for external PyPI upload connections).
-      - pwsh: |
-          # Force array context with @(...) so .Count is reliable even when
-          # Get-ChildItem returns nothing ($null) or a single item.
-          $packages = @(Get-ChildItem -File "$(Pipeline.Workspace)/${{ parameters.artifactName }}/python" |
-            Where-Object { $_.Name.EndsWith(".whl") -or $_.Name.EndsWith(".tar.gz") })
-          if ($packages.Count -eq 0) {
-            throw "No Python packages were found."
-          }
-
-          python -m twine upload `
-            --non-interactive `
-            --repository "${{ parameters.pypiServiceConnection }}" `
-            --config-file "$(PYPIRC_PATH)" `
-            @($packages.FullName)
-        displayName: 'Upload Python package to PyPI'
+          connectedservicename: ${{ parameters.esrpServiceConnection }}
+          usemanagedidentity: true
+          keyvaultname: ${{ parameters.esrpKeyVaultName }}
+          signcertname: ${{ parameters.esrpSignCertName }}
+          clientid: ${{ parameters.esrpClientId }}
+          intent: 'PackageDistribution'
+          contenttype: 'PyPi'
+          # Point ESRP at the folder holding the built wheel/sdist that the
+          # BuildPackages stage produced and this job downloaded.
+          contentsource: 'Folder'
+          folderlocation: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/python'
+          waitforreleasecompletion: true
+          # Auto-populate owner/approver from whoever queued the run so no personal
+          # emails are hardcoded in source (matches the durabletask-python pattern).
+          owners: $(Build.RequestedForEmail)
+          approvers: $(Build.RequestedForEmail)
+          serviceendpointurl: 'https://api.esrp.microsoft.com'
+          mainpublisher: ${{ parameters.esrpMainPublisher }}
+          domaintenantid: ${{ parameters.esrpDomainTenantId }}
