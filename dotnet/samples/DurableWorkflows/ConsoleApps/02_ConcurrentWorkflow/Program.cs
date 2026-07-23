@@ -16,7 +16,6 @@
 //                         |
 //                    Aggregator (class-based)
 
-using Azure;
 using Azure.AI.OpenAI;
 using Azure.Identity;
 using Microsoft.Agents.AI;
@@ -34,18 +33,17 @@ using WorkflowConcurrency;
 // Configuration
 string dtsConnectionString = Environment.GetEnvironmentVariable("DURABLE_TASK_SCHEDULER_CONNECTION_STRING")
     ?? "Endpoint=http://localhost:8080;TaskHub=default;Authentication=None";
-string endpoint = Environment.GetEnvironmentVariable("AZURE_OPENAI_ENDPOINT")
-    ?? throw new InvalidOperationException("AZURE_OPENAI_ENDPOINT is not set.");
-string deploymentName = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_NAME")
-    ?? Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT")
-    ?? throw new InvalidOperationException("AZURE_OPENAI_DEPLOYMENT_NAME is not set.");
-string? azureOpenAiKey = Environment.GetEnvironmentVariable("AZURE_OPENAI_API_KEY")
-    ?? Environment.GetEnvironmentVariable("AZURE_OPENAI_KEY");
+// Get the Foundry project endpoint and model deployment name from environment variables.
+string projectEndpoint = Environment.GetEnvironmentVariable("FOUNDRY_PROJECT_ENDPOINT")
+    ?? throw new InvalidOperationException("FOUNDRY_PROJECT_ENDPOINT is not set.");
+string deploymentName = Environment.GetEnvironmentVariable("FOUNDRY_MODEL")
+    ?? throw new InvalidOperationException("FOUNDRY_MODEL is not set.");
+
+// The Azure OpenAI endpoint is the authority (scheme + host) of the Foundry project endpoint.
+string endpoint = new Uri(projectEndpoint).GetLeftPart(UriPartial.Authority);
 
 // Create Azure OpenAI client
-AzureOpenAIClient openAiClient = !string.IsNullOrEmpty(azureOpenAiKey)
-    ? new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(azureOpenAiKey))
-    : new AzureOpenAIClient(new Uri(endpoint), new AzureCliCredential());
+AzureOpenAIClient openAiClient = new(new Uri(endpoint), new AzureCliCredential());
 ChatClient chatClient = openAiClient.GetChatClient(deploymentName);
 
 // Define the 4 executors for the workflow

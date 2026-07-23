@@ -75,9 +75,8 @@ jobs:
               --report-xunit-trx \
               --results-directory ../artifacts/test-results
         env:
-          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
-          AZURE_OPENAI_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
-          AZURE_OPENAI_CHAT_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
+          FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
+          FOUNDRY_MODEL: $(FOUNDRY_MODEL)
 
       - bash: df -h
         condition: always()
@@ -98,9 +97,8 @@ jobs:
               --report-xunit-trx \
               --results-directory ../artifacts/test-results
         env:
-          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
-          AZURE_OPENAI_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
-          AZURE_OPENAI_CHAT_DEPLOYMENT_NAME: $(AZURE_OPENAI_DEPLOYMENT_NAME)
+          FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
+          FOUNDRY_MODEL: $(FOUNDRY_MODEL)
 
       - task: PublishTestResults@2
         condition: always()

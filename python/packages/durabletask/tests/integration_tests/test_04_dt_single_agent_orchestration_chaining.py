@@ -38,7 +38,7 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.sample("04_single_agent_orchestration_chaining"),
     pytest.mark.integration_test,
-    pytest.mark.requires_azure_openai,
+    pytest.mark.requires_foundry,
     pytest.mark.requires_dts,
 ]
 

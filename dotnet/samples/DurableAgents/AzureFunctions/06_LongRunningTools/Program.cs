@@ -2,7 +2,6 @@
 
 #pragma warning disable IDE0002 // Simplify Member Access
 
-using Azure;
 using Azure.AI.OpenAI;
 using Azure.Identity;
 using LongRunningTools;
@@ -15,20 +14,19 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using OpenAI.Chat;
 
-// Get the Azure OpenAI endpoint and deployment name from environment variables.
-string endpoint = Environment.GetEnvironmentVariable("AZURE_OPENAI_ENDPOINT")
-    ?? throw new InvalidOperationException("AZURE_OPENAI_ENDPOINT is not set.");
-string deploymentName = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_NAME")
-    ?? throw new InvalidOperationException("AZURE_OPENAI_DEPLOYMENT_NAME is not set.");
+// Get the Foundry project endpoint and model deployment name from environment variables.
+string projectEndpoint = Environment.GetEnvironmentVariable("FOUNDRY_PROJECT_ENDPOINT")
+    ?? throw new InvalidOperationException("FOUNDRY_PROJECT_ENDPOINT is not set.");
+string deploymentName = Environment.GetEnvironmentVariable("FOUNDRY_MODEL")
+    ?? throw new InvalidOperationException("FOUNDRY_MODEL is not set.");
 
-// Use Azure Key Credential if provided, otherwise use Azure CLI Credential.
-string? azureOpenAiKey = System.Environment.GetEnvironmentVariable("AZURE_OPENAI_API_KEY");
+// The Azure OpenAI endpoint is the authority (scheme + host) of the Foundry project endpoint.
+string endpoint = new Uri(projectEndpoint).GetLeftPart(UriPartial.Authority);
+
 // WARNING: DefaultAzureCredential is convenient for development but requires careful consideration in production.
 // In production, consider using a specific credential (e.g., ManagedIdentityCredential) to avoid
 // latency issues, unintended credential probing, and potential security risks from fallback mechanisms.
-AzureOpenAIClient client = !string.IsNullOrEmpty(azureOpenAiKey)
-    ? new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(azureOpenAiKey))
-    : new AzureOpenAIClient(new Uri(endpoint), new DefaultAzureCredential());
+AzureOpenAIClient client = new(new Uri(endpoint), new DefaultAzureCredential());
 
 // Agent used by the orchestration to write content.
 const string WriterAgentName = "Writer";

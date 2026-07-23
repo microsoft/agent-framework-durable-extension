@@ -11,7 +11,7 @@ This sample demonstrates how to use the Durable Extension for Agent Framework to
 
 ## Prerequisites
 
-Complete the common environment preparation steps described in `../README.md`, including installing Azure Functions Core Tools, starting Azurite, configuring Azure OpenAI settings, and installing this sample's requirements.
+Complete the common environment preparation steps described in `../README.md`, including installing Azure Functions Core Tools, starting Azurite, configuring Azure AI Foundry settings, and installing this sample's requirements.
 
 ## Running the Sample
 

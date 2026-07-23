@@ -35,7 +35,7 @@ WORKFLOW_NAME = "moderation_pipeline"
 # The WorkflowExecutor node id that embeds the inner HITL workflow.
 SUBWORKFLOW_NODE_ID = "review_sub"
 
-# Module-level markers. No requires_azure_openai: the sample hosts no agents.
+# Module-level markers. No requires_foundry: the sample hosts no agents.
 pytestmark = [
     pytest.mark.flaky,
     pytest.mark.integration,

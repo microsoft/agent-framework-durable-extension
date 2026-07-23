@@ -19,8 +19,8 @@ These samples are designed to be run locally in a cloned repository.
 The following prerequisites are required to run the samples:
 
 - [.NET 10.0 SDK or later](https://dotnet.microsoft.com/download/dotnet)
-- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) installed and authenticated (`az login`) or an API key for the Azure OpenAI service
 - [Azure OpenAI Service](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource) with a deployed model (gpt-5.4-mini or better is recommended)
+- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) installed and authenticated (`az login`) for RBAC-based authentication
 - [Durable Task Scheduler](https://learn.microsoft.com/azure/azure-functions/durable/durable-task-scheduler/develop-with-durable-task-scheduler) (local emulator or Azure-hosted)
 - [Docker](https://docs.docker.com/get-docker/) installed if running the Durable Task Scheduler emulator locally
 - [Redis](https://redis.io/) (for sample 07 only) - can be run locally using Docker
@@ -51,22 +51,6 @@ az role assignment create `
 
 More information on how to configure RBAC permissions for Azure OpenAI can be found in the [Azure OpenAI documentation](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource?pivots=cli).
 
-### Setting an API key for the Azure OpenAI service
-
-As an alternative to configuring Azure RBAC permissions, you can set an API key for the Azure OpenAI service by setting the `AZURE_OPENAI_API_KEY` environment variable.
-
-Bash (Linux/macOS/WSL):
-
-```bash
-export AZURE_OPENAI_API_KEY="your-api-key"
-```
-
-PowerShell:
-
-```powershell
-$env:AZURE_OPENAI_API_KEY="your-api-key"
-```
-
 ### Start Durable Task Scheduler
 
 Most samples use the Durable Task Scheduler (DTS) to support hosted agents and durable orchestrations. DTS also allows you to view the status of orchestrations and their inputs and outputs from a web UI.
@@ -84,8 +68,8 @@ The DTS dashboard will be available at `http://localhost:8080`.
 Each sample reads configuration from environment variables. You'll need to set the following environment variables:
 
 ```bash
-export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
-export AZURE_OPENAI_DEPLOYMENT_NAME="your-deployment-name"
+export FOUNDRY_PROJECT_ENDPOINT="https://your-foundry-resource.services.ai.azure.com/api/projects/default-project"
+export FOUNDRY_MODEL="your-deployment-name"
 ```
 
 ### Running the Console Apps

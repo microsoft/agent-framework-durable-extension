@@ -51,7 +51,7 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.sample("03_single_agent_streaming"),
     pytest.mark.integration_test,
-    pytest.mark.requires_azure_openai,
+    pytest.mark.requires_foundry,
     pytest.mark.requires_dts,
     pytest.mark.requires_redis,
 ]
