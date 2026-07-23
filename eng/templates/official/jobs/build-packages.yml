@@ -104,8 +104,13 @@ jobs:
               } else {
                 $reader = New-Object System.IO.StreamReader($entry.Open())
                 try { [xml]$nuspec = $reader.ReadToEnd() } finally { $reader.Dispose() }
-                $id = $nuspec.package.metadata.id
-                $version = $nuspec.package.metadata.version
+                # Extract id/version via XPath with local-name() so the lookup is
+                # namespace-agnostic: the generated .nuspec declares a default xmlns
+                # (nuspec.xsd), and namespace-qualified element access is fragile.
+                $idNode = $nuspec.SelectSingleNode("/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='id']")
+                $versionNode = $nuspec.SelectSingleNode("/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='version']")
+                $id = $idNode.InnerText
+                $version = $versionNode.InnerText
                 if ([string]::IsNullOrWhiteSpace($id) -or [string]::IsNullOrWhiteSpace($version)) {
                   Write-Host "##[error]$($pkg.Name) is missing id or version in its .nuspec."
                   $failed = $true
