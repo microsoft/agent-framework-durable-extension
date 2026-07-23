@@ -60,20 +60,43 @@ jobs:
         displayName: 'Disk space (after build)'
 
       - task: AzureCLI@2
-        displayName: 'Run DurableTask integration tests'
+        displayName: 'Run .NET integration tests in parallel'
         inputs:
           azureSubscription: ${{ parameters.azureServiceConnection }}
           scriptType: bash
           scriptLocation: inlineScript
           workingDirectory: $(Build.SourcesDirectory)/dotnet
           inlineScript: |
-            mkdir -p ../artifacts/test-results
+            set -uo pipefail
+            mkdir -p ../artifacts/test-results/durabletask ../artifacts/test-results/azurefunctions
+
+            dotnet test tests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests.csproj \
+              --configuration Release \
+              --no-build \
+              --report-xunit-trx \
+              --results-directory ../artifacts/test-results/azurefunctions \
+              2>&1 | sed -u 's/^/[AzureFunctions] /' &
+            azurefunctions_pid=$!
+
             dotnet test tests/Microsoft.Agents.AI.DurableTask.IntegrationTests/Microsoft.Agents.AI.DurableTask.IntegrationTests.csproj \
               --configuration Release \
               --no-build \
               --filter-not-trait Category=IntegrationDisabled \
               --report-xunit-trx \
-              --results-directory ../artifacts/test-results
+              --results-directory ../artifacts/test-results/durabletask \
+              2>&1 | sed -u 's/^/[DurableTask] /' &
+            durabletask_pid=$!
+
+            azurefunctions_status=0
+            durabletask_status=0
+            # pipefail makes each wait return dotnet test's failure instead of sed's success.
+            wait "$azurefunctions_pid" || azurefunctions_status=$?
+            wait "$durabletask_pid" || durabletask_status=$?
+
+            if (( azurefunctions_status != 0 || durabletask_status != 0 )); then
+              echo "Integration test failures: AzureFunctions=$azurefunctions_status DurableTask=$durabletask_status" >&2
+              exit 1
+            fi
         env:
           FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
           FOUNDRY_MODEL: $(FOUNDRY_MODEL)
@@ -81,26 +104,7 @@ jobs:
 
       - bash: df -h
         condition: always()
-        displayName: 'Disk space (after DurableTask tests)'
-
-      - task: AzureCLI@2
-        displayName: 'Run Azure Functions integration tests'
-        inputs:
-          azureSubscription: ${{ parameters.azureServiceConnection }}
-          scriptType: bash
-          scriptLocation: inlineScript
-          workingDirectory: $(Build.SourcesDirectory)/dotnet
-          inlineScript: |
-            mkdir -p ../artifacts/test-results
-            dotnet test tests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests/Microsoft.Agents.AI.Hosting.AzureFunctions.IntegrationTests.csproj \
-              --configuration Release \
-              --no-build \
-              --report-xunit-trx \
-              --results-directory ../artifacts/test-results
-        env:
-          FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
-          FOUNDRY_MODEL: $(FOUNDRY_MODEL)
-          AZURE_TOKEN_CREDENTIALS: AzureCliCredential
+        displayName: 'Disk space (after integration tests)'
 
       - task: PublishTestResults@2
         condition: always()
