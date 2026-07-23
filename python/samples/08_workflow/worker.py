@@ -38,8 +38,8 @@ from agent_framework import (
     WorkflowContext,
     handler,
 )
-from agent_framework.azure import DurableAIAgentWorker
 from agent_framework.foundry import FoundryChatClient, FoundryChatOptions
+from agent_framework_durabletask import DurableAIAgentWorker
 from azure.identity import AzureCliCredential
 from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential
 from dotenv import load_dotenv

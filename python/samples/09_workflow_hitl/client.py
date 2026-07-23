@@ -23,7 +23,7 @@ import os
 import time
 from typing import Any
 
-from agent_framework.azure import DurableWorkflowClient
+from agent_framework_durabletask import DurableWorkflowClient
 from azure.identity import AzureCliCredential
 from dotenv import load_dotenv
 from durabletask.azuremanaged.client import DurableTaskSchedulerClient

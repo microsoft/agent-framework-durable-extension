@@ -29,8 +29,10 @@ jobs:
 
       - bash: |
           set -euo pipefail
-          uv python install 3.13
-          uv sync --python 3.13 --all-packages --group dev --group test
+          # Core Tools 4.12.1 predates the Python 3.13 proxy-worker fix for
+          # monorepo-level virtual environments (azure-functions-python-worker#1833).
+          uv python install 3.12
+          uv sync --python 3.12 --all-packages --group dev --group test
         workingDirectory: python
         displayName: 'Sync Python workspace'
         env:
@@ -38,32 +40,80 @@ jobs:
           # uv reads UV_INDEX_URL first, so point it at the same authenticated URL.
           UV_INDEX_URL: $(PIP_INDEX_URL)
 
+      - bash: |
+          set -euo pipefail
+
+          is_missing() {
+            local value="$1"
+            [ -z "$value" ] || [[ "$value" =~ ^\$\(.+\)$ ]]
+          }
+
+          missing=()
+          for variable in \
+            FOUNDRY_PROJECT_ENDPOINT \
+            FOUNDRY_MODEL
+          do
+            value="${!variable}"
+            if is_missing "$value"; then
+              missing+=("${variable}")
+            fi
+          done
+
+          if (( ${#missing[@]} )); then
+            echo "Missing required integration configuration: ${missing[*]}" >&2
+            exit 1
+          fi
+        displayName: 'Validate Python integration configuration'
+        env:
+          FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
+          FOUNDRY_MODEL: $(FOUNDRY_MODEL)
+
       - task: AzureCLI@2
-        displayName: 'Run Python integration tests'
+        displayName: 'Run Durable Task integration tests'
         inputs:
           azureSubscription: ${{ parameters.azureServiceConnection }}
           scriptType: bash
           scriptLocation: inlineScript
           workingDirectory: $(Build.SourcesDirectory)/python
           inlineScript: |
+            set -euo pipefail
             mkdir -p ../artifacts/test-results
             uv run --no-sync pytest packages/durabletask/tests/integration_tests \
               -m integration \
               -n logical \
               --dist worksteal \
               --timeout 480 \
-              --junitxml ../artifacts/test-results/python-integration.xml
+              --junitxml ../artifacts/test-results/python-durabletask-integration.xml
         env:
           FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
           FOUNDRY_MODEL: $(FOUNDRY_MODEL)
-          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
-          AZURE_OPENAI_MODEL: $(AZURE_OPENAI_DEPLOYMENT_NAME)
+
+      - task: AzureCLI@2
+        displayName: 'Run Azure Functions integration tests'
+        inputs:
+          azureSubscription: ${{ parameters.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          workingDirectory: $(Build.SourcesDirectory)/python
+          inlineScript: |
+            set -euo pipefail
+            uv run --no-sync pytest packages/azurefunctions/tests/integration_tests \
+              -m integration \
+              -n logical \
+              --dist worksteal \
+              --timeout 480 \
+              --junitxml ../artifacts/test-results/python-azurefunctions-integration.xml
+        env:
+          FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
+          FOUNDRY_MODEL: $(FOUNDRY_MODEL)
+          AzureWebJobsStorage: 'UseDevelopmentStorage=true'
+          FUNCTIONS_WORKER_RUNTIME: 'python'
 
       - task: PublishTestResults@2
         condition: always()
         inputs:
           testResultsFormat: JUnit
-          testResultsFiles: 'artifacts/test-results/python-integration.xml'
+          testResultsFiles: 'artifacts/test-results/python-*-integration.xml'
           searchFolder: $(Build.SourcesDirectory)
           failTaskOnFailedTests: true
         displayName: 'Publish Python test results'

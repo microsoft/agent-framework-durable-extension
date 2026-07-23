@@ -13,9 +13,8 @@ cp .env.example .env
 ```
 
 Required variables:
-- `AZURE_OPENAI_ENDPOINT`
-- `AZURE_OPENAI_MODEL`
-- `AZURE_OPENAI_API_KEY` (optional if using Azure CLI authentication)
+- `FOUNDRY_PROJECT_ENDPOINT`
+- `FOUNDRY_MODEL`
 - `ENDPOINT` (default: http://localhost:8080)
 - `TASKHUB` (default: default)
 
@@ -65,7 +64,7 @@ Each test file uses pytest markers to automatically configure and start the work
 pytestmark = [
     pytest.mark.sample("03_single_agent_streaming"),
     pytest.mark.integration_test,
-    pytest.mark.requires_azure_openai,
+    pytest.mark.requires_foundry,
     pytest.mark.requires_dts,
     pytest.mark.requires_redis,
 ]
@@ -74,7 +73,7 @@ pytestmark = [
 ## Troubleshooting
 
 **Tests are skipped:**
-Ensure the required environment variables (e.g., `AZURE_OPENAI_ENDPOINT`) are set in your `.env` file.
+Ensure the required environment variables (e.g., `FOUNDRY_PROJECT_ENDPOINT`) are set in your `.env` file.
 
 **DTS connection failed:**
 Check that the DTS emulator container is running: `docker ps | grep dts-emulator`
@@ -86,20 +85,19 @@ Check that Redis is running: `docker ps | grep redis`
 Ensure your `.env` file contains all required variables from `.env.example`.
 
 **Tests timeout:**
-Check that Azure OpenAI credentials are valid and the service is accessible.
+Check that Foundry credentials are valid and the service is accessible.
 
 If you see "DTS emulator is not available":
 - Ensure Docker container is running: `docker ps | grep dts-emulator`
 - Check port 8080 is not in use by another process
 - Restart the container if needed
 
-### Azure OpenAI Errors
+### Foundry Errors
 
 If you see authentication or deployment errors:
-- Verify your `AZURE_OPENAI_ENDPOINT` is correct
-- Confirm `AZURE_OPENAI_MODEL` matches your deployment
-- If using API key, check `AZURE_OPENAI_API_KEY` is valid
-- If using Azure CLI, ensure you're logged in: `az login`
+- Verify your `FOUNDRY_PROJECT_ENDPOINT` is correct
+- Confirm `FOUNDRY_MODEL` matches your deployment
+- Ensure you're logged in with Azure CLI: `az login`
 
 ## CI/CD
 

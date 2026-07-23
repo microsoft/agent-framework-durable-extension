@@ -8,3 +8,6 @@
 # This sample hosts no AI agents, so it needs only the core + durabletask + azurefunctions packages.
 -e ../../../packages/durabletask  # Durable Task support - dependency of azurefunctions
 -e ../../../packages/azurefunctions  # Azure Functions integration - the main package for this sample
+
+# Local environment loading
+python-dotenv

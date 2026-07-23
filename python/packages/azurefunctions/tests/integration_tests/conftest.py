@@ -114,13 +114,10 @@ def _should_skip_azure_functions_integration_tests() -> tuple[bool, str]:
     has_foundry_config = bool(os.getenv("FOUNDRY_PROJECT_ENDPOINT", "").strip()) and bool(
         os.getenv("FOUNDRY_MODEL", "").strip()
     )
-    has_azure_openai_config = bool(os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()) and bool(
-        os.getenv("AZURE_OPENAI_MODEL", "").strip()
-    )
-    if not has_foundry_config and not has_azure_openai_config:
+    if not has_foundry_config:
         return (
             True,
-            "No real FOUNDRY_* or AZURE_OPENAI_* configuration provided; skipping integration tests.",
+            "No real FOUNDRY_* configuration provided; skipping integration tests.",
         )
 
     return False, "Integration tests enabled."
@@ -297,7 +294,7 @@ def _get_sample_path_from_marker(request: pytest.FixtureRequest) -> tuple[Path |
 
     sample_name = marker.args[0]
     repo_root = _resolve_repo_root()
-    sample_path = repo_root / "samples" / "04-hosting" / "azure_functions" / sample_name
+    sample_path = repo_root / "samples" / "azure_functions" / sample_name
 
     if not sample_path.exists():
         return None, f"Sample directory does not exist: {sample_path}"
@@ -343,8 +340,6 @@ def _load_and_validate_env(sample_path: Path) -> None:
     no_llm_samples = {"13_subworkflow_hitl"}
     if sample_path.name in no_llm_samples:
         pass
-    elif sample_path.name == "11_workflow_parallel":
-        required_env_vars.extend(["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_MODEL"])
     else:
         required_env_vars.extend(["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"])
 
@@ -369,14 +364,6 @@ def _start_function_app(sample_path: Path, port: int) -> subprocess.Popen[Any]:
     # This prevents conflicts between parallel or repeated test runs, as Durable Functions
     # use the task hub name to separate orchestration state.
     env["TASKHUB_NAME"] = f"test{uuid.uuid4().hex[:8]}"
-
-    # The Azure Functions Python worker's dependency isolation mechanism crashes
-    # on Python 3.13 with a SIGSEGV in the protobuf C extension (google._upb).
-    # Disabling isolation lets the worker load dependencies from the app's own
-    # environment, which avoids the crash.
-    # See: https://github.com/Azure/azure-functions-python-worker/issues/1797
-    if sys.version_info >= (3, 13):
-        env.setdefault("PYTHON_ISOLATE_WORKER_DEPENDENCIES", "0")
 
     # On Windows, use CREATE_NEW_PROCESS_GROUP to allow proper termination
     # shell=True only on Windows to handle PATH resolution

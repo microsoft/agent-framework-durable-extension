@@ -53,7 +53,7 @@ See the [README.md](../../README.md) file in the parent directory for informatio
 ## Running the Sample
 
 ```bash
-cd dotnet/samples/04-hosting/DurableWorkflows/ConsoleApps/09_SwitchRouting
+cd dotnet/samples/DurableWorkflows/ConsoleApps/09_SwitchRouting
 dotnet run --framework net10.0
 ```
 

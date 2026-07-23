@@ -394,12 +394,10 @@ public abstract class SamplesValidationBase : IAsyncLifetime
             RedirectStandardInput = true,
         };
 
-        string openAiEndpoint = Configuration["AZURE_OPENAI_ENDPOINT"] ??
-            throw new InvalidOperationException("The required AZURE_OPENAI_ENDPOINT env variable is not set.");
-        string openAiDeployment = Configuration["AZURE_OPENAI_DEPLOYMENT_NAME"] ??
-            Configuration["AZURE_OPENAI_CHAT_DEPLOYMENT_NAME"] ??
-            throw new InvalidOperationException("The required AZURE_OPENAI_DEPLOYMENT_NAME env variable is not set.");
-        string? openAiApiKey = Configuration["AZURE_OPENAI_API_KEY"];
+        string projectEndpoint = Configuration["FOUNDRY_PROJECT_ENDPOINT"] ??
+            throw new InvalidOperationException("The required FOUNDRY_PROJECT_ENDPOINT env variable is not set.");
+        string model = Configuration["FOUNDRY_MODEL"] ??
+            throw new InvalidOperationException("The required FOUNDRY_MODEL env variable is not set.");
 
         void SetAndLogEnvironmentVariable(string key, string value)
         {
@@ -407,13 +405,8 @@ public abstract class SamplesValidationBase : IAsyncLifetime
             startInfo.EnvironmentVariables[key] = value;
         }
 
-        SetAndLogEnvironmentVariable("AZURE_OPENAI_ENDPOINT", openAiEndpoint);
-        SetAndLogEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_NAME", openAiDeployment);
-        SetAndLogEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT", openAiDeployment);
-        if (!string.IsNullOrEmpty(openAiApiKey))
-        {
-            SetAndLogEnvironmentVariable("AZURE_OPENAI_API_KEY", openAiApiKey);
-        }
+        SetAndLogEnvironmentVariable("FOUNDRY_PROJECT_ENDPOINT", projectEndpoint);
+        SetAndLogEnvironmentVariable("FOUNDRY_MODEL", model);
 
         SetAndLogEnvironmentVariable("DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
             $"Endpoint=http://localhost:{DtsPort};TaskHub={taskHubName};Authentication=None");

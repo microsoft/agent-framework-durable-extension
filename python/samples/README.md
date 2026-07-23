@@ -2,6 +2,22 @@
 
 This directory contains samples for durable agent hosting using the Durable Task Scheduler. These samples demonstrate the worker-client architecture pattern, enabling distributed agent execution with persistent conversation state.
 
+## Import convention
+
+These samples import the durable hosting types **directly from the extension packages** —
+`agent_framework_durabletask` and `agent_framework_azurefunctions`:
+
+```python
+from agent_framework_durabletask import DurableAIAgentWorker, DurableWorkflowClient
+from agent_framework_azurefunctions import AgentFunctionApp
+```
+
+For backward compatibility these entry-point types are also re-exported from
+`agent_framework.azure` in the core `agent-framework` package, so existing
+`from agent_framework.azure import ...` code keeps working. **New and updated samples should use
+the direct package imports shown above** — the canonical, self-contained path for this repo —
+rather than routing through the `agent_framework.azure` shim.
+
 ## Quick Prerequisites Checklist
 
 Install and verify these tools before [Running the Samples](#running-the-samples):
@@ -56,8 +72,19 @@ az account show
 
 ### Azure Functions Hosting
 
-These samples host workflows on Azure Durable Functions (`func start`) instead of the worker-client model above. Each has its own setup steps in its README.
+These samples host workflows and agents on Azure Durable Functions (`func start`) instead of the worker-client model above. Each has its own setup steps in its README, and shared environment setup lives in [azure_functions/README.md](azure_functions/README.md).
 
+- **[azure_functions/01_single_agent](azure_functions/01_single_agent/)**: Host a single AI agent on Azure Functions with direct HTTP API access for interactive conversations.
+- **[azure_functions/02_multi_agent](azure_functions/02_multi_agent/)**: Host multiple AI agents on Azure Functions, each reachable via its own HTTP endpoint.
+- **[azure_functions/03_reliable_streaming](azure_functions/03_reliable_streaming/)**: Reliable, resumable streaming for durable agents using Redis Streams with cursor-based reconnection.
+- **[azure_functions/04_single_agent_orchestration_chaining](azure_functions/04_single_agent_orchestration_chaining/)**: Chain two invocations of the same agent inside a Durable Functions orchestration, preserving conversation state between runs.
+- **[azure_functions/05_multi_agent_orchestration_concurrency](azure_functions/05_multi_agent_orchestration_concurrency/)**: Run two agents in parallel inside a Durable Functions orchestration and merge their responses.
+- **[azure_functions/06_multi_agent_orchestration_conditionals](azure_functions/06_multi_agent_orchestration_conditionals/)**: Conditional orchestration that screens emails with a spam-detector agent and drafts replies with an email assistant agent.
+- **[azure_functions/07_single_agent_orchestration_hitl](azure_functions/07_single_agent_orchestration_hitl/)**: Human-in-the-loop orchestration where a writer agent iterates until a reviewer approves or the attempt limit is reached.
+- **[azure_functions/08_mcp_server](azure_functions/08_mcp_server/)**: Expose agents as both HTTP endpoints and [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) tools.
+- **[azure_functions/09_workflow_shared_state](azure_functions/09_workflow_shared_state/)**: Run a MAF `Workflow` with `SharedState` on Azure Durable Functions.
+- **[azure_functions/10_workflow_no_shared_state](azure_functions/10_workflow_no_shared_state/)**: Run a MAF `Workflow` on Azure Durable Functions without SharedState.
+- **[azure_functions/11_workflow_parallel](azure_functions/11_workflow_parallel/)**: Parallel execution of executors and agents in an Azure Durable Functions workflow.
 - **[azure_functions/12_workflow_hitl](azure_functions/12_workflow_hitl/)**: The workflow human-in-the-loop pattern on Azure Durable Functions, with the reviewer notified from inside the workflow via `WorkflowHitlContext`.
 - **[azure_functions/13_subworkflow_hitl](azure_functions/13_subworkflow_hitl/)**: A human-in-the-loop pause inside a sub-workflow on Azure Durable Functions, exposed through a single top-level respond surface.
 
@@ -70,7 +97,7 @@ These samples are designed to be run locally in a cloned repository.
 The following prerequisites are required to run the samples:
 
 - [Python 3.9 or later](https://www.python.org/downloads/)
-- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) installed and authenticated (`az login`) or an API key for the Azure OpenAI service
+- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) installed and authenticated (`az login`)
 - [Azure OpenAI Service](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource) with a deployed model (gpt-4o-mini or better is recommended)
 - [Durable Task Scheduler](https://learn.microsoft.com/azure/azure-functions/durable/durable-task-scheduler/develop-with-durable-task-scheduler) (local emulator or Azure-hosted)
 - [Docker](https://docs.docker.com/get-docker/) installed if running the Durable Task Scheduler emulator locally

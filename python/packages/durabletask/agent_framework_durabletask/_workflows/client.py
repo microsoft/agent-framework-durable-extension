@@ -49,7 +49,7 @@ class DurableWorkflowClient:
     Example:
         ```python
         from durabletask.azuremanaged.client import DurableTaskSchedulerClient
-        from agent_framework.azure import DurableWorkflowClient
+        from agent_framework_durabletask import DurableWorkflowClient
 
         # Create the underlying client
         client = DurableTaskSchedulerClient(host_address="localhost:8080", taskhub="default")

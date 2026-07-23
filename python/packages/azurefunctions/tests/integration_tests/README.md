@@ -13,12 +13,18 @@ cp .env.example .env
 ```
 
 Required variables:
-- `AZURE_OPENAI_ENDPOINT`
-- `AZURE_OPENAI_MODEL`
-- `AZURE_OPENAI_API_KEY`
+- `FOUNDRY_PROJECT_ENDPOINT`
+- `FOUNDRY_MODEL`
 - `AzureWebJobsStorage`
 - `DURABLE_TASK_SCHEDULER_CONNECTION_STRING`
 - `FUNCTIONS_WORKER_RUNTIME`
+
+Run `az login` before the tests. The hosted samples use `AzureCliCredential`.
+
+For GitHub Actions, configure the same model endpoints plus `AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` as secrets on the `integration`
+environment. The workflow uses Azure Login with OpenID Connect so
+`AzureCliCredential` can authenticate without a stored client secret.
 
 ### 2. Start required services
 
@@ -59,7 +65,6 @@ Each test file uses pytest markers to automatically configure and start the func
 pytestmark = [
     pytest.mark.sample("01_single_agent"),
     pytest.mark.usefixtures("function_app_for_test"),
-    skip_if_azure_functions_integration_tests_disabled,
 ]
 ```
 

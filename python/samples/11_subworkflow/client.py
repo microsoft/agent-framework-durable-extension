@@ -19,7 +19,7 @@ import asyncio
 import logging
 import os
 
-from agent_framework.azure import DurableWorkflowClient
+from agent_framework_durabletask import DurableWorkflowClient
 from azure.identity import AzureCliCredential
 from dotenv import load_dotenv
 from durabletask.azuremanaged.client import DurableTaskSchedulerClient

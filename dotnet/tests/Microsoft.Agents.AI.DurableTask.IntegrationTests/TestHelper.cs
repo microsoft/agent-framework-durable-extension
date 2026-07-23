@@ -1,6 +1,5 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
-using Azure;
 using Azure.AI.OpenAI;
 using Microsoft.Agents.AI.DurableTask.IntegrationTests.Logging;
 using Microsoft.DurableTask;
@@ -160,20 +159,17 @@ internal sealed class TestHelper : IDisposable
 
     internal static ChatClient GetAzureOpenAIChatClient(IConfiguration configuration)
     {
-        string azureOpenAiEndpoint = configuration["AZURE_OPENAI_ENDPOINT"] ??
-            throw new InvalidOperationException("The required AZURE_OPENAI_ENDPOINT env variable is not set.");
-        string azureOpenAiDeploymentName = configuration["AZURE_OPENAI_DEPLOYMENT_NAME"] ??
-            throw new InvalidOperationException("The required AZURE_OPENAI_DEPLOYMENT_NAME env variable is not set.");
+        string projectEndpoint = configuration["FOUNDRY_PROJECT_ENDPOINT"] ??
+            throw new InvalidOperationException("The required FOUNDRY_PROJECT_ENDPOINT env variable is not set.");
+        string model = configuration["FOUNDRY_MODEL"] ??
+            throw new InvalidOperationException("The required FOUNDRY_MODEL env variable is not set.");
 
-        // Check if AZURE_OPENAI_API_KEY is provided for key-based authentication.
-        // NOTE: This is not used for automated tests, but can be useful for local development.
-        string? azureOpenAiKey = configuration["AZURE_OPENAI_API_KEY"];
+        // The Azure OpenAI endpoint is the authority (scheme + host) of the Foundry project endpoint.
+        string azureOpenAiEndpoint = new Uri(projectEndpoint).GetLeftPart(UriPartial.Authority);
 
-        AzureOpenAIClient client = !string.IsNullOrEmpty(azureOpenAiKey)
-            ? new AzureOpenAIClient(new Uri(azureOpenAiEndpoint), new AzureKeyCredential(azureOpenAiKey))
-            : new AzureOpenAIClient(new Uri(azureOpenAiEndpoint), TestAzureCliCredentials.CreateAzureCliCredential());
+        AzureOpenAIClient client = new(new Uri(azureOpenAiEndpoint), TestAzureCliCredentials.CreateAzureCliCredential());
 
-        return client.GetChatClient(azureOpenAiDeploymentName);
+        return client.GetChatClient(model);
     }
 
     internal IReadOnlyCollection<LogEntry> GetLogs()

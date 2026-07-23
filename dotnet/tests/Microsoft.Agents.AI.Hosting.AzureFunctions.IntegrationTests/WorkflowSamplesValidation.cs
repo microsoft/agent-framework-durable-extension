@@ -608,22 +608,15 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
 
         if (requiresOpenAI)
         {
-            string openAiEndpoint = s_configuration["AZURE_OPENAI_ENDPOINT"] ??
-                throw new InvalidOperationException("The required AZURE_OPENAI_ENDPOINT env variable is not set.");
-            string openAiDeployment = s_configuration["AZURE_OPENAI_DEPLOYMENT_NAME"] ??
-                s_configuration["AZURE_OPENAI_CHAT_DEPLOYMENT_NAME"] ??
-                throw new InvalidOperationException("The required AZURE_OPENAI_DEPLOYMENT_NAME env variable is not set.");
-            string? openAiApiKey = s_configuration["AZURE_OPENAI_API_KEY"];
+            string projectEndpoint = s_configuration["FOUNDRY_PROJECT_ENDPOINT"] ??
+                throw new InvalidOperationException("The required FOUNDRY_PROJECT_ENDPOINT env variable is not set.");
+            string model = s_configuration["FOUNDRY_MODEL"] ??
+                throw new InvalidOperationException("The required FOUNDRY_MODEL env variable is not set.");
 
-            this._outputHelper.WriteLine($"Using Azure OpenAI endpoint: {openAiEndpoint}, deployment: {openAiDeployment}");
+            this._outputHelper.WriteLine($"Using Foundry project endpoint: {projectEndpoint}, model: {model}");
 
-            startInfo.EnvironmentVariables["AZURE_OPENAI_ENDPOINT"] = openAiEndpoint;
-            startInfo.EnvironmentVariables["AZURE_OPENAI_DEPLOYMENT_NAME"] = openAiDeployment;
-            startInfo.EnvironmentVariables["AZURE_OPENAI_DEPLOYMENT"] = openAiDeployment;
-            if (!string.IsNullOrEmpty(openAiApiKey))
-            {
-                startInfo.EnvironmentVariables["AZURE_OPENAI_API_KEY"] = openAiApiKey;
-            }
+            startInfo.EnvironmentVariables["FOUNDRY_PROJECT_ENDPOINT"] = projectEndpoint;
+            startInfo.EnvironmentVariables["FOUNDRY_MODEL"] = model;
         }
 
         startInfo.EnvironmentVariables["FUNCTIONS_WORKER_RUNTIME"] = "dotnet-isolated";

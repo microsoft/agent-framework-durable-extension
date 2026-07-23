@@ -60,7 +60,7 @@ internal sealed class SampleVerifier
         {
             if (this._verifierAgent is null)
             {
-                failures.Add("AI verification required but no AI agent configured (missing AZURE_OPENAI_ENDPOINT).");
+                failures.Add("AI verification required but no AI agent configured (missing FOUNDRY_PROJECT_ENDPOINT and/or FOUNDRY_MODEL).");
             }
             else
             {

@@ -8,7 +8,7 @@ each with their own specialized capabilities and tools.
 
 Prerequisites:
 - The worker must be running with both agents registered
-- Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_MODEL when running the worker
+- Set FOUNDRY_PROJECT_ENDPOINT and FOUNDRY_MODEL when running the worker
 - Sign in with Azure CLI for AzureCliCredential authentication
 - Durable Task Scheduler must be running
 """
@@ -17,7 +17,7 @@ import asyncio
 import logging
 import os
 
-from agent_framework.azure import DurableAIAgentClient
+from agent_framework_durabletask import DurableAIAgentClient
 from azure.identity import AzureCliCredential
 from dotenv import load_dotenv
 from durabletask.azuremanaged.client import DurableTaskSchedulerClient
