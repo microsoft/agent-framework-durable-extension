@@ -29,6 +29,8 @@ load_dotenv(Path(__file__).parent / ".env")
 # Configure logging to reduce noise during tests
 logging.basicConfig(level=logging.WARNING)
 
+_NO_LLM_SAMPLES = {"12_subworkflow_hitl"}
+
 
 class AgentClientFactoryProtocol(Protocol):
     """Protocol for the agent client factory fixture."""
@@ -346,8 +348,7 @@ def check_sample_env(request: pytest.FixtureRequest) -> None:
 
     sample_name = cast(str, sample_marker.args[0])  # type: ignore[union-attr]
     # Samples that host no AI agents need no model credentials (only the DTS emulator).
-    no_llm_samples = {"12_subworkflow_hitl"}
-    if sample_name in no_llm_samples:
+    if sample_name in _NO_LLM_SAMPLES:
         return
     required_vars = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"]
     missing = [var for var in required_vars if not os.getenv(var)]

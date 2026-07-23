@@ -79,11 +79,12 @@ steps:
         printf 'Types: deb\nURIs: https://packages.microsoft.com/repos/azure-cli/\nSuites: %s\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/microsoft.gpg\n' \
           "$az_dist" "$arch" | sudo tee /etc/apt/sources.list.d/azure-cli.sources
 
-        sudo apt-get update
-        sudo apt-get install -y azure-cli
+        # Injected agent maintenance can hold apt locks for several minutes.
+        sudo apt-get -o DPkg::Lock::Timeout=300 update
+        sudo apt-get -o DPkg::Lock::Timeout=300 install -y azure-cli
 
         # Reclaim disk on the space-constrained OS volume.
-        sudo apt-get clean
+        sudo apt-get -o DPkg::Lock::Timeout=300 clean
         sudo rm -rf /var/lib/apt/lists/*
       fi
 
@@ -117,12 +118,13 @@ steps:
         rm -f /tmp/packages-microsoft-prod.deb
       fi
 
-      sudo apt-get update
-      sudo apt-get install -y azure-functions-core-tools-4
+      # Injected agent maintenance can hold apt locks for several minutes.
+      sudo apt-get -o DPkg::Lock::Timeout=300 update
+      sudo apt-get -o DPkg::Lock::Timeout=300 install -y azure-functions-core-tools-4
       func --version
 
       # Reclaim disk on the OS volume (/): the apt cache and package lists are no
       # longer needed after install, and the agent OS disk is space-constrained.
-      sudo apt-get clean
+      sudo apt-get -o DPkg::Lock::Timeout=300 clean
       sudo rm -rf /var/lib/apt/lists/*
     displayName: 'Install Azure Functions Core Tools'
