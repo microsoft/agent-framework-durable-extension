@@ -66,7 +66,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
     public async Task SequentialWorkflowSampleValidationAsync()
     {
         string samplePath = Path.Combine(s_samplesPath, "01_SequentialWorkflow");
-        await this.RunSampleTestAsync(samplePath, requiresOpenAI: false, async (logs) =>
+        await this.RunSampleTestAsync(samplePath, requiresFoundry: false, async (logs) =>
         {
             // Test the CancelOrder workflow
             Uri cancelOrderUri = new($"http://localhost:{AzureFunctionsPort}/api/workflows/CancelOrder/run");
@@ -172,7 +172,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
     public async Task HITLWorkflowSampleValidationAsync()
     {
         string samplePath = Path.Combine(s_samplesPath, "03_WorkflowHITL");
-        await this.RunSampleTestAsync(samplePath, requiresOpenAI: false, async (logs) =>
+        await this.RunSampleTestAsync(samplePath, requiresFoundry: false, async (logs) =>
         {
             // Use a unique run ID to avoid conflicts with previous test runs
             string runId = $"hitl-test-{Guid.NewGuid():N}";
@@ -281,7 +281,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
     public async Task WorkflowMcpToolSampleValidationAsync()
     {
         string samplePath = Path.Combine(s_samplesPath, "04_WorkflowMcpTool");
-        await this.RunSampleTestAsync(samplePath, requiresOpenAI: false, async (logs) =>
+        await this.RunSampleTestAsync(samplePath, requiresFoundry: false, async (logs) =>
         {
             // Connect to the MCP endpoint exposed by the Azure Functions host
             IClientTransport clientTransport = new HttpClientTransport(new()
@@ -337,7 +337,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
     public async Task WorkflowAndAgentsSampleValidationAsync()
     {
         string samplePath = Path.Combine(s_samplesPath, "05_WorkflowAndAgents");
-        await this.RunSampleTestAsync(samplePath, requiresOpenAI: true, async (logs) =>
+        await this.RunSampleTestAsync(samplePath, requiresFoundry: true, async (logs) =>
         {
             // Connect to the MCP endpoint exposed by the Azure Functions host
             IClientTransport clientTransport = new HttpClientTransport(new()
@@ -389,7 +389,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
     public async Task ConcurrentWorkflowSampleValidationAsync()
     {
         string samplePath = Path.Combine(s_samplesPath, "02_ConcurrentWorkflow");
-        await this.RunSampleTestAsync(samplePath, requiresOpenAI: true, async (logs) =>
+        await this.RunSampleTestAsync(samplePath, requiresFoundry: true, async (logs) =>
         {
             // Start the ExpertReview workflow with a science question
             const string RequestBody = "What is temperature?";
@@ -573,7 +573,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
 
     private sealed record OutputLog(DateTime Timestamp, LogLevel Level, string Message);
 
-    private async Task RunSampleTestAsync(string samplePath, bool requiresOpenAI, Func<IReadOnlyList<OutputLog>, Task> testAction)
+    private async Task RunSampleTestAsync(string samplePath, bool requiresFoundry, Func<IReadOnlyList<OutputLog>, Task> testAction)
     {
         string taskHubName = $"workflow-{Guid.NewGuid():N}"[..17];
 
@@ -583,7 +583,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
 
         // Start the Azure Functions app
         List<OutputLog> logsContainer = [];
-        using Process funcProcess = this.StartFunctionApp(samplePath, logsContainer, requiresOpenAI, taskHubName);
+        using Process funcProcess = this.StartFunctionApp(samplePath, logsContainer, requiresFoundry, taskHubName);
         try
         {
             await AzureFunctionsTestHelper.WaitForFunctionsReadyAsync(
@@ -596,7 +596,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
         }
     }
 
-    private Process StartFunctionApp(string samplePath, List<OutputLog> logs, bool requiresOpenAI, string taskHubName)
+    private Process StartFunctionApp(string samplePath, List<OutputLog> logs, bool requiresFoundry, string taskHubName)
     {
         ProcessStartInfo startInfo = new()
         {
@@ -608,7 +608,7 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
             RedirectStandardError = true,
         };
 
-        if (requiresOpenAI)
+        if (requiresFoundry)
         {
             string projectEndpoint = s_configuration["FOUNDRY_PROJECT_ENDPOINT"] ??
                 throw new InvalidOperationException("The required FOUNDRY_PROJECT_ENDPOINT env variable is not set.");
