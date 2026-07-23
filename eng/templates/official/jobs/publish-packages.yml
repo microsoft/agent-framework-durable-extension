@@ -41,10 +41,13 @@ jobs:
         # push task is blocked by the governed 1ES.Official template
         # (see https://aka.ms/1espt/outputs/nuget).
         #
-        # useDotNetTask runs `dotnet nuget push`, which also auto-publishes the
-        # co-located .snupkg symbol packages (IncludeSymbols + SymbolPackageFormat
-        # =snupkg in dotnet/nuget/nuget-package.props) to NuGet.org's symbol server,
-        # so no separate symbol-package push step is needed.
+        # useDotNetTask runs `dotnet nuget push`. Unlike nuget.exe, `dotnet nuget push`
+        # does NOT auto-publish a co-located .snupkg when pushing the .nupkg, so the
+        # symbol packages (IncludeSymbols + SymbolPackageFormat=snupkg in
+        # dotnet/nuget/nuget-package.props) are pushed explicitly by including the
+        # *.snupkg pattern below. The *.nupkg pattern is listed first so the primary
+        # package publishes before its symbols. nuget.org routes .snupkg to its symbol
+        # server, so this does not conflict with the primary package push.
         #
         # packageParentPath must be a sub-directory (not the Pipeline.Workspace or
         # ArtifactStagingDirectory root): 1ES injects SDL binary analysis on it.
@@ -55,7 +58,7 @@ jobs:
         # remove the already-published package before rerunning.
         - output: nuget
           useDotNetTask: true
-          packagesToPush: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet/*.nupkg'
+          packagesToPush: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet/*.nupkg;$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet/*.snupkg'
           packageParentPath: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet'
           nuGetFeedType: external
           publishFeedCredentials: ${{ parameters.nugetServiceConnection }}
