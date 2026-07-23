@@ -77,8 +77,8 @@ jobs:
 
       - name: Integration tests
         working-directory: python
-        run: uv run pytest packages/durabletask/tests/integration_tests -m integration -n logical --dist worksteal --timeout 480
+        run: uv run pytest packages/durabletask/tests/integration_tests -m integration -n 4 --dist loadscope --timeout 480
 
       - name: Azure Functions integration tests
         working-directory: python
-        run: uv run pytest packages/azurefunctions/tests/integration_tests -m integration -n logical --dist worksteal --timeout 480
+        run: uv run pytest packages/azurefunctions/tests/integration_tests -m integration -n 4 --dist loadscope --timeout 480

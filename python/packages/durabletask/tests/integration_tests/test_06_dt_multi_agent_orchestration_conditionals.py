@@ -63,7 +63,6 @@ class TestMultiAgentOrchestrationConditionals:
         assert email_agent is not None
         assert email_agent.name == EMAIL_AGENT_NAME
 
-    @pytest.mark.skip(reason="Flaky in CI: times out / crashes the xdist runner; temporarily disabled.")
     def test_conditional_branching(self):
         """Test that conditional branching works correctly."""
         # Test with obvious spam
@@ -80,7 +79,7 @@ class TestMultiAgentOrchestrationConditionals:
         # Both should complete successfully (different branches)
         spam_metadata = self.orch_helper.wait_for_orchestration(
             instance_id=spam_instance_id,
-            timeout=120.0,
+            timeout=300.0,
         )
 
         assert spam_metadata.runtime_status == OrchestrationStatus.COMPLETED

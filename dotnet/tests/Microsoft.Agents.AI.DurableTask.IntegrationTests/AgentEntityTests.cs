@@ -19,11 +19,9 @@ namespace Microsoft.Agents.AI.DurableTask.IntegrationTests;
 [Trait("Category", "Integration")]
 public sealed class AgentEntityTests(ITestOutputHelper outputHelper) : IDisposable
 {
-    private const string DisabledDueToFailingCiJob = "Disabled due to persistent CI failures. See #6732.";
-
     private static readonly TimeSpan s_defaultTimeout = Debugger.IsAttached
         ? TimeSpan.FromMinutes(5)
-        : TimeSpan.FromSeconds(30);
+        : TimeSpan.FromSeconds(120);
 
     private static readonly IConfiguration s_configuration =
         new ConfigurationBuilder()
@@ -38,7 +36,7 @@ public sealed class AgentEntityTests(ITestOutputHelper outputHelper) : IDisposab
 
     public void Dispose() => this._cts.Dispose();
 
-    [Fact(Skip = DisabledDueToFailingCiJob)]
+    [Fact]
     public async Task EntityNamePrefixAsync()
     {
         // Setup
@@ -82,7 +80,7 @@ public sealed class AgentEntityTests(ITestOutputHelper outputHelper) : IDisposab
         Assert.Null(request.OrchestrationId);
     }
 
-    [Theory(Skip = DisabledDueToFailingCiJob)]
+    [Theory]
     [InlineData("run")]
     [InlineData("Run")]
     [InlineData("RunAgentAsync")]
@@ -140,7 +138,7 @@ public sealed class AgentEntityTests(ITestOutputHelper outputHelper) : IDisposab
         Assert.Null(request.OrchestrationId);
     }
 
-    [Fact(Skip = DisabledDueToFailingCiJob)]
+    [Fact]
     public async Task OrchestrationIdSetDuringOrchestrationAsync()
     {
         // Arrange

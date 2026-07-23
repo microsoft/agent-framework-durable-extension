@@ -98,7 +98,7 @@ The following prerequisites are required to run the samples:
 
 - [Python 3.9 or later](https://www.python.org/downloads/)
 - [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) installed and authenticated (`az login`)
-- [Azure OpenAI Service](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource) with a deployed model (gpt-4o-mini or better is recommended)
+- [Microsoft Foundry project](https://learn.microsoft.com/azure/foundry/how-to/create-projects) with a deployed model, configured through `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL` (gpt-4o-mini or better is recommended)
 - [Durable Task Scheduler](https://learn.microsoft.com/azure/azure-functions/durable/durable-task-scheduler/develop-with-durable-task-scheduler) (local emulator or Azure-hosted)
 - [Docker](https://docs.docker.com/get-docker/) installed if running the Durable Task Scheduler emulator locally
 
@@ -202,4 +202,3 @@ python sample.py
 The sample output is displayed directly in the terminal where you ran the Python script. Agent responses are printed to stdout with log formatting for better readability.
 
 You can also see the state of agents and orchestrations in the Durable Task Scheduler dashboard at `http://localhost:8082`.
-

@@ -31,6 +31,7 @@ _DEFAULT_HOST = "localhost"
 # Emulator ports (match CI workflow configuration)
 _AZURITE_BLOB_PORT = 10000
 _DTS_EMULATOR_PORT = 8080
+_NO_LLM_SAMPLES = {"13_subworkflow_hitl"}
 
 
 # =============================================================================
@@ -111,24 +112,7 @@ def _should_skip_azure_functions_integration_tests() -> tuple[bool, str]:
             f"Durable Task Scheduler emulator not running on port {_DTS_EMULATOR_PORT}. Start with: docker run -d -p 8080:8080 -p 8082:8082 mcr.microsoft.com/dts/dts-emulator:latest",  # noqa: E501
         )
 
-    has_foundry_config = bool(os.getenv("FOUNDRY_PROJECT_ENDPOINT", "").strip()) and bool(
-        os.getenv("FOUNDRY_MODEL", "").strip()
-    )
-    if not has_foundry_config:
-        return (
-            True,
-            "No real FOUNDRY_* configuration provided; skipping integration tests.",
-        )
-
     return False, "Integration tests enabled."
-
-
-_SKIP_AZURE_FUNCTIONS_INTEGRATION_TESTS, _AZURE_FUNCTIONS_SKIP_REASON = _should_skip_azure_functions_integration_tests()
-
-skip_if_azure_functions_integration_tests_disabled = pytest.mark.skipif(
-    _SKIP_AZURE_FUNCTIONS_INTEGRATION_TESTS,
-    reason=_AZURE_FUNCTIONS_SKIP_REASON,
-)
 
 
 # =============================================================================
@@ -335,12 +319,8 @@ def _load_and_validate_env(sample_path: Path) -> None:
         "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
         "FUNCTIONS_WORKER_RUNTIME",
     ]
-    # Samples that host no AI agents need no model credentials (only the DTS emulator
-    # and Azurite). The suite-level gate still requires *some* LLM config to be present.
-    no_llm_samples = {"13_subworkflow_hitl"}
-    if sample_path.name in no_llm_samples:
-        pass
-    else:
+    # Samples that host no AI agents need no model credentials.
+    if sample_path.name not in _NO_LLM_SAMPLES:
         required_env_vars.extend(["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"])
 
     # Check if required env vars are set
@@ -478,13 +458,24 @@ def pytest_configure(config: pytest.Config) -> None:
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Skip integration tests in this directory if prerequisites are not met."""
-    should_skip, reason = _should_skip_azure_functions_integration_tests()
-    if should_skip:
-        skip_marker = pytest.mark.skip(reason=reason)
-        for item in items:
-            # Only skip items that are in this integration_tests directory
-            if "integration_tests" in str(item.fspath):
-                item.add_marker(skip_marker)
+    should_skip_infrastructure, infrastructure_reason = _should_skip_azure_functions_integration_tests()
+    skip_infrastructure = pytest.mark.skip(reason=infrastructure_reason)
+
+    foundry_vars = ["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"]
+    foundry_available = all(os.getenv(var, "").strip() for var in foundry_vars)
+    skip_foundry = pytest.mark.skip(reason=f"Missing required environment variables: {', '.join(foundry_vars)}")
+
+    for item in items:
+        if "integration_tests" not in str(item.fspath):
+            continue
+        if should_skip_infrastructure:
+            item.add_marker(skip_infrastructure)
+            continue
+
+        sample_marker = item.get_closest_marker("sample")
+        sample_name = sample_marker.args[0] if sample_marker and sample_marker.args else None
+        if sample_name not in _NO_LLM_SAMPLES and not foundry_available:
+            item.add_marker(skip_foundry)
 
 
 # =============================================================================
