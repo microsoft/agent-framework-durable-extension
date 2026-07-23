@@ -75,12 +75,15 @@ jobs:
     displayName: 'Publish Python package'
     # NOTE: This job publishes to PyPI directly via `twine upload`. That works for a
     # standard-network agent, but the governed 1ES pool cannot reach upload.pypi.org,
-    # so a real release from that pool will require the sanctioned partner-drops path
-    # instead (stage the wheel/sdist to the azure-sdk-partner-drops blob, then trigger
-    # the Azure SDK partner-release pipeline that publishes to PyPI). 1ES has no native
-    # PyPI output construct. This is left as direct twine for now because publishing is
-    # disabled by default (publishPython=false) and the dry run never runs this job;
-    # revisit before enabling a real Python release.
+    # and direct twine upload is not the sanctioned Microsoft release path. The
+    # recommended approach (used by the sibling microsoft/durabletask-python project)
+    # is the ESRP Release task (EsrpRelease@9 with contenttype: PyPi) inside a
+    # templateContext releaseJob gated by an ADO environment, reusing the Durable Task
+    # team's ESRP service connection / key vault / signing cert. ESRP can also publish
+    # NuGet (contenttype: NuGet), so both package types could eventually be unified
+    # under it. This is left as direct twine for now because publishing is disabled by
+    # default (publishPython=false) and the dry run never runs this job; replace with
+    # the ESRP releaseJob before enabling a real Python release.
     steps:
       - checkout: none
 
