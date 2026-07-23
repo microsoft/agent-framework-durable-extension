@@ -75,6 +75,54 @@ jobs:
         workingDirectory: dotnet
         displayName: 'Pack .NET packages'
 
+      # Validate the packed .NET packages without pushing to a registry. This catches
+      # packaging regressions early in a dry run: a missing co-located symbol package
+      # (.snupkg), a missing/empty .nuspec, or a missing id/version. The symbol-package
+      # check specifically guards the IncludeSymbols/snupkg setup in nuget-package.props.
+      - pwsh: |
+          $dotnetDir = "$(Build.ArtifactStagingDirectory)/packages/dotnet"
+          $nupkgs = @(Get-ChildItem -File -Path $dotnetDir -Filter *.nupkg)
+          if ($nupkgs.Count -eq 0) {
+            throw "No .nupkg packages were produced in $dotnetDir."
+          }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $failed = $false
+          foreach ($pkg in $nupkgs) {
+            $snupkg = [System.IO.Path]::ChangeExtension($pkg.FullName, ".snupkg")
+            if (-not (Test-Path $snupkg)) {
+              Write-Host "##[error]Missing symbol package for $($pkg.Name) (expected $([System.IO.Path]::GetFileName($snupkg)))."
+              $failed = $true
+            }
+
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($pkg.FullName)
+            try {
+              $entry = $zip.Entries | Where-Object { $_.FullName.EndsWith(".nuspec") } | Select-Object -First 1
+              if ($null -eq $entry) {
+                Write-Host "##[error]$($pkg.Name) does not contain a .nuspec."
+                $failed = $true
+              } else {
+                $reader = New-Object System.IO.StreamReader($entry.Open())
+                try { [xml]$nuspec = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                $id = $nuspec.package.metadata.id
+                $version = $nuspec.package.metadata.version
+                if ([string]::IsNullOrWhiteSpace($id) -or [string]::IsNullOrWhiteSpace($version)) {
+                  Write-Host "##[error]$($pkg.Name) is missing id or version in its .nuspec."
+                  $failed = $true
+                } else {
+                  Write-Host "Validated $id $version ($($pkg.Name))"
+                }
+              }
+            } finally {
+              $zip.Dispose()
+            }
+          }
+
+          if ($failed) {
+            throw "One or more .NET packages failed validation."
+          }
+        displayName: 'Validate .NET packages'
+
       - pwsh: uv sync --all-packages --group dev --group test
         workingDirectory: python
         displayName: 'Sync Python workspace'
@@ -113,6 +161,21 @@ jobs:
           # uv build resolves the build backend (flit-core) in an isolated environment.
           # The governed pool blocks PyPI, so point uv at the authenticated internal feed.
           UV_INDEX_URL: $(PIP_INDEX_URL)
+
+      # Validate the built Python distributions without uploading. `twine check`
+      # verifies the package metadata (including that the long description renders on
+      # PyPI), catching issues that would otherwise only surface at publish time.
+      # twine is installed from the internal feed (pip is authenticated above).
+      - pwsh: |
+          python -m pip install twine
+          $pythonDir = "$(Build.ArtifactStagingDirectory)/packages/python"
+          $dists = @(Get-ChildItem -File -Path $pythonDir |
+            Where-Object { $_.Name.EndsWith(".whl") -or $_.Name.EndsWith(".tar.gz") })
+          if ($dists.Count -eq 0) {
+            throw "No Python distributions were produced in $pythonDir."
+          }
+          python -m twine check @($dists.FullName)
+        displayName: 'Validate Python package (twine check)'
 
       - pwsh: Get-ChildItem -Recurse "$(Build.ArtifactStagingDirectory)/packages" | Select-Object -ExpandProperty FullName
         displayName: 'List package artifacts'
