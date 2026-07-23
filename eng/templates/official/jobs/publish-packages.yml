@@ -34,42 +34,50 @@ jobs:
     dependsOn: ValidateRelease
     condition: and(succeeded(), ${{ eq(parameters.publishDotNet, true) }})
     displayName: 'Publish .NET packages'
+    templateContext:
+      outputs:
+        # 1ES requires NuGet packages to be published through its `output: nuget`
+        # construct (or the 1ES.PublishNuget@1 inline task). The raw NuGetCommand@2
+        # push task is blocked by the governed 1ES.Official template
+        # (see https://aka.ms/1espt/outputs/nuget).
+        #
+        # useDotNetTask runs `dotnet nuget push`, which also auto-publishes the
+        # co-located .snupkg symbol packages (IncludeSymbols + SymbolPackageFormat
+        # =snupkg in dotnet/nuget/nuget-package.props) to NuGet.org's symbol server,
+        # so no separate symbol-package push step is needed.
+        #
+        # packageParentPath must be a sub-directory (not the Pipeline.Workspace or
+        # ArtifactStagingDirectory root): 1ES injects SDL binary analysis on it.
+        #
+        # Note on reruns: pushing an already-published version fails with HTTP 409.
+        # Releases bump the version each time and publishing is gated behind the
+        # manual validation above, so on a partial failure, bump the version or
+        # remove the already-published package before rerunning.
+        - output: nuget
+          useDotNetTask: true
+          packagesToPush: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet/*.nupkg'
+          packageParentPath: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet'
+          nuGetFeedType: external
+          publishFeedCredentials: ${{ parameters.nugetServiceConnection }}
+          publishPackageMetadata: true
     steps:
       - checkout: none
 
       - download: current
         artifact: ${{ parameters.artifactName }}
 
-      # Note on reruns: NuGetCommand@2's skip-duplicate (allowPackageConflicts) only
-      # applies to Azure Artifacts feeds, not external registries like NuGet.org, so it
-      # is not set here. A rerun that re-pushes an already-published version will fail
-      # with HTTP 409. Releases bump the package version each time, and publishing is
-      # gated behind the manual validation above, so this is expected: on a partial
-      # failure, bump the version or remove the already-published package before rerunning.
-      - task: NuGetCommand@2
-        displayName: 'Push .NET packages to NuGet.org'
-        inputs:
-          command: push
-          packagesToPush: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet/*.nupkg'
-          nuGetFeedType: external
-          publishFeedCredentials: ${{ parameters.nugetServiceConnection }}
-
-      # NuGetCommand@2 does not auto-push co-located symbol packages, so publish the
-      # .snupkg files explicitly. The repo produces symbol packages (IncludeSymbols +
-      # SymbolPackageFormat=snupkg in dotnet/nuget/nuget-package.props); without this
-      # step, symbols would silently stop reaching NuGet.org's symbol server.
-      - task: NuGetCommand@2
-        displayName: 'Push .NET symbol packages to NuGet.org'
-        inputs:
-          command: push
-          packagesToPush: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet/*.snupkg'
-          nuGetFeedType: external
-          publishFeedCredentials: ${{ parameters.nugetServiceConnection }}
-
   - job: PublishPython
     dependsOn: ValidateRelease
     condition: and(succeeded(), ${{ eq(parameters.publishPython, true) }})
     displayName: 'Publish Python package'
+    # NOTE: This job publishes to PyPI directly via `twine upload`. That works for a
+    # standard-network agent, but the governed 1ES pool cannot reach upload.pypi.org,
+    # so a real release from that pool will require the sanctioned partner-drops path
+    # instead (stage the wheel/sdist to the azure-sdk-partner-drops blob, then trigger
+    # the Azure SDK partner-release pipeline that publishes to PyPI). 1ES has no native
+    # PyPI output construct. This is left as direct twine for now because publishing is
+    # disabled by default (publishPython=false) and the dry run never runs this job;
+    # revisit before enabling a real Python release.
     steps:
       - checkout: none
 
