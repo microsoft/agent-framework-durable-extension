@@ -109,8 +109,11 @@ jobs:
                 # (nuspec.xsd), and namespace-qualified element access is fragile.
                 $idNode = $nuspec.SelectSingleNode("/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='id']")
                 $versionNode = $nuspec.SelectSingleNode("/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='version']")
-                $id = $idNode.InnerText
-                $version = $versionNode.InnerText
+                # SelectSingleNode returns $null when the element is absent; guard so a
+                # missing id/version is reported cleanly instead of throwing (which would
+                # also occur under Set-StrictMode).
+                $id = if ($null -ne $idNode) { $idNode.InnerText } else { $null }
+                $version = if ($null -ne $versionNode) { $versionNode.InnerText } else { $null }
                 if ([string]::IsNullOrWhiteSpace($id) -or [string]::IsNullOrWhiteSpace($version)) {
                   Write-Host "##[error]$($pkg.Name) is missing id or version in its .nuspec."
                   $failed = $true
