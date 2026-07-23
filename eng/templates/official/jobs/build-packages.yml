@@ -103,22 +103,35 @@ jobs:
                 $failed = $true
               } else {
                 $reader = New-Object System.IO.StreamReader($entry.Open())
-                try { [xml]$nuspec = $reader.ReadToEnd() } finally { $reader.Dispose() }
-                # Extract id/version via XPath with local-name() so the lookup is
-                # namespace-agnostic: the generated .nuspec declares a default xmlns
-                # (nuspec.xsd), and namespace-qualified element access is fragile.
-                $idNode = $nuspec.SelectSingleNode("/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='id']")
-                $versionNode = $nuspec.SelectSingleNode("/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='version']")
-                # SelectSingleNode returns $null when the element is absent; guard so a
-                # missing id/version is reported cleanly instead of throwing (which would
-                # also occur under Set-StrictMode).
-                $id = if ($null -ne $idNode) { $idNode.InnerText } else { $null }
-                $version = if ($null -ne $versionNode) { $versionNode.InnerText } else { $null }
-                if ([string]::IsNullOrWhiteSpace($id) -or [string]::IsNullOrWhiteSpace($version)) {
-                  Write-Host "##[error]$($pkg.Name) is missing id or version in its .nuspec."
+                try { $nuspecXml = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                # Parse defensively: an empty or malformed .nuspec would make the [xml]
+                # cast throw and abort the whole loop, skipping remaining packages and
+                # the aggregated summary below. Treat a parse failure as this package's
+                # validation failure and continue.
+                $nuspec = $null
+                try {
+                  $nuspec = [xml]$nuspecXml
+                } catch {
+                  Write-Host "##[error]$($pkg.Name) has an invalid or empty .nuspec: $($_.Exception.Message)"
                   $failed = $true
-                } else {
-                  Write-Host "Validated $id $version ($($pkg.Name))"
+                }
+                if ($null -ne $nuspec) {
+                  # Extract id/version via XPath with local-name() so the lookup is
+                  # namespace-agnostic: the generated .nuspec declares a default xmlns
+                  # (nuspec.xsd), and namespace-qualified element access is fragile.
+                  $idNode = $nuspec.SelectSingleNode("/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='id']")
+                  $versionNode = $nuspec.SelectSingleNode("/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='version']")
+                  # SelectSingleNode returns $null when the element is absent; guard so a
+                  # missing id/version is reported cleanly instead of throwing (which would
+                  # also occur under Set-StrictMode).
+                  $id = if ($null -ne $idNode) { $idNode.InnerText } else { $null }
+                  $version = if ($null -ne $versionNode) { $versionNode.InnerText } else { $null }
+                  if ([string]::IsNullOrWhiteSpace($id) -or [string]::IsNullOrWhiteSpace($version)) {
+                    Write-Host "##[error]$($pkg.Name) is missing id or version in its .nuspec."
+                    $failed = $true
+                  } else {
+                    Write-Host "Validated $id $version ($($pkg.Name))"
+                  }
                 }
               }
             } finally {
@@ -173,9 +186,10 @@ jobs:
       # Validate the built Python distributions without uploading. `twine check`
       # verifies the package metadata (including that the long description renders on
       # PyPI), catching issues that would otherwise only surface at publish time.
-      # twine is installed from the internal feed (pip is authenticated above).
+      # twine is installed from the internal feed (pip is authenticated above) and
+      # pinned for reproducible CI, consistent with the pinned uv version.
       - pwsh: |
-          python -m pip install twine
+          python -m pip install twine==6.1.0
           $pythonDir = "$(Build.ArtifactStagingDirectory)/packages/python"
           $dists = @(Get-ChildItem -File -Path $pythonDir |
             Where-Object { $_.Name.EndsWith(".whl") -or $_.Name.EndsWith(".tar.gz") })
