@@ -889,13 +889,11 @@ def _prepare_all_tasks(
 
     for executor_id, messages_with_sources in pending_messages.items():
         executor = workflow.executors[executor_id]
-        is_agent = isinstance(executor, AgentExecutor)
-        is_subworkflow = isinstance(executor, WorkflowExecutor)
 
         for message, source_executor_id in messages_with_sources:
-            if is_agent:
+            if isinstance(executor, AgentExecutor):
                 agent_messages_by_executor[executor_id].append((executor_id, message, source_executor_id))
-            elif is_subworkflow:
+            elif isinstance(executor, WorkflowExecutor):
                 # Derive a deterministic, globally-unique child instance id. The counter
                 # persists across supersteps, so two invocations of the same node (in the
                 # same or different supersteps, e.g. fan-out) never collide, and the ids
