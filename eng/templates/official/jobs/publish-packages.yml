@@ -111,11 +111,16 @@ jobs:
       type: releaseJob
       isProduction: true
       environment: ${{ parameters.pypiEnvironment }}
+      # 1ES release jobs disallow the raw `- download` step; declare the build
+      # artifact as a pipelineArtifact input instead (see https://aka.ms/1espt/inputs).
+      # No `pipeline:` resource is needed for a current-run artifact — it downloads the
+      # artifact produced by the BuildPackages stage of this same run to targetPath.
+      inputs:
+        - input: pipelineArtifact
+          artifactName: ${{ parameters.artifactName }}
+          targetPath: '$(Pipeline.Workspace)/${{ parameters.artifactName }}'
     steps:
       - checkout: none
-
-      - download: current
-        artifact: ${{ parameters.artifactName }}
 
       - task: EsrpRelease@9
         displayName: 'ESRP release Python package to PyPI'
@@ -128,7 +133,7 @@ jobs:
           intent: 'PackageDistribution'
           contenttype: 'PyPi'
           # Point ESRP at the folder holding the built wheel/sdist that the
-          # BuildPackages stage produced and this job downloaded.
+          # BuildPackages stage produced and the pipelineArtifact input downloaded.
           contentsource: 'Folder'
           folderlocation: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/python'
           waitforreleasecompletion: true
