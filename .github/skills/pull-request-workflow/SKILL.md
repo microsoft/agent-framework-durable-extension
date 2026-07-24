@@ -63,15 +63,14 @@ use REST:
 gh api -X POST repos/<owner>/<repo>/pulls/<n>/requested_reviewers -f 'reviewers[]=Copilot'
 ```
 
-Reviews land in roughly 1–5 minutes. Poll for them:
+Reviews land in roughly 1–5 minutes. Poll for them, filtering by author — both so
+you can tell a fresh round from your own replies, and because the guidance below
+applies only to Copilot:
 
 ```powershell
 gh api repos/<owner>/<repo>/pulls/<n>/reviews --jq '[.[]|select(.user.login=="Copilot")]|length'
-gh api "repos/<owner>/<repo>/pulls/<n>/comments?per_page=100" --jq '.[]|"\(.id) \(.path):\(.line)\n\(.body)\n---"'
+gh api "repos/<owner>/<repo>/pulls/<n>/comments?per_page=100" --jq '.[]|select(.user.login=="Copilot")|"\(.id) \(.path):\(.line)\n\(.body)\n---"'
 ```
-
-Your own replies count as reviews, so filter by author rather than counting
-reviews when deciding whether a new round has arrived.
 
 Evaluate each comment on its merits — some are genuinely wrong or not worth the
 churn, and saying so with a reason is a fine outcome. Fix the ones that are
@@ -86,7 +85,28 @@ The reply route needs the PR number; `pulls/comments/<id>/replies` returns 404.
 If pushing fixes does not automatically re-trigger review, request Copilot again,
 and keep looping until a round comes back with no new comments.
 
+A clean round is not on its own a signal to stop. Every fix commit triggers
+another review, so a "no new comments" result can still be followed by a round
+that finds something. Confirm no further review arrives after your last push
+before calling it done.
+
 Update the PR description to reflect any changes in intent or compatibility as you go.
+
+### Human review comments are different — do not auto-respond
+
+Everything above applies to Copilot only. When a **human** leaves review
+comments, do not reply on the user's behalf and do not push fixes for them
+unless the user asks you to.
+
+Two reasons this matters. Human reviewers encode context the diff doesn't carry
+— team priorities, the history behind a design, work already planned elsewhere —
+so the right response often isn't derivable from the code alone. And a reply
+posted through the user's account reads as the user speaking; committing them to
+a position they haven't seen is worse than a slow reply.
+
+Instead, summarize what the reviewer said, note which points look straightforward
+versus which need the user's judgment, and let them decide. If they hand you
+specific comments, act on those and leave the rest alone.
 
 ## 4. Monitor CI
 
