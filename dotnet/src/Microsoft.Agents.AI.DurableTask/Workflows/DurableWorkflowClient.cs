@@ -13,16 +13,20 @@ namespace Microsoft.Agents.AI.DurableTask.Workflows;
 internal sealed class DurableWorkflowClient : IWorkflowClient
 {
     private readonly DurableTaskClient _client;
+    private readonly DurableOptions _options;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="DurableWorkflowClient"/> class.
     /// </summary>
     /// <param name="client">The durable task client for orchestration operations.</param>
-    /// <exception cref="ArgumentNullException">Thrown when <paramref name="client"/> is null.</exception>
-    public DurableWorkflowClient(DurableTaskClient client)
+    /// <param name="options">The durable options containing the registered workflows.</param>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="client"/> or <paramref name="options"/> is null.</exception>
+    public DurableWorkflowClient(DurableTaskClient client, DurableOptions options)
     {
         ArgumentNullException.ThrowIfNull(client);
+        ArgumentNullException.ThrowIfNull(options);
         this._client = client;
+        this._options = options;
     }
 
     /// <inheritdoc/>
@@ -60,6 +64,23 @@ internal sealed class DurableWorkflowClient : IWorkflowClient
         => this.RunAsync<string>(workflow, input, runId, cancellationToken);
 
     /// <inheritdoc/>
+    public ValueTask<IWorkflowRun> RunAsync<TInput>(
+        string workflowName,
+        TInput input,
+        string? runId = null,
+        CancellationToken cancellationToken = default)
+        where TInput : notnull
+        => this.RunAsync(this.ResolveWorkflow(workflowName), input, runId, cancellationToken);
+
+    /// <inheritdoc/>
+    public ValueTask<IWorkflowRun> RunAsync(
+        string workflowName,
+        string input,
+        string? runId = null,
+        CancellationToken cancellationToken = default)
+        => this.RunAsync<string>(workflowName, input, runId, cancellationToken);
+
+    /// <inheritdoc/>
     public async ValueTask<IStreamingWorkflowRun> StreamAsync<TInput>(
         Workflow workflow,
         TInput input,
@@ -92,4 +113,40 @@ internal sealed class DurableWorkflowClient : IWorkflowClient
         string? runId = null,
         CancellationToken cancellationToken = default)
         => this.StreamAsync<string>(workflow, input, runId, cancellationToken);
+
+    /// <inheritdoc/>
+    public ValueTask<IStreamingWorkflowRun> StreamAsync<TInput>(
+        string workflowName,
+        TInput input,
+        string? runId = null,
+        CancellationToken cancellationToken = default)
+        where TInput : notnull
+        => this.StreamAsync(this.ResolveWorkflow(workflowName), input, runId, cancellationToken);
+
+    /// <inheritdoc/>
+    public ValueTask<IStreamingWorkflowRun> StreamAsync(
+        string workflowName,
+        string input,
+        string? runId = null,
+        CancellationToken cancellationToken = default)
+        => this.StreamAsync<string>(workflowName, input, runId, cancellationToken);
+
+    /// <summary>
+    /// Resolves a registered workflow by name.
+    /// </summary>
+    /// <param name="workflowName">The name of the workflow to resolve.</param>
+    /// <returns>The registered <see cref="Workflow"/>.</returns>
+    /// <exception cref="ArgumentException">Thrown when <paramref name="workflowName"/> is null or empty.</exception>
+    /// <exception cref="WorkflowNotRegisteredException">Thrown when no workflow with the specified name has been registered.</exception>
+    private Workflow ResolveWorkflow(string workflowName)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(workflowName);
+
+        if (!this._options.Workflows.Workflows.TryGetValue(workflowName, out Workflow? workflow))
+        {
+            throw new WorkflowNotRegisteredException(workflowName);
+        }
+
+        return workflow;
+    }
 }

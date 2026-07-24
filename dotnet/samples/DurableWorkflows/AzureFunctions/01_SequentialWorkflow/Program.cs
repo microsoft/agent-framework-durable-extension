@@ -5,6 +5,8 @@
 // The OrderStatus workflow looks up an order and generates a status report.
 // The BatchCancelOrders workflow accepts a complex JSON input to cancel multiple orders.
 // Both CancelOrder and OrderStatus reuse the same OrderLookup executor, demonstrating executor sharing.
+// OrderFunctions.cs additionally shows how to start a registered workflow from your own function
+// code using DurableTaskClient.AsWorkflowClient, without creating an HttpClient.
 
 using Microsoft.Agents.AI.Hosting.AzureFunctions;
 using Microsoft.Agents.AI.Workflows;
