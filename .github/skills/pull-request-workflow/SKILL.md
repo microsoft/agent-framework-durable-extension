@@ -138,5 +138,15 @@ don't check locally. Verify before pushing:
 dotnet format <project.csproj> --verify-no-changes
 ```
 
-This repo's .NET tests run on Microsoft.Testing.Platform, so use
-`dotnet run --project <test.csproj> -f net10.0` — `dotnet test` errors out.
+This repo's .NET tests run on Microsoft.Testing.Platform (set in `global.json`),
+which is what CI uses via `dotnet test`. Pass the target framework explicitly:
+
+```powershell
+dotnet test <test.csproj> -f net10.0
+```
+
+If you pass a framework the project doesn't target, the failure is reported as
+`global.json defines test runner to be Microsoft.Testing.Platform. All projects
+are using VSTest test runner` — which points at the runner rather than the real
+problem. Check the project's `TargetFrameworks` before assuming the runner is
+misconfigured.
