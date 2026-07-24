@@ -11,9 +11,38 @@ parameters:
   - name: nugetServiceConnection
     type: string
     default: 'agent-framework-durable-extension-nuget-org'
-  - name: pypiServiceConnection
+  # ESRP is the sanctioned Microsoft release path for PyPI (there is no 1ES PyPI
+  # output and the governed pool cannot reach pypi.org). These defaults reuse the
+  # Durable Task team's existing ESRP registration, matching the sibling
+  # microsoft/durabletask-python pipeline. Credentials are never in the repo: ESRP
+  # authenticates via a managed identity and a Key Vault signing certificate.
+  - name: esrpServiceConnection
     type: string
-    default: 'agent-framework-durable-extension-pypi'
+    default: 'dtfx-internal-esrp-prod'
+  - name: esrpKeyVaultName
+    type: string
+    default: 'durable-esrp-akv'
+  - name: esrpSignCertName
+    type: string
+    default: 'dts-esrp-cert'
+  - name: esrpClientId
+    type: string
+    default: '0b3ed1a4-0727-4a50-b82a-02c2bd9dec89'
+  - name: esrpDomainTenantId
+    type: string
+    default: '33e01921-4d64-4f8c-a055-5bdaffd5e33d'
+  # ESRP release label. It is NOT bound to the target registry: durabletask-python
+  # publishes Python packages with a "durabletask-java" value against this same ESRP
+  # registration, confirming it is a free-form label. Set to this project's name.
+  - name: esrpMainPublisher
+    type: string
+    default: 'agent-framework-durable-extension'
+  # ADO environment used to satisfy the 1ES release-job requirement. Defaults to the
+  # Durable Task team's existing PyPI production environment so it resolves without
+  # provisioning a new one; switch to a dedicated environment later if desired.
+  - name: pypiEnvironment
+    type: string
+    default: 'durabletask-pypi-prod'
 
 jobs:
   - job: ValidateRelease
@@ -30,88 +59,90 @@ jobs:
             Confirm package versions are correct and have not already been published.
             Resume only when ready to publish selected package types.
 
-  - job: PublishDotNet
-    dependsOn: ValidateRelease
-    condition: and(succeeded(), ${{ eq(parameters.publishDotNet, true) }})
-    displayName: 'Publish .NET packages'
-    steps:
-      - checkout: none
+  - ${{ if eq(parameters.publishDotNet, true) }}:
+    - job: PublishDotNet
+      dependsOn: ValidateRelease
+      condition: succeeded()
+      displayName: 'Publish .NET packages'
+      templateContext:
+        outputs:
+          # 1ES requires NuGet packages to be published through its `output: nuget`
+          # construct (or the 1ES.PublishNuget@1 inline task). The raw NuGetCommand@2
+          # push task is blocked by the governed 1ES.Official template
+          # (see https://aka.ms/1espt/outputs/nuget).
+          #
+          # useDotNetTask runs `dotnet nuget push`. Unlike nuget.exe, `dotnet nuget push`
+          # does NOT auto-publish a co-located .snupkg when pushing the .nupkg, so the
+          # symbol packages (IncludeSymbols + SymbolPackageFormat=snupkg in
+          # dotnet/nuget/nuget-package.props) are pushed explicitly by including the
+          # *.snupkg pattern below. The *.nupkg pattern is listed first so the primary
+          # package publishes before its symbols. nuget.org routes .snupkg to its symbol
+          # server, so this does not conflict with the primary package push.
+          #
+          # packageParentPath must be a sub-directory (not the Pipeline.Workspace or
+          # ArtifactStagingDirectory root): 1ES injects SDL binary analysis on it.
+          #
+          # Note on reruns: pushing an already-published version fails with HTTP 409.
+          # Releases bump the version each time and publishing is gated behind the
+          # manual validation above, so on a partial failure, bump the version or
+          # remove the already-published package before rerunning.
+          - output: nuget
+            useDotNetTask: true
+            packagesToPush: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet/*.nupkg;$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet/*.snupkg'
+            packageParentPath: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet'
+            nuGetFeedType: external
+            publishFeedCredentials: ${{ parameters.nugetServiceConnection }}
+            publishPackageMetadata: true
+      steps:
+        - checkout: none
 
-      - download: current
-        artifact: ${{ parameters.artifactName }}
+        - download: current
+          artifact: ${{ parameters.artifactName }}
 
-      # Note on reruns: NuGetCommand@2's skip-duplicate (allowPackageConflicts) only
-      # applies to Azure Artifacts feeds, not external registries like NuGet.org, so it
-      # is not set here. A rerun that re-pushes an already-published version will fail
-      # with HTTP 409. Releases bump the package version each time, and publishing is
-      # gated behind the manual validation above, so this is expected: on a partial
-      # failure, bump the version or remove the already-published package before rerunning.
-      - task: NuGetCommand@2
-        displayName: 'Push .NET packages to NuGet.org'
+  - ${{ if eq(parameters.publishPython, true) }}:
+    - job: PublishPython
+      dependsOn: ValidateRelease
+      condition: succeeded()
+      displayName: 'Publish Python package'
+      # Publishes to PyPI through ESRP, the sanctioned Microsoft release path (used by
+      # the sibling microsoft/durabletask-python project), reusing the Durable Task
+      # team's ESRP registration. ESRP authenticates with a managed identity + Key Vault
+      # signing certificate, so no PyPI credentials live in this repo. 1ES requires
+      # production release work to run in a releaseJob bound to an environment.
+      templateContext:
+        type: releaseJob
+        isProduction: true
+        environment: ${{ parameters.pypiEnvironment }}
+        # 1ES release jobs disallow the raw `- download` step; declare the build
+        # artifact as a pipelineArtifact input instead (see https://aka.ms/1espt/inputs).
+        # No `pipeline:` resource is needed for a current-run artifact — it downloads the
+        # artifact produced by the BuildPackages stage of this same run to targetPath.
         inputs:
-          command: push
-          packagesToPush: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet/*.nupkg'
-          nuGetFeedType: external
-          publishFeedCredentials: ${{ parameters.nugetServiceConnection }}
+          - input: pipelineArtifact
+            artifactName: ${{ parameters.artifactName }}
+            targetPath: '$(Pipeline.Workspace)/${{ parameters.artifactName }}'
+      steps:
+        - checkout: none
 
-      # NuGetCommand@2 does not auto-push co-located symbol packages, so publish the
-      # .snupkg files explicitly. The repo produces symbol packages (IncludeSymbols +
-      # SymbolPackageFormat=snupkg in dotnet/nuget/nuget-package.props); without this
-      # step, symbols would silently stop reaching NuGet.org's symbol server.
-      - task: NuGetCommand@2
-        displayName: 'Push .NET symbol packages to NuGet.org'
-        inputs:
-          command: push
-          packagesToPush: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dotnet/*.snupkg'
-          nuGetFeedType: external
-          publishFeedCredentials: ${{ parameters.nugetServiceConnection }}
-
-  - job: PublishPython
-    dependsOn: ValidateRelease
-    condition: and(succeeded(), ${{ eq(parameters.publishPython, true) }})
-    displayName: 'Publish Python package'
-    steps:
-      - checkout: none
-
-      - download: current
-        artifact: ${{ parameters.artifactName }}
-
-      - task: UsePythonVersion@0
-        displayName: 'Use Python 3.13'
-        inputs:
-          versionSpec: '3.13'
-
-      # Authenticate to the internal feed before installing twine. The governed pool
-      # cannot reach PyPI directly, so pip must install twine from the authenticated
-      # feed (via the PIP_INDEX_URL this task sets).
-      - task: PipAuthenticate@1
-        displayName: 'Authenticate to Azure Artifacts feed'
-        inputs:
-          artifactFeeds: 'internal/upstream'
-
-      - pwsh: python -m pip install --upgrade pip twine
-        displayName: 'Install Twine'
-
-      - task: TwineAuthenticate@1
-        displayName: 'Authenticate to PyPI'
-        inputs:
-          pythonUploadServiceConnection: ${{ parameters.pypiServiceConnection }}
-
-      # TwineAuthenticate writes a .pypirc whose repository section is named after the
-      # service connection, so `--repository` must be that same service connection name
-      # (this matches the documented pattern for external PyPI upload connections).
-      - pwsh: |
-          # Force array context with @(...) so .Count is reliable even when
-          # Get-ChildItem returns nothing ($null) or a single item.
-          $packages = @(Get-ChildItem -File "$(Pipeline.Workspace)/${{ parameters.artifactName }}/python" |
-            Where-Object { $_.Name.EndsWith(".whl") -or $_.Name.EndsWith(".tar.gz") })
-          if ($packages.Count -eq 0) {
-            throw "No Python packages were found."
-          }
-
-          python -m twine upload `
-            --non-interactive `
-            --repository "${{ parameters.pypiServiceConnection }}" `
-            --config-file "$(PYPIRC_PATH)" `
-            @($packages.FullName)
-        displayName: 'Upload Python package to PyPI'
+        - task: SFP.release-tasks.custom-build-release-task.EsrpRelease@9
+          displayName: 'ESRP release Python package to PyPI'
+          inputs:
+            connectedservicename: ${{ parameters.esrpServiceConnection }}
+            usemanagedidentity: true
+            keyvaultname: ${{ parameters.esrpKeyVaultName }}
+            signcertname: ${{ parameters.esrpSignCertName }}
+            clientid: ${{ parameters.esrpClientId }}
+            intent: 'PackageDistribution'
+            contenttype: 'PyPi'
+            # Point ESRP at the folder holding the built wheel/sdist that the
+            # BuildPackages stage produced and the pipelineArtifact input downloaded.
+            contentsource: 'Folder'
+            folderlocation: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/python'
+            waitforreleasecompletion: true
+            # Auto-populate owner/approver from whoever queued the run so no personal
+            # emails are hardcoded in source (matches the durabletask-python pattern).
+            owners: $(Build.RequestedForEmail)
+            approvers: $(Build.RequestedForEmail)
+            serviceendpointurl: 'https://api.esrp.microsoft.com'
+            mainpublisher: ${{ parameters.esrpMainPublisher }}
+            domaintenantid: ${{ parameters.esrpDomainTenantId }}

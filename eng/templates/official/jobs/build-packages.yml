@@ -70,10 +70,91 @@ jobs:
 
       - pwsh: |
           New-Item -ItemType Directory -Force -Path "$(Build.ArtifactStagingDirectory)/packages/dotnet" | Out-Null
-          dotnet pack src/Microsoft.Agents.AI.DurableTask/Microsoft.Agents.AI.DurableTask.csproj --configuration Release --no-build --output "$(Build.ArtifactStagingDirectory)/packages/dotnet"
-          dotnet pack src/Microsoft.Agents.AI.Hosting.AzureFunctions/Microsoft.Agents.AI.Hosting.AzureFunctions.csproj --configuration Release --no-build --output "$(Build.ArtifactStagingDirectory)/packages/dotnet"
+          # Pass the output directory as an explicit MSBuild property rather than the
+          # `dotnet pack --output` switch. On .NET SDK 10.0.3xx, `--output` is forwarded
+          # to MSBuild as a bare `PackageOutputPath=<dir>` token (missing the -p: prefix),
+          # which MSBuild treats as a second project and fails with MSB1008 ("Only one
+          # project can be specified"). The whole -p: arg is quoted so PowerShell passes
+          # it through as a single literal argument.
+          dotnet pack src/Microsoft.Agents.AI.DurableTask/Microsoft.Agents.AI.DurableTask.csproj --configuration Release --no-build "-p:PackageOutputPath=$(Build.ArtifactStagingDirectory)/packages/dotnet"
+          dotnet pack src/Microsoft.Agents.AI.Hosting.AzureFunctions/Microsoft.Agents.AI.Hosting.AzureFunctions.csproj --configuration Release --no-build "-p:PackageOutputPath=$(Build.ArtifactStagingDirectory)/packages/dotnet"
         workingDirectory: dotnet
         displayName: 'Pack .NET packages'
+
+      # Validate the packed .NET packages without pushing to a registry. This catches
+      # packaging regressions early in a dry run: a missing co-located symbol package
+      # (.snupkg), a missing/empty .nuspec, or a missing id/version. The symbol-package
+      # check specifically guards the IncludeSymbols/snupkg setup in nuget-package.props.
+      - pwsh: |
+          $dotnetDir = "$(Build.ArtifactStagingDirectory)/packages/dotnet"
+          $nupkgs = @(Get-ChildItem -File -Path $dotnetDir -Filter *.nupkg)
+          if ($nupkgs.Count -eq 0) {
+            throw "No .nupkg packages were produced in $dotnetDir."
+          }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $failed = $false
+          foreach ($pkg in $nupkgs) {
+            $snupkg = [System.IO.Path]::ChangeExtension($pkg.FullName, ".snupkg")
+            if (-not (Test-Path $snupkg)) {
+              Write-Host "##[error]Missing symbol package for $($pkg.Name) (expected $([System.IO.Path]::GetFileName($snupkg)))."
+              $failed = $true
+            }
+
+            try {
+              $zip = [System.IO.Compression.ZipFile]::OpenRead($pkg.FullName)
+            } catch {
+              Write-Host "##[error]Unable to read $($pkg.Name) as a NuGet package: $($_.Exception.Message)"
+              $failed = $true
+              continue
+            }
+            try {
+              $entry = $zip.Entries | Where-Object { $_.FullName.EndsWith(".nuspec") } | Select-Object -First 1
+              if ($null -eq $entry) {
+                Write-Host "##[error]$($pkg.Name) does not contain a .nuspec."
+                $failed = $true
+              } else {
+                $reader = New-Object System.IO.StreamReader($entry.Open())
+                try { $nuspecXml = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                # Parse defensively: an empty or malformed .nuspec would make the [xml]
+                # cast throw and abort the whole loop, skipping remaining packages and
+                # the aggregated summary below. Treat a parse failure as this package's
+                # validation failure and continue.
+                $nuspec = $null
+                try {
+                  $nuspec = [xml]$nuspecXml
+                } catch {
+                  Write-Host "##[error]$($pkg.Name) has an invalid or empty .nuspec: $($_.Exception.Message)"
+                  $failed = $true
+                }
+                if ($null -ne $nuspec) {
+                  # Extract id/version via XPath with local-name() so the lookup is
+                  # namespace-agnostic: the generated .nuspec declares a default xmlns
+                  # (nuspec.xsd), and namespace-qualified element access is fragile.
+                  $idNode = $nuspec.SelectSingleNode("/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='id']")
+                  $versionNode = $nuspec.SelectSingleNode("/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='version']")
+                  # SelectSingleNode returns $null when the element is absent; guard so a
+                  # missing id/version is reported cleanly instead of throwing (which would
+                  # also occur under Set-StrictMode).
+                  $id = if ($null -ne $idNode) { $idNode.InnerText } else { $null }
+                  $version = if ($null -ne $versionNode) { $versionNode.InnerText } else { $null }
+                  if ([string]::IsNullOrWhiteSpace($id) -or [string]::IsNullOrWhiteSpace($version)) {
+                    Write-Host "##[error]$($pkg.Name) is missing id or version in its .nuspec."
+                    $failed = $true
+                  } else {
+                    Write-Host "Validated $id $version ($($pkg.Name))"
+                  }
+                }
+              }
+            } finally {
+              $zip.Dispose()
+            }
+          }
+
+          if ($failed) {
+            throw "One or more .NET packages failed validation."
+          }
+        displayName: 'Validate .NET packages'
 
       - pwsh: uv sync --all-packages --group dev --group test
         workingDirectory: python
@@ -113,6 +194,22 @@ jobs:
           # uv build resolves the build backend (flit-core) in an isolated environment.
           # The governed pool blocks PyPI, so point uv at the authenticated internal feed.
           UV_INDEX_URL: $(PIP_INDEX_URL)
+
+      # Validate the built Python distributions without uploading. `twine check`
+      # verifies the package metadata (including that the long description renders on
+      # PyPI), catching issues that would otherwise only surface at publish time.
+      # twine is installed from the internal feed (pip is authenticated above) and
+      # pinned for reproducible CI, consistent with the pinned uv version.
+      - pwsh: |
+          python -m pip install twine==6.1.0
+          $pythonDir = "$(Build.ArtifactStagingDirectory)/packages/python"
+          $dists = @(Get-ChildItem -File -Path $pythonDir |
+            Where-Object { $_.Name.EndsWith(".whl") -or $_.Name.EndsWith(".tar.gz") })
+          if ($dists.Count -eq 0) {
+            throw "No Python distributions were produced in $pythonDir."
+          }
+          python -m twine check @($dists.FullName)
+        displayName: 'Validate Python package (twine check)'
 
       - pwsh: Get-ChildItem -Recurse "$(Build.ArtifactStagingDirectory)/packages" | Select-Object -ExpandProperty FullName
         displayName: 'List package artifacts'
