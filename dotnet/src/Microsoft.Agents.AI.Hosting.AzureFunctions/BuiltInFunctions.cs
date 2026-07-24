@@ -717,8 +717,9 @@ internal static class BuiltInFunctions
 
     /// <summary>
     /// Combines the canonical <c>session_id</c> value with its deprecated <c>thread_id</c> alias from a single
-    /// source (the request body or the query string). The canonical value wins when only one is supplied.
-    /// Blank values are treated as absent, matching how the MCP tool trigger resolves its arguments.
+    /// source (the request body or the query string). Whichever non-blank value is present is returned; when
+    /// both are present they must be equal, otherwise the pair is rejected. Blank values are treated as absent,
+    /// matching how the MCP tool trigger resolves its arguments.
     /// </summary>
     /// <param name="sessionId">The canonical <c>session_id</c> value, if any.</param>
     /// <param name="legacyThreadId">The deprecated <c>thread_id</c> value, if any.</param>

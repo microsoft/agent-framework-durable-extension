@@ -89,12 +89,18 @@ The `RedisStreamCallback` class implements `AgentResponseCallbackProtocol` to ca
 class RedisStreamCallback(AgentResponseCallbackProtocol):
     async def on_streaming_response_update(self, update, context):
         session_id = context.session_id
+        # Track the chunk sequence number per session
+        sequence = self._sequence_numbers.setdefault(session_id, 0)
+
         # Write chunk to Redis Stream
         async with await get_stream_handler() as handler:
             await handler.write_chunk(session_id, update.text, sequence)
+            self._sequence_numbers[session_id] += 1
 
     async def on_agent_response(self, response, context):
         session_id = context.session_id
+        sequence = self._sequence_numbers.get(session_id, 0)
+
         # Write end-of-stream marker
         async with await get_stream_handler() as handler:
             await handler.write_completion(session_id, sequence)
