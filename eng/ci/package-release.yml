@@ -53,14 +53,21 @@ extends:
             parameters:
               artifactName: ${{ parameters.artifactName }}
 
-      - stage: PublishPackages
-        displayName: 'Publish packages'
-        dependsOn: BuildPackages
-        jobs:
-          - template: /eng/templates/official/jobs/publish-packages.yml@self
-            parameters:
-              artifactName: ${{ parameters.artifactName }}
-              publishDotNet: ${{ parameters.publishDotNet }}
-              publishPython: ${{ parameters.publishPython }}
-              nugetServiceConnection: ${{ parameters.nugetServiceConnection }}
-              esrpMainPublisher: ${{ parameters.esrpMainPublisher }}
+      # Gate the entire publish stage at compile time (not with a runtime `condition`).
+      # 1ES validates referenced service connections even for jobs that would be
+      # skipped by a runtime condition, so a dry run (both flags false) would still
+      # fail on the publish service connections. A compile-time `${{ if }}` removes the
+      # stage from the pipeline entirely when nothing is being published, so a dry run
+      # only runs BuildPackages and requires no publishing credentials.
+      - ${{ if or(eq(parameters.publishDotNet, true), eq(parameters.publishPython, true)) }}:
+        - stage: PublishPackages
+          displayName: 'Publish packages'
+          dependsOn: BuildPackages
+          jobs:
+            - template: /eng/templates/official/jobs/publish-packages.yml@self
+              parameters:
+                artifactName: ${{ parameters.artifactName }}
+                publishDotNet: ${{ parameters.publishDotNet }}
+                publishPython: ${{ parameters.publishPython }}
+                nugetServiceConnection: ${{ parameters.nugetServiceConnection }}
+                esrpMainPublisher: ${{ parameters.esrpMainPublisher }}
