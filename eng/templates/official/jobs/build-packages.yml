@@ -101,7 +101,13 @@ jobs:
               $failed = $true
             }
 
-            $zip = [System.IO.Compression.ZipFile]::OpenRead($pkg.FullName)
+            try {
+              $zip = [System.IO.Compression.ZipFile]::OpenRead($pkg.FullName)
+            } catch {
+              Write-Host "##[error]Unable to read $($pkg.Name) as a NuGet package: $($_.Exception.Message)"
+              $failed = $true
+              continue
+            }
             try {
               $entry = $zip.Entries | Where-Object { $_.FullName.EndsWith(".nuspec") } | Select-Object -First 1
               if ($null -eq $entry) {

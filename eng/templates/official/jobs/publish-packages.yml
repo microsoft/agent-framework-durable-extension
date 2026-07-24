@@ -122,7 +122,7 @@ jobs:
     steps:
       - checkout: none
 
-      - task: EsrpRelease@9
+      - task: SFP.release-tasks.custom-build-release-task.EsrpRelease@9
         displayName: 'ESRP release Python package to PyPI'
         inputs:
           connectedservicename: ${{ parameters.esrpServiceConnection }}
