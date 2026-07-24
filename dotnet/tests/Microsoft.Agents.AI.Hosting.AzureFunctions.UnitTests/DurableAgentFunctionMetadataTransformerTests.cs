@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 using System.Diagnostics.CodeAnalysis;
+using System.Text.Json;
 using Microsoft.Azure.Functions.Worker.Core.FunctionMetadata;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -142,8 +143,22 @@ public sealed class DurableAgentFunctionMetadataTransformerTests
                 Assert.NotNull(mcpToolMeta.RawBindings);
                 Assert.Equal(4, mcpToolMeta.RawBindings.Count);
                 Assert.Contains("mcpToolTrigger", mcpToolMeta.RawBindings[0]);
-                Assert.Contains("mcpToolProperty", mcpToolMeta.RawBindings[1]); // We expect 2 tool property bindings
-                Assert.Contains("mcpToolProperty", mcpToolMeta.RawBindings[2]);
+
+                // Only the canonical "sessionId" property is advertised; the deprecated "threadId"
+                // alias is still accepted at runtime but is no longer part of the tool schema.
+                // The advertised schema lives in the escaped "toolProperties" string of the trigger
+                // binding, so it has to be parsed rather than substring-matched.
+                using JsonDocument triggerBinding = JsonDocument.Parse(mcpToolMeta.RawBindings[0]);
+                using JsonDocument toolProperties = JsonDocument.Parse(
+                    triggerBinding.RootElement.GetProperty("toolProperties").GetString()!);
+
+                string[] advertisedNames = [.. toolProperties.RootElement.EnumerateArray()
+                    .Select(p => p.GetProperty("propertyName").GetString()!)];
+
+                Assert.Equal(["query", "sessionId"], advertisedNames);
+
+                Assert.Single(mcpToolMeta.RawBindings, b => b.Contains("\"propertyName\":\"sessionId\""));
+                Assert.DoesNotContain(mcpToolMeta.RawBindings, b => b.Contains("threadId"));
             }
         }
     }

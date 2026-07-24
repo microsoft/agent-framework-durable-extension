@@ -192,7 +192,7 @@ The `id` field is the Redis stream entry ID - use it as the `cursor` parameter t
 
 ### Data Flow
 
-1. **Client sends prompt**: The `Create` endpoint receives the prompt and generates a new agent thread.
+1. **Client sends prompt**: The `Create` endpoint receives the prompt and generates a new agent session.
 
 2. **Agent invoked**: The durable entity (`AgentEntity`) is signaled to run the travel planner agent. This is fire-and-forget from the HTTP request's perspective.
 

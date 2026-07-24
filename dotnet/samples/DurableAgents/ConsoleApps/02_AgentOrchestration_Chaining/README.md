@@ -39,7 +39,7 @@ Result: Learning serves as the key, opening doors to boundless opportunities and
 The orchestration will proceed to run the WriterAgent twice in sequence:
 
 1. First, it writes an inspirational sentence about learning
-2. Then, it refines the initial output using the same conversation thread
+2. Then, it refines the initial output using the same conversation session
 
 ## Viewing Orchestration State
 

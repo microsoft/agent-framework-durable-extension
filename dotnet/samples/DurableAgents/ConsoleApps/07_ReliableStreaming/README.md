@@ -94,7 +94,7 @@ You can view the state of the agent in the Durable Task Scheduler dashboard:
    - **Agents**: View the state of the TravelPlanner agent, including conversation history and current state
    - **Orchestrations**: View any orchestrations that may have been triggered by the agent
 
-The conversation ID displayed in the console output (shown as "Starting new conversation: {conversationId}") corresponds to the agent's conversation thread. You can use this to identify the agent in the dashboard and inspect:
+The conversation ID displayed in the console output (shown as "Starting new conversation: {conversationId}") corresponds to the agent's conversation session. You can use this to identify the agent in the dashboard and inspect:
 
 - The agent's conversation state
 - Tool calls made by the agent (weather and events lookups)
@@ -137,7 +137,7 @@ Note that while the console app streams responses from Redis, the agent state in
 
 ### Data Flow
 
-1. **Client sends prompt**: The console app reads the prompt from stdin and generates a new agent thread.
+1. **Client sends prompt**: The console app reads the prompt from stdin and generates a new agent session.
 
 2. **Agent invoked**: The durable agent is signaled to run the travel planner agent. This is fire-and-forget from the console app's perspective.
 

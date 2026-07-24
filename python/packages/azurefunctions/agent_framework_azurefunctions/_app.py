@@ -24,12 +24,13 @@ from agent_framework import SupportsAgentRun, Workflow
 from agent_framework_durabletask import (
     DEFAULT_MAX_POLL_RETRIES,
     DEFAULT_POLL_INTERVAL_SECONDS,
+    LEGACY_THREAD_ID_FIELD,
     MIMETYPE_APPLICATION_JSON,
     MIMETYPE_TEXT_PLAIN,
     REQUEST_RESPONSE_FORMAT_JSON,
     REQUEST_RESPONSE_FORMAT_TEXT,
-    THREAD_ID_FIELD,
-    THREAD_ID_HEADER,
+    SESSION_ID_FIELD,
+    SESSION_ID_HEADER,
     WAIT_FOR_RESPONSE_FIELD,
     WAIT_FOR_RESPONSE_HEADER,
     AgentResponseCallbackProtocol,
@@ -944,22 +945,23 @@ class AgentFunctionApp(DFAppBase):
             Expected request body (RunRequest format):
             {
                 "message": "user message to agent",
-                "thread_id": "optional conversation identifier",
+                "session_id": "optional conversation identifier",
                 "role": "user|system" (optional, default: "user"),
                 "response_format": {...} (optional JSON schema for structured responses),
                 "enable_tool_calls": true|false (optional, default: true)
             }
             """
             request_response_format: str = REQUEST_RESPONSE_FORMAT_JSON
-            thread_id: str | None = None
+            session_id: str | None = None
 
             try:
                 req_body, message, request_response_format = self._parse_incoming_request(req)
-                thread_id = self._resolve_thread_id(req=req, req_body=req_body)
+                session_id = self._resolve_session_id(req=req, req_body=req_body)
                 wait_for_response = self._should_wait_for_response(req=req, req_body=req_body)
 
                 logger.debug(
-                    f"[HTTP Trigger] Message: {message}, Thread ID: {thread_id}, wait_for_response: {wait_for_response}"
+                    f"[HTTP Trigger] Message: {message}, Session ID: {session_id}, "
+                    f"wait_for_response: {wait_for_response}"
                 )
 
                 if not message:
@@ -968,20 +970,20 @@ class AgentFunctionApp(DFAppBase):
                         payload={"error": "Message is required"},
                         status_code=400,
                         request_response_format=request_response_format,
-                        thread_id=thread_id,
+                        session_id=session_id,
                     )
 
-                session_id = self._create_session_id(agent_name, thread_id)
+                agent_session_id = self._create_session_id(agent_name, session_id)
                 correlation_id = self._generate_unique_id()
 
                 logger.debug(
-                    f"[HTTP Trigger] Calling entity to run agent using session ID: {session_id} "
+                    f"[HTTP Trigger] Calling entity to run agent using session ID: {agent_session_id} "
                     f"and correlation ID: {correlation_id}"
                 )
 
                 entity_instance_id = df.EntityId(
-                    name=session_id.entity_name,
-                    key=session_id.key,
+                    name=agent_session_id.entity_name,
+                    key=agent_session_id.key,
                 )
                 run_request = self._build_request_data(
                     req_body,
@@ -992,7 +994,7 @@ class AgentFunctionApp(DFAppBase):
                 logger.debug("Signalling entity %s with request: %s", entity_instance_id, run_request)
                 await client.signal_entity(entity_instance_id, "run", run_request)
 
-                logger.debug(f"[HTTP Trigger] Signal sent to entity {session_id}")
+                logger.debug(f"[HTTP Trigger] Signal sent to entity {agent_session_id}")
 
                 if wait_for_response:
                     result = await self._get_response_from_entity(
@@ -1000,7 +1002,7 @@ class AgentFunctionApp(DFAppBase):
                         entity_instance_id=entity_instance_id,
                         correlation_id=correlation_id,
                         message=message,
-                        thread_id=thread_id,
+                        session_id=session_id,
                     )
 
                     logger.debug(f"[HTTP Trigger] Result status: {result.get('status', 'unknown')}")
@@ -1008,20 +1010,20 @@ class AgentFunctionApp(DFAppBase):
                         payload=result,
                         status_code=200 if result.get("status") == "success" else 500,
                         request_response_format=request_response_format,
-                        thread_id=thread_id,
+                        session_id=session_id,
                     )
 
                 logger.debug("[HTTP Trigger] wait_for_response disabled; returning correlation ID")
 
                 accepted_response = self._build_accepted_response(
-                    message=message, thread_id=thread_id, correlation_id=correlation_id
+                    message=message, session_id=session_id, correlation_id=correlation_id
                 )
 
                 return self._create_http_response(
                     payload=accepted_response,
                     status_code=202,
                     request_response_format=request_response_format,
-                    thread_id=thread_id,
+                    session_id=session_id,
                 )
 
             except IncomingRequestError as exc:
@@ -1030,7 +1032,7 @@ class AgentFunctionApp(DFAppBase):
                     payload={"error": str(exc)},
                     status_code=exc.status_code,
                     request_response_format=request_response_format,
-                    thread_id=thread_id,
+                    session_id=session_id,
                 )
             except ValueError as exc:
                 logger.error(f"[HTTP Trigger] Invalid JSON: {exc!s}")
@@ -1038,7 +1040,7 @@ class AgentFunctionApp(DFAppBase):
                     payload={"error": "Invalid JSON"},
                     status_code=400,
                     request_response_format=request_response_format,
-                    thread_id=thread_id,
+                    session_id=session_id,
                 )
             except Exception as exc:
                 logger.error(f"[HTTP Trigger] Error: {exc!s}", exc_info=True)
@@ -1046,7 +1048,7 @@ class AgentFunctionApp(DFAppBase):
                     payload={"error": str(exc)},
                     status_code=500,
                     request_response_format=request_response_format,
-                    thread_id=thread_id,
+                    session_id=session_id,
                 )
 
         _ = http_start
@@ -1105,9 +1107,9 @@ class AgentFunctionApp(DFAppBase):
                 "isArray": False,
             },
             {
-                "propertyName": "threadId",
+                "propertyName": "sessionId",
                 "propertyType": "string",
-                "description": "Optional thread identifier for conversation continuity.",
+                "description": "Optional session identifier for conversation continuity.",
                 "isRequired": False,
                 "isArray": False,
             },
@@ -1130,7 +1132,7 @@ class AgentFunctionApp(DFAppBase):
             """Handle MCP tool invocation for the agent.
 
             Args:
-                context: MCP tool invocation context containing arguments (query, threadId)
+                context: MCP tool invocation context containing arguments (query, sessionId)
                 client: Durable orchestration client for entity communication
 
             Returns:
@@ -1179,20 +1181,27 @@ class AgentFunctionApp(DFAppBase):
         if not query or not isinstance(query, str):
             raise ValueError("MCP Tool invocation is missing required 'query' argument of type string.")
 
-        # Extract optional threadId
-        thread_id = arguments.get("threadId")
+        # Extract the optional session key. "sessionId" is the only advertised tool property, but the
+        # deprecated "threadId" argument is still honored for clients that have not been updated yet.
+        # Blank or non-string values are treated as absent so a valid alias is not shadowed.
+        session_key: str | None = None
+        for argument_name in ("sessionId", "threadId"):
+            candidate = arguments.get(argument_name)
+            if isinstance(candidate, str) and candidate.strip():
+                session_key = candidate
+                break
 
         # Create or parse session ID
-        if thread_id and isinstance(thread_id, str) and thread_id.strip():
+        if session_key:
             try:
-                session_id = AgentSessionId.parse(thread_id, agent_name=agent_name)
+                session_id = AgentSessionId.parse(session_key, agent_name=agent_name)
             except ValueError as e:
                 logger.warning(
-                    "Failed to parse AgentSessionId from thread_id '%s': %s. Falling back to new session ID.",
-                    thread_id,
+                    "Failed to parse AgentSessionId from session identifier '%s': %s. Falling back to new session ID.",
+                    session_key,
                     e,
                 )
-                session_id = AgentSessionId(name=agent_name, key=thread_id)
+                session_id = AgentSessionId(name=agent_name, key=session_key)
         else:
             # Generate new session ID
             session_id = AgentSessionId.with_random_key(agent_name)
@@ -1225,7 +1234,7 @@ class AgentFunctionApp(DFAppBase):
                 entity_instance_id=entity_instance_id,
                 correlation_id=correlation_id,
                 message=query,
-                thread_id=str(session_id),
+                session_id=str(session_id),
             )
 
             # Extract and return response text
@@ -1304,7 +1313,7 @@ class AgentFunctionApp(DFAppBase):
         entity_instance_id: df.EntityId,
         correlation_id: str,
         message: str,
-        thread_id: str,
+        session_id: str,
     ) -> dict[str, Any]:
         """Poll the entity state until a response is available or timeout occurs."""
         max_retries = self.max_poll_retries
@@ -1322,7 +1331,7 @@ class AgentFunctionApp(DFAppBase):
                 entity_instance_id=entity_instance_id,
                 correlation_id=correlation_id,
                 message=message,
-                thread_id=thread_id,
+                session_id=session_id,
             )
             if result is not None:
                 break
@@ -1337,7 +1346,7 @@ class AgentFunctionApp(DFAppBase):
             f"[HTTP Trigger] Response with correlation ID {correlation_id} "
             f"not found in time (waited {max_retries * interval} seconds)"
         )
-        return await self._build_timeout_result(message=message, thread_id=thread_id, correlation_id=correlation_id)
+        return await self._build_timeout_result(message=message, session_id=session_id, correlation_id=correlation_id)
 
     async def _poll_entity_for_response(
         self,
@@ -1345,7 +1354,7 @@ class AgentFunctionApp(DFAppBase):
         entity_instance_id: df.EntityId,
         correlation_id: str,
         message: str,
-        thread_id: str,
+        session_id: str,
     ) -> dict[str, Any] | None:
         result: dict[str, Any] | None = None
         try:
@@ -1359,7 +1368,7 @@ class AgentFunctionApp(DFAppBase):
                 result = self._build_success_result(
                     response_message=agent_response.text,
                     message=message,
-                    thread_id=thread_id,
+                    session_id=session_id,
                     correlation_id=correlation_id,
                     state=state,
                 )
@@ -1375,7 +1384,7 @@ class AgentFunctionApp(DFAppBase):
         *,
         response: str | None,
         message: str,
-        thread_id: str,
+        session_id: str,
         status: str,
         correlation_id: str,
         extra_fields: dict[str, Any] | None = None,
@@ -1384,7 +1393,7 @@ class AgentFunctionApp(DFAppBase):
         payload = {
             "response": response,
             "message": message,
-            THREAD_ID_FIELD: thread_id,
+            SESSION_ID_FIELD: session_id,
             "status": status,
             "correlation_id": correlation_id,
         }
@@ -1392,24 +1401,24 @@ class AgentFunctionApp(DFAppBase):
             payload.update(extra_fields)
         return payload
 
-    async def _build_timeout_result(self, message: str, thread_id: str, correlation_id: str) -> dict[str, Any]:
+    async def _build_timeout_result(self, message: str, session_id: str, correlation_id: str) -> dict[str, Any]:
         """Create the timeout response."""
         return self._build_response_payload(
             response="Agent is still processing or timed out...",
             message=message,
-            thread_id=thread_id,
+            session_id=session_id,
             status="timeout",
             correlation_id=correlation_id,
         )
 
     def _build_success_result(
-        self, response_message: str, message: str, thread_id: str, correlation_id: str, state: DurableAgentState
+        self, response_message: str, message: str, session_id: str, correlation_id: str, state: DurableAgentState
     ) -> dict[str, Any]:
         """Build the success result returned to the HTTP caller."""
         return self._build_response_payload(
             response=response_message,
             message=message,
-            thread_id=thread_id,
+            session_id=session_id,
             status="success",
             correlation_id=correlation_id,
             extra_fields={ApiResponseFields.MESSAGE_COUNT: state.message_count},
@@ -1436,12 +1445,12 @@ class AgentFunctionApp(DFAppBase):
             created_at=datetime.now(timezone.utc),
         ).to_dict()
 
-    def _build_accepted_response(self, message: str, thread_id: str, correlation_id: str) -> dict[str, Any]:
+    def _build_accepted_response(self, message: str, session_id: str, correlation_id: str) -> dict[str, Any]:
         """Build the response returned when not waiting for completion."""
         return self._build_response_payload(
             response="Agent request accepted",
             message=message,
-            thread_id=thread_id,
+            session_id=session_id,
             status="accepted",
             correlation_id=correlation_id,
         )
@@ -1451,11 +1460,11 @@ class AgentFunctionApp(DFAppBase):
         payload: dict[str, Any] | str,
         status_code: int,
         request_response_format: str,
-        thread_id: str | None,
+        session_id: str | None,
     ) -> func.HttpResponse:
         """Create the HTTP response using helper serializers for clarity."""
         if request_response_format == REQUEST_RESPONSE_FORMAT_TEXT:
-            return self._build_plain_text_response(payload=payload, status_code=status_code, thread_id=thread_id)
+            return self._build_plain_text_response(payload=payload, status_code=status_code, session_id=session_id)
 
         return self._build_json_response(payload=payload, status_code=status_code)
 
@@ -1463,11 +1472,11 @@ class AgentFunctionApp(DFAppBase):
         self,
         payload: dict[str, Any] | str,
         status_code: int,
-        thread_id: str | None,
+        session_id: str | None,
     ) -> func.HttpResponse:
-        """Return a plain-text response with optional thread identifier header."""
+        """Return a plain-text response with optional session identifier header."""
         body_text = payload if isinstance(payload, str) else self._convert_payload_to_text(payload)
-        headers = {THREAD_ID_HEADER: thread_id} if thread_id is not None else None
+        headers = {SESSION_ID_HEADER: session_id} if session_id is not None else None
         return func.HttpResponse(body_text, status_code=status_code, mimetype=MIMETYPE_TEXT_PLAIN, headers=headers)
 
     def _build_json_response(self, payload: dict[str, Any] | str, status_code: int) -> func.HttpResponse:
@@ -1496,27 +1505,43 @@ class AgentFunctionApp(DFAppBase):
         """Generate a new unique identifier."""
         return uuid.uuid4().hex
 
-    def _create_session_id(self, agent_name: str, thread_id: str | None) -> AgentSessionId:
-        """Create a session identifier using the provided thread id or a random value."""
-        if thread_id:
-            return AgentSessionId(name=agent_name, key=thread_id)
+    def _create_session_id(self, agent_name: str, session_key: str | None) -> AgentSessionId:
+        """Create a session identifier using the provided session key or a random value."""
+        if session_key:
+            return AgentSessionId(name=agent_name, key=session_key)
         return AgentSessionId.with_random_key(name=agent_name)
 
-    def _resolve_thread_id(self, req: func.HttpRequest, req_body: dict[str, Any]) -> str:
-        """Retrieve the thread identifier from request body or query parameters."""
+    def _resolve_session_id(self, req: func.HttpRequest, req_body: dict[str, Any]) -> str:
+        """Retrieve the session identifier from the request body or query parameters.
+
+        Callers may use the canonical ``session_id`` name or the deprecated ``thread_id`` alias, in
+        either the request body or the query string. Blank values are treated as absent. Any two
+        non-blank values that disagree are rejected, matching the .NET implementation. A random
+        identifier is generated when no name is supplied.
+
+        Raises:
+            IncomingRequestError: If conflicting session identifiers were supplied.
+        """
         params = req.params or {}
 
-        if THREAD_ID_FIELD in req_body:
-            value = req_body.get(THREAD_ID_FIELD)
-            if value is not None:
-                return str(value)
+        candidates: dict[str, str] = {}
+        for source_name, source in (("request body", req_body), ("query string", params)):
+            for field in (SESSION_ID_FIELD, LEGACY_THREAD_ID_FIELD):
+                value = source.get(field)
+                if value is not None and str(value).strip():
+                    candidates[f"{field} in the {source_name}"] = str(value)
 
-        if THREAD_ID_FIELD in params:
-            value = params.get(THREAD_ID_FIELD)
-            if value is not None:
-                return str(value)
+        distinct = set(candidates.values())
+        if len(distinct) > 1:
+            raise IncomingRequestError(
+                "Conflicting session identifiers supplied: "
+                + ", ".join(f"{name}={value!r}" for name, value in sorted(candidates.items()))
+            )
 
-        logger.debug("[HTTP Trigger] No thread identifier provided; using random thread id")
+        if distinct:
+            return distinct.pop()
+
+        logger.debug("[HTTP Trigger] No session identifier provided; using a random session id")
         return self._generate_unique_id()
 
     def _parse_incoming_request(self, req: func.HttpRequest) -> tuple[dict[str, Any], str, str]:

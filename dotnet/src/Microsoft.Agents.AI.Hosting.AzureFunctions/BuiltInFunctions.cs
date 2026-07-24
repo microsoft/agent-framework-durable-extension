@@ -1,5 +1,6 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -24,6 +25,22 @@ internal static class BuiltInFunctions
     internal const string RespondFunctionSuffix = "-respond";
 
     private const string WaitForResponseHeaderName = "x-ms-wait-for-response";
+
+    private const string SessionIdHeaderName = "x-ms-session-id";
+    private const string SessionIdParameterName = "session_id";
+    private const string SessionIdMcpArgumentName = "sessionId";
+
+    /// <summary>
+    /// Deprecated alias for <see cref="SessionIdParameterName"/>. Still accepted on incoming requests,
+    /// but never emitted on responses.
+    /// </summary>
+    private const string LegacyThreadIdParameterName = "thread_id";
+
+    /// <summary>
+    /// Deprecated alias for <see cref="SessionIdMcpArgumentName"/>. Still accepted on incoming MCP tool
+    /// invocations, but no longer advertised as a tool property.
+    /// </summary>
+    private const string LegacyThreadIdMcpArgumentName = "threadId";
 
     internal static readonly string RunAgentHttpFunctionEntryPoint = $"{typeof(BuiltInFunctions).FullName!}.{nameof(RunAgentHttpAsync)}";
     internal static readonly string RunAgentEntityFunctionEntryPoint = $"{typeof(BuiltInFunctions).FullName!}.{nameof(InvokeAgentAsync)}";
@@ -260,7 +277,8 @@ internal static class BuiltInFunctions
     {
         // Parse request body - support both JSON and plain text
         string? message = null;
-        string? threadIdFromBody = null;
+        string? sessionIdFromBody = null;
+        string? legacyThreadIdFromBody = null;
 
         if (req.Headers.TryGetValues("Content-Type", out IEnumerable<string>? contentTypeValues) &&
             contentTypeValues.Any(ct => ct.Contains("application/json", StringComparison.OrdinalIgnoreCase)))
@@ -270,7 +288,8 @@ internal static class BuiltInFunctions
             if (requestBody != null)
             {
                 message = requestBody.Message;
-                threadIdFromBody = requestBody.ThreadId;
+                sessionIdFromBody = requestBody.SessionId;
+                legacyThreadIdFromBody = requestBody.ThreadId;
             }
         }
         else
@@ -279,29 +298,26 @@ internal static class BuiltInFunctions
             message = await req.ReadAsStringAsync();
         }
 
-        // The session ID can come from query string or JSON body
-        string? threadIdFromQuery = req.Query["thread_id"];
-
-        // Validate that if thread_id is specified in both places, they must match
-        if (!string.IsNullOrEmpty(threadIdFromQuery) && !string.IsNullOrEmpty(threadIdFromBody) &&
-            !string.Equals(threadIdFromQuery, threadIdFromBody, StringComparison.Ordinal))
+        // The session ID can come from the query string or the JSON body, under either the canonical
+        // "session_id" name or the deprecated "thread_id" alias. Conflicting values are rejected.
+        if (!TryResolveSessionKey(
+                sessionIdFromBody,
+                legacyThreadIdFromBody,
+                req.Query[SessionIdParameterName],
+                req.Query[LegacyThreadIdParameterName],
+                out string? sessionIdValue,
+                out string? sessionKeyError))
         {
-            return await CreateErrorResponseAsync(
-                req,
-                context,
-                HttpStatusCode.BadRequest,
-                "thread_id specified in both query string and request body must match.");
+            return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, sessionKeyError);
         }
 
-        string? threadIdValue = threadIdFromBody ?? threadIdFromQuery;
-
-        // The thread_id is treated as a session key (not a full session ID).
+        // The caller-supplied value is treated as a session key (not a full session ID).
         // If no session key is provided, use the function invocation ID as the session key
         // to help correlate the session with the function invocation.
         string agentName = GetAgentName(context);
-        AgentSessionId sessionId = string.IsNullOrEmpty(threadIdValue)
+        AgentSessionId sessionId = string.IsNullOrEmpty(sessionIdValue)
             ? new AgentSessionId(agentName, context.InvocationId)
-            : new AgentSessionId(agentName, threadIdValue);
+            : new AgentSessionId(agentName, sessionIdValue);
 
         if (string.IsNullOrWhiteSpace(message))
         {
@@ -365,10 +381,23 @@ internal static class BuiltInFunctions
 
         string agentName = context.Name;
 
-        // Bind the caller-supplied threadId as a session key under the current agent name,
-        // mirroring the behavior of RunAgentHttpAsync.
-        AgentSessionId sessionId = context.Arguments.TryGetValue("threadId", out object? threadObj) && threadObj is string threadId && !string.IsNullOrWhiteSpace(threadId)
-            ? new AgentSessionId(agentName, threadId)
+        // Bind the caller-supplied session key under the current agent name, mirroring the behavior of
+        // RunAgentHttpAsync. "sessionId" is the only advertised tool property, but the deprecated
+        // "threadId" argument is still honored for clients that have not been updated yet.
+        // Unlike the HTTP path, a conflicting pair cannot be surfaced as a 400 here, so the canonical
+        // value simply wins.
+        string? sessionKey = null;
+        if (context.Arguments.TryGetValue(SessionIdMcpArgumentName, out object? sessionObj) && sessionObj is string sessionArg && !string.IsNullOrWhiteSpace(sessionArg))
+        {
+            sessionKey = sessionArg;
+        }
+        else if (context.Arguments.TryGetValue(LegacyThreadIdMcpArgumentName, out object? threadObj) && threadObj is string threadArg && !string.IsNullOrWhiteSpace(threadArg))
+        {
+            sessionKey = threadArg;
+        }
+
+        AgentSessionId sessionId = sessionKey is not null
+            ? new AgentSessionId(agentName, sessionKey)
             : new AgentSessionId(agentName, functionContext.InvocationId);
 
         AIAgent agentProxy = client.AsDurableAgentProxy(functionContext, agentName);
@@ -568,7 +597,7 @@ internal static class BuiltInFunctions
         AgentResponse agentResponse)
     {
         HttpResponseData response = req.CreateResponse(statusCode);
-        response.Headers.Add("x-ms-thread-id", sessionId);
+        response.Headers.Add(SessionIdHeaderName, sessionId);
 
         if (AcceptsJson(req))
         {
@@ -597,7 +626,7 @@ internal static class BuiltInFunctions
         string sessionId)
     {
         HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
-        response.Headers.Add("x-ms-thread-id", sessionId);
+        response.Headers.Add(SessionIdHeaderName, sessionId);
 
         if (AcceptsJson(req))
         {
@@ -639,6 +668,75 @@ internal static class BuiltInFunctions
                 .SelectMany(v => v.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                 .Select(v => v.Split(';', 2)[0].Trim())
                 .Contains("application/json", StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Resolves the session key for an agent run request from the four places a caller may supply it:
+    /// the canonical <c>session_id</c> and its deprecated <c>thread_id</c> alias, in both the request body
+    /// and the query string. Blank values are treated as absent. Any two non-blank values that disagree —
+    /// whether within one source or across the body and query string — are rejected.
+    /// </summary>
+    /// <param name="bodySessionId">The <c>session_id</c> value from the request body, if any.</param>
+    /// <param name="bodyThreadId">The deprecated <c>thread_id</c> value from the request body, if any.</param>
+    /// <param name="querySessionId">The <c>session_id</c> value from the query string, if any.</param>
+    /// <param name="queryThreadId">The deprecated <c>thread_id</c> value from the query string, if any.</param>
+    /// <param name="sessionKey">The resolved session key, or <see langword="null"/> when none was supplied.</param>
+    /// <param name="errorMessage">The error to return to the caller when resolution fails.</param>
+    /// <returns><see langword="false"/> when conflicting values were supplied; otherwise <see langword="true"/>.</returns>
+    internal static bool TryResolveSessionKey(
+        string? bodySessionId,
+        string? bodyThreadId,
+        string? querySessionId,
+        string? queryThreadId,
+        out string? sessionKey,
+        [NotNullWhen(false)] out string? errorMessage)
+    {
+        sessionKey = null;
+
+        if (!TryCombineSessionIdAliases(bodySessionId, bodyThreadId, out string? bodyValue))
+        {
+            errorMessage = $"{SessionIdParameterName} and {LegacyThreadIdParameterName} specified in the request body must match.";
+            return false;
+        }
+
+        if (!TryCombineSessionIdAliases(querySessionId, queryThreadId, out string? queryValue))
+        {
+            errorMessage = $"{SessionIdParameterName} and {LegacyThreadIdParameterName} specified in the query string must match.";
+            return false;
+        }
+
+        if (!TryCombineSessionIdAliases(bodyValue, queryValue, out sessionKey))
+        {
+            errorMessage = "The session identifier specified in both the query string and request body must match.";
+            return false;
+        }
+
+        errorMessage = null;
+        return true;
+    }
+
+    /// <summary>
+    /// Combines the canonical <c>session_id</c> value with its deprecated <c>thread_id</c> alias from a single
+    /// source (the request body or the query string). The canonical value wins when only one is supplied.
+    /// Blank values are treated as absent, matching how the MCP tool trigger resolves its arguments.
+    /// </summary>
+    /// <param name="sessionId">The canonical <c>session_id</c> value, if any.</param>
+    /// <param name="legacyThreadId">The deprecated <c>thread_id</c> value, if any.</param>
+    /// <param name="result">The resolved value, or <see langword="null"/> when neither was supplied.</param>
+    /// <returns><see langword="false"/> when both values are supplied but differ; otherwise <see langword="true"/>.</returns>
+    internal static bool TryCombineSessionIdAliases(string? sessionId, string? legacyThreadId, out string? result)
+    {
+        bool hasSessionId = !string.IsNullOrWhiteSpace(sessionId);
+        bool hasLegacyThreadId = !string.IsNullOrWhiteSpace(legacyThreadId);
+
+        if (hasSessionId && hasLegacyThreadId && !string.Equals(sessionId, legacyThreadId, StringComparison.Ordinal))
+        {
+            result = null;
+            return false;
+        }
+
+        result = hasSessionId ? sessionId : hasLegacyThreadId ? legacyThreadId : null;
+        return true;
     }
 
     private static string GetAgentName(FunctionContext context)
@@ -694,9 +792,11 @@ internal static class BuiltInFunctions
     /// Represents a request to run an agent.
     /// </summary>
     /// <param name="Message">The message to send to the agent.</param>
-    /// <param name="ThreadId">The optional session ID to continue a conversation.</param>
-    private sealed record AgentRunRequest(
+    /// <param name="SessionId">The optional session ID to continue a conversation.</param>
+    /// <param name="ThreadId">Deprecated alias for <paramref name="SessionId"/>.</param>
+    internal sealed record AgentRunRequest(
         [property: JsonPropertyName("message")] string? Message,
+        [property: JsonPropertyName("session_id")] string? SessionId,
         [property: JsonPropertyName("thread_id")] string? ThreadId);
 
     /// <summary>
@@ -712,21 +812,21 @@ internal static class BuiltInFunctions
     /// Represents a successful agent run response.
     /// </summary>
     /// <param name="Status">The HTTP status code.</param>
-    /// <param name="ThreadId">The session ID for the conversation.</param>
+    /// <param name="SessionId">The session ID for the conversation.</param>
     /// <param name="Response">The agent response.</param>
-    private sealed record AgentRunSuccessResponse(
+    internal sealed record AgentRunSuccessResponse(
         [property: JsonPropertyName("status")] int Status,
-        [property: JsonPropertyName("thread_id")] string ThreadId,
+        [property: JsonPropertyName("session_id")] string SessionId,
         [property: JsonPropertyName("response")] AgentResponse Response);
 
     /// <summary>
     /// Represents an accepted (fire-and-forget) agent run response.
     /// </summary>
     /// <param name="Status">The HTTP status code.</param>
-    /// <param name="ThreadId">The session ID for the conversation.</param>
-    private sealed record AgentRunAcceptedResponse(
+    /// <param name="SessionId">The session ID for the conversation.</param>
+    internal sealed record AgentRunAcceptedResponse(
         [property: JsonPropertyName("status")] int Status,
-        [property: JsonPropertyName("thread_id")] string ThreadId);
+        [property: JsonPropertyName("session_id")] string SessionId);
 
     /// <summary>
     /// Represents a request to respond to a pending RequestPort in a workflow.

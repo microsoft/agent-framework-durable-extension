@@ -68,7 +68,7 @@ class RedisStreamCallback(AgentResponseCallbackProtocol):
 
     def __init__(self) -> None:
         self._logger = logging.getLogger("durableagent.samples.redis_streaming")
-        self._sequence_numbers = {}  # Track sequence per thread
+        self._sequence_numbers = {}  # Track sequence per session
 
     async def on_streaming_response_update(
         self,
@@ -79,11 +79,11 @@ class RedisStreamCallback(AgentResponseCallbackProtocol):
 
         Args:
             update: The streaming response update chunk.
-            context: The callback context with thread_id, agent_name, etc.
+            context: The callback context with session_id, agent_name, etc.
         """
-        thread_id = context.thread_id
-        if not thread_id:
-            self._logger.warning("No thread_id available for streaming update")
+        session_id = context.session_id
+        if not session_id:
+            self._logger.warning("No session_id available for streaming update")
             return
 
         if not update.text:
@@ -91,24 +91,24 @@ class RedisStreamCallback(AgentResponseCallbackProtocol):
 
         text = update.text
 
-        # Get or initialize sequence number for this thread
-        if thread_id not in self._sequence_numbers:
-            self._sequence_numbers[thread_id] = 0
+        # Get or initialize sequence number for this session
+        if session_id not in self._sequence_numbers:
+            self._sequence_numbers[session_id] = 0
 
-        sequence = self._sequence_numbers[thread_id]
+        sequence = self._sequence_numbers[session_id]
 
         try:
             # Use context manager to ensure Redis client is properly closed
             async with await get_stream_handler() as stream_handler:
                 # Write chunk to Redis Stream using public API
-                await stream_handler.write_chunk(thread_id, text, sequence)
+                await stream_handler.write_chunk(session_id, text, sequence)
 
-                self._sequence_numbers[thread_id] += 1
+                self._sequence_numbers[session_id] += 1
 
                 self._logger.info(
                     "[%s][%s] Wrote chunk to Redis: seq=%d, text=%s",
                     context.agent_name,
-                    thread_id[:8],
+                    session_id[:8],
                     sequence,
                     text,
                 )
@@ -122,26 +122,26 @@ class RedisStreamCallback(AgentResponseCallbackProtocol):
             response: The final agent response.
             context: The callback context.
         """
-        thread_id = context.thread_id
-        if not thread_id:
+        session_id = context.session_id
+        if not session_id:
             return
 
-        sequence = self._sequence_numbers.get(thread_id, 0)
+        sequence = self._sequence_numbers.get(session_id, 0)
 
         try:
             # Use context manager to ensure Redis client is properly closed
             async with await get_stream_handler() as stream_handler:
                 # Write end-of-stream marker using public API
-                await stream_handler.write_completion(thread_id, sequence)
+                await stream_handler.write_completion(session_id, sequence)
 
                 self._logger.info(
                     "[%s][%s] Agent completed, wrote end-of-stream marker",
                     context.agent_name,
-                    thread_id[:8],
+                    session_id[:8],
                 )
 
                 # Clean up sequence tracker
-                self._sequence_numbers.pop(thread_id, None)
+                self._sequence_numbers.pop(session_id, None)
         except Exception as ex:
             self._logger.error(f"Error writing end-of-stream marker: {ex}", exc_info=True)
 
@@ -206,7 +206,7 @@ async def stream(req: func.HttpRequest) -> func.HttpResponse:
 
     Response Headers:
         Content-Type: text/event-stream or text/plain based on Accept header
-        x-conversation-id: The conversation/thread ID
+        x-conversation-id: The conversation/session ID
 
     SSE Event Fields (when Accept: text/event-stream):
         id: Redis stream entry ID (use as cursor for resumption)

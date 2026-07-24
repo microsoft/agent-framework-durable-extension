@@ -90,12 +90,12 @@ class RedisStreamCallback(AgentResponseCallbackProtocol):
     async def on_streaming_response_update(self, update, context):
         # Write chunk to Redis Stream
         async with await get_stream_handler() as handler:
-            await handler.write_chunk(thread_id, update.text, sequence)
+            await handler.write_chunk(session_id, update.text, sequence)
 
     async def on_agent_response(self, response, context):
         # Write end-of-stream marker
         async with await get_stream_handler() as handler:
-            await handler.write_completion(thread_id, sequence)
+            await handler.write_completion(session_id, sequence)
 ```
 
 ### Worker Registration
@@ -114,11 +114,11 @@ The client uses fire-and-forget mode to start the agent and streams from Redis:
 
 ```python
 # Start agent run with wait_for_response=False for non-blocking execution
-travel_planner.run(user_message, thread=thread, options={"wait_for_response": False})
+travel_planner.run(user_message, session=session, options={"wait_for_response": False})
 
 # Stream response from Redis while the agent is processing
 async with await get_stream_handler() as stream_handler:
-    async for chunk in stream_handler.read_stream(thread_id):
+    async for chunk in stream_handler.read_stream(session_id):
         if chunk.text:
             print(chunk.text, end="", flush=True)
         elif chunk.is_done:
@@ -134,7 +134,7 @@ Clients can resume streaming from any point after disconnection:
 ```python
 cursor = "1734649123456-0"  # Entry ID from previous stream
 async with await get_stream_handler() as stream_handler:
-    async for chunk in stream_handler.read_stream(thread_id, cursor=cursor):
+    async for chunk in stream_handler.read_stream(session_id, cursor=cursor):
         # Process chunk
 ```
 

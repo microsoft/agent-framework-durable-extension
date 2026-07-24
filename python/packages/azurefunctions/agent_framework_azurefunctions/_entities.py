@@ -44,7 +44,7 @@ class AzureFunctionEntityStateProvider(AgentEntityStateProviderMixin):
     def _set_state_dict(self, state: dict[str, Any]) -> None:
         self._context.set_state(state)
 
-    def _get_thread_id_from_entity(self) -> str:
+    def _get_session_id_from_entity(self) -> str:
         return str(self._context.entity_key)
 
 

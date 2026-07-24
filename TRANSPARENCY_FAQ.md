@@ -68,7 +68,7 @@ Microsoft Agent Framework relies on existing LLMs. Using the framework retains c
 
 - **Tool Integration**: Careful selection and validation of external tools and MCP servers 
 
-- **Type Safety**: Strong typing and compatibility validation between agents and threads 
+- **Type Safety**: Strong typing and compatibility validation between agents and sessions 
 
  
 
@@ -88,13 +88,13 @@ Microsoft Agent Framework relies on existing LLMs. Using the framework retains c
 
  
 
-**How do I provide feedback on Microsoft Agent Framework?**
+**How do I provide feedback on the Durable Task Extension for Microsoft Agent Framework?**
 
-- **Bug Reports**: File issues at https://github.com/microsoft/agent-framework-durable-extension/issues
+- **Bug Reports**: File issues at <https://github.com/microsoft/agent-framework-durable-extension/issues>
 
 **What are external services and how does Microsoft Agent Framework use them?**
 
-The framework supports multiple external service types: 
+The framework supports multiple external service types:
 
 - **Native Functions**: Custom Python/C# functions that agents can invoke
 - **A2A (Agent2Agent)Integration**: Agent-to-agent communication and coordination

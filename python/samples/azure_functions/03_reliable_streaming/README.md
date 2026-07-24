@@ -95,12 +95,12 @@ class RedisStreamCallback(AgentResponseCallbackProtocol):
     async def on_streaming_response_update(self, update, context):
         # Write chunk to Redis Stream
         async with await get_stream_handler() as handler:
-            await handler.write_chunk(thread_id, update.text, sequence)
+            await handler.write_chunk(session_id, update.text, sequence)
 
     async def on_agent_response(self, response, context):
         # Write end-of-stream marker
         async with await get_stream_handler() as handler:
-            await handler.write_completion(thread_id, sequence)
+            await handler.write_completion(session_id, sequence)
 ```
 
 ### 2. Custom Streaming Endpoint

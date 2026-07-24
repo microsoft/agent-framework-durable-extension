@@ -3,7 +3,7 @@
 """Worker process for hosting a single agent with chaining orchestration using Durable Task.
 
 This worker registers a writer agent and an orchestration function that demonstrates
-chaining behavior by running the agent twice sequentially on the same thread,
+chaining behavior by running the agent twice sequentially in the same session,
 preserving conversation context between invocations.
 
 Prerequisites:
@@ -75,11 +75,11 @@ def get_orchestration():
 def single_agent_chaining_orchestration(
     context: OrchestrationContext, _: str
 ) -> Generator[Task[AgentResponse], AgentResponse, str]:
-    """Orchestration that runs the writer agent twice on the same thread.
+    """Orchestration that runs the writer agent twice in the same session.
 
     This demonstrates chaining behavior where the output of the first agent run
     becomes part of the input for the second run, all while maintaining the
-    conversation context through a shared thread.
+    conversation context through a shared session.
 
     Args:
         context: The orchestration context
@@ -113,7 +113,7 @@ def single_agent_chaining_orchestration(
     )
     logger.info(f"[Orchestration] Initial response: {initial_response.text}")
 
-    # Second run: Refine the initial response on the same thread
+    # Second run: Refine the initial response in the same session
     improved_prompt = f"Improve this further while keeping it under 25 words: {initial_response.text}"
 
     logger.info("[Orchestration] Second agent run: Refining the sentence: %s", improved_prompt)

@@ -6,7 +6,7 @@ This sample demonstrates how to use the durable agents extension to create a sim
 
 - Using the Microsoft Agent Framework to define a simple AI agent with a name and instructions.
 - Registering durable agents with the console app and running them interactively.
-- Conversation management (via threads) for isolated interactions.
+- Conversation management (via sessions) for isolated interactions.
 
 ## Environment Setup
 
