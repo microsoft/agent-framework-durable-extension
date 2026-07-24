@@ -28,7 +28,8 @@ public sealed class DurableTaskClientWorkflowExtensionsTests
     {
         // Arrange
         Mock<DurableTaskClient> mockClient = CreateMockClient();
-        FunctionContext context = CreateContext(CreateServiceProviderWithWorkflows());
+        using ServiceProvider provider = CreateServiceProviderWithWorkflows();
+        FunctionContext context = CreateContext(provider);
 
         // Act
         IWorkflowClient workflowClient = mockClient.Object.AsWorkflowClient(context);
@@ -50,7 +51,8 @@ public sealed class DurableTaskClientWorkflowExtensionsTests
     {
         // Arrange
         Mock<DurableTaskClient> mockClient = CreateMockClient();
-        FunctionContext context = CreateContext(CreateServiceProviderWithWorkflows());
+        using ServiceProvider provider = CreateServiceProviderWithWorkflows();
+        FunctionContext context = CreateContext(provider);
 
         // Act
         IWorkflowClient workflowClient = mockClient.Object.AsWorkflowClient(context);
@@ -67,7 +69,8 @@ public sealed class DurableTaskClientWorkflowExtensionsTests
     {
         // Arrange
         Mock<DurableTaskClient> mockClient = CreateMockClient();
-        FunctionContext context = CreateContext(new ServiceCollection().BuildServiceProvider());
+        using ServiceProvider provider = new ServiceCollection().BuildServiceProvider();
+        FunctionContext context = CreateContext(provider);
 
         // Act & Assert
         InvalidOperationException ex = Assert.Throws<InvalidOperationException>(
@@ -102,7 +105,8 @@ public sealed class DurableTaskClientWorkflowExtensionsTests
     public void AsWorkflowClient_ThrowsOnNullArguments()
     {
         Mock<DurableTaskClient> mockClient = CreateMockClient();
-        FunctionContext context = CreateContext(CreateServiceProviderWithWorkflows());
+        using ServiceProvider provider = CreateServiceProviderWithWorkflows();
+        FunctionContext context = CreateContext(provider);
 
         Assert.Throws<ArgumentNullException>(() => DurableTaskClientExtensions.AsWorkflowClient(null!, context));
         Assert.Throws<ArgumentNullException>(() => mockClient.Object.AsWorkflowClient(null!));
