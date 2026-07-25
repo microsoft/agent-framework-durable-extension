@@ -1006,6 +1006,44 @@ public sealed class DurableStreamingWorkflowRunTests
 
     #endregion
 
+    #region Host serialization compatibility
+
+    // The Azure Functions worker serializes orchestration output with the Durable Task default
+    // JsonDataConverter, which applies no naming policy and therefore writes PascalCase. Reading it
+    // back must not depend on the camelCase names this library writes, otherwise every property
+    // silently binds to null and the workflow result is lost.
+    [Theory]
+    [InlineData("""{"Result":"\"hello\"","Events":[],"SentMessages":[],"HaltRequested":false}""")]
+    [InlineData("""{"result":"\"hello\"","events":[],"sentMessages":[],"haltRequested":false}""")]
+    public void ExtractResult_ReadsResultRegardlessOfPropertyCasing(string serializedOutput)
+    {
+        // Act
+        string? result = DurableStreamingWorkflowRun.ExtractResult<string>(serializedOutput);
+
+        // Assert
+        Assert.Equal("\"hello\"", result);
+    }
+
+    // Same concern for the events collection, which the streaming path backfills from the output.
+    [Fact]
+    public void ExtractResult_ReadsPascalCaseTypedResult()
+    {
+        // Arrange
+        string payloadJson = JsonSerializer.Serialize(new TestPayload { Name = "n", Value = 7 }, DurableSerialization.Options);
+        string serializedOutput = JsonSerializer.Serialize(
+            new Dictionary<string, object> { ["Result"] = payloadJson, ["Events"] = Array.Empty<string>() });
+
+        // Act
+        TestPayload? result = DurableStreamingWorkflowRun.ExtractResult<TestPayload>(serializedOutput);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Equal("n", result.Name);
+        Assert.Equal(7, result.Value);
+    }
+
+    #endregion
+
     private sealed class TestPayload
     {
         public string? Name { get; set; }

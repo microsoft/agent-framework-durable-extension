@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- [BREAKING] Added `IWorkflowClient` overloads that start a registered workflow by name; external implementations of `IWorkflowClient` must implement the new members, and an untyped `null` first argument is now ambiguous between the `Workflow` and workflow-name overloads ([#48](https://github.com/microsoft/agent-framework-durable-extension/pull/48))
+- [BREAKING] Added `IWorkflowClient` overloads that start a registered workflow by name, and made workflow result deserialization case-insensitive so results can be read back when hosted in Azure Functions. External implementations of `IWorkflowClient` must implement the new members, and an untyped `null` first argument is now ambiguous between the `Workflow` and workflow-name overloads ([#48](https://github.com/microsoft/agent-framework-durable-extension/pull/48))
 - Wrap RequestPort external responses in a controlled `DurableExecutorOutput` envelope so that only the `result` property is populated during deserialization ([#20](https://github.com/microsoft/agent-framework-durable-extension/pull/20))
 - Bound the live workflow status to a trailing event window so multi-executor workflows with large typed outputs no longer overflow the Durable Task 16&#160;KB custom status cap ([#6775](https://github.com/microsoft/agent-framework/pull/6775))
 - Fixed `WorkflowOutputEvent` streaming deserialization to read `executorId` instead of the renamed `sourceId` property, with fallback for backward compatibility ([#6896](https://github.com/microsoft/agent-framework/pull/6896))
