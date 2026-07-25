@@ -63,7 +63,7 @@ public sealed class OrderFunctions
     /// <param name="durableClient">The Durable Task client provided by the <c>[DurableClient]</c> binding.</param>
     /// <param name="context">The function invocation context.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A <c>200 OK</c> response carrying the workflow result.</returns>
+    /// <returns>A <c>200 OK</c> response carrying the workflow result, or <c>202 Accepted</c> carrying the run ID if the run handle does not support awaiting completion.</returns>
     [Function(nameof(CancelOrderAndWaitAsync))]
     public async Task<IActionResult> CancelOrderAndWaitAsync(
         [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "orders/{orderId}/cancel-and-wait")] HttpRequest request,

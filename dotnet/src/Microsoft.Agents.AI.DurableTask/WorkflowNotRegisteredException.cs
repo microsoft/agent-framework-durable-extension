@@ -42,6 +42,6 @@ public sealed class WorkflowNotRegisteredException : InvalidOperationException
     private static string GetMessage(string workflowName)
     {
         ArgumentException.ThrowIfNullOrEmpty(workflowName);
-        return $"No workflow named '{workflowName}' was registered. Ensure the workflow is registered using {nameof(ServiceCollectionExtensions.ConfigureDurableWorkflows)} before invoking it by name.";
+        return $"No workflow named '{workflowName}' was registered. Ensure the workflow is registered using {nameof(ServiceCollectionExtensions.ConfigureDurableWorkflows)} or {nameof(ServiceCollectionExtensions.ConfigureDurableOptions)} before invoking it by name.";
     }
 }
