@@ -136,7 +136,8 @@ internal sealed class DurableWorkflowClient : IWorkflowClient
     /// </summary>
     /// <param name="workflowName">The name of the workflow to resolve.</param>
     /// <returns>The registered <see cref="Workflow"/>.</returns>
-    /// <exception cref="ArgumentException">Thrown when <paramref name="workflowName"/> is null or empty.</exception>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="workflowName"/> is null.</exception>
+    /// <exception cref="ArgumentException">Thrown when <paramref name="workflowName"/> is empty.</exception>
     /// <exception cref="WorkflowNotRegisteredException">Thrown when no workflow with the specified name has been registered.</exception>
     private Workflow ResolveWorkflow(string workflowName)
     {
