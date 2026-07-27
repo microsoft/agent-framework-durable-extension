@@ -490,7 +490,7 @@ internal static class BuiltInFunctions
     /// <summary>
     /// Waits for a workflow orchestration to complete and returns an appropriate HTTP response.
     /// </summary>
-    private static async Task<HttpResponseData> WaitForWorkflowCompletionAsync(
+    internal static async Task<HttpResponseData> WaitForWorkflowCompletionAsync(
         HttpRequestData req,
         DurableTaskClient client,
         FunctionContext context,
