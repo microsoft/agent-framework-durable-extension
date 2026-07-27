@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- [BREAKING] Removed the `AddAIAgents` and `AddWorkflows` bulk registration APIs and changed `AddWorkflow` to return `DurableWorkflowOptions` so multiple workflows can be registered fluently ([#39](https://github.com/microsoft/agent-framework-durable-extension/pull/39))
 - Use "session" instead of "thread" terminology in documentation and API comments ([#47](https://github.com/microsoft/agent-framework-durable-extension/pull/47))
 - Wrap RequestPort external responses in a controlled `DurableExecutorOutput` envelope so that only the `result` property is populated during deserialization ([#20](https://github.com/microsoft/agent-framework-durable-extension/pull/20))
 - Bound the live workflow status to a trailing event window so multi-executor workflows with large typed outputs no longer overflow the Durable Task 16&#160;KB custom status cap ([#6775](https://github.com/microsoft/agent-framework/pull/6775))
