@@ -92,6 +92,8 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
     [InlineData("0", false, 0)]
     [InlineData("231", false, 0)]
     [InlineData("invalid", false, 0)]
+    [InlineData("", false, 0)]
+    [InlineData(" ", false, 0)]
     public void TryGetWaitTimeout_ValidatesSeconds(string? value, bool expectedSuccess, int expectedSeconds)
     {
         HttpRequestData request = CreateRequest(timeoutSeconds: value);

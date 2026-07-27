@@ -386,6 +386,15 @@ class TestWaitForResponseAndCorrelationId:
         request = self._make_request()
 
         assert app._should_wait_for_response(request, {}, default_value=False) is False
+        assert app._should_wait_for_response(request, {WAIT_FOR_RESPONSE_FIELD: "invalid"}) is True
+        assert (
+            app._should_wait_for_response(
+                request,
+                {WAIT_FOR_RESPONSE_FIELD: "invalid"},
+                default_value=False,
+            )
+            is False
+        )
 
     @pytest.mark.parametrize(
         ("value", "expected"),

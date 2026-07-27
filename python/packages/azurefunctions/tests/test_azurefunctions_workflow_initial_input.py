@@ -63,6 +63,8 @@ async def test_workflow_run_route_neutralizes_reserved_marker_shaped_input() -> 
         "__pickled__": "not-checkpoint-data",
         "__type__": "builtins:int",
     }
+    request.headers = {}
+    request.params = {}
     request.url = "https://example.test/api/workflow/input_boundary/run"
     client = AsyncMock()
     client.start_new.return_value = "instance-1"

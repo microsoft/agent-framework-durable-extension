@@ -711,7 +711,7 @@ internal static class BuiltInFunctions
     internal static bool TryGetWaitTimeout(HttpRequestData req, out TimeSpan timeout, out string? error)
     {
         string? value = req.Query[WaitTimeoutSecondsParameterName];
-        if (string.IsNullOrWhiteSpace(value))
+        if (value is null)
         {
             timeout = TimeSpan.FromSeconds(DefaultWaitTimeoutSeconds);
             error = null;

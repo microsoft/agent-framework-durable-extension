@@ -1698,8 +1698,9 @@ class AgentFunctionApp(DFAppBase):
         if parsed_query is not None:
             return parsed_query
 
-        if WAIT_FOR_RESPONSE_FIELD in req_body:
-            return self._coerce_to_bool(req_body.get(WAIT_FOR_RESPONSE_FIELD))
+        parsed_body = self._try_coerce_to_bool(req_body.get(WAIT_FOR_RESPONSE_FIELD))
+        if parsed_body is not None:
+            return parsed_body
         return default_value
 
     @staticmethod

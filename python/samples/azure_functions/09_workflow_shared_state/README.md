@@ -83,7 +83,7 @@ curl -X POST http://localhost:7071/api/workflow/email_triage_shared_state/run \
 
 ### Wait for a Result
 
-Add `waitForResponse=true` to wait up to 10 seconds for the workflow result:
+Add `waitForResponse=true` to wait up to 30 seconds for the workflow result:
 
 ```bash
 curl -X POST "http://localhost:7071/api/workflow/email_triage_shared_state/run?waitForResponse=true&timeoutSeconds=30" \
