@@ -50,14 +50,14 @@ class TestSampleReliableStreaming:
         assert response.status_code == 202
         data = response.json()
 
-        thread_id = data.get("thread_id")
+        session_id = data.get("session_id")
 
         # Wait a moment for the agent to start writing to Redis
         time.sleep(2)
 
         # Stream response from Redis with longer timeout to account for LLM latency
         stream_response = requests.get(
-            f"{self.stream_url}/{thread_id}",
+            f"{self.stream_url}/{session_id}",
             headers={"Accept": "text/plain"},
             timeout=60,
         )
@@ -72,14 +72,14 @@ class TestSampleReliableStreaming:
         )
         assert response.status_code == 202
         data = response.json()
-        thread_id = data.get("thread_id")
+        session_id = data.get("session_id")
 
         # Wait for agent to start writing
         time.sleep(2)
 
         # Stream with SSE format
         stream_response = requests.get(
-            f"{self.stream_url}/{thread_id}",
+            f"{self.stream_url}/{session_id}",
             headers={"Accept": "text/event-stream"},
             timeout=60,
         )

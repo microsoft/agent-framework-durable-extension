@@ -15,6 +15,7 @@ from agent_framework import AgentResponse, AgentResponseUpdate, Content, Message
 from pydantic import BaseModel
 
 from agent_framework_durabletask import (
+    AgentCallbackContext,
     AgentEntity,
     AgentEntityStateProviderMixin,
     DurableAgentState,
@@ -54,9 +55,30 @@ class MockEntityContext:
 class _InMemoryStateProvider(AgentEntityStateProviderMixin):
     """Test-only state provider for AgentEntity."""
 
-    def __init__(self, *, thread_id: str, initial_state: dict[str, Any] | None = None) -> None:
-        self._thread_id = thread_id
+    def __init__(self, *, session_id: str, initial_state: dict[str, Any] | None = None) -> None:
+        self._session_id = session_id
         self._state_dict: dict[str, Any] = initial_state or {}
+
+    def _get_state_dict(self) -> dict[str, Any]:
+        return self._state_dict
+
+    def _set_state_dict(self, state: dict[str, Any]) -> None:
+        self._state_dict = state
+
+    def _get_session_id_from_entity(self) -> str:
+        return self._session_id
+
+
+def _make_entity(agent: Any, callback: Any = None, *, session_id: str = "test-session") -> AgentEntity:
+    return AgentEntity(agent, callback=callback, state_provider=_InMemoryStateProvider(session_id=session_id))
+
+
+class _LegacyHookStateProvider(AgentEntityStateProviderMixin):
+    """State provider written against the pre-rename API, used to verify the compatibility shim."""
+
+    def __init__(self, *, thread_id: str) -> None:
+        self._thread_id = thread_id
+        self._state_dict: dict[str, Any] = {}
 
     def _get_state_dict(self) -> dict[str, Any]:
         return self._state_dict
@@ -68,8 +90,46 @@ class _InMemoryStateProvider(AgentEntityStateProviderMixin):
         return self._thread_id
 
 
-def _make_entity(agent: Any, callback: Any = None, *, thread_id: str = "test-thread") -> AgentEntity:
-    return AgentEntity(agent, callback=callback, state_provider=_InMemoryStateProvider(thread_id=thread_id))
+class TestSessionIdCompatibility:
+    """Deprecated 'thread' names must keep working while emitting DeprecationWarning."""
+
+    def test_session_id_property_returns_value(self) -> None:
+        provider = _InMemoryStateProvider(session_id="abc")
+        assert provider.session_id == "abc"
+
+    def test_thread_id_property_is_deprecated_alias(self) -> None:
+        provider = _InMemoryStateProvider(session_id="abc")
+        with pytest.warns(DeprecationWarning, match="use session_id instead"):
+            assert provider.thread_id == "abc"
+
+    def test_legacy_hook_still_resolves_session_id(self) -> None:
+        provider = _LegacyHookStateProvider(thread_id="legacy-key")
+        with pytest.warns(DeprecationWarning, match="_get_session_id_from_entity"):
+            assert provider.session_id == "legacy-key"
+
+    def test_callback_context_thread_id_is_deprecated_alias(self) -> None:
+        context = AgentCallbackContext(agent_name="a", correlation_id="c", session_id="s")
+        assert context.session_id == "s"
+        with pytest.warns(DeprecationWarning, match="use session_id instead"):
+            assert context.thread_id == "s"
+
+    def test_deprecated_constants_still_importable(self) -> None:
+        import agent_framework_durabletask as dt
+
+        assert dt.SESSION_ID_FIELD == "session_id"
+        assert dt.SESSION_ID_HEADER == "x-ms-session-id"
+        assert dt.LEGACY_THREAD_ID_FIELD == "thread_id"
+
+        with pytest.warns(DeprecationWarning, match="use SESSION_ID_FIELD instead"):
+            assert dt.THREAD_ID_FIELD == "thread_id"
+        with pytest.warns(DeprecationWarning, match="use SESSION_ID_HEADER instead"):
+            assert dt.THREAD_ID_HEADER == "x-ms-thread-id"
+
+    def test_unknown_attribute_still_raises(self) -> None:
+        import agent_framework_durabletask as dt
+
+        with pytest.raises(AttributeError):
+            _ = dt.NOT_A_REAL_NAME
 
 
 def _role_value(chat_message: DurableAgentStateMessage) -> str:
@@ -263,7 +323,7 @@ class TestAgentEntityRunAgent:
         mock_agent.run = mock_run
 
         callback = RecordingCallback()
-        entity = _make_entity(mock_agent, callback=callback, thread_id="session-1")
+        entity = _make_entity(mock_agent, callback=callback, session_id="session-1")
 
         result = await entity.run(
             {
@@ -284,7 +344,7 @@ class TestAgentEntityRunAgent:
             context = recorded_call.args[1]
             assert context.agent_name == "StreamingAgent"
             assert context.correlation_id == "corr-stream-1"
-            assert context.thread_id == "session-1"
+            assert context.session_id == "session-1"
             assert context.request_message == "Tell me something"
 
         final_call = callback.response_mock.await_args
@@ -292,7 +352,7 @@ class TestAgentEntityRunAgent:
         final_response, final_context = final_call.args
         assert final_context.agent_name == "StreamingAgent"
         assert final_context.correlation_id == "corr-stream-1"
-        assert final_context.thread_id == "session-1"
+        assert final_context.session_id == "session-1"
         assert final_context.request_message == "Tell me something"
         assert getattr(final_response, "text", "").strip()
 
@@ -304,7 +364,7 @@ class TestAgentEntityRunAgent:
         mock_agent.run = _create_mock_run(response=agent_response)
 
         callback = RecordingCallback()
-        entity = _make_entity(mock_agent, callback=callback, thread_id="session-2")
+        entity = _make_entity(mock_agent, callback=callback, session_id="session-2")
 
         result = await entity.run(
             {
@@ -324,7 +384,7 @@ class TestAgentEntityRunAgent:
         final_context = final_call.args[1]
         assert final_context.agent_name == "NonStreamingAgent"
         assert final_context.correlation_id == "corr-final-1"
-        assert final_context.thread_id == "session-2"
+        assert final_context.session_id == "session-2"
         assert final_context.request_message == "Hi"
 
     async def test_run_agent_updates_conversation_history(self) -> None:
@@ -369,14 +429,14 @@ class TestAgentEntityRunAgent:
         await entity.run({"message": "Message 3", "correlationId": "corr-entity-3c"})
         assert len(entity.state.data.conversation_history) == 6
 
-    async def test_run_requires_entity_thread_id(self) -> None:
-        """Test that AgentEntity.run rejects missing entity thread identifiers."""
+    async def test_run_requires_entity_session_id(self) -> None:
+        """Test that AgentEntity.run rejects missing entity session identifiers."""
         mock_agent = Mock()
         mock_agent.run = _create_mock_run(response=_agent_response("Response"))
 
-        entity = _make_entity(mock_agent, thread_id="")
+        entity = _make_entity(mock_agent, session_id="")
 
-        with pytest.raises(ValueError, match="thread_id"):
+        with pytest.raises(ValueError, match="session_id"):
             await entity.run({"message": "Message", "correlationId": "corr-entity-5"})
 
     async def test_run_agent_multiple_conversations(self) -> None:

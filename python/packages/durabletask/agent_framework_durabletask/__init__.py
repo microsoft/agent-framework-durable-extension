@@ -3,19 +3,23 @@
 """Durable Task integration for Microsoft Agent Framework."""
 
 import importlib.metadata
+import warnings
+from typing import TYPE_CHECKING
 
+from . import _constants
 from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentCallbackContext, AgentResponseCallbackProtocol
 from ._client import DurableAIAgentClient
 from ._constants import (
     DEFAULT_MAX_POLL_RETRIES,
     DEFAULT_POLL_INTERVAL_SECONDS,
+    LEGACY_THREAD_ID_FIELD,
     MIMETYPE_APPLICATION_JSON,
     MIMETYPE_TEXT_PLAIN,
     REQUEST_RESPONSE_FORMAT_JSON,
     REQUEST_RESPONSE_FORMAT_TEXT,
-    THREAD_ID_FIELD,
-    THREAD_ID_HEADER,
+    SESSION_ID_FIELD,
+    SESSION_ID_HEADER,
     WAIT_FOR_RESPONSE_FIELD,
     WAIT_FOR_RESPONSE_HEADER,
     ApiResponseFields,
@@ -73,14 +77,50 @@ try:
 except importlib.metadata.PackageNotFoundError:
     __version__ = "0.0.0"  # Fallback for development mode
 
+if TYPE_CHECKING:  # pragma: no cover - declarations for the deprecated aliases below
+    THREAD_ID_FIELD: str
+    THREAD_ID_HEADER: str
+
+# Deprecated public names mapped to (preferred name, value). Resolved here rather than delegated
+# to ``_constants`` so that exactly one warning is emitted, attributed to the importing caller.
+_DEPRECATED_ALIASES = {
+    "THREAD_ID_FIELD": ("SESSION_ID_FIELD", _constants.LEGACY_THREAD_ID_FIELD),
+    "THREAD_ID_HEADER": ("SESSION_ID_HEADER", _constants.LEGACY_THREAD_ID_HEADER),
+}
+
+
+def __getattr__(name: str) -> str:
+    """Resolve deprecated re-exports lazily so importing the package stays warning-free."""
+    alias = _DEPRECATED_ALIASES.get(name)
+    if alias is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    preferred, value = alias
+    warnings.warn(
+        f"{name} is deprecated and will be removed in a future release; use {preferred} instead. "
+        "Responses no longer emit the 'thread_id' field or the 'x-ms-thread-id' header.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return value
+
+
+def __dir__() -> list[str]:
+    """Include the deprecated aliases so they remain discoverable."""
+    return sorted(set(globals()) | set(_DEPRECATED_ALIASES))
+
+
 __all__ = [
     "DEFAULT_MAX_POLL_RETRIES",
     "DEFAULT_POLL_INTERVAL_SECONDS",
     "DURABLE_NAME_PREFIX",
+    "LEGACY_THREAD_ID_FIELD",
     "MIMETYPE_APPLICATION_JSON",
     "MIMETYPE_TEXT_PLAIN",
     "REQUEST_RESPONSE_FORMAT_JSON",
     "REQUEST_RESPONSE_FORMAT_TEXT",
+    "SESSION_ID_FIELD",
+    "SESSION_ID_HEADER",
     "THREAD_ID_FIELD",
     "THREAD_ID_HEADER",
     "WAIT_FOR_RESPONSE_FIELD",

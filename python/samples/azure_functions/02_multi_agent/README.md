@@ -39,7 +39,7 @@ Expected HTTP 202 payload:
   "status": "accepted",
   "response": "Agent request accepted",
   "message": "What is the weather in Seattle?",
-  "thread_id": "<guid>",
+  "session_id": "<guid>",
   "correlation_id": "<guid>"
 }
 ```
@@ -59,7 +59,7 @@ Expected HTTP 202 payload:
   "status": "accepted",
   "response": "Agent request accepted",
   "message": "Calculate a 20% tip on a $50 bill",
-  "thread_id": "<guid>",
+  "session_id": "<guid>",
   "correlation_id": "<guid>"
 }
 ```

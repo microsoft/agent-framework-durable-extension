@@ -5,7 +5,7 @@
 Tests operations with multiple specialized agents:
 - Multiple agent registration
 - Agent-specific tool usage
-- Independent thread management per agent
+- Independent session management per agent
 - Concurrent agent operations
 - Agent isolation and tool routing
 """

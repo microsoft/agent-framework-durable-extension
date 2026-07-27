@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- [BREAKING] Replace "thread" with "session" in HTTP and MCP APIs ([#47](https://github.com/microsoft/agent-framework-durable-extension/pull/47))
 - [BREAKING] Renamed `AddWorkflow` parameters `exposeStatusEndpoint` and `exposeMcpToolTrigger` to `enableStatusEndpoint` and `enableMcpToolTrigger` for consistency with `AddAIAgent` ([#35](https://github.com/microsoft/agent-framework-durable-extension/pull/35))
 - Scope workflow status/respond endpoints to the route workflow name ([#6608](https://github.com/microsoft/agent-framework/pull/6608))
 - Bind MCP threadId to the current agent and guard cross-agent session dispatch ([#6531](https://github.com/microsoft/agent-framework/pull/6531))

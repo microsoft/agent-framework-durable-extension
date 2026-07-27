@@ -28,9 +28,9 @@ curl -i -X POST http://localhost:7071/api/agents/publisher/run \
     -H "Content-Type: text/plain" \
     -d 'Start a content generation workflow for the topic \"The Future of Artificial Intelligence\"'
 
-# Save the thread ID to a variable and print it to the terminal
-threadId=$(cat headers.txt | grep "x-ms-thread-id" | cut -d' ' -f2)
-echo "Thread ID: $threadId"
+# Save the session ID to a variable and print it to the terminal
+sessionId=$(cat headers.txt | grep "x-ms-session-id" | cut -d' ' -f2)
+echo "Session ID: $sessionId"
 ```
 
 PowerShell:
@@ -42,9 +42,9 @@ Invoke-RestMethod -Method Post `
     -ContentType text/plain `
     -Body 'Start a content generation workflow for the topic \"The Future of Artificial Intelligence\"' `
 
-# Save the thread ID to a variable and print it to the console
-$threadId = $ResponseHeaders['x-ms-thread-id']
-Write-Host "Thread ID: $threadId"
+# Save the session ID to a variable and print it to the console
+$sessionId = $ResponseHeaders['x-ms-session-id']
+Write-Host "Session ID: $sessionId"
 ```
 
 The response will be a text string that looks something like the following, indicating that the agent request has been received and will be processed:
@@ -52,12 +52,12 @@ The response will be a text string that looks something like the following, indi
 ```http
 HTTP/1.1 200 OK
 Content-Type: text/plain
-x-ms-thread-id: 351ec855-7f4d-4527-a60d-498301ced36d
+x-ms-session-id: 351ec855-7f4d-4527-a60d-498301ced36d
 
 The content generation workflow for the topic "The Future of Artificial Intelligence" has been successfully started, and the instance ID is **6a04276e8d824d8d941e1dc4142cc254**. If you need any further assistance or updates on the workflow, feel free to ask!
 ```
 
-The `x-ms-thread-id` response header contains the thread ID, which can be used to continue the conversation by passing it as a query parameter (`thread_id`) to the `run` endpoint. The commands above show how to save the thread ID to a `$threadId` variable for use in subsequent requests.
+The `x-ms-session-id` response header contains the session ID, which can be used to continue the conversation by passing it as a query parameter (`session_id`) to the `run` endpoint. The commands above show how to save the session ID to a `$sessionId` variable for use in subsequent requests.
 
 Behind the scenes, the publisher agent will:
 
@@ -70,12 +70,12 @@ Bash (Linux/macOS/WSL):
 
 ```bash
 # Approve the content
-curl -X POST "http://localhost:7071/api/agents/publisher/run?thread_id=$threadId" \
+curl -X POST "http://localhost:7071/api/agents/publisher/run?session_id=$sessionId" \
     -H "Content-Type: text/plain" \
     -d 'Approve the content'
 
 # Reject the content with feedback
-curl -X POST "http://localhost:7071/api/agents/publisher/run?thread_id=$threadId" \
+curl -X POST "http://localhost:7071/api/agents/publisher/run?session_id=$sessionId" \
     -H "Content-Type: text/plain" \
     -d 'Reject the content with feedback: The article needs more technical depth and better examples.'
 ```
@@ -85,13 +85,13 @@ PowerShell:
 ```powershell
 # Approve the content
 Invoke-RestMethod -Method Post `
-    -Uri "http://localhost:7071/api/agents/publisher/run?thread_id=$threadId" `
+    -Uri "http://localhost:7071/api/agents/publisher/run?session_id=$sessionId" `
     -ContentType text/plain `
     -Body 'Approve the content'
 
 # Reject the content with feedback
 Invoke-RestMethod -Method Post `
-    -Uri "http://localhost:7071/api/agents/publisher/run?thread_id=$threadId" `
+    -Uri "http://localhost:7071/api/agents/publisher/run?session_id=$sessionId" `
     -ContentType text/plain `
     -Body 'Reject the content with feedback: The article needs more technical depth and better examples.'
 ```
@@ -101,7 +101,7 @@ Once the workflow has completed, you can get the status by prompting the publish
 Bash (Linux/macOS/WSL):
 
 ```bash
-curl -X POST "http://localhost:7071/api/agents/publisher/run?thread_id=$threadId" \
+curl -X POST "http://localhost:7071/api/agents/publisher/run?session_id=$sessionId" \
     -H "Content-Type: text/plain" \
     -d 'Get the status of the workflow you previously started'
 ```
@@ -110,7 +110,7 @@ PowerShell:
 
 ```powershell
 Invoke-RestMethod -Method Post `
-    -Uri "http://localhost:7071/api/agents/publisher/run?thread_id=$threadId" `
+    -Uri "http://localhost:7071/api/agents/publisher/run?session_id=$sessionId" `
     -ContentType text/plain `
     -Body 'Get the status of the workflow you previously started'
 ```

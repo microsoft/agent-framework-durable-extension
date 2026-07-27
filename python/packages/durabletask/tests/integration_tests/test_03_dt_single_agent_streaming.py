@@ -93,7 +93,7 @@ class TestSampleReliableStreaming:
         Stream responses from Redis using the sample's RedisStreamResponseHandler.
 
         Args:
-            session_key: The conversation/thread ID to stream from
+            session_key: The conversation/session ID to stream from
             cursor: Optional cursor to resume from
             timeout: Maximum time to wait for stream completion
 
