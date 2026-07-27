@@ -5,7 +5,7 @@
 Tests concurrent execution patterns:
 - Parallel agent execution
 - Concurrent orchestration tasks
-- Independent thread management in parallel
+- Independent session management in parallel
 - Result aggregation from concurrent calls
 """
 

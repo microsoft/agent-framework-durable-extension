@@ -83,9 +83,12 @@ public sealed class SamplesValidation(ITestOutputHelper outputHelper) : IAsyncLi
             this._outputHelper.WriteLine($"Agent run response: {responseText}");
 
             // The response headers should include the agent session ID, which can be used to continue the conversation.
-            string? sessionId = response.Headers.GetValues("x-ms-thread-id")?.FirstOrDefault();
+            string? sessionId = response.Headers.GetValues("x-ms-session-id")?.FirstOrDefault();
             Assert.NotNull(sessionId);
             Assert.NotEmpty(sessionId);
+
+            // The deprecated x-ms-thread-id header is no longer emitted.
+            Assert.False(response.Headers.Contains("x-ms-thread-id"));
 
             this._outputHelper.WriteLine($"Agent session ID: {sessionId}");
 
@@ -294,7 +297,7 @@ public sealed class SamplesValidation(ITestOutputHelper outputHelper) : IAsyncLi
             this._outputHelper.WriteLine($"Agent response: {startResponseText}");
 
             // The response should be deserializable as an AgentResponse object and have a valid session ID
-            startResponse.Headers.TryGetValues("x-ms-thread-id", out IEnumerable<string>? agentIdValues);
+            startResponse.Headers.TryGetValues("x-ms-session-id", out IEnumerable<string>? agentIdValues);
             string? sessionId = agentIdValues?.FirstOrDefault();
             Assert.NotNull(sessionId);
             Assert.NotEmpty(sessionId);
@@ -314,7 +317,8 @@ public sealed class SamplesValidation(ITestOutputHelper outputHelper) : IAsyncLi
                 message: "Orchestration is requesting human feedback",
                 timeout: TimeSpan.FromSeconds(180));
 
-            // Approve the content
+            // Approve the content. This request intentionally uses the deprecated thread_id alias
+            // to guard against regressions in backwards compatibility.
             Uri approvalUri = new($"{runAgentUri}?thread_id={sessionId}");
             using HttpContent approvalContent = new StringContent("Approve the content", Encoding.UTF8, "text/plain");
             using HttpResponseMessage approvalResponse = await s_sharedHttpClient.PostAsync(approvalUri, approvalContent);
@@ -335,7 +339,7 @@ public sealed class SamplesValidation(ITestOutputHelper outputHelper) : IAsyncLi
                 timeout: TimeSpan.FromSeconds(180));
 
             // Verify the final orchestration status by asking the agent for the status
-            Uri statusUri = new($"{runAgentUri}?thread_id={sessionId}");
+            Uri statusUri = new($"{runAgentUri}?session_id={sessionId}");
             await this.WaitForConditionAsync(
                 condition: async () =>
                 {

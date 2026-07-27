@@ -55,7 +55,7 @@ class TestSampleMultiAgent:
 
         assert data["status"] == "accepted"
         assert "correlation_id" in data
-        assert "thread_id" in data
+        assert "session_id" in data
 
 
 if __name__ == "__main__":

@@ -75,9 +75,12 @@ The recommended production hosting model. A single call to `ConfigureDurableAgen
 
 - Registers agent entities with the Durable Task worker.
 - Generates HTTP endpoints at `/api/agents/{agentName}/run` for each registered agent.
-- Supports `thread_id` query parameter / JSON field and the `x-ms-thread-id` response header for session continuity.
+- Supports the `session_id` query parameter / JSON field and the `x-ms-session-id` response header for session continuity.
 - Supports fire-and-forget via the `x-ms-wait-for-response: false` header (returns HTTP 202).
 - Optionally exposes agents as MCP tools.
+
+> [!NOTE]
+> Preview versions of this extension used `thread_id` instead of `session_id`. The `session_id` parameter is now preferred over the deprecated `thread_id`, and responses only ever return `session_id` / `x-ms-session-id`. If both names are provided they must carry the same value; conflicting values are rejected with HTTP 400.
 
 **C# example:**
 

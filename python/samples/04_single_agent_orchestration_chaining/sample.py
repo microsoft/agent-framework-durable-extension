@@ -3,12 +3,12 @@
 """Single Agent Orchestration Chaining Sample - Durable Task Integration
 This sample demonstrates chaining two invocations of the same agent inside a Durable Task
 orchestration while preserving the conversation state between runs. The orchestration
-runs the writer agent sequentially on a shared thread to refine text iteratively.
+runs the writer agent sequentially in a shared session to refine text iteratively.
 Components used:
 - FoundryChatClient to construct the writer agent
 - DurableTaskSchedulerWorker and DurableAIAgentWorker for agent hosting
 - DurableTaskSchedulerClient and orchestration for sequential agent invocations
-- Thread management to maintain conversation context across invocations
+- Session management to maintain conversation context across invocations
 Prerequisites:
 - Set FOUNDRY_PROJECT_ENDPOINT and FOUNDRY_MODEL
 - Sign in with Azure CLI for AzureCliCredential authentication

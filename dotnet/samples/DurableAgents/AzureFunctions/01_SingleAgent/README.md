@@ -44,10 +44,10 @@ curl -X POST http://localhost:7071/api/agents/Joker/run \
     -d '{"message": "Tell me a joke about a pirate."}'
 ```
 
-To continue a conversation, include the `thread_id` in the query string or JSON body:
+To continue a conversation, include the `session_id` in the query string or JSON body:
 
 ```bash
-curl -X POST "http://localhost:7071/api/agents/Joker/run?thread_id=your-thread-id" \
+curl -X POST "http://localhost:7071/api/agents/Joker/run?session_id=your-session-id" \
     -H "Content-Type: application/json" \
     -H "Accept: application/json" \
     -d '{"message": "Tell me another one."}'
@@ -64,7 +64,7 @@ The expected `application/json` output will look something like:
 ```json
 {
   "status": 200,
-  "thread_id": "ee6e47a0-f24b-40b1-ade8-16fcebb9eb40",
+  "session_id": "ee6e47a0-f24b-40b1-ade8-16fcebb9eb40",
   "response": {
     "Messages": [
       {

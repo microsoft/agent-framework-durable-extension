@@ -44,7 +44,7 @@ The response will be a JSON object that looks something like the following, whic
 The orchestration will proceed to run the WriterAgent twice in sequence:
 
 1. First, it writes an inspirational sentence about learning
-2. Then, it refines the initial output using the same conversation thread
+2. Then, it refines the initial output using the same conversation session
 
 Once the orchestration has completed, you can get the status of the orchestration by sending a GET request to the `statusQueryGetUri` URL. The response will be a JSON object that looks something like the following:
 

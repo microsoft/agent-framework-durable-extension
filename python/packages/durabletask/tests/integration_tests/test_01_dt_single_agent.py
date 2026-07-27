@@ -6,8 +6,8 @@ Tests basic agent operations including:
 - Agent registration and retrieval
 - Single agent interactions
 - Conversation continuity across multiple messages
-- Multi-threaded agent usage
-- Empty thread ID handling
+- Concurrent agent usage
+- Empty session ID handling
 """
 
 from typing import Any, Protocol

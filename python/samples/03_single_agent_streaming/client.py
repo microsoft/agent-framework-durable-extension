@@ -89,15 +89,15 @@ def get_client(
     return DurableAIAgentClient(dts_client)
 
 
-async def stream_from_redis(thread_id: str, cursor: str | None = None) -> None:
+async def stream_from_redis(session_id: str, cursor: str | None = None) -> None:
     """Stream agent responses from Redis.
 
     Args:
-        thread_id: The conversation/thread ID to stream from
+        session_id: The conversation/session ID to stream from
         cursor: Optional cursor to resume from. If None, starts from beginning.
     """
-    stream_key = f"agent-stream:{thread_id}"
-    logger.info(f"Streaming response from Redis (thread: {thread_id[:8]}...)")
+    stream_key = f"agent-stream:{session_id}"
+    logger.info(f"Streaming response from Redis (session: {session_id[:8]}...)")
     logger.debug(f"To manually check Redis, run: redis-cli XLEN {stream_key}")
     if cursor:
         logger.info(f"Resuming from cursor: {cursor}")
@@ -106,7 +106,7 @@ async def stream_from_redis(thread_id: str, cursor: str | None = None) -> None:
         logger.info("Stream handler created, starting to read...")
         try:
             chunk_count = 0
-            async for chunk in stream_handler.read_stream(thread_id, cursor):
+            async for chunk in stream_handler.read_stream(session_id, cursor):
                 chunk_count += 1
                 logger.debug(
                     f"Received chunk #{chunk_count}: error={chunk.error}, is_done={chunk.is_done}, text_len={len(chunk.text) if chunk.text else 0}"
