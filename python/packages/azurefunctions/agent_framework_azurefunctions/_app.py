@@ -553,7 +553,7 @@ class AgentFunctionApp(DFAppBase):
                     req,
                     instance_id,
                     timeout_in_milliseconds=timeout_in_milliseconds,
-                    retry_interval_in_milliseconds=min(1000, timeout_in_milliseconds),
+                    retry_interval_in_milliseconds=1000,
                 )
 
             base_url, route_prefix = split_request_url(req.url)
