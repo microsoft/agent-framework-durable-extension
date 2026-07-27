@@ -211,7 +211,11 @@ public sealed class DurableWorkflowClientTests
     private static DurableWorkflowClient CreateClient(Mock<DurableTaskClient> mockClient, params Workflow[] workflows)
     {
         DurableOptions options = new();
-        options.Workflows.AddWorkflows(workflows);
+        foreach (Workflow workflow in workflows)
+        {
+            options.Workflows.AddWorkflow(workflow);
+        }
+
         return new DurableWorkflowClient(mockClient.Object, options);
     }
 
