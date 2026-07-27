@@ -40,6 +40,6 @@ Workflow workflow = new WorkflowBuilder(parseQuestion)
 using IHost app = FunctionsApplication
     .CreateBuilder(args)
     .ConfigureFunctionsWebApplication()
-    .ConfigureDurableWorkflows(workflows => workflows.AddWorkflows(workflow))
+    .ConfigureDurableWorkflows(workflows => workflows.AddWorkflow(workflow))
     .Build();
 app.Run();

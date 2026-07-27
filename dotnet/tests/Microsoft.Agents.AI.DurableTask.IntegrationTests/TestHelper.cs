@@ -48,9 +48,17 @@ internal sealed class TestHelper : IDisposable
         ITestOutputHelper outputHelper,
         Action<DurableTaskRegistry>? durableTaskRegistry = null)
     {
+        ArgumentNullException.ThrowIfNull(agents);
+
         return BuildAndStartTestHelper(
             outputHelper,
-            options => options.AddAIAgents(agents),
+            options =>
+            {
+                foreach (AIAgent agent in agents)
+                {
+                    options.AddAIAgent(agent);
+                }
+            },
             durableTaskRegistry);
     }
 

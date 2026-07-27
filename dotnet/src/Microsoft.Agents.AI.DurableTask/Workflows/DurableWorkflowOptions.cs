@@ -41,6 +41,7 @@ public sealed class DurableWorkflowOptions
     /// Adds a workflow to the collection for processing or execution.
     /// </summary>
     /// <param name="workflow">The workflow instance to add. Cannot be null.</param>
+    /// <returns>The options instance, so that multiple calls can be chained.</returns>
     /// <remarks>
     /// When a workflow is added, all executors are registered in the executor registry.
     /// Any AI agent executors will also be automatically registered with the
@@ -48,7 +49,7 @@ public sealed class DurableWorkflowOptions
     /// </remarks>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="workflow"/> is null.</exception>
     /// <exception cref="ArgumentException">Thrown when the workflow does not have a valid name.</exception>
-    public void AddWorkflow(Workflow workflow)
+    public DurableWorkflowOptions AddWorkflow(Workflow workflow)
     {
         ArgumentNullException.ThrowIfNull(workflow);
 
@@ -59,21 +60,8 @@ public sealed class DurableWorkflowOptions
 
         this._workflows[workflow.Name] = workflow;
         this.RegisterWorkflowExecutors(workflow);
-    }
 
-    /// <summary>
-    /// Adds a collection of workflows to the current instance.
-    /// </summary>
-    /// <param name="workflows">The collection of <see cref="Workflow"/> objects to add.</param>
-    /// <exception cref="ArgumentNullException">Thrown when <paramref name="workflows"/> is null.</exception>
-    public void AddWorkflows(params Workflow[] workflows)
-    {
-        ArgumentNullException.ThrowIfNull(workflows);
-
-        foreach (Workflow workflow in workflows)
-        {
-            this.AddWorkflow(workflow);
-        }
+        return this;
     }
 
     /// <summary>
