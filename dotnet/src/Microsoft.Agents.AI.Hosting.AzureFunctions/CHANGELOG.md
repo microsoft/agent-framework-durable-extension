@@ -4,6 +4,7 @@
 
 - [BREAKING] Consolidated the `AddWorkflow` extension overloads into a single method with optional `enableStatusEndpoint` and `enableMcpToolTrigger` parameters, and changed it to return `DurableWorkflowOptions` instead of `void` so multiple workflows can be registered fluently ([#39](https://github.com/microsoft/agent-framework-durable-extension/pull/39))
 - [BREAKING] Replace "thread" with "session" in HTTP and MCP APIs ([#47](https://github.com/microsoft/agent-framework-durable-extension/pull/47))
+- Support bounded synchronous workflow HTTP invocation through query parameters, with an asynchronous management response on timeout ([#25](https://github.com/microsoft/agent-framework-durable-extension/issues/25))
 - [BREAKING] Renamed `AddWorkflow` parameters `exposeStatusEndpoint` and `exposeMcpToolTrigger` to `enableStatusEndpoint` and `enableMcpToolTrigger` for consistency with `AddAIAgent` ([#35](https://github.com/microsoft/agent-framework-durable-extension/pull/35))
 - Scope workflow status/respond endpoints to the route workflow name ([#6608](https://github.com/microsoft/agent-framework/pull/6608))
 - Bind MCP threadId to the current agent and guard cross-agent session dispatch ([#6531](https://github.com/microsoft/agent-framework/pull/6531))

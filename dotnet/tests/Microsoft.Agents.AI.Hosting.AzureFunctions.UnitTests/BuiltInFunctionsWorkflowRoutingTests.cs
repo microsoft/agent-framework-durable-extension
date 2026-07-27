@@ -1,5 +1,10 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Collections.Specialized;
+using Microsoft.Azure.Functions.Worker;
+using Microsoft.Azure.Functions.Worker.Http;
+using Moq;
+
 namespace Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests;
 
 public sealed class BuiltInFunctionsWorkflowRoutingTests
@@ -48,5 +53,82 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
 
         // Assert
         Assert.Equal(expectedResult, result);
+    }
+
+    [Theory]
+    [InlineData(null, null, false, false)]
+    [InlineData(null, "true", false, true)]
+    [InlineData("false", "true", true, false)]
+    [InlineData("invalid", "true", false, true)]
+    public void ShouldWaitForResponse_UsesHeaderThenQueryThenDefault(
+        string? headerValue,
+        string? queryValue,
+        bool defaultValue,
+        bool expected)
+    {
+        HttpRequestData request = CreateRequest(headerValue, queryValue);
+
+        bool result = BuiltInFunctions.ShouldWaitForResponse(request, "waitForResponse", defaultValue);
+
+        Assert.Equal(expected, result);
+    }
+
+    [Theory]
+    [InlineData("waitForResponse", "wait_for_response")] // workflow endpoints use camelCase
+    [InlineData("wait_for_response", "waitForResponse")] // agent endpoints use snake_case
+    public void ShouldWaitForResponse_OnlyHonorsTheParameterForItsSurface(string parameterName, string otherName)
+    {
+        HttpRequestData matching = CreateRequest(waitForResponse: "true", waitForResponseParameterName: parameterName);
+        HttpRequestData mismatched = CreateRequest(waitForResponse: "true", waitForResponseParameterName: otherName);
+
+        Assert.True(BuiltInFunctions.ShouldWaitForResponse(matching, parameterName, defaultValue: false));
+        Assert.False(BuiltInFunctions.ShouldWaitForResponse(mismatched, parameterName, defaultValue: false));
+    }
+
+    [Theory]
+    [InlineData(null, true, 10)]
+    [InlineData("1", true, 1)]
+    [InlineData("230", true, 230)]
+    [InlineData("0", false, 0)]
+    [InlineData("231", false, 0)]
+    [InlineData("invalid", false, 0)]
+    public void TryGetWaitTimeout_ValidatesSeconds(string? value, bool expectedSuccess, int expectedSeconds)
+    {
+        HttpRequestData request = CreateRequest(timeoutSeconds: value);
+
+        bool success = BuiltInFunctions.TryGetWaitTimeout(request, out TimeSpan timeout, out string? error);
+
+        Assert.Equal(expectedSuccess, success);
+        Assert.Equal(expectedSeconds, timeout.TotalSeconds);
+        Assert.Equal(expectedSuccess, error is null);
+    }
+
+    private static HttpRequestData CreateRequest(
+        string? headerValue = null,
+        string? waitForResponse = null,
+        string? timeoutSeconds = null,
+        string waitForResponseParameterName = "waitForResponse")
+    {
+        HttpHeadersCollection headers = new();
+        if (headerValue is not null)
+        {
+            headers.Add("x-ms-wait-for-response", headerValue);
+        }
+
+        NameValueCollection query = new();
+        if (waitForResponse is not null)
+        {
+            query.Add(waitForResponseParameterName, waitForResponse);
+        }
+
+        if (timeoutSeconds is not null)
+        {
+            query.Add("timeoutSeconds", timeoutSeconds);
+        }
+
+        Mock<HttpRequestData> request = new(MockBehavior.Strict, Mock.Of<FunctionContext>());
+        request.SetupGet(r => r.Headers).Returns(headers);
+        request.SetupGet(r => r.Query).Returns(query);
+        return request.Object;
     }
 }

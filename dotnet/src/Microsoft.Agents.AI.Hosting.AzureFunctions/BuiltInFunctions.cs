@@ -26,6 +26,26 @@ internal static class BuiltInFunctions
 
     private const string WaitForResponseHeaderName = "x-ms-wait-for-response";
 
+    /// <summary>
+    /// Query parameter used by the agent endpoints, which use snake_case names throughout their
+    /// query string, request body, and response body.
+    /// </summary>
+    /// <remarks>
+    /// Issue https://github.com/microsoft/agent-framework-durable-extension/issues/51 tracks the plan
+    /// to unify the query parameter naming across all endpoints.
+    /// </remarks>
+    private const string AgentWaitForResponseParameterName = "wait_for_response";
+
+    /// <summary>
+    /// Query parameter used by the workflow endpoints, which use camelCase names throughout their
+    /// query string, request body, and response body.
+    /// </summary>
+    private const string WorkflowWaitForResponseParameterName = "waitForResponse";
+
+    private const string WaitTimeoutSecondsParameterName = "timeoutSeconds";
+    private const int DefaultWaitTimeoutSeconds = 10;
+    private const int MaxWaitTimeoutSeconds = 230;
+
     private const string SessionIdHeaderName = "x-ms-session-id";
     private const string SessionIdParameterName = "session_id";
     private const string SessionIdMcpArgumentName = "sessionId";
@@ -76,6 +96,13 @@ internal static class BuiltInFunctions
             return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, "Workflow input cannot be empty.");
         }
 
+        bool waitForResponse = ShouldWaitForResponse(req, WorkflowWaitForResponseParameterName, defaultValue: false);
+        TimeSpan waitTimeout = default;
+        if (waitForResponse && !TryGetWaitTimeout(req, out waitTimeout, out string? timeoutError))
+        {
+            return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, timeoutError!);
+        }
+
         DurableWorkflowInput<string> orchestrationInput = new() { Input = inputMessage };
 
         // Allow users to provide a custom run ID via query string; otherwise, auto-generate one.
@@ -83,9 +110,9 @@ internal static class BuiltInFunctions
         StartOrchestrationOptions? options = instanceId is not null ? new StartOrchestrationOptions(instanceId) : null;
         string resolvedInstanceId = await client.ScheduleNewOrchestrationInstanceAsync(orchestrationFunctionName, orchestrationInput, options);
 
-        if (ShouldWaitForResponse(req, defaultValue: false))
+        if (waitForResponse)
         {
-            return await WaitForWorkflowCompletionAsync(req, client, context, resolvedInstanceId);
+            return await WaitForWorkflowCompletionAsync(req, client, context, resolvedInstanceId, waitTimeout);
         }
 
         HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
@@ -298,8 +325,9 @@ internal static class BuiltInFunctions
             message = await req.ReadAsStringAsync();
         }
 
-        // The session ID can come from the query string or the JSON body, under either the canonical
+        // The session ID can come from the query string or the request body, using either the canonical
         // "session_id" name or the deprecated "thread_id" alias. Conflicting values are rejected.
+        // The deprecated "thread_id" alias is accepted in either location. Conflicting values are rejected.
         if (!TryResolveSessionKey(
                 sessionIdFromBody,
                 legacyThreadIdFromBody,
@@ -329,7 +357,7 @@ internal static class BuiltInFunctions
         }
 
         // Check if we should wait for response (default is true)
-        bool waitForResponse = ShouldWaitForResponse(req, defaultValue: true);
+        bool waitForResponse = ShouldWaitForResponse(req, AgentWaitForResponseParameterName, defaultValue: true);
 
         AIAgent agentProxy = client.AsDurableAgentProxy(context, agentName);
 
@@ -466,14 +494,28 @@ internal static class BuiltInFunctions
         HttpRequestData req,
         DurableTaskClient client,
         FunctionContext context,
-        string instanceId)
+        string instanceId,
+        TimeSpan timeout)
     {
         bool acceptsJson = AcceptsJson(req);
 
-        OrchestrationMetadata? metadata = await client.WaitForInstanceCompletionAsync(
-            instanceId,
-            getInputsAndOutputs: true,
-            cancellation: context.CancellationToken);
+        OrchestrationMetadata? metadata;
+        using (CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken))
+        {
+            timeoutSource.CancelAfter(timeout);
+
+            try
+            {
+                metadata = await client.WaitForInstanceCompletionAsync(
+                    instanceId,
+                    getInputsAndOutputs: true,
+                    cancellation: timeoutSource.Token);
+            }
+            catch (OperationCanceledException) when (!context.CancellationToken.IsCancellationRequested)
+            {
+                return await client.CreateCheckStatusResponseAsync(req, instanceId, context.CancellationToken);
+            }
+        }
 
         if (metadata is null)
         {
@@ -644,10 +686,10 @@ internal static class BuiltInFunctions
 
     /// <summary>
     /// Returns <see langword="true"/> when the caller has requested waiting for the workflow/agent to complete,
-    /// as indicated by the <c>x-ms-wait-for-response</c> header. Falls back to <paramref name="defaultValue"/>
-    /// when the header is absent or not a valid boolean.
+    /// as indicated by the <c>x-ms-wait-for-response</c> header or <paramref name="parameterName"/> query parameter.
+    /// The header takes precedence. Falls back to <paramref name="defaultValue"/> when neither value is valid.
     /// </summary>
-    private static bool ShouldWaitForResponse(HttpRequestData req, bool defaultValue)
+    internal static bool ShouldWaitForResponse(HttpRequestData req, string parameterName, bool defaultValue)
     {
         if (req.Headers.TryGetValues(WaitForResponseHeaderName, out IEnumerable<string>? values) &&
             bool.TryParse(values.FirstOrDefault(), out bool parsed))
@@ -655,7 +697,37 @@ internal static class BuiltInFunctions
             return parsed;
         }
 
+        if (bool.TryParse(req.Query[parameterName], out parsed))
+        {
+            return parsed;
+        }
+
         return defaultValue;
+    }
+
+    /// <summary>
+    /// Gets the maximum time to wait for a synchronous workflow response.
+    /// </summary>
+    internal static bool TryGetWaitTimeout(HttpRequestData req, out TimeSpan timeout, out string? error)
+    {
+        string? value = req.Query[WaitTimeoutSecondsParameterName];
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            timeout = TimeSpan.FromSeconds(DefaultWaitTimeoutSeconds);
+            error = null;
+            return true;
+        }
+
+        if (!int.TryParse(value, out int seconds) || seconds <= 0 || seconds > MaxWaitTimeoutSeconds)
+        {
+            timeout = default;
+            error = $"'{WaitTimeoutSecondsParameterName}' must be an integer between 1 and {MaxWaitTimeoutSeconds}.";
+            return false;
+        }
+
+        timeout = TimeSpan.FromSeconds(seconds);
+        error = null;
+        return true;
     }
 
     /// <summary>

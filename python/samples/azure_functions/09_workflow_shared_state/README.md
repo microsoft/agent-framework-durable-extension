@@ -81,6 +81,18 @@ curl -X POST http://localhost:7071/api/workflow/email_triage_shared_state/run \
   -d '"Hi team, reminder about our meeting tomorrow at 10 AM."'
 ```
 
+### Wait for a Result
+
+Add `waitForResponse=true` to wait up to 10 seconds for the workflow result:
+
+```bash
+curl -X POST "http://localhost:7071/api/workflow/email_triage_shared_state/run?waitForResponse=true&timeoutSeconds=30" \
+  -H "Content-Type: application/json" \
+  -d '"Hi team, reminder about our meeting tomorrow at 10 AM."'
+```
+
+`timeoutSeconds` must be an integer from 1 to 230. If the workflow does not finish before the timeout, the endpoint returns `202 Accepted` with Durable Functions management URLs so the caller can continue asynchronously. A completed workflow returns `200 OK`, and a failed workflow returns `500 Internal Server Error`. Use `runId` to supply a custom workflow run identifier.
+
 ## Expected Output
 
 **Spam email:**

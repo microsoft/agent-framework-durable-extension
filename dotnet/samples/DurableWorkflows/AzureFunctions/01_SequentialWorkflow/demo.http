@@ -8,17 +8,15 @@ Content-Type: text/plain
 12345
 
 ### Cancel an order and wait for the result
-POST {{authority}}/api/workflows/CancelOrder/run
+POST {{authority}}/api/workflows/CancelOrder/run?waitForResponse=true&timeoutSeconds=30
 Content-Type: text/plain
-x-ms-wait-for-response: true
 
 12345
 
 ### Cancel an order and wait for the result (JSON response)
-POST {{authority}}/api/workflows/CancelOrder/run
+POST {{authority}}/api/workflows/CancelOrder/run?waitForResponse=true
 Content-Type: text/plain
 Accept: application/json
-x-ms-wait-for-response: true
 
 12345
 
@@ -35,9 +33,8 @@ Content-Type: text/plain
 12345
 
 ### Get order status and wait for the result
-POST {{authority}}/api/workflows/OrderStatus/run
+POST {{authority}}/api/workflows/OrderStatus/run?waitForResponse=true
 Content-Type: text/plain
-x-ms-wait-for-response: true
 
 12345
 
