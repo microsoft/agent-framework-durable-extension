@@ -49,7 +49,7 @@ public class DurableAgentContext
     public DurableTaskClient Client { get; }
 
     /// <summary>
-    /// Gets the current agent thread.
+    /// Gets the current agent session.
     /// </summary>
     public DurableAgentSession CurrentSession { get; }
 

@@ -44,7 +44,7 @@ The default plain-text response looks like the following:
 ```http
 HTTP/1.1 200 OK
 Content-Type: text/plain; charset=utf-8
-x-ms-thread-id: 4f205157170244bfbd80209df383757e
+x-ms-session-id: 4f205157170244bfbd80209df383757e
 
 Why did the cloud break up with the server?
 
@@ -58,7 +58,7 @@ When you specify the `x-ms-wait-for-response` header or include `"wait_for_respo
   "status": "accepted",
   "response": "Agent request accepted",
   "message": "Tell me a short joke about cloud computing.",
-  "thread_id": "<guid>",
+  "session_id": "<guid>",
   "correlation_id": "<guid>"
 }
 ```

@@ -1,6 +1,6 @@
 # Durable Agent State
 
-Durable agents are represented as durable entities, with each session (i.e. thread) of conversation history stored as JSON-serialized state for an individual entity instance.
+Durable agents are represented as durable entities, with each session of conversation history stored as JSON-serialized state for an individual entity instance.
 
 ## State Schema
 

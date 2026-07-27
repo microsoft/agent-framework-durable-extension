@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import warnings
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -38,7 +39,7 @@ class AgentEntityStateProviderMixin:
     Concrete classes must implement:
     - _get_state_dict(): fetch raw persisted state dict (default should be {})
     - _set_state_dict(): persist raw state dict
-    - _get_thread_id_from_entity(): fetch the thread ID from the underlying context
+    - _get_session_id_from_entity(): fetch the session ID from the underlying context
     """
 
     _state_cache: DurableAgentState | None = None
@@ -49,12 +50,32 @@ class AgentEntityStateProviderMixin:
     def _set_state_dict(self, state: dict[str, Any]) -> None:
         raise NotImplementedError
 
-    def _get_thread_id_from_entity(self) -> str:
+    def _get_session_id_from_entity(self) -> str:
+        # Subclasses written against the previous API may still override the old hook name.
+        legacy_hook = getattr(self, "_get_thread_id_from_entity", None)
+        if legacy_hook is not None:
+            warnings.warn(
+                f"{type(self).__name__}._get_thread_id_from_entity is deprecated; "
+                "rename it to _get_session_id_from_entity.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return cast(str, legacy_hook())
         raise NotImplementedError
 
     @property
+    def session_id(self) -> str:
+        return self._get_session_id_from_entity()
+
+    @property
     def thread_id(self) -> str:
-        return self._get_thread_id_from_entity()
+        """Deprecated alias for :attr:`session_id`."""
+        warnings.warn(
+            "AgentEntityStateProviderMixin.thread_id is deprecated; use session_id instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.session_id
 
     @property
     def state(self) -> DurableAgentState:
@@ -136,16 +157,16 @@ class AgentEntity:
             run_request = request
 
         message = run_request.message
-        thread_id = self._state_provider.thread_id
+        session_id = self._state_provider.session_id
         correlation_id = run_request.correlation_id
-        if not thread_id:
-            raise ValueError("Entity State Provider must provide a thread_id")
+        if not session_id:
+            raise ValueError("Entity State Provider must provide a session_id")
         options: dict[str, Any] = dict(run_request.options)
         options.setdefault("response_format", run_request.response_format)
         if not run_request.enable_tool_calls:
             options.setdefault("tools", None)
 
-        logger.debug("[AgentEntity.run] Received ThreadId %s Message: %s", thread_id, run_request)
+        logger.debug("[AgentEntity.run] Received SessionId %s Message: %s", session_id, run_request)
 
         state_request = DurableAgentStateRequest.from_run_request(run_request)
         self.state.data.conversation_history.append(state_request)
@@ -164,7 +185,7 @@ class AgentEntity:
             agent_run_response: AgentResponse = await self._invoke_agent(
                 run_kwargs=run_kwargs,
                 correlation_id=correlation_id,
-                thread_id=thread_id,
+                session_id=session_id,
                 request_message=message,
             )
 
@@ -211,7 +232,7 @@ class AgentEntity:
         self,
         run_kwargs: dict[str, Any],
         correlation_id: str,
-        thread_id: str,
+        session_id: str,
         request_message: str,
     ) -> AgentResponse:
         """Execute the agent, preferring streaming when available."""
@@ -219,7 +240,7 @@ class AgentEntity:
         if self.callback is not None:
             callback_context = self._build_callback_context(
                 correlation_id=correlation_id,
-                thread_id=thread_id,
+                session_id=session_id,
                 request_message=request_message,
             )
 
@@ -319,7 +340,7 @@ class AgentEntity:
     def _build_callback_context(
         self,
         correlation_id: str,
-        thread_id: str,
+        session_id: str,
         request_message: str,
     ) -> AgentCallbackContext:
         """Create the callback context provided to consumers."""
@@ -327,7 +348,7 @@ class AgentEntity:
         return AgentCallbackContext(
             agent_name=agent_name,
             correlation_id=correlation_id,
-            thread_id=thread_id,
+            session_id=session_id,
             request_message=request_message,
         )
 
@@ -349,5 +370,5 @@ class DurableTaskEntityStateProvider(DurableEntity, AgentEntityStateProviderMixi
     def _set_state_dict(self, state: dict[str, Any]) -> None:
         self.set_state(state)
 
-    def _get_thread_id_from_entity(self) -> str:
+    def _get_session_id_from_entity(self) -> str:
         return self.entity_context.entity_id.key

@@ -4,9 +4,9 @@
 
 Tests orchestration patterns with sequential agent calls:
 - Orchestration registration and execution
-- Sequential agent calls on same thread
+- Sequential agent calls in the same session
 - Conversation continuity in orchestrations
-- Thread context preservation
+- Session context preservation
 """
 
 import json

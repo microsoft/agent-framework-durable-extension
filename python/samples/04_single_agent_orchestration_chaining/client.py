@@ -3,7 +3,7 @@
 """Client application for starting a single agent chaining orchestration.
 
 This client connects to the Durable Task Scheduler and starts an orchestration
-that runs a writer agent twice sequentially on the same thread, demonstrating
+that runs a writer agent twice sequentially in the same session, demonstrating
 how conversation context is maintained across multiple agent invocations.
 
 Prerequisites:

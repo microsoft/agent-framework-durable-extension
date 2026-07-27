@@ -16,7 +16,7 @@ from agent_framework import AgentResponse, Message
 from agent_framework_durabletask import (
     MIMETYPE_APPLICATION_JSON,
     MIMETYPE_TEXT_PLAIN,
-    THREAD_ID_HEADER,
+    SESSION_ID_HEADER,
     WAIT_FOR_RESPONSE_FIELD,
     WAIT_FOR_RESPONSE_HEADER,
     AgentEntity,
@@ -27,6 +27,7 @@ from agent_framework_durabletask import (
 
 from agent_framework_azurefunctions import AgentFunctionApp
 from agent_framework_azurefunctions._entities import create_agent_entity
+from agent_framework_azurefunctions._errors import IncomingRequestError
 
 FuncT = TypeVar("FuncT", bound=Callable[..., Any])
 
@@ -36,8 +37,8 @@ def _identity_decorator(func: FuncT) -> FuncT:
 
 
 class _InMemoryStateProvider(AgentEntityStateProviderMixin):
-    def __init__(self, *, thread_id: str = "test-thread", initial_state: dict[str, Any] | None = None) -> None:
-        self._thread_id = thread_id
+    def __init__(self, *, session_id: str = "test-session", initial_state: dict[str, Any] | None = None) -> None:
+        self._session_id = session_id
         self._state_dict: dict[str, Any] = initial_state or {}
 
     def _get_state_dict(self) -> dict[str, Any]:
@@ -46,8 +47,8 @@ class _InMemoryStateProvider(AgentEntityStateProviderMixin):
     def _set_state_dict(self, state: dict[str, Any]) -> None:
         self._state_dict = state
 
-    def _get_thread_id_from_entity(self) -> str:
-        return self._thread_id
+    def _get_session_id_from_entity(self) -> str:
+        return self._session_id
 
 
 class TestAgentFunctionAppInit:
@@ -360,7 +361,7 @@ class TestAgentEntityOperations:
             return_value=AgentResponse(messages=[Message(role="assistant", contents=["Test response"])])
         )
 
-        entity = AgentEntity(mock_agent, state_provider=_InMemoryStateProvider(thread_id="test-conv-123"))
+        entity = AgentEntity(mock_agent, state_provider=_InMemoryStateProvider(session_id="test-conv-123"))
 
         result = await entity.run({
             "message": "Test message",
@@ -378,7 +379,7 @@ class TestAgentEntityOperations:
             return_value=AgentResponse(messages=[Message(role="assistant", contents=["Response 1"])])
         )
 
-        entity = AgentEntity(mock_agent, state_provider=_InMemoryStateProvider(thread_id="conv-1"))
+        entity = AgentEntity(mock_agent, state_provider=_InMemoryStateProvider(session_id="conv-1"))
 
         # Send first message
         await entity.run({"message": "Message 1", "correlationId": "corr-app-entity-2"})
@@ -412,7 +413,7 @@ class TestAgentEntityOperations:
             return_value=AgentResponse(messages=[Message(role="assistant", contents=["Response"])])
         )
 
-        entity = AgentEntity(mock_agent, state_provider=_InMemoryStateProvider(thread_id="conv-1"))
+        entity = AgentEntity(mock_agent, state_provider=_InMemoryStateProvider(session_id="conv-1"))
 
         assert len(entity.state.data.conversation_history) == 0
 
@@ -627,7 +628,7 @@ class TestErrorHandling:
         mock_agent = Mock()
         mock_agent.run = AsyncMock(side_effect=Exception("Agent error"))
 
-        entity = AgentEntity(mock_agent, state_provider=_InMemoryStateProvider(thread_id="conv-1"))
+        entity = AgentEntity(mock_agent, state_provider=_InMemoryStateProvider(session_id="conv-1"))
 
         result = await entity.run({
             "message": "Test message",
@@ -719,17 +720,58 @@ class TestIncomingRequestParsing:
         assert message == "Plain text message"
         assert response_format == "json"
 
-    def test_extract_thread_id_from_query_params(self) -> None:
-        """Test thread identifier extraction from query parameters."""
+    def test_extract_session_id_from_query_params(self) -> None:
+        """Test session identifier extraction from query parameters."""
+        app = self._create_app()
+
+        request = Mock()
+        request.params = {"session_id": "query-session"}
+        req_body: dict[str, Any] = {}
+
+        assert app._resolve_session_id(request, req_body) == "query-session"
+
+    def test_extract_legacy_thread_id_from_query_params(self) -> None:
+        """The deprecated thread_id name is still accepted on incoming requests."""
         app = self._create_app()
 
         request = Mock()
         request.params = {"thread_id": "query-thread"}
         req_body: dict[str, Any] = {}
 
-        thread_id = app._resolve_thread_id(request, req_body)
+        assert app._resolve_session_id(request, req_body) == "query-thread"
 
-        assert thread_id == "query-thread"
+    def test_session_id_wins_over_matching_legacy_thread_id(self) -> None:
+        """Matching values under both names resolve to that value."""
+        app = self._create_app()
+
+        request = Mock()
+        request.params = {"session_id": "same-key", "thread_id": "same-key"}
+
+        assert app._resolve_session_id(request, {}) == "same-key"
+        assert app._resolve_session_id(request, {"session_id": "same-key"}) == "same-key"
+
+    def test_conflicting_session_identifiers_are_rejected(self) -> None:
+        """Any two non-blank values that disagree are rejected, matching the .NET behavior."""
+        app = self._create_app()
+
+        request = Mock()
+        request.params = {"session_id": "query-session", "thread_id": "query-thread"}
+        with pytest.raises(IncomingRequestError, match="Conflicting session identifiers"):
+            app._resolve_session_id(request, {})
+
+        # Conflicts across the body and query string are rejected too.
+        request.params = {"session_id": "query-session"}
+        with pytest.raises(IncomingRequestError, match="Conflicting session identifiers"):
+            app._resolve_session_id(request, {"thread_id": "body-thread"})
+
+    def test_blank_session_identifiers_are_ignored(self) -> None:
+        """Blank values fall through to the next source instead of winning or conflicting."""
+        app = self._create_app()
+
+        request = Mock()
+        request.params = {"thread_id": "query-thread"}
+
+        assert app._resolve_session_id(request, {"session_id": "   "}) == "query-thread"
 
 
 class TestHttpRunRoute:
@@ -784,7 +826,7 @@ class TestHttpRunRoute:
 
         assert response.status_code == 202
         assert response.mimetype == MIMETYPE_TEXT_PLAIN
-        assert response.headers.get(THREAD_ID_HEADER) is not None
+        assert response.headers.get(SESSION_ID_HEADER) is not None
         assert response.get_body().decode("utf-8") == "Agent request accepted"
 
         signal_args = client.signal_entity.call_args[0]
@@ -792,6 +834,7 @@ class TestHttpRunRoute:
 
         assert run_request["message"] == "Plain text via HTTP"
         assert run_request["role"] == "user"
+        assert "session_id" not in run_request
         assert "thread_id" not in run_request
 
     async def test_http_run_accept_header_returns_json(self) -> None:
@@ -814,9 +857,64 @@ class TestHttpRunRoute:
 
         assert response.status_code == 202
         assert response.mimetype == MIMETYPE_APPLICATION_JSON
-        assert response.headers.get(THREAD_ID_HEADER) is None
+        assert response.headers.get(SESSION_ID_HEADER) is None
         body = response.get_body().decode("utf-8")
         assert '"status": "accepted"' in body
+
+        # Responses carry only the canonical session_id name.
+        payload = json.loads(body)
+        assert payload["session_id"]
+        assert "thread_id" not in payload
+
+    async def test_http_run_round_trips_explicit_session_id(self) -> None:
+        """An explicit caller-supplied key flows through the entity, payload, and header unchanged."""
+        mock_agent = Mock()
+        mock_agent.name = "HttpAgentEcho"
+
+        handler = self._get_run_handler(mock_agent)
+
+        request = Mock()
+        request.headers = {WAIT_FOR_RESPONSE_HEADER: "false", "Accept": MIMETYPE_APPLICATION_JSON}
+        # Supplied under the deprecated name to also cover backward compatibility.
+        request.params = {"thread_id": "caller-key-1"}
+        request.route_params = {}
+        request.get_json.side_effect = ValueError("Invalid JSON")
+        request.get_body.return_value = b"Plain text via HTTP"
+
+        client = AsyncMock()
+
+        response = await handler(request, client)
+
+        assert response.status_code == 202
+        payload = json.loads(response.get_body().decode("utf-8"))
+        assert payload["session_id"] == "caller-key-1"
+        assert "thread_id" not in payload
+
+        # The durable entity is keyed by the same caller-supplied value.
+        entity_id = client.signal_entity.call_args[0][0]
+        assert entity_id.key == "caller-key-1"
+
+    async def test_http_run_rejects_conflicting_session_identifiers(self) -> None:
+        """Conflicting session identifiers are rejected with HTTP 400."""
+        mock_agent = Mock()
+        mock_agent.name = "HttpAgentConflict"
+
+        handler = self._get_run_handler(mock_agent)
+
+        request = Mock()
+        request.headers = {WAIT_FOR_RESPONSE_HEADER: "false", "Accept": MIMETYPE_APPLICATION_JSON}
+        request.params = {"session_id": "one", "thread_id": "two"}
+        request.route_params = {}
+        request.get_json.side_effect = ValueError("Invalid JSON")
+        request.get_body.return_value = b"Plain text via HTTP"
+
+        client = AsyncMock()
+
+        response = await handler(request, client)
+
+        assert response.status_code == 400
+        assert "Conflicting session identifiers" in response.get_body().decode("utf-8")
+        client.signal_entity.assert_not_called()
 
     async def test_http_run_rejects_empty_message(self) -> None:
         """Test that the HTTP handler rejects empty messages with a 400 response."""
@@ -838,7 +936,7 @@ class TestHttpRunRoute:
 
         assert response.status_code == 400
         assert response.mimetype == MIMETYPE_TEXT_PLAIN
-        assert response.headers.get(THREAD_ID_HEADER) is not None
+        assert response.headers.get(SESSION_ID_HEADER) is not None
         assert response.get_body().decode("utf-8") == "Message is required"
         client.signal_entity.assert_not_called()
 
@@ -945,6 +1043,10 @@ class TestMCPToolEndpoint:
             )
             client_mock.assert_called_once_with(client_name="client")
 
+            # The advertised schema exposes only the canonical "sessionId" property.
+            advertised = json.loads(mcp_trigger_mock.call_args.kwargs["tool_properties"])
+            assert [prop["propertyName"] for prop in advertised] == ["query", "sessionId"]
+
     def test_setup_mcp_tool_trigger_uses_default_description(self) -> None:
         """Test that _setup_mcp_tool_trigger uses default description when none provided."""
         mock_agent = Mock()
@@ -982,7 +1084,7 @@ class TestMCPToolEndpoint:
         client.read_entity_state.return_value = mock_state
 
         # Create JSON string context
-        context = '{"arguments": {"query": "test query", "threadId": "test-thread"}}'
+        context = '{"arguments": {"query": "test query", "sessionId": "test-session"}}'
 
         with patch.object(app, "_get_response_from_entity") as get_response_mock:
             get_response_mock.return_value = {"status": "success", "response": "Test response"}
@@ -1009,7 +1111,7 @@ class TestMCPToolEndpoint:
         client.read_entity_state.return_value = mock_state
 
         # Create JSON string context
-        context = json.dumps({"arguments": {"query": "test query", "threadId": "test-thread"}})
+        context = json.dumps({"arguments": {"query": "test query", "sessionId": "test-session"}})
 
         with patch.object(app, "_get_response_from_entity") as get_response_mock:
             get_response_mock.return_value = {"status": "success", "response": "Test response"}
@@ -1071,8 +1173,8 @@ class TestMCPToolEndpoint:
             with pytest.raises(RuntimeError, match="Agent execution failed"):
                 await app._handle_mcp_tool_invocation("TestAgent", context, client)
 
-    async def test_handle_mcp_tool_invocation_ignores_agent_name_in_thread_id(self) -> None:
-        """Test that MCP tool invocation uses the agent_name parameter, not the name from thread_id."""
+    async def test_handle_mcp_tool_invocation_ignores_agent_name_in_session_id(self) -> None:
+        """Test that MCP tool invocation uses the agent_name parameter, not the name from the session id."""
         mock_agent = Mock()
         mock_agent.name = "PlantAdvisor"
 
@@ -1087,9 +1189,9 @@ class TestMCPToolEndpoint:
         }
         client.read_entity_state.return_value = mock_state
 
-        # Thread ID contains a different agent name (@StockAdvisor@poc123)
+        # Session ID contains a different agent name (@StockAdvisor@poc123)
         # but we're invoking PlantAdvisor - it should use PlantAdvisor's entity
-        context = json.dumps({"arguments": {"query": "test query", "threadId": "@StockAdvisor@test123"}})
+        context = json.dumps({"arguments": {"query": "test query", "sessionId": "@StockAdvisor@test123"}})
 
         with patch.object(app, "_get_response_from_entity") as get_response_mock:
             get_response_mock.return_value = {"status": "success", "response": "Test response"}
@@ -1105,8 +1207,8 @@ class TestMCPToolEndpoint:
             assert entity_id.name == "dafx-PlantAdvisor"
             assert entity_id.key == "test123"
 
-    async def test_handle_mcp_tool_invocation_uses_plain_thread_id_as_key(self) -> None:
-        """Test that a plain thread_id (not in @name@key format) is used as-is for the key."""
+    async def test_handle_mcp_tool_invocation_uses_plain_session_id_as_key(self) -> None:
+        """Test that a plain session id (not in @name@key format) is used as-is for the key."""
         mock_agent = Mock()
         mock_agent.name = "TestAgent"
 
@@ -1120,8 +1222,8 @@ class TestMCPToolEndpoint:
         }
         client.read_entity_state.return_value = mock_state
 
-        # Plain thread_id without @name@key format
-        context = json.dumps({"arguments": {"query": "test query", "threadId": "simple-thread-123"}})
+        # Plain session id without @name@key format
+        context = json.dumps({"arguments": {"query": "test query", "sessionId": "simple-session-123"}})
 
         with patch.object(app, "_get_response_from_entity") as get_response_mock:
             get_response_mock.return_value = {"status": "success", "response": "Test response"}
@@ -1133,7 +1235,59 @@ class TestMCPToolEndpoint:
             entity_id = call_args[0][0]
 
             assert entity_id.name == "dafx-TestAgent"
-            assert entity_id.key == "simple-thread-123"
+            assert entity_id.key == "simple-session-123"
+
+    async def test_handle_mcp_tool_invocation_accepts_legacy_thread_id(self) -> None:
+        """The deprecated threadId argument is still honored when sessionId is absent."""
+        mock_agent = Mock()
+        mock_agent.name = "TestAgent"
+
+        app = AgentFunctionApp(agents=[mock_agent])
+        client = AsyncMock()
+
+        mock_state = Mock()
+        mock_state.entity_state = {
+            "schemaVersion": "1.0.0",
+            "data": {"conversationHistory": []},
+        }
+        client.read_entity_state.return_value = mock_state
+
+        context = json.dumps({"arguments": {"query": "test query", "threadId": "legacy-key-123"}})
+
+        with patch.object(app, "_get_response_from_entity") as get_response_mock:
+            get_response_mock.return_value = {"status": "success", "response": "Test response"}
+
+            await app._handle_mcp_tool_invocation("TestAgent", context, client)
+
+            entity_id = client.signal_entity.call_args[0][0]
+            assert entity_id.key == "legacy-key-123"
+
+    async def test_handle_mcp_tool_invocation_prefers_session_id(self) -> None:
+        """The canonical sessionId argument wins over the deprecated threadId alias."""
+        mock_agent = Mock()
+        mock_agent.name = "TestAgent"
+
+        app = AgentFunctionApp(agents=[mock_agent])
+        client = AsyncMock()
+
+        mock_state = Mock()
+        mock_state.entity_state = {
+            "schemaVersion": "1.0.0",
+            "data": {"conversationHistory": []},
+        }
+        client.read_entity_state.return_value = mock_state
+
+        context = json.dumps({
+            "arguments": {"query": "test query", "sessionId": "canonical-key", "threadId": "legacy-key"}
+        })
+
+        with patch.object(app, "_get_response_from_entity") as get_response_mock:
+            get_response_mock.return_value = {"status": "success", "response": "Test response"}
+
+            await app._handle_mcp_tool_invocation("TestAgent", context, client)
+
+            entity_id = client.signal_entity.call_args[0][0]
+            assert entity_id.key == "canonical-key"
 
     def test_health_check_includes_mcp_tool_enabled(self) -> None:
         """Test that health check endpoint includes mcp_tool_enabled field."""
@@ -1241,30 +1395,51 @@ class TestAgentFunctionAppErrorPaths:
         assert "other" in result
         assert "value" in result
 
-    def test_create_session_id_with_thread_id(self) -> None:
-        """Test _create_session_id with provided thread_id."""
+    def test_create_session_id_with_session_key(self) -> None:
+        """Test _create_session_id with a provided session key."""
         app = AgentFunctionApp(enable_http_endpoints=False, enable_health_check=False)
 
-        # With thread_id provided
-        session_id = app._create_session_id("TestAgent", "my-thread-123")
-        assert session_id.key == "my-thread-123"
+        # With a session key provided
+        session_id = app._create_session_id("TestAgent", "my-session-123")
+        assert session_id.key == "my-session-123"
 
-        # Without thread_id (None) - should generate random
+        # Without a session key (None) - should generate random
         session_id = app._create_session_id("TestAgent", None)
         assert session_id.key is not None
         assert len(session_id.key) > 0
 
-    def test_resolve_thread_id_from_body(self) -> None:
-        """Test _resolve_thread_id extracts from body."""
+    def test_resolve_session_id_from_body(self) -> None:
+        """Test _resolve_session_id extracts from body."""
         app = AgentFunctionApp(enable_http_endpoints=False, enable_health_check=False)
 
         mock_req = Mock()
         mock_req.params = {}
 
-        # Thread ID in body - field name is "thread_id"
-        req_body = {"thread_id": "body-thread-123"}
-        result = app._resolve_thread_id(mock_req, req_body)
-        assert result == "body-thread-123"
+        assert app._resolve_session_id(mock_req, {"session_id": "body-session-123"}) == "body-session-123"
+        # The deprecated field name is still accepted.
+        assert app._resolve_session_id(mock_req, {"thread_id": "body-thread-123"}) == "body-thread-123"
+
+    async def test_handle_mcp_tool_invocation_blank_session_id_falls_back_to_thread_id(self) -> None:
+        """A blank sessionId must not shadow a valid deprecated threadId."""
+        mock_agent = Mock()
+        mock_agent.name = "TestAgent"
+
+        app = AgentFunctionApp(agents=[mock_agent])
+        client = AsyncMock()
+
+        mock_state = Mock()
+        mock_state.entity_state = {"schemaVersion": "1.0.0", "data": {"conversationHistory": []}}
+        client.read_entity_state.return_value = mock_state
+
+        context = json.dumps({"arguments": {"query": "q", "sessionId": "   ", "threadId": "legacy-key"}})
+
+        with patch.object(app, "_get_response_from_entity") as get_response_mock:
+            get_response_mock.return_value = {"status": "success", "response": "Test response"}
+
+            await app._handle_mcp_tool_invocation("TestAgent", context, client)
+
+            entity_id = client.signal_entity.call_args[0][0]
+            assert entity_id.key == "legacy-key"
 
     def test_select_body_parser_json_content_type(self) -> None:
         """Test _select_body_parser for JSON content type."""
