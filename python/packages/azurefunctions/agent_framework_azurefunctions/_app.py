@@ -1572,11 +1572,8 @@ class AgentFunctionApp(DFAppBase):
         params = req.params or {}
 
         candidates: dict[str, str] = {}
-        for source_name, source, fields in (
-            ("request body", req_body, (SESSION_ID_FIELD, LEGACY_THREAD_ID_FIELD)),
-            ("query string", params, (SESSION_ID_FIELD, LEGACY_THREAD_ID_FIELD)),
-        ):
-            for field in fields:
+        for source_name, source in (("request body", req_body), ("query string", params)):
+            for field in (SESSION_ID_FIELD, LEGACY_THREAD_ID_FIELD):
                 value = source.get(field)
                 if value is not None and str(value).strip():
                     candidates[f"{field} in the {source_name}"] = str(value)
