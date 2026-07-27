@@ -1013,15 +1013,15 @@ public sealed class DurableStreamingWorkflowRunTests
     // back must not depend on the camelCase names this library writes, otherwise every property
     // silently binds to null and the workflow result is lost.
     [Theory]
-    [InlineData("""{"Result":"\"hello\"","Events":[],"SentMessages":[],"HaltRequested":false}""")]
-    [InlineData("""{"result":"\"hello\"","events":[],"sentMessages":[],"haltRequested":false}""")]
+    [InlineData("""{"Result":"hello","Events":[],"SentMessages":[],"HaltRequested":false}""")]
+    [InlineData("""{"result":"hello","events":[],"sentMessages":[],"haltRequested":false}""")]
     public void ExtractResult_ReadsResultRegardlessOfPropertyCasing(string serializedOutput)
     {
         // Act
         string? result = DurableStreamingWorkflowRun.ExtractResult<string>(serializedOutput);
 
         // Assert
-        Assert.Equal("\"hello\"", result);
+        Assert.Equal("hello", result);
     }
 
     // Same concern for the events collection, which the streaming path backfills from the output.
