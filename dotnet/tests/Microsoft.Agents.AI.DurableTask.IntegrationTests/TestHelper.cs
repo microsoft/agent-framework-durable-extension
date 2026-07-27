@@ -48,6 +48,8 @@ internal sealed class TestHelper : IDisposable
         ITestOutputHelper outputHelper,
         Action<DurableTaskRegistry>? durableTaskRegistry = null)
     {
+        ArgumentNullException.ThrowIfNull(agents);
+
         return BuildAndStartTestHelper(
             outputHelper,
             options =>

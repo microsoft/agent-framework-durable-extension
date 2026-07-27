@@ -16,7 +16,8 @@ public static class DurableWorkflowOptionsExtensions
     /// <param name="options">The workflow options to add the workflow to.</param>
     /// <param name="workflow">The workflow instance to add.</param>
     /// <param name="enableStatusEndpoint">If <see langword="true"/>, a GET endpoint is generated at <c>workflows/{name}/status/{runId}</c>.</param>
-    public static void AddWorkflow(this DurableWorkflowOptions options, Workflow workflow, bool enableStatusEndpoint)
+    /// <returns>The options instance, so that multiple calls can be chained.</returns>
+    public static DurableWorkflowOptions AddWorkflow(this DurableWorkflowOptions options, Workflow workflow, bool enableStatusEndpoint)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -26,6 +27,8 @@ public static class DurableWorkflowOptionsExtensions
         {
             functionsOptions.EnableStatusEndpoint(workflow.Name!);
         }
+
+        return options;
     }
 
     /// <summary>
@@ -35,7 +38,8 @@ public static class DurableWorkflowOptionsExtensions
     /// <param name="workflow">The workflow instance to add.</param>
     /// <param name="enableStatusEndpoint">If <see langword="true"/>, a GET endpoint is generated at <c>workflows/{name}/status/{runId}</c>.</param>
     /// <param name="enableMcpToolTrigger">If <see langword="true"/>, an MCP tool trigger is generated for the workflow.</param>
-    public static void AddWorkflow(this DurableWorkflowOptions options, Workflow workflow, bool enableStatusEndpoint, bool enableMcpToolTrigger)
+    /// <returns>The options instance, so that multiple calls can be chained.</returns>
+    public static DurableWorkflowOptions AddWorkflow(this DurableWorkflowOptions options, Workflow workflow, bool enableStatusEndpoint, bool enableMcpToolTrigger)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -53,5 +57,7 @@ public static class DurableWorkflowOptionsExtensions
                 functionsOptions.EnableMcpToolTrigger(workflow.Name!);
             }
         }
+
+        return options;
     }
 }
