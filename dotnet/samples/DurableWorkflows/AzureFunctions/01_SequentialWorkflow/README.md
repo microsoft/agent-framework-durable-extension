@@ -109,7 +109,7 @@ curl -X POST "http://localhost:7071/api/workflows/CancelOrder/run?waitForRespons
 }
 ```
 
-The `x-ms-wait-for-response` header remains supported for backward compatibility. Request cancellation cancels the wait without terminating the durable workflow; use the returned run ID or management URLs to inspect or manage the run.
+The `x-ms-wait-for-response` header remains supported for backward compatibility. A wait timeout returns `202 Accepted` with the run ID and management URLs. Client request cancellation instead aborts the HTTP wait without returning a response, but the durable workflow continues; callers that need to recover should supply `runId` up front and query its status later.
 
 In the function app logs, you will see the sequential execution of each executor:
 
