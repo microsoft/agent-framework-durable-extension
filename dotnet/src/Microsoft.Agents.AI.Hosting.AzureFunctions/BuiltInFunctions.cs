@@ -692,17 +692,41 @@ internal static class BuiltInFunctions
     internal static bool ShouldWaitForResponse(HttpRequestData req, string parameterName, bool defaultValue)
     {
         if (req.Headers.TryGetValues(WaitForResponseHeaderName, out IEnumerable<string>? values) &&
-            bool.TryParse(values.FirstOrDefault(), out bool parsed))
+            TryParseBoolean(values.FirstOrDefault(), out bool parsed))
         {
             return parsed;
         }
 
-        if (bool.TryParse(req.Query[parameterName], out parsed))
+        if (TryParseBoolean(req.Query[parameterName], out parsed))
         {
             return parsed;
         }
 
         return defaultValue;
+    }
+
+    private static bool TryParseBoolean(string? value, out bool result)
+    {
+        switch (value?.Trim().ToUpperInvariant())
+        {
+            case "TRUE":
+            case "1":
+            case "YES":
+            case "Y":
+            case "ON":
+                result = true;
+                return true;
+            case "FALSE":
+            case "0":
+            case "NO":
+            case "N":
+            case "OFF":
+                result = false;
+                return true;
+            default:
+                result = false;
+                return false;
+        }
     }
 
     /// <summary>

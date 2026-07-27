@@ -60,6 +60,10 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
     [InlineData(null, "true", false, true)]
     [InlineData("false", "true", true, false)]
     [InlineData("invalid", "true", false, true)]
+    [InlineData("1", "false", false, true)]
+    [InlineData("0", "true", true, false)]
+    [InlineData(null, "yes", false, true)]
+    [InlineData(null, "off", true, false)]
     public void ShouldWaitForResponse_UsesHeaderThenQueryThenDefault(
         string? headerValue,
         string? queryValue,
