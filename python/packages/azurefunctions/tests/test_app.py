@@ -1118,6 +1118,31 @@ class TestWorkflowRunRoute:
         assert timeout_response.headers == async_response.headers
         assert timeout_response.get_body() == async_response.get_body()
 
+    async def test_wait_failure_returns_domain_result(self) -> None:
+        """Test that workflow failure is returned as a successful HTTP domain result."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.url = "http://localhost:7071/api/workflow/test_workflow/run"
+        request.headers = {}
+        request.params = {"waitForResponse": "true"}
+        request.get_json.return_value = {"message": "hello"}
+        failure_body = json.dumps({"runtimeStatus": "Failed", "output": "Something went wrong"})
+        client = AsyncMock()
+        client.start_new.return_value = "instance-1"
+        client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
+            failure_body,
+            status_code=500,
+            mimetype=MIMETYPE_APPLICATION_JSON,
+            headers={"X-Test": "preserved"},
+        )
+
+        response = await handler(request, client)
+
+        assert response.status_code == 200
+        assert response.mimetype == MIMETYPE_APPLICATION_JSON
+        assert response.headers["X-Test"] == "preserved"
+        assert response.get_body().decode("utf-8") == failure_body
+
     async def test_invalid_wait_timeout_does_not_start_workflow(self) -> None:
         """Test invalid synchronous timeout rejection before scheduling."""
         handler = self._get_run_handler("test_workflow")

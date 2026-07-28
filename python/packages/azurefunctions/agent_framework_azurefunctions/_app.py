@@ -555,6 +555,16 @@ class AgentFunctionApp(DFAppBase):
                     timeout_in_milliseconds=timeout_in_milliseconds,
                     retry_interval_in_milliseconds=1000,
                 )
+                if completion_response.status_code == 500:
+                    # Workflow failure is a domain result, not an HTTP processing failure.
+                    # Preserve the helper payload while matching the .NET endpoint's status.
+                    return func.HttpResponse(
+                        completion_response.get_body(),
+                        status_code=200,
+                        headers=dict(completion_response.headers),
+                        mimetype=completion_response.mimetype,
+                        charset=completion_response.charset,
+                    )
                 if completion_response.status_code != 202:
                     return completion_response
 
