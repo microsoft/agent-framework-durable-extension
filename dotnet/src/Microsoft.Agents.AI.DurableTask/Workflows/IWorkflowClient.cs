@@ -40,6 +40,38 @@ public interface IWorkflowClient
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Runs a registered workflow by name and returns a handle to monitor its execution.
+    /// </summary>
+    /// <typeparam name="TInput">The type of the input to the workflow.</typeparam>
+    /// <param name="workflowName">The name of a workflow that was registered via <see cref="DurableWorkflowOptions.AddWorkflow"/>.</param>
+    /// <param name="input">The input to pass to the workflow's starting executor.</param>
+    /// <param name="runId">Optional identifier for the run. If not provided, a new ID will be generated.</param>
+    /// <param name="cancellationToken">A cancellation token to observe.</param>
+    /// <returns>An <see cref="IWorkflowRun"/> that can be used to monitor the workflow execution.</returns>
+    /// <exception cref="WorkflowNotRegisteredException">Thrown when no workflow with the specified name has been registered.</exception>
+    ValueTask<IWorkflowRun> RunAsync<TInput>(
+        string workflowName,
+        TInput input,
+        string? runId = null,
+        CancellationToken cancellationToken = default)
+        where TInput : notnull;
+
+    /// <summary>
+    /// Runs a registered workflow by name with string input and returns a handle to monitor its execution.
+    /// </summary>
+    /// <param name="workflowName">The name of a workflow that was registered via <see cref="DurableWorkflowOptions.AddWorkflow"/>.</param>
+    /// <param name="input">The string input to pass to the workflow.</param>
+    /// <param name="runId">Optional identifier for the run. If not provided, a new ID will be generated.</param>
+    /// <param name="cancellationToken">A cancellation token to observe.</param>
+    /// <returns>An <see cref="IWorkflowRun"/> that can be used to monitor the workflow execution.</returns>
+    /// <exception cref="WorkflowNotRegisteredException">Thrown when no workflow with the specified name has been registered.</exception>
+    ValueTask<IWorkflowRun> RunAsync(
+        string workflowName,
+        string input,
+        string? runId = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Starts a workflow and returns a streaming handle to watch events in real-time.
     /// </summary>
     /// <typeparam name="TInput">The type of the input to the workflow.</typeparam>
@@ -65,6 +97,38 @@ public interface IWorkflowClient
     /// <returns>An <see cref="IStreamingWorkflowRun"/> that can be used to stream workflow events.</returns>
     ValueTask<IStreamingWorkflowRun> StreamAsync(
         Workflow workflow,
+        string input,
+        string? runId = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Starts a registered workflow by name and returns a streaming handle to watch events in real-time.
+    /// </summary>
+    /// <typeparam name="TInput">The type of the input to the workflow.</typeparam>
+    /// <param name="workflowName">The name of a workflow that was registered via <see cref="DurableWorkflowOptions.AddWorkflow"/>.</param>
+    /// <param name="input">The input to pass to the workflow's starting executor.</param>
+    /// <param name="runId">Optional identifier for the run. If not provided, a new ID will be generated.</param>
+    /// <param name="cancellationToken">A cancellation token to observe.</param>
+    /// <returns>An <see cref="IStreamingWorkflowRun"/> that can be used to stream workflow events.</returns>
+    /// <exception cref="WorkflowNotRegisteredException">Thrown when no workflow with the specified name has been registered.</exception>
+    ValueTask<IStreamingWorkflowRun> StreamAsync<TInput>(
+        string workflowName,
+        TInput input,
+        string? runId = null,
+        CancellationToken cancellationToken = default)
+        where TInput : notnull;
+
+    /// <summary>
+    /// Starts a registered workflow by name with string input and returns a streaming handle to watch events in real-time.
+    /// </summary>
+    /// <param name="workflowName">The name of a workflow that was registered via <see cref="DurableWorkflowOptions.AddWorkflow"/>.</param>
+    /// <param name="input">The string input to pass to the workflow.</param>
+    /// <param name="runId">Optional identifier for the run. If not provided, a new ID will be generated.</param>
+    /// <param name="cancellationToken">A cancellation token to observe.</param>
+    /// <returns>An <see cref="IStreamingWorkflowRun"/> that can be used to stream workflow events.</returns>
+    /// <exception cref="WorkflowNotRegisteredException">Thrown when no workflow with the specified name has been registered.</exception>
+    ValueTask<IStreamingWorkflowRun> StreamAsync(
+        string workflowName,
         string input,
         string? runId = null,
         CancellationToken cancellationToken = default);
