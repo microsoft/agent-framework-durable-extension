@@ -7,16 +7,16 @@ Content-Type: text/plain
 
 12345
 
-### Cancel an order and wait for the result
+### Cancel an order and wait for the result (plain-text response)
 POST {{authority}}/api/workflows/CancelOrder/run?waitForResponse=true&timeoutSeconds=30
 Content-Type: text/plain
+Accept: text/plain
 
 12345
 
-### Cancel an order and wait for the result (JSON response)
+### Cancel an order and wait for the result (default JSON response)
 POST {{authority}}/api/workflows/CancelOrder/run?waitForResponse=true
 Content-Type: text/plain
-Accept: application/json
 
 12345
 

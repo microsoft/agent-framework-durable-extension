@@ -2,9 +2,12 @@
 
 using System.Collections.Specialized;
 using System.Net;
+using System.Text.Json;
+using Azure.Core.Serialization;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.DurableTask.Client;
+using Microsoft.Extensions.Options;
 using Moq;
 
 namespace Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests;
@@ -111,17 +114,39 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
         Assert.Equal(expectedSuccess, error is null);
     }
 
-    [Fact]
-    public async Task WaitForWorkflowCompletionAsync_Timeout_ReturnsAsyncWorkflowResponseAsync()
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("application/json", true)]
+    [InlineData("application/*", true)]
+    [InlineData("*/*", true)]
+    [InlineData("text/plain", false)]
+    [InlineData("text/*", false)]
+    [InlineData("text/plain, application/json", true)]
+    [InlineData("text/plain, application/json;q=0", false)]
+    [InlineData("text/plain;q=0", true)]
+    [InlineData("image/png", true)]
+    public void ShouldReturnWorkflowJson_DefaultsToJsonUnlessOnlyTextIsAccepted(
+        string? accept,
+        bool expected)
+    {
+        (HttpRequestData request, _, _) = CreateCompletionRequest(CancellationToken.None, accept);
+
+        Assert.Equal(expected, BuiltInFunctions.ShouldReturnWorkflowJson(request));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("text/plain")]
+    public async Task WaitForWorkflowCompletionAsync_Timeout_ReturnsAsyncWorkflowResponseAsync(string? accept)
     {
         const string WorkflowName = "TestWorkflow";
         const string InstanceId = "workflow-123";
         (HttpRequestData asyncRequest, _, FunctionContext asyncContext) =
-            CreateCompletionRequest(CancellationToken.None);
+            CreateCompletionRequest(CancellationToken.None, accept);
         HttpResponseData expectedResponse = await BuiltInFunctions.CreateWorkflowAcceptedResponseAsync(
             asyncRequest, WorkflowName, InstanceId, asyncContext.CancellationToken);
         (HttpRequestData request, _, FunctionContext context) =
-            CreateCompletionRequest(CancellationToken.None);
+            CreateCompletionRequest(CancellationToken.None, accept);
         Mock<DurableTaskClient> client = CreateWaitingClient(InstanceId);
 
         HttpResponseData response = await BuiltInFunctions.WaitForWorkflowCompletionAsync(
@@ -137,6 +162,149 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
         Assert.Equal(
             expectedResponse.Headers.Select(header => (header.Key, string.Join(",", header.Value))),
             response.Headers.Select(header => (header.Key, string.Join(",", header.Value))));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("text/plain")]
+    public async Task CreateWorkflowAcceptedResponseAsync_HonorsContentNegotiationAsync(string? accept)
+    {
+        const string WorkflowName = "TestWorkflow";
+        const string InstanceId = "workflow-123";
+        (HttpRequestData request, _, FunctionContext context) =
+            CreateCompletionRequest(CancellationToken.None, accept);
+
+        HttpResponseData response = await BuiltInFunctions.CreateWorkflowAcceptedResponseAsync(
+            request, WorkflowName, InstanceId, context.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        if (accept is null)
+        {
+            AssertJsonContentType(response);
+            using JsonDocument body = JsonDocument.Parse(GetResponseBody(response));
+            Assert.Equal(InstanceId, body.RootElement.GetProperty("runId").GetString());
+            Assert.Equal(
+                $"Workflow orchestration started for {WorkflowName}.",
+                body.RootElement.GetProperty("message").GetString());
+        }
+        else
+        {
+            Assert.Equal(
+                $"Workflow orchestration started for {WorkflowName}. Orchestration runId: {InstanceId}",
+                GetResponseBody(response));
+            AssertTextContentType(response);
+        }
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("text/plain")]
+    public async Task WaitForWorkflowCompletionAsync_Completed_HonorsContentNegotiationAsync(string? accept)
+    {
+        const string InstanceId = "workflow-123";
+        const string Result = "Workflow completed.";
+        (HttpRequestData request, _, FunctionContext context) =
+            CreateCompletionRequest(CancellationToken.None, accept);
+        OrchestrationMetadata metadata = new("dafx-TestWorkflow", InstanceId)
+        {
+            RuntimeStatus = OrchestrationRuntimeStatus.Completed,
+            DataConverter = Microsoft.DurableTask.Converters.JsonDataConverter.Default,
+            SerializedOutput = JsonSerializer.Serialize(new { Result }),
+        };
+        Mock<DurableTaskClient> client = CreateCompletedClient(InstanceId, metadata);
+
+        HttpResponseData response = await BuiltInFunctions.WaitForWorkflowCompletionAsync(
+            request,
+            client.Object,
+            context,
+            "TestWorkflow",
+            InstanceId,
+            TimeSpan.FromSeconds(1));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        if (accept is null)
+        {
+            AssertJsonContentType(response);
+            using JsonDocument body = JsonDocument.Parse(GetResponseBody(response));
+            Assert.Equal(InstanceId, body.RootElement.GetProperty("runId").GetString());
+            Assert.Equal("Completed", body.RootElement.GetProperty("workflowStatus").GetString());
+            Assert.Equal(Result, body.RootElement.GetProperty("result").GetString());
+        }
+        else
+        {
+            Assert.Equal(Result, GetResponseBody(response));
+            AssertTextContentType(response);
+        }
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("text/plain")]
+    public async Task WaitForWorkflowCompletionAsync_Failed_HonorsContentNegotiationAsync(string? accept)
+    {
+        const string InstanceId = "workflow-123";
+        (HttpRequestData request, _, FunctionContext context) =
+            CreateCompletionRequest(CancellationToken.None, accept);
+        OrchestrationMetadata metadata = new("dafx-TestWorkflow", InstanceId)
+        {
+            RuntimeStatus = OrchestrationRuntimeStatus.Failed,
+        };
+        Mock<DurableTaskClient> client = CreateCompletedClient(InstanceId, metadata);
+
+        HttpResponseData response = await BuiltInFunctions.WaitForWorkflowCompletionAsync(
+            request,
+            client.Object,
+            context,
+            "TestWorkflow",
+            InstanceId,
+            TimeSpan.FromSeconds(1));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        if (accept is null)
+        {
+            AssertJsonContentType(response);
+            using JsonDocument body = JsonDocument.Parse(GetResponseBody(response));
+            Assert.Equal(InstanceId, body.RootElement.GetProperty("runId").GetString());
+            Assert.Equal("Failed", body.RootElement.GetProperty("workflowStatus").GetString());
+            Assert.Equal("Unknown error", body.RootElement.GetProperty("error").GetString());
+        }
+        else
+        {
+            Assert.Equal("Unknown error", GetResponseBody(response));
+            AssertTextContentType(response);
+        }
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("text/plain")]
+    public async Task RunWorkflowOrchestrationHttpTriggerAsync_ValidationError_HonorsContentNegotiationAsync(
+        string? accept)
+    {
+        (HttpRequestData request, _, FunctionContext context) =
+            CreateCompletionRequest(CancellationToken.None, accept);
+        Mock.Get(request).SetupGet(r => r.Body).Returns(new MemoryStream());
+        Mock<FunctionDefinition> functionDefinition = new();
+        functionDefinition.SetupGet(d => d.Name).Returns("http-TestWorkflow");
+        Mock.Get(context).SetupGet(c => c.FunctionDefinition).Returns(functionDefinition.Object);
+        Mock<DurableTaskClient> client = new("test");
+
+        HttpResponseData response = await BuiltInFunctions.RunWorkflowOrchestrationHttpTriggerAsync(
+            request, client.Object, context);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        if (accept is null)
+        {
+            AssertJsonContentType(response);
+            using JsonDocument body = JsonDocument.Parse(GetResponseBody(response));
+            Assert.Equal(400, body.RootElement.GetProperty("status").GetInt32());
+            Assert.Equal("Workflow input cannot be empty.", body.RootElement.GetProperty("error").GetString());
+        }
+        else
+        {
+            Assert.Equal("Workflow input cannot be empty.", GetResponseBody(response));
+            AssertTextContentType(response);
+        }
     }
 
     [Fact]
@@ -202,19 +370,53 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
         return client;
     }
 
-    private static (HttpRequestData Request, HttpResponseData Response, FunctionContext Context) CreateCompletionRequest(
-        CancellationToken cancellationToken)
+    private static Mock<DurableTaskClient> CreateCompletedClient(
+        string instanceId,
+        OrchestrationMetadata metadata)
     {
+        Mock<DurableTaskClient> client = new("test");
+        client.Setup(c => c.WaitForInstanceCompletionAsync(instanceId, true, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(metadata);
+        return client;
+    }
+
+    private static (HttpRequestData Request, HttpResponseData Response, FunctionContext Context) CreateCompletionRequest(
+        CancellationToken cancellationToken,
+        string? accept = null)
+    {
+        Mock<ObjectSerializer> serializer = new();
+        serializer
+            .Setup(s => s.SerializeAsync(
+                It.IsAny<Stream>(),
+                It.IsAny<object?>(),
+                It.IsAny<Type>(),
+                It.IsAny<CancellationToken>()))
+            .Returns<Stream, object?, Type, CancellationToken>(async (stream, value, type, token) =>
+                await JsonSerializer.SerializeAsync(stream, value, type, cancellationToken: token));
+
+        WorkerOptions workerOptions = new() { Serializer = serializer.Object };
+        Mock<IOptions<WorkerOptions>> options = new();
+        options.SetupGet(o => o.Value).Returns(workerOptions);
+        Mock<IServiceProvider> services = new();
+        services.Setup(s => s.GetService(typeof(IOptions<WorkerOptions>))).Returns(options.Object);
+
         Mock<FunctionContext> context = new();
         context.SetupGet(c => c.CancellationToken).Returns(cancellationToken);
+        context.SetupGet(c => c.InstanceServices).Returns(services.Object);
 
         Mock<HttpResponseData> response = new(context.Object);
         response.SetupProperty(r => r.StatusCode, HttpStatusCode.OK);
         response.SetupProperty(r => r.Body, new MemoryStream());
         response.SetupGet(r => r.Headers).Returns(new HttpHeadersCollection());
 
+        HttpHeadersCollection requestHeaders = new();
+        if (accept is not null)
+        {
+            requestHeaders.Add("Accept", accept);
+        }
+
         Mock<HttpRequestData> request = new(context.Object);
-        request.SetupGet(r => r.Headers).Returns(new HttpHeadersCollection());
+        request.SetupGet(r => r.Headers).Returns(requestHeaders);
         request.Setup(r => r.CreateResponse()).Returns(response.Object);
 
         return (request.Object, response.Object, context.Object);
@@ -223,5 +425,17 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
     private static string GetResponseBody(HttpResponseData response)
     {
         return System.Text.Encoding.UTF8.GetString(((MemoryStream)response.Body).ToArray());
+    }
+
+    private static void AssertJsonContentType(HttpResponseData response)
+    {
+        Assert.True(response.Headers.TryGetValues("Content-Type", out IEnumerable<string>? contentTypes));
+        Assert.Contains("application/json", Assert.Single(contentTypes), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void AssertTextContentType(HttpResponseData response)
+    {
+        Assert.True(response.Headers.TryGetValues("Content-Type", out IEnumerable<string>? contentTypes));
+        Assert.Contains("text/plain", Assert.Single(contentTypes), StringComparison.OrdinalIgnoreCase);
     }
 }

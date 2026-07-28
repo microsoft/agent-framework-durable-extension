@@ -51,9 +51,14 @@ Invoke-RestMethod -Method Post `
 
 The response will confirm the workflow orchestration has started:
 
-```text
-Workflow orchestration started for CancelOrder. Orchestration runId: abc123def456
+```json
+{
+    "runId": "abc123def456",
+    "message": "Workflow orchestration started for CancelOrder."
+}
 ```
+
+Workflow run responses use JSON by default. Include `Accept: text/plain` to request the legacy plain-text representation instead.
 
 > **Tip:** You can provide a custom run ID by appending a `runId` query parameter:
 >
@@ -86,20 +91,7 @@ Invoke-RestMethod -Method Post `
     -Body "12345"
 ```
 
-The response will contain the workflow result as plain text (200 OK):
-
-```text
-Cancellation email sent for order 12345 to jerry@example.com.
-```
-
-To get the result as JSON, also include the `Accept: application/json` header:
-
-```bash
-curl -X POST "http://localhost:7071/api/workflows/CancelOrder/run?waitForResponse=true" \
-    -H "Content-Type: text/plain" \
-    -H "Accept: application/json" \
-    -d "12345"
-```
+The response is JSON by default:
 
 ```json
 {
@@ -107,6 +99,19 @@ curl -X POST "http://localhost:7071/api/workflows/CancelOrder/run?waitForRespons
     "workflowStatus": "Completed",
     "result": "Cancellation email sent for order 12345 to jerry@example.com."
 }
+```
+
+To get only the workflow result as plain text, include the `Accept: text/plain` header:
+
+```bash
+curl -X POST "http://localhost:7071/api/workflows/CancelOrder/run?waitForResponse=true" \
+    -H "Content-Type: text/plain" \
+    -H "Accept: text/plain" \
+    -d "12345"
+```
+
+```text
+Cancellation email sent for order 12345 to jerry@example.com.
 ```
 
 The `x-ms-wait-for-response` header remains supported for backward compatibility. A wait timeout returns the same `202 Accepted` response as the default asynchronous invocation. Client request cancellation instead aborts the HTTP wait without returning a response, but the durable workflow continues; callers that need to recover should supply `runId` up front and query its status later.
