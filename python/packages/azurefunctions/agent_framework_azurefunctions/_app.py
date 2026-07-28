@@ -549,28 +549,16 @@ class AgentFunctionApp(DFAppBase):
             if wait_for_response:
                 timeout_in_milliseconds = wait_timeout_seconds * 1000
                 completion_client = cast(_WorkflowCompletionClient, client)
-                return await completion_client.wait_for_completion_or_create_check_status_response(
+                completion_response = await completion_client.wait_for_completion_or_create_check_status_response(
                     req,
                     instance_id,
                     timeout_in_milliseconds=timeout_in_milliseconds,
                     retry_interval_in_milliseconds=1000,
                 )
+                if completion_response.status_code != 202:
+                    return completion_response
 
-            base_url, route_prefix = split_request_url(req.url)
-            status_url = build_workflow_status_url(base_url, workflow_name, instance_id, prefix=route_prefix)
-
-            return func.HttpResponse(
-                json.dumps({
-                    "instanceId": instance_id,
-                    "statusQueryGetUri": status_url,
-                    "respondUri": build_workflow_respond_url(
-                        base_url, workflow_name, instance_id, "{requestId}", prefix=route_prefix
-                    ),
-                    "message": "Workflow started",
-                }),
-                status_code=202,
-                mimetype="application/json",
-            )
+            return self._build_workflow_accepted_response(req, workflow_name, instance_id)
 
         @self.function_name(f"{orchestrator_name}-status")
         @self.route(route=f"workflow/{workflow_name}/status/{{instanceId}}", methods=["GET"])
@@ -1500,6 +1488,27 @@ class AgentFunctionApp(DFAppBase):
             session_id=session_id,
             status="accepted",
             correlation_id=correlation_id,
+        )
+
+    @staticmethod
+    def _build_workflow_accepted_response(
+        req: func.HttpRequest, workflow_name: str, instance_id: str
+    ) -> func.HttpResponse:
+        """Build the response returned when a workflow continues asynchronously."""
+        base_url, route_prefix = split_request_url(req.url)
+        return func.HttpResponse(
+            json.dumps({
+                "instanceId": instance_id,
+                "statusQueryGetUri": build_workflow_status_url(
+                    base_url, workflow_name, instance_id, prefix=route_prefix
+                ),
+                "respondUri": build_workflow_respond_url(
+                    base_url, workflow_name, instance_id, "{requestId}", prefix=route_prefix
+                ),
+                "message": "Workflow started",
+            }),
+            status_code=202,
+            mimetype=MIMETYPE_APPLICATION_JSON,
         )
 
     def _create_http_response(

@@ -112,12 +112,12 @@ internal static class BuiltInFunctions
 
         if (waitForResponse)
         {
-            return await WaitForWorkflowCompletionAsync(req, client, context, resolvedInstanceId, waitTimeout);
+            return await WaitForWorkflowCompletionAsync(
+                req, client, context, workflowName, resolvedInstanceId, waitTimeout);
         }
 
-        HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
-        await response.WriteStringAsync($"Workflow orchestration started for {workflowName}. Orchestration runId: {resolvedInstanceId}");
-        return response;
+        return await CreateWorkflowAcceptedResponseAsync(
+            req, workflowName, resolvedInstanceId, context.CancellationToken);
     }
 
     /// <summary>
@@ -494,6 +494,7 @@ internal static class BuiltInFunctions
         HttpRequestData req,
         DurableTaskClient client,
         FunctionContext context,
+        string workflowName,
         string instanceId,
         TimeSpan timeout)
     {
@@ -513,7 +514,8 @@ internal static class BuiltInFunctions
             }
             catch (OperationCanceledException) when (!context.CancellationToken.IsCancellationRequested)
             {
-                return await client.CreateCheckStatusResponseAsync(req, instanceId, context.CancellationToken);
+                return await CreateWorkflowAcceptedResponseAsync(
+                    req, workflowName, instanceId, context.CancellationToken);
             }
         }
 
@@ -587,6 +589,22 @@ internal static class BuiltInFunctions
             await response.WriteStringAsync(result ?? string.Empty, context.CancellationToken);
         }
 
+        return response;
+    }
+
+    /// <summary>
+    /// Creates the response returned when a workflow continues asynchronously.
+    /// </summary>
+    internal static async Task<HttpResponseData> CreateWorkflowAcceptedResponseAsync(
+        HttpRequestData req,
+        string workflowName,
+        string instanceId,
+        CancellationToken cancellationToken)
+    {
+        HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
+        await response.WriteStringAsync(
+            $"Workflow orchestration started for {workflowName}. Orchestration runId: {instanceId}",
+            cancellationToken);
         return response;
     }
 

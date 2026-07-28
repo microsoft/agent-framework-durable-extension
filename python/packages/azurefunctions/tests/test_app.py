@@ -1086,6 +1086,38 @@ class TestWorkflowRunRoute:
         assert json.loads(response.get_body())["instanceId"] == "instance-1"
         client.wait_for_completion_or_create_check_status_response.assert_not_awaited()
 
+    async def test_wait_timeout_returns_same_async_workflow_handle(self) -> None:
+        """Test that a wait timeout preserves the default asynchronous response contract."""
+        handler = self._get_run_handler("test_workflow")
+        async_request = Mock()
+        async_request.url = "http://localhost:7071/api/workflow/test_workflow/run"
+        async_request.headers = {}
+        async_request.params = {}
+        async_request.get_json.return_value = {"message": "hello"}
+        async_client = AsyncMock()
+        async_client.start_new.return_value = "instance-1"
+
+        timeout_request = Mock()
+        timeout_request.url = async_request.url
+        timeout_request.headers = {}
+        timeout_request.params = {"waitForResponse": "true"}
+        timeout_request.get_json.return_value = {"message": "hello"}
+        timeout_client = AsyncMock()
+        timeout_client.start_new.return_value = "instance-1"
+        timeout_client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
+            json.dumps({"id": "instance-1", "statusQueryGetUri": "https://durable-webhook.example/status"}),
+            status_code=202,
+            mimetype=MIMETYPE_APPLICATION_JSON,
+        )
+
+        async_response = await handler(async_request, async_client)
+        timeout_response = await handler(timeout_request, timeout_client)
+
+        assert timeout_response.status_code == async_response.status_code
+        assert timeout_response.mimetype == async_response.mimetype
+        assert timeout_response.headers == async_response.headers
+        assert timeout_response.get_body() == async_response.get_body()
+
     async def test_invalid_wait_timeout_does_not_start_workflow(self) -> None:
         """Test invalid synchronous timeout rejection before scheduling."""
         handler = self._get_run_handler("test_workflow")

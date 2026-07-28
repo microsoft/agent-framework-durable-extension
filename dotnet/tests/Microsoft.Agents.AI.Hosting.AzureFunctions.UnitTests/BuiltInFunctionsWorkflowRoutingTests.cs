@@ -2,11 +2,9 @@
 
 using System.Collections.Specialized;
 using System.Net;
-using Azure.Core.Serialization;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.DurableTask.Client;
-using Microsoft.Extensions.Options;
 using Moq;
 
 namespace Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests;
@@ -114,10 +112,15 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
     }
 
     [Fact]
-    public async Task WaitForWorkflowCompletionAsync_Timeout_ReturnsCheckStatusResponseAsync()
+    public async Task WaitForWorkflowCompletionAsync_Timeout_ReturnsAsyncWorkflowResponseAsync()
     {
+        const string WorkflowName = "TestWorkflow";
         const string InstanceId = "workflow-123";
-        (HttpRequestData request, HttpResponseData expectedResponse, FunctionContext context) =
+        (HttpRequestData asyncRequest, _, FunctionContext asyncContext) =
+            CreateCompletionRequest(CancellationToken.None);
+        HttpResponseData expectedResponse = await BuiltInFunctions.CreateWorkflowAcceptedResponseAsync(
+            asyncRequest, WorkflowName, InstanceId, asyncContext.CancellationToken);
+        (HttpRequestData request, _, FunctionContext context) =
             CreateCompletionRequest(CancellationToken.None);
         Mock<DurableTaskClient> client = CreateWaitingClient(InstanceId);
 
@@ -125,18 +128,21 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
             request,
             client.Object,
             context,
+            WorkflowName,
             InstanceId,
             TimeSpan.Zero);
 
-        Assert.Same(expectedResponse, response);
-        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
-        Assert.True(response.Headers.TryGetValues("Location", out IEnumerable<string>? locations));
-        Assert.EndsWith($"/runtime/webhooks/durabletask/instances/{InstanceId}", Assert.Single(locations));
+        Assert.Equal(expectedResponse.StatusCode, response.StatusCode);
+        Assert.Equal(GetResponseBody(expectedResponse), GetResponseBody(response));
+        Assert.Equal(
+            expectedResponse.Headers.Select(header => (header.Key, string.Join(",", header.Value))),
+            response.Headers.Select(header => (header.Key, string.Join(",", header.Value))));
     }
 
     [Fact]
     public async Task WaitForWorkflowCompletionAsync_CallerCancellation_PropagatesAsync()
     {
+        const string WorkflowName = "TestWorkflow";
         const string InstanceId = "workflow-123";
         using CancellationTokenSource callerCancellation = new();
         callerCancellation.Cancel();
@@ -150,6 +156,7 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
                 request,
                 client.Object,
                 context.Object,
+                WorkflowName,
                 InstanceId,
                 TimeSpan.FromSeconds(30)));
     }
@@ -198,25 +205,8 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
     private static (HttpRequestData Request, HttpResponseData Response, FunctionContext Context) CreateCompletionRequest(
         CancellationToken cancellationToken)
     {
-        Mock<ObjectSerializer> serializer = new();
-        serializer
-            .Setup(s => s.SerializeAsync(
-                It.IsAny<Stream>(),
-                It.IsAny<object?>(),
-                It.IsAny<Type>(),
-                It.IsAny<CancellationToken>()))
-            .Returns<Stream, object?, Type, CancellationToken>(async (stream, value, type, token) =>
-                await System.Text.Json.JsonSerializer.SerializeAsync(stream, value, type, cancellationToken: token));
-
-        WorkerOptions workerOptions = new() { Serializer = serializer.Object };
-        Mock<IOptions<WorkerOptions>> options = new();
-        options.SetupGet(o => o.Value).Returns(workerOptions);
-        Mock<IServiceProvider> services = new();
-        services.Setup(s => s.GetService(typeof(IOptions<WorkerOptions>))).Returns(options.Object);
-
         Mock<FunctionContext> context = new();
         context.SetupGet(c => c.CancellationToken).Returns(cancellationToken);
-        context.SetupGet(c => c.InstanceServices).Returns(services.Object);
 
         Mock<HttpResponseData> response = new(context.Object);
         response.SetupProperty(r => r.StatusCode, HttpStatusCode.OK);
@@ -225,9 +215,13 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
 
         Mock<HttpRequestData> request = new(context.Object);
         request.SetupGet(r => r.Headers).Returns(new HttpHeadersCollection());
-        request.SetupGet(r => r.Url).Returns(new Uri("https://localhost/workflows/test"));
         request.Setup(r => r.CreateResponse()).Returns(response.Object);
 
         return (request.Object, response.Object, context.Object);
+    }
+
+    private static string GetResponseBody(HttpResponseData response)
+    {
+        return System.Text.Encoding.UTF8.GetString(((MemoryStream)response.Body).ToArray());
     }
 }

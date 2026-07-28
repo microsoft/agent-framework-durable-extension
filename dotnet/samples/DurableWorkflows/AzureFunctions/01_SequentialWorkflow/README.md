@@ -67,7 +67,7 @@ Workflow orchestration started for CancelOrder. Orchestration runId: abc123def45
 
 ### Wait for the Workflow Result
 
-By default, the HTTP endpoint returns `202 Accepted` immediately with the run ID. To wait for the workflow to complete, set `waitForResponse=true` in the query string. The endpoint waits for up to 10 seconds by default; set `timeoutSeconds` to use a timeout from 1 to 230 seconds. If the workflow is still running when the timeout expires, the endpoint returns `202 Accepted` with the Durable Functions management URLs so the caller can continue asynchronously.
+By default, the HTTP endpoint returns `202 Accepted` immediately with the run ID. To wait for the workflow to complete, set `waitForResponse=true` in the query string. The endpoint waits for up to 10 seconds by default; set `timeoutSeconds` to use a timeout from 1 to 230 seconds. If the workflow is still running when the timeout expires, the endpoint returns the same `202 Accepted` response as the default asynchronous invocation.
 
 Bash (Linux/macOS/WSL):
 
@@ -109,7 +109,7 @@ curl -X POST "http://localhost:7071/api/workflows/CancelOrder/run?waitForRespons
 }
 ```
 
-The `x-ms-wait-for-response` header remains supported for backward compatibility. A wait timeout returns `202 Accepted` with the run ID and management URLs. Client request cancellation instead aborts the HTTP wait without returning a response, but the durable workflow continues; callers that need to recover should supply `runId` up front and query its status later.
+The `x-ms-wait-for-response` header remains supported for backward compatibility. A wait timeout returns the same `202 Accepted` response as the default asynchronous invocation. Client request cancellation instead aborts the HTTP wait without returning a response, but the durable workflow continues; callers that need to recover should supply `runId` up front and query its status later.
 
 In the function app logs, you will see the sequential execution of each executor:
 

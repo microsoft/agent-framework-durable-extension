@@ -91,7 +91,7 @@ curl -X POST "http://localhost:7071/api/workflow/email_triage_shared_state/run?w
   -d '"Hi team, reminder about our meeting tomorrow at 10 AM."'
 ```
 
-`timeoutSeconds` must be an integer from 1 to 230. If the workflow does not finish before the timeout, the endpoint returns `202 Accepted` with Durable Functions management URLs so the caller can continue asynchronously. A completed workflow returns `200 OK`, and a failed workflow returns `500 Internal Server Error`. Use `runId` to supply a custom workflow run identifier.
+`timeoutSeconds` must be an integer from 1 to 230. If the workflow does not finish before the timeout, the endpoint returns the same `202 Accepted` workflow handle as the default asynchronous invocation, including `statusQueryGetUri` and `respondUri`. A completed workflow returns `200 OK`, and a failed workflow returns `500 Internal Server Error`. Use `runId` to supply a custom workflow run identifier.
 
 ## Expected Output
 
