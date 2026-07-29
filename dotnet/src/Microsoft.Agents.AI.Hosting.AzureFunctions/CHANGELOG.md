@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - [BREAKING] Support bounded synchronous workflow HTTP invocation through query parameters and default workflow run responses to JSON, with `Accept: text/plain` available for the legacy text format and the same negotiated asynchronous response returned on timeout ([#52](https://github.com/microsoft/agent-framework-durable-extension/pull/52))
+- Added `DurableTaskClient.AsWorkflowClient` so functions can invoke durable workflows without constructing an `HttpClient` ([#48](https://github.com/microsoft/agent-framework-durable-extension/pull/48))
 - [BREAKING] Consolidated the `AddWorkflow` extension overloads into a single method with optional `enableStatusEndpoint` and `enableMcpToolTrigger` parameters, and changed it to return `DurableWorkflowOptions` instead of `void` so multiple workflows can be registered fluently ([#39](https://github.com/microsoft/agent-framework-durable-extension/pull/39))
 - [BREAKING] Replace "thread" with "session" in HTTP and MCP APIs ([#47](https://github.com/microsoft/agent-framework-durable-extension/pull/47))
 - [BREAKING] Renamed `AddWorkflow` parameters `exposeStatusEndpoint` and `exposeMcpToolTrigger` to `enableStatusEndpoint` and `enableMcpToolTrigger` for consistency with `AddAIAgent` ([#35](https://github.com/microsoft/agent-framework-durable-extension/pull/35))

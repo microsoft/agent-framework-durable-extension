@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- [BREAKING] Added `IWorkflowClient` overloads that start a registered workflow by name, and made workflow result deserialization case-insensitive so results can be read back when hosted in Azure Functions. External implementations of `IWorkflowClient` must implement the new members, and an untyped `null` first argument is now ambiguous between the `Workflow` and workflow-name overloads ([#48](https://github.com/microsoft/agent-framework-durable-extension/pull/48))
 - [BREAKING] Removed the `AddAIAgents` and `AddWorkflows` bulk registration APIs and changed `AddWorkflow` to return `DurableWorkflowOptions` so multiple workflows can be registered fluently ([#39](https://github.com/microsoft/agent-framework-durable-extension/pull/39))
 - Use "session" instead of "thread" terminology in documentation and API comments ([#47](https://github.com/microsoft/agent-framework-durable-extension/pull/47))
 - Wrap RequestPort external responses in a controlled `DurableExecutorOutput` envelope so that only the `result` property is populated during deserialization ([#20](https://github.com/microsoft/agent-framework-durable-extension/pull/20))

@@ -165,6 +165,22 @@ public sealed class WorkflowSamplesValidation(ITestOutputHelper outputHelper) : 
             Assert.Equal("Completed", statusEl.GetString());
             Assert.True(root.TryGetProperty("result", out JsonElement resultEl), "JSON response missing 'result' property");
             Assert.Contains("77777", resultEl.GetString());
+
+            // Test starting the workflow from function code via DurableTaskClient.AsWorkflowClient
+            // (see OrderFunctions.cs). This route does not go through the generated workflow HTTP
+            // endpoint; the function starts the orchestration directly through the durable backend.
+            Uri nativeCancelUri = new($"http://localhost:{AzureFunctionsPort}/api/orders/88888/cancel-and-wait");
+            this._outputHelper.WriteLine($"Starting CancelOrder workflow from function code via POST request to {nativeCancelUri}...");
+
+            using CancellationTokenSource nativeCts = new(s_orchestrationTimeout);
+            using HttpResponseMessage nativeResponse = await s_sharedHttpClient.PostAsync(nativeCancelUri, content: null, nativeCts.Token);
+
+            Assert.True(nativeResponse.IsSuccessStatusCode, $"Functions-native CancelOrder request failed with status: {nativeResponse.StatusCode}");
+            string nativeResponseText = await nativeResponse.Content.ReadAsStringAsync();
+            this._outputHelper.WriteLine($"Functions-native CancelOrder result: {nativeResponseText}");
+
+            // The response is the workflow result, proving the workflow ran to completion.
+            Assert.Contains("88888", nativeResponseText);
         });
     }
 

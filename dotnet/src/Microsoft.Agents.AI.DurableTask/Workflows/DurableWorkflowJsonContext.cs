@@ -22,11 +22,18 @@ namespace Microsoft.Agents.AI.DurableTask.Workflows;
 /// Note: User-defined executor input/output types still use reflection-based serialization
 /// since their types are not known at compile time.
 /// </para>
+/// <para>
+/// Deserialization is case-insensitive because these payloads are not always written by this
+/// library. When hosted in Azure Functions, the Durable Task worker serializes orchestration
+/// output with the default <c>JsonDataConverter</c>, which applies no naming policy and therefore
+/// writes PascalCase. Matching case-sensitively would silently bind every property to null.
+/// </para>
 /// </remarks>
 [JsonSourceGenerationOptions(
     WriteIndented = false,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+    PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+    PropertyNameCaseInsensitive = true)]
 [JsonSerializable(typeof(DurableActivityInput))]
 [JsonSerializable(typeof(DurableExecutorOutput))]
 [JsonSerializable(typeof(TypedPayload))]

@@ -43,3 +43,9 @@ POST {{authority}}/api/workflows/BatchCancelOrders/run
 Content-Type: application/json
 
 {"orderIds": ["1001", "1002", "1003"], "reason": "Customer requested cancellation", "notifyCustomers": true}
+
+### Cancel an order from function code (see OrderFunctions.cs), returning the run ID
+POST {{authority}}/api/orders/12345/cancel
+
+### Cancel an order from function code and wait for the result
+POST {{authority}}/api/orders/12345/cancel-and-wait
