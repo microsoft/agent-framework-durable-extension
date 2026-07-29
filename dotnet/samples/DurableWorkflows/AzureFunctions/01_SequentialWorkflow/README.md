@@ -73,7 +73,7 @@ Workflow run responses use JSON by default. Include `Accept: text/plain` to requ
 
 ### Wait for the Workflow Result
 
-By default, the HTTP endpoint returns `202 Accepted` immediately with the run ID. To wait for the workflow to complete, set `waitForResponse=true` in the query string. The endpoint waits for up to 10 seconds by default; set `timeoutSeconds` to use a timeout from 1 to 230 seconds. If the workflow is still running when the timeout expires, the endpoint returns the same `202 Accepted` response as the default asynchronous invocation.
+By default, the HTTP endpoint returns `202 Accepted` immediately with the run ID. To wait for the workflow to complete, set `waitForResponse=true` in the query string. The endpoint waits for up to 10 seconds by default; set `timeoutSeconds` to use a timeout from 1 to 200 seconds. If the workflow is still running when the timeout expires, the endpoint returns the same `202 Accepted` response as the default asynchronous invocation.
 
 Bash (Linux/macOS/WSL):
 

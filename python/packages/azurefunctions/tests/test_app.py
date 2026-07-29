@@ -1057,14 +1057,25 @@ class TestWorkflowRunRoute:
         request.params = {"waitForResponse": "true", "timeoutSeconds": "30", "runId": "custom-run"}
         request.get_json.return_value = {"message": "hello"}
 
-        expected_response = func.HttpResponse("completed", status_code=200)
         client = AsyncMock()
         client.start_new.return_value = "custom-run"
-        client.wait_for_completion_or_create_check_status_response.return_value = expected_response
+        client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
+            "completed", status_code=200
+        )
+        client.get_status.return_value = Mock(
+            instance_id="custom-run",
+            runtime_status=df.OrchestrationRuntimeStatus.Completed,
+            output="completed",
+        )
 
         response = await handler(request, client)
 
-        assert response is expected_response
+        assert response.status_code == 200
+        assert json.loads(response.get_body()) == {
+            "instanceId": "custom-run",
+            "runtimeStatus": "Completed",
+            "output": "completed",
+        }
         client.wait_for_completion_or_create_check_status_response.assert_awaited_once_with(
             request,
             "custom-run",
@@ -1085,14 +1096,25 @@ class TestWorkflowRunRoute:
         request.params = {}
         request.get_json.return_value = {"message": "hello"}
 
-        expected_response = func.HttpResponse("completed", status_code=200)
         client = AsyncMock()
         client.start_new.return_value = "instance-1"
-        client.wait_for_completion_or_create_check_status_response.return_value = expected_response
+        client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
+            "completed", status_code=200
+        )
+        client.get_status.return_value = Mock(
+            instance_id="instance-1",
+            runtime_status=df.OrchestrationRuntimeStatus.Completed,
+            output="completed",
+        )
 
         response = await handler(request, client)
 
-        assert response is expected_response
+        assert response.status_code == 200
+        assert json.loads(response.get_body()) == {
+            "instanceId": "instance-1",
+            "runtimeStatus": "Completed",
+            "output": "completed",
+        }
         client.wait_for_completion_or_create_check_status_response.assert_awaited_once_with(
             request,
             "instance-1",
@@ -1158,22 +1180,82 @@ class TestWorkflowRunRoute:
         request.headers = {}
         request.params = {"waitForResponse": "true"}
         request.get_json.return_value = {"message": "hello"}
-        failure_body = json.dumps({"runtimeStatus": "Failed", "output": "Something went wrong"})
         client = AsyncMock()
         client.start_new.return_value = "instance-1"
         client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
-            failure_body,
+            json.dumps({"runtimeStatus": "Failed", "output": "Something went wrong"}),
             status_code=500,
             mimetype=MIMETYPE_APPLICATION_JSON,
-            headers={"X-Test": "preserved"},
+        )
+        client.get_status.return_value = Mock(
+            instance_id="instance-1",
+            runtime_status=df.OrchestrationRuntimeStatus.Failed,
+            output="Something went wrong",
         )
 
         response = await handler(request, client)
 
         assert response.status_code == 200
         assert response.mimetype == MIMETYPE_APPLICATION_JSON
-        assert response.headers["X-Test"] == "preserved"
-        assert response.get_body().decode("utf-8") == failure_body
+        assert json.loads(response.get_body()) == {
+            "instanceId": "instance-1",
+            "runtimeStatus": "Failed",
+            "output": None,
+            "error": "Something went wrong",
+        }
+
+    async def test_wait_completion_decodes_typed_output(self) -> None:
+        """Test that synchronous completion uses the shared workflow output decoder."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.headers = {}
+        request.params = {"waitForResponse": "true"}
+        request.get_json.return_value = {"message": "hello"}
+        encoded_output = {"__pickled__": "checkpoint-data"}
+        client = AsyncMock()
+        client.start_new.return_value = "instance-1"
+        client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
+            json.dumps(encoded_output), status_code=200
+        )
+        client.get_status.return_value = Mock(
+            instance_id="instance-1",
+            runtime_status=df.OrchestrationRuntimeStatus.Completed,
+            output=encoded_output,
+        )
+
+        with patch(
+            "agent_framework_azurefunctions._app.deserialize_workflow_output",
+            return_value={"approved": True},
+        ) as deserialize:
+            response = await handler(request, client)
+
+        deserialize.assert_called_once_with(encoded_output)
+        assert json.loads(response.get_body())["output"] == {"approved": True}
+
+    async def test_wait_terminated_returns_unexpected_status_error(self) -> None:
+        """Test that an unexpected terminal status matches the .NET endpoint semantics."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.headers = {}
+        request.params = {"waitForResponse": "true"}
+        request.get_json.return_value = {"message": "hello"}
+        client = AsyncMock()
+        client.start_new.return_value = "instance-1"
+        client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
+            json.dumps({"runtimeStatus": "Terminated"}),
+            status_code=200,
+            mimetype=MIMETYPE_APPLICATION_JSON,
+        )
+        client.get_status.return_value = Mock(
+            instance_id="instance-1",
+            runtime_status=df.OrchestrationRuntimeStatus.Terminated,
+            output=None,
+        )
+
+        response = await handler(request, client)
+
+        assert response.status_code == 500
+        assert "unexpected status 'Terminated'" in response.get_body().decode("utf-8")
 
     async def test_invalid_wait_timeout_does_not_start_workflow(self) -> None:
         """Test invalid synchronous timeout rejection before scheduling."""
@@ -1186,6 +1268,63 @@ class TestWorkflowRunRoute:
         response = await handler(request, client)
 
         assert response.status_code == 400
+        client.start_new.assert_not_awaited()
+
+    async def test_invalid_wait_for_response_does_not_start_workflow(self) -> None:
+        """Test invalid synchronous wait rejection before scheduling."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.headers = {}
+        request.params = {"waitForResponse": "invalid"}
+        client = AsyncMock()
+
+        response = await handler(request, client)
+
+        assert response.status_code == 400
+        assert "waitForResponse" in response.get_body().decode("utf-8")
+        client.start_new.assert_not_awaited()
+
+    async def test_wait_header_takes_precedence_over_invalid_query(self) -> None:
+        """Test that the legacy wait header retains precedence over the query parameter."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.headers = {WAIT_FOR_RESPONSE_HEADER: "false"}
+        request.params = {"waitForResponse": "invalid"}
+        request.url = "http://localhost:7071/api/workflow/test_workflow/run"
+        request.get_json.return_value = {"message": "hello"}
+        client = AsyncMock()
+        client.start_new.return_value = "instance-1"
+
+        response = await handler(request, client)
+
+        assert response.status_code == 202
+        client.wait_for_completion_or_create_check_status_response.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "run_id",
+        [
+            "",
+            "@workflow",
+            "workflow/123",
+            "workflow\\123",
+            "workflow#123",
+            "workflow?123",
+            "workflow\n123",
+            "x" * 101,
+        ],
+    )
+    async def test_invalid_run_id_does_not_start_workflow(self, run_id: str) -> None:
+        """Test that invalid custom run IDs are rejected before scheduling."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.headers = {}
+        request.params = {"runId": run_id}
+        client = AsyncMock()
+
+        response = await handler(request, client)
+
+        assert response.status_code == 400
+        assert "runId" in response.get_body().decode("utf-8")
         client.start_new.assert_not_awaited()
 
 

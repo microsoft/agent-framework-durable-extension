@@ -43,9 +43,11 @@ internal static class BuiltInFunctions
     /// </summary>
     private const string WorkflowWaitForResponseParameterName = "waitForResponse";
 
+    private const string WorkflowRunIdParameterName = "runId";
+    private const int MaxWorkflowRunIdLength = 100;
     private const string WaitTimeoutSecondsParameterName = "timeoutSeconds";
     private const int DefaultWaitTimeoutSeconds = 10;
-    private const int MaxWaitTimeoutSeconds = 230;
+    private const int MaxWaitTimeoutSeconds = 200;
 
     private const string SessionIdHeaderName = "x-ms-session-id";
     private const string SessionIdParameterName = "session_id";
@@ -102,7 +104,16 @@ internal static class BuiltInFunctions
                 ShouldReturnWorkflowJson(req));
         }
 
-        bool waitForResponse = ShouldWaitForResponse(req, WorkflowWaitForResponseParameterName, defaultValue: false);
+        if (!TryGetWorkflowWaitForResponse(req, out bool waitForResponse, out string? waitForResponseError))
+        {
+            return await CreateErrorResponseAsync(
+                req,
+                context,
+                HttpStatusCode.BadRequest,
+                waitForResponseError!,
+                ShouldReturnWorkflowJson(req));
+        }
+
         TimeSpan waitTimeout = default;
         if (waitForResponse && !TryGetWaitTimeout(req, out waitTimeout, out string? timeoutError))
         {
@@ -114,10 +125,20 @@ internal static class BuiltInFunctions
                 ShouldReturnWorkflowJson(req));
         }
 
+        string? instanceId = req.Query[WorkflowRunIdParameterName];
+        if (!TryValidateWorkflowRunId(instanceId, out string? runIdError))
+        {
+            return await CreateErrorResponseAsync(
+                req,
+                context,
+                HttpStatusCode.BadRequest,
+                runIdError!,
+                ShouldReturnWorkflowJson(req));
+        }
+
         DurableWorkflowInput<string> orchestrationInput = new() { Input = inputMessage };
 
         // Allow users to provide a custom run ID via query string; otherwise, auto-generate one.
-        string? instanceId = req.Query["runId"];
         StartOrchestrationOptions? options = instanceId is not null ? new StartOrchestrationOptions(instanceId) : null;
         string resolvedInstanceId = await client.ScheduleNewOrchestrationInstanceAsync(orchestrationFunctionName, orchestrationInput, options);
 
@@ -747,6 +768,40 @@ internal static class BuiltInFunctions
         return defaultValue;
     }
 
+    /// <summary>
+    /// Gets the workflow wait preference while rejecting invalid values of the new query parameter.
+    /// The legacy header retains precedence and its existing invalid-value fallback behavior.
+    /// </summary>
+    internal static bool TryGetWorkflowWaitForResponse(
+        HttpRequestData req,
+        out bool waitForResponse,
+        out string? error)
+    {
+        if (req.Headers.TryGetValues(WaitForResponseHeaderName, out IEnumerable<string>? values) &&
+            TryParseBoolean(values.FirstOrDefault(), out waitForResponse))
+        {
+            error = null;
+            return true;
+        }
+
+        string? queryValue = req.Query[WorkflowWaitForResponseParameterName];
+        if (queryValue is null)
+        {
+            waitForResponse = false;
+            error = null;
+            return true;
+        }
+
+        if (!TryParseBoolean(queryValue, out waitForResponse))
+        {
+            error = $"'{WorkflowWaitForResponseParameterName}' must be a boolean value.";
+            return false;
+        }
+
+        error = null;
+        return true;
+    }
+
     private static bool TryParseBoolean(string? value, out bool result)
     {
         switch (value?.Trim().ToUpperInvariant())
@@ -792,6 +847,31 @@ internal static class BuiltInFunctions
         }
 
         timeout = TimeSpan.FromSeconds(seconds);
+        error = null;
+        return true;
+    }
+
+    /// <summary>
+    /// Validates a caller-provided workflow run ID against the Durable Task instance ID contract.
+    /// </summary>
+    internal static bool TryValidateWorkflowRunId(string? runId, out string? error)
+    {
+        if (runId is null)
+        {
+            error = null;
+            return true;
+        }
+
+        if (runId.Length is < 1 or > MaxWorkflowRunIdLength ||
+            runId[0] == '@' ||
+            runId.IndexOfAny(['/', '\\', '#', '?']) >= 0 ||
+            runId.Any(char.IsControl))
+        {
+            error = $"'{WorkflowRunIdParameterName}' must be between 1 and {MaxWorkflowRunIdLength} characters, " +
+                "must not start with '@', and must not contain '/', '\\', '#', '?', or control characters.";
+            return false;
+        }
+
         error = null;
         return true;
     }

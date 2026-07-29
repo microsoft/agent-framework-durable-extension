@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import re
+import unicodedata
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
@@ -62,12 +63,13 @@ from ._routes import build_workflow_respond_url, build_workflow_status_url, spli
 from ._workflow import run_workflow_orchestrator
 
 _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS = 10
-_MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS = 230
+_MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS = 200
 
 # The workflow endpoints use camelCase names throughout their query string, request body, and
 # response body. The agent endpoints use snake_case throughout, so they reuse the shared
 # ``SESSION_ID_FIELD`` / ``WAIT_FOR_RESPONSE_FIELD`` constants instead of the names below.
 _RUN_ID_QUERY_PARAMETER = "runId"
+_MAX_WORKFLOW_RUN_ID_LENGTH = 100
 _WORKFLOW_WAIT_FOR_RESPONSE_QUERY_PARAMETER = "waitForResponse"
 _WORKFLOW_WAIT_TIMEOUT_SECONDS_QUERY_PARAMETER = "timeoutSeconds"
 
@@ -510,16 +512,16 @@ class AgentFunctionApp(DFAppBase):
             req: func.HttpRequest, client: df.DurableOrchestrationClient
         ) -> func.HttpResponse:
             """HTTP endpoint to start the workflow."""
-            wait_for_response = self._should_wait_for_response(
-                req=req,
-                req_body={},
-                query_parameter=_WORKFLOW_WAIT_FOR_RESPONSE_QUERY_PARAMETER,
-                default_value=False,
-            )
-            wait_timeout_seconds = _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS
             try:
+                wait_for_response = self._get_workflow_wait_for_response(req)
+                wait_timeout_seconds = _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS
                 if wait_for_response:
                     wait_timeout_seconds = self._get_workflow_wait_timeout_seconds(req)
+            except ValueError as exc:
+                return self._build_error_response(str(exc), status_code=400)
+
+            try:
+                requested_instance_id = self._validate_workflow_run_id((req.params or {}).get(_RUN_ID_QUERY_PARAMETER))
             except ValueError as exc:
                 return self._build_error_response(str(exc), status_code=400)
 
@@ -542,7 +544,7 @@ class AgentFunctionApp(DFAppBase):
 
             instance_id = await client.start_new(
                 orchestrator_name,
-                instance_id=(req.params or {}).get(_RUN_ID_QUERY_PARAMETER),
+                instance_id=requested_instance_id,
                 client_input=client_input,
             )
 
@@ -557,18 +559,9 @@ class AgentFunctionApp(DFAppBase):
                     timeout_in_milliseconds=timeout_in_milliseconds,
                     retry_interval_in_milliseconds=1000,
                 )
-                if completion_response.status_code == 500:
-                    # Workflow failure is a domain result, not an HTTP processing failure.
-                    # Preserve the helper payload while matching the .NET endpoint's status.
-                    return func.HttpResponse(
-                        completion_response.get_body(),
-                        status_code=200,
-                        headers=dict(completion_response.headers),
-                        mimetype=completion_response.mimetype,
-                        charset=completion_response.charset,
-                    )
                 if completion_response.status_code != 202:
-                    return completion_response
+                    status = await client.get_status(instance_id)
+                    return self._build_workflow_terminal_response(status, instance_id)
 
             return self._build_workflow_accepted_response(req, workflow_name, instance_id)
 
@@ -1523,6 +1516,39 @@ class AgentFunctionApp(DFAppBase):
             mimetype=MIMETYPE_APPLICATION_JSON,
         )
 
+    def _build_workflow_terminal_response(self, status: Any, instance_id: str) -> func.HttpResponse:
+        """Build a compact response for a completed or failed workflow."""
+        if status is None or status.runtime_status is None:
+            return self._build_error_response(
+                f"Workflow orchestration '{instance_id}' returned no status.",
+                status_code=500,
+            )
+
+        runtime_status = status.runtime_status
+        if runtime_status not in {
+            df.OrchestrationRuntimeStatus.Completed,
+            df.OrchestrationRuntimeStatus.Failed,
+        }:
+            return self._build_error_response(
+                f"Workflow orchestration '{instance_id}' ended with unexpected status '{runtime_status.name}'.",
+                status_code=500,
+            )
+
+        decoded_output = deserialize_workflow_output(status.output) if status.output is not None else None
+        response: dict[str, Any] = {
+            "instanceId": status.instance_id or instance_id,
+            "runtimeStatus": runtime_status.name,
+            "output": decoded_output if runtime_status == df.OrchestrationRuntimeStatus.Completed else None,
+        }
+        if runtime_status == df.OrchestrationRuntimeStatus.Failed:
+            response["error"] = decoded_output
+
+        return func.HttpResponse(
+            json.dumps(response, default=_json_default),
+            status_code=200,
+            mimetype=MIMETYPE_APPLICATION_JSON,
+        )
+
     def _create_http_response(
         self,
         payload: dict[str, Any] | str,
@@ -1741,6 +1767,42 @@ class AgentFunctionApp(DFAppBase):
             raise ValueError(error_message)
 
         return seconds
+
+    def _get_workflow_wait_for_response(self, req: func.HttpRequest) -> bool:
+        """Get the workflow wait preference while rejecting an invalid query value."""
+        headers = self._extract_normalized_headers(req)
+        parsed_header = self._try_coerce_to_bool(headers.get(WAIT_FOR_RESPONSE_HEADER))
+        if parsed_header is not None:
+            return parsed_header
+
+        query_value = (req.params or {}).get(_WORKFLOW_WAIT_FOR_RESPONSE_QUERY_PARAMETER)
+        if query_value is None:
+            return False
+
+        parsed_query = self._try_coerce_to_bool(query_value)
+        if parsed_query is None:
+            raise ValueError(f"'{_WORKFLOW_WAIT_FOR_RESPONSE_QUERY_PARAMETER}' must be a boolean value.")
+
+        return parsed_query
+
+    @staticmethod
+    def _validate_workflow_run_id(run_id: str | None) -> str | None:
+        """Validate a custom workflow run ID against the Durable Task instance ID contract."""
+        if run_id is None:
+            return None
+
+        if (
+            not 1 <= len(run_id) <= _MAX_WORKFLOW_RUN_ID_LENGTH
+            or run_id.startswith("@")
+            or any(character in run_id for character in "/\\#?")
+            or any(unicodedata.category(character) == "Cc" for character in run_id)
+        ):
+            raise ValueError(
+                f"'{_RUN_ID_QUERY_PARAMETER}' must be between 1 and {_MAX_WORKFLOW_RUN_ID_LENGTH} characters, "
+                "must not start with '@', and must not contain '/', '\\', '#', '?', or control characters."
+            )
+
+        return run_id
 
     @staticmethod
     def _try_coerce_to_bool(value: Any) -> bool | None:

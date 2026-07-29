@@ -95,11 +95,35 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
     }
 
     [Theory]
+    [InlineData(null, null, true, false)]
+    [InlineData("invalid", null, true, false)]
+    [InlineData("invalid", "true", true, true)]
+    [InlineData("false", "invalid", true, false)]
+    [InlineData(null, "invalid", false, false)]
+    public void TryGetWorkflowWaitForResponse_ValidatesQueryAfterHeader(
+        string? headerValue,
+        string? queryValue,
+        bool expectedSuccess,
+        bool expectedWait)
+    {
+        HttpRequestData request = CreateRequest(headerValue, queryValue);
+
+        bool success = BuiltInFunctions.TryGetWorkflowWaitForResponse(
+            request,
+            out bool waitForResponse,
+            out string? error);
+
+        Assert.Equal(expectedSuccess, success);
+        Assert.Equal(expectedWait, waitForResponse);
+        Assert.Equal(expectedSuccess, error is null);
+    }
+
+    [Theory]
     [InlineData(null, true, 10)]
     [InlineData("1", true, 1)]
-    [InlineData("230", true, 230)]
+    [InlineData("200", true, 200)]
     [InlineData("0", false, 0)]
-    [InlineData("231", false, 0)]
+    [InlineData("201", false, 0)]
     [InlineData("invalid", false, 0)]
     [InlineData("", false, 0)]
     [InlineData(" ", false, 0)]
@@ -112,6 +136,26 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
         Assert.Equal(expectedSuccess, success);
         Assert.Equal(expectedSeconds, timeout.TotalSeconds);
         Assert.Equal(expectedSuccess, error is null);
+    }
+
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("workflow-123", true)]
+    [InlineData("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", true)]
+    [InlineData("", false)]
+    [InlineData("@workflow", false)]
+    [InlineData("workflow/123", false)]
+    [InlineData("workflow\\123", false)]
+    [InlineData("workflow#123", false)]
+    [InlineData("workflow?123", false)]
+    [InlineData("workflow\n123", false)]
+    [InlineData("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", false)]
+    public void TryValidateWorkflowRunId_EnforcesDurableTaskContract(string? runId, bool expected)
+    {
+        bool success = BuiltInFunctions.TryValidateWorkflowRunId(runId, out string? error);
+
+        Assert.Equal(expected, success);
+        Assert.Equal(expected, error is null);
     }
 
     [Theory]

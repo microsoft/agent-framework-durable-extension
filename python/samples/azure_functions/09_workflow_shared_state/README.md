@@ -91,7 +91,7 @@ curl -X POST "http://localhost:7071/api/workflow/email_triage_shared_state/run?w
   -d '"Hi team, reminder about our meeting tomorrow at 10 AM."'
 ```
 
-`timeoutSeconds` must be an integer from 1 to 230. If the workflow does not finish before the timeout, the endpoint returns the same `202 Accepted` workflow handle as the default asynchronous invocation, including `statusQueryGetUri` and `respondUri`. Completed and failed workflows return `200 OK`; inspect the response payload to distinguish the workflow outcome. Use `runId` to supply a custom workflow run identifier.
+`timeoutSeconds` must be an integer from 1 to 200. If the workflow does not finish before the timeout, the endpoint returns the same `202 Accepted` workflow handle as the default asynchronous invocation, including `statusQueryGetUri` and `respondUri`. Completed and failed workflows return `200 OK`; inspect the response payload to distinguish the workflow outcome. Use `runId` to supply a custom workflow run identifier.
 
 ## Expected Output
 
