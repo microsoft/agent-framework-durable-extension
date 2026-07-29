@@ -359,7 +359,6 @@ internal static class BuiltInFunctions
 
         // The session ID can come from the query string or the request body, using either the canonical
         // "session_id" name or the deprecated "thread_id" alias. Conflicting values are rejected.
-        // The deprecated "thread_id" alias is accepted in either location. Conflicting values are rejected.
         if (!TryResolveSessionKey(
                 sessionIdFromBody,
                 legacyThreadIdFromBody,
