@@ -12,6 +12,12 @@ Content-Type: application/json
 
 "Hi team, just a reminder about the sprint planning meeting tomorrow at 10 AM. Please review the agenda items in Jira before the call."
 
+### Start the workflow and wait up to 30 seconds for its result
+POST {{endpoint}}/api/workflow/email_triage_shared_state/run?waitForResponse=true&timeoutSeconds=30
+Content-Type: application/json
+
+"Hi team, reminder about our meeting tomorrow at 10 AM."
+
 ### Start the workflow with another legitimate email
 POST {{endpoint}}/api/workflow/email_triage_shared_state/run
 Content-Type: application/json

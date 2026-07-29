@@ -548,6 +548,8 @@ class AgentFunctionApp(DFAppBase):
 
             if wait_for_response:
                 timeout_in_milliseconds = wait_timeout_seconds * 1000
+                # The SDK leaves the request parameter untyped, so use the local protocol
+                # to give pyright a complete signature for this runtime method.
                 completion_client = cast(_WorkflowCompletionClient, client)
                 completion_response = await completion_client.wait_for_completion_or_create_check_status_response(
                     req,
@@ -1726,19 +1728,17 @@ class AgentFunctionApp(DFAppBase):
         if value is None:
             return _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS
 
+        error_message = (
+            f"'{_WORKFLOW_WAIT_TIMEOUT_SECONDS_QUERY_PARAMETER}' must be an integer between "
+            f"1 and {_MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS}."
+        )
         try:
             seconds = int(value)
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"'{_WORKFLOW_WAIT_TIMEOUT_SECONDS_QUERY_PARAMETER}' must be an integer between "
-                f"1 and {_MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS}."
-            ) from exc
+            raise ValueError(error_message) from exc
 
         if seconds <= 0 or seconds > _MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS:
-            raise ValueError(
-                f"'{_WORKFLOW_WAIT_TIMEOUT_SECONDS_QUERY_PARAMETER}' must be an integer between "
-                f"1 and {_MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS}."
-            )
+            raise ValueError(error_message)
 
         return seconds
 
@@ -1759,12 +1759,4 @@ class AgentFunctionApp(DFAppBase):
 
     def _coerce_to_bool(self, value: Any) -> bool:
         """Convert various representations into a boolean flag."""
-        if isinstance(value, bool):
-            return value
-        if value is None:
-            return False
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            return value.strip().lower() in {"true", "1", "yes", "y", "on"}
-        return False
+        return bool(self._try_coerce_to_bool(value))

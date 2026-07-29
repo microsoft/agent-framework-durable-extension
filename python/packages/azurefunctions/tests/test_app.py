@@ -26,6 +26,10 @@ from agent_framework_durabletask import (
 )
 
 from agent_framework_azurefunctions import AgentFunctionApp
+from agent_framework_azurefunctions._app import (
+    _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS,
+    _MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS,
+)
 from agent_framework_azurefunctions._entities import create_agent_entity
 from agent_framework_azurefunctions._errors import IncomingRequestError
 
@@ -398,7 +402,12 @@ class TestWaitForResponseAndCorrelationId:
 
     @pytest.mark.parametrize(
         ("value", "expected"),
-        [(None, 10), ("1", 1), ("30", 30), ("230", 230)],
+        [
+            (None, _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS),
+            ("1", 1),
+            ("30", 30),
+            (str(_MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS), _MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS),
+        ],
     )
     def test_workflow_wait_timeout_seconds(self, value: str | None, expected: int) -> None:
         """Test workflow wait timeout parsing."""
@@ -407,13 +416,13 @@ class TestWaitForResponseAndCorrelationId:
 
         assert app._get_workflow_wait_timeout_seconds(request) == expected
 
-    @pytest.mark.parametrize("value", ["0", "-1", "231", "invalid"])
+    @pytest.mark.parametrize("value", ["0", "-1", str(_MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS + 1), "invalid"])
     def test_workflow_wait_timeout_seconds_rejects_invalid_values(self, value: str) -> None:
         """Test workflow wait timeout validation."""
         app = self._create_app()
         request = self._make_request(params={"timeoutSeconds": value})
 
-        with pytest.raises(ValueError, match="between 1 and 230"):
+        with pytest.raises(ValueError, match=rf"between 1 and {_MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS}"):
             app._get_workflow_wait_timeout_seconds(request)
 
 
@@ -1066,6 +1075,29 @@ class TestWorkflowRunRoute:
             "dafx-test_workflow",
             instance_id="custom-run",
             client_input={"message": "hello"},
+        )
+
+    async def test_wait_for_response_header_waits_with_default_timeout(self) -> None:
+        """Test that the legacy wait header remains supported."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.headers = {WAIT_FOR_RESPONSE_HEADER: "true"}
+        request.params = {}
+        request.get_json.return_value = {"message": "hello"}
+
+        expected_response = func.HttpResponse("completed", status_code=200)
+        client = AsyncMock()
+        client.start_new.return_value = "instance-1"
+        client.wait_for_completion_or_create_check_status_response.return_value = expected_response
+
+        response = await handler(request, client)
+
+        assert response is expected_response
+        client.wait_for_completion_or_create_check_status_response.assert_awaited_once_with(
+            request,
+            "instance-1",
+            timeout_in_milliseconds=_DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS * 1000,
+            retry_interval_in_milliseconds=1000,
         )
 
     async def test_default_returns_async_workflow_handle(self) -> None:
