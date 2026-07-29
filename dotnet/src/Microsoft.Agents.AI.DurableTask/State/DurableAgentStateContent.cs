@@ -23,6 +23,10 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 [JsonDerivedType(typeof(DurableAgentStateUnknownContent), "unknown")]
 internal abstract class DurableAgentStateContent
 {
+    private static readonly JsonElement s_nullElement = JsonSerializer.SerializeToElement(
+        value: null,
+        jsonTypeInfo: AIJsonUtilities.DefaultOptions.GetTypeInfo(typeof(object)));
+
     /// <summary>
     /// Gets any additional data found during deserialization that does not map to known properties.
     /// </summary>
@@ -55,6 +59,32 @@ internal abstract class DurableAgentStateContent
             UriContent uriContent => DurableAgentStateUriContent.FromUriContent(uriContent),
             UsageContent usageContent => DurableAgentStateUsageContent.FromUsageContent(usageContent),
             _ => DurableAgentStateUnknownContent.FromUnknownContent(content)
+        };
+    }
+
+    /// <summary>
+    /// Encodes a loosely typed value as a <see cref="JsonElement"/> so that it can be persisted.
+    /// </summary>
+    /// <param name="value">
+    /// The value to encode. Values that are already a <see cref="JsonElement"/> are returned unchanged.
+    /// </param>
+    /// <returns>The encoded value.</returns>
+    /// <remarks>
+    /// <see cref="DurableAgentStateJsonContext"/> is source generated and has no reflection fallback, so
+    /// <see cref="object"/> typed members must be reduced to JSON before the state is written. Otherwise
+    /// serialization throws for any runtime type the context was not generated for, which fails the entity
+    /// operation after the model call has already happened.
+    /// See https://github.com/microsoft/agent-framework-durable-extension/issues/33.
+    /// </remarks>
+    protected static JsonElement ToJsonElement(object? value)
+    {
+        return value switch
+        {
+            null => s_nullElement,
+            JsonElement element => element,
+            _ => JsonSerializer.SerializeToElement(
+                value: value,
+                jsonTypeInfo: AIJsonUtilities.DefaultOptions.GetTypeInfo(value.GetType()))
         };
     }
 }
