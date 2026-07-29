@@ -169,6 +169,8 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
     [InlineData("text/plain, application/json;q=0", false)]
     [InlineData("text/plain;q=0", true)]
     [InlineData("image/png", true)]
+    [InlineData("not-a-media-type", true)]
+    [InlineData("not-a-media-type, text/plain", false)]
     public void ShouldReturnWorkflowJson_DefaultsToJsonUnlessOnlyTextIsAccepted(
         string? accept,
         bool expected)
@@ -456,7 +458,7 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
         HttpHeadersCollection requestHeaders = new();
         if (accept is not null)
         {
-            requestHeaders.Add("Accept", accept);
+            Assert.True(requestHeaders.TryAddWithoutValidation("Accept", accept));
         }
 
         Mock<HttpRequestData> request = new(context.Object);

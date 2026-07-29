@@ -903,8 +903,9 @@ internal static class BuiltInFunctions
             .Select(v => MediaTypeWithQualityHeaderValue.TryParse(v, out MediaTypeWithQualityHeaderValue? mediaType)
                 ? mediaType
                 : null)
-            .Where(v => ((v?.Quality) ?? 1) > 0)
-            .Select(v => v!.MediaType!)
+            .OfType<MediaTypeWithQualityHeaderValue>()
+            .Where(v => (v.Quality ?? 1) > 0)
+            .Select(v => v.MediaType!)
             .ToArray();
 
         bool acceptsJson = mediaTypes.Contains("application/json", StringComparer.OrdinalIgnoreCase) ||
