@@ -2,6 +2,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.AI;
 
 namespace Microsoft.Agents.AI.DurableTask.State;
@@ -23,9 +24,22 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 [JsonDerivedType(typeof(DurableAgentStateUnknownContent), "unknown")]
 internal abstract class DurableAgentStateContent
 {
-    private static readonly JsonElement s_nullElement = JsonSerializer.SerializeToElement(
-        value: null,
-        jsonTypeInfo: AIJsonUtilities.DefaultOptions.GetTypeInfo(typeof(object)));
+    /// <summary>
+    /// Type info for <see cref="object"/>, which dispatches on the runtime type of the value being
+    /// serialized.
+    /// </summary>
+    /// <remarks>
+    /// Serializing through <see cref="object"/> rather than the runtime type directly preserves the
+    /// <c>$type</c> discriminator for polymorphic types such as <see cref="AIContent"/>, which keeps the
+    /// persisted JSON self describing. This also matches how chat clients serialize loosely typed tool
+    /// values, so a value read back from durable state produces the same payload as the value that was
+    /// never persisted.
+    /// </remarks>
+    private static readonly JsonTypeInfo s_objectTypeInfo =
+        AIJsonUtilities.DefaultOptions.GetTypeInfo(typeof(object));
+
+    private static readonly JsonElement s_nullElement =
+        JsonSerializer.SerializeToElement(value: null, jsonTypeInfo: s_objectTypeInfo);
 
     /// <summary>
     /// Gets any additional data found during deserialization that does not map to known properties.
@@ -82,9 +96,7 @@ internal abstract class DurableAgentStateContent
         {
             null => s_nullElement,
             JsonElement element => element,
-            _ => JsonSerializer.SerializeToElement(
-                value: value,
-                jsonTypeInfo: AIJsonUtilities.DefaultOptions.GetTypeInfo(value.GetType()))
+            _ => JsonSerializer.SerializeToElement(value: value, jsonTypeInfo: s_objectTypeInfo)
         };
     }
 }

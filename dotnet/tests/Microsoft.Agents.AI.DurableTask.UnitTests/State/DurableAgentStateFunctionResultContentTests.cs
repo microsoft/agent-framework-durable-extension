@@ -9,7 +9,9 @@ namespace Microsoft.Agents.AI.DurableTask.Tests.Unit.State;
 
 /// <summary>
 /// Regression tests for function results that are not plain JSON values, such as the
-/// <see cref="AIContent"/> results produced by MCP tools.
+/// <see cref="AIContent"/> results produced by MCP tools. Every result shape is persisted under the
+/// single <c>result</c> property, encoded through <see cref="object"/> so that the polymorphic
+/// <c>$type</c> discriminator is retained.
 /// See https://github.com/microsoft/agent-framework-durable-extension/issues/33.
 /// </summary>
 public sealed class DurableAgentStateFunctionResultContentTests
@@ -36,8 +38,10 @@ public sealed class DurableAgentStateFunctionResultContentTests
         FunctionResultContent result = RoundTrip(new("call-1", new TextContent("hello from mcp")));
 
         Assert.Equal("call-1", result.CallId);
-        TextContent text = Assert.IsType<TextContent>(result.Result);
-        Assert.Equal("hello from mcp", text.Text);
+
+        JsonElement roundTripped = Assert.IsType<JsonElement>(result.Result);
+        Assert.Equal("text", roundTripped.GetProperty("$type").GetString());
+        Assert.Equal("hello from mcp", roundTripped.GetProperty("text").GetString());
     }
 
     [Fact]
@@ -48,12 +52,15 @@ public sealed class DurableAgentStateFunctionResultContentTests
         FunctionResultContent result = RoundTrip(new("call-2", contents));
 
         Assert.Equal("call-2", result.CallId);
-        IEnumerable<AIContent> roundTripped = Assert.IsAssignableFrom<IEnumerable<AIContent>>(result.Result);
 
-        AIContent[] items = [.. roundTripped];
+        JsonElement roundTripped = Assert.IsType<JsonElement>(result.Result);
+        Assert.Equal(JsonValueKind.Array, roundTripped.ValueKind);
+
+        JsonElement[] items = [.. roundTripped.EnumerateArray()];
         Assert.Equal(2, items.Length);
-        Assert.Equal("first", Assert.IsType<TextContent>(items[0]).Text);
-        Assert.Equal(new Uri("https://example.com/img.png"), Assert.IsType<UriContent>(items[1]).Uri);
+        Assert.Equal("text", items[0].GetProperty("$type").GetString());
+        Assert.Equal("first", items[0].GetProperty("text").GetString());
+        Assert.Equal("uri", items[1].GetProperty("$type").GetString());
     }
 
     [Fact]
@@ -103,9 +110,10 @@ public sealed class DurableAgentStateFunctionResultContentTests
         // MCP tools surface tool failures as an ErrorContent result rather than a JSON payload.
         FunctionResultContent result = RoundTrip(new("call-8", new ErrorContent("tool exploded") { ErrorCode = "E42" }));
 
-        ErrorContent error = Assert.IsType<ErrorContent>(result.Result);
-        Assert.Equal("tool exploded", error.Message);
-        Assert.Equal("E42", error.ErrorCode);
+        JsonElement roundTripped = Assert.IsType<JsonElement>(result.Result);
+        Assert.Equal("error", roundTripped.GetProperty("$type").GetString());
+        Assert.Equal("tool exploded", roundTripped.GetProperty("message").GetString());
+        Assert.Equal("E42", roundTripped.GetProperty("errorCode").GetString());
     }
 
     [Fact]
