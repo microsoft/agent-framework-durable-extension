@@ -154,6 +154,7 @@ class AzureFunctionsAgentExecutor(DurableAgentExecutor[AgentTask]):
         message: str,
         *,
         options: dict[str, Any] | None = None,
+        context_messages: list[dict[str, Any]] | None = None,
     ) -> RunRequest:
         """Get the current run request from the orchestration context.
 
@@ -162,13 +163,16 @@ class AzureFunctionsAgentExecutor(DurableAgentExecutor[AgentTask]):
             options: Optional options dictionary. Supported keys include
                 ``response_format``, ``enable_tool_calls``, and ``wait_for_response``.
                 Additional keys are forwarded to the agent execution.
+            context_messages: Optional upstream conversation (serialized ``Message`` dicts)
+                delivered to the agent as prior context. Workflows use this to give a
+                downstream agent the conversation produced by upstream nodes.
 
         Returns:
             RunRequest: The current run request
         """
         # Create a copy to avoid modifying the caller's dict
 
-        request = super().get_run_request(message, options=options)
+        request = super().get_run_request(message, options=options, context_messages=context_messages)
         request.orchestration_id = self.context.instance_id
         return request
 

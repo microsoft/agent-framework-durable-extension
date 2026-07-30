@@ -269,7 +269,7 @@ class TestAgentFunctionAppSetup:
             app.add_agent(mock_agent, enable_http_endpoint=True)
 
         http_route_mock.assert_called_once_with("OverrideAgent")
-        agent_entity_mock.assert_called_once_with(mock_agent, "OverrideAgent", ANY)
+        agent_entity_mock.assert_called_once_with(mock_agent, "OverrideAgent", ANY, prune_history=False)
         assert app._agent_metadata["OverrideAgent"].http_endpoint_enabled is True
 
     def test_agent_override_disables_http_route_when_app_enabled(self) -> None:
@@ -286,7 +286,7 @@ class TestAgentFunctionAppSetup:
             app.add_agent(mock_agent, enable_http_endpoint=False)
 
         http_route_mock.assert_not_called()
-        agent_entity_mock.assert_called_once_with(mock_agent, "DisabledOverride", ANY)
+        agent_entity_mock.assert_called_once_with(mock_agent, "DisabledOverride", ANY, prune_history=False)
         assert app._agent_metadata["DisabledOverride"].http_endpoint_enabled is False
 
     def test_multiple_apps_independent(self) -> None:

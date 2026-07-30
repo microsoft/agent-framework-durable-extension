@@ -51,12 +51,18 @@ class AzureFunctionEntityStateProvider(AgentEntityStateProviderMixin):
 def create_agent_entity(
     agent: SupportsAgentRun,
     callback: AgentResponseCallbackProtocol | None = None,
+    *,
+    prune_history: bool = False,
 ) -> Callable[[df.DurableEntityContext], None]:
     """Factory function to create an agent entity class.
 
     Args:
         agent: The Microsoft Agent Framework agent instance (must implement SupportsAgentRun)
         callback: Optional callback invoked during streaming and final responses
+
+    Keyword Args:
+        prune_history: When True, messages that compaction excluded are physically deleted
+            from durable state. Lossy retention policy; off by default.
 
     Returns:
         Entity function configured with the agent
@@ -69,7 +75,7 @@ def create_agent_entity(
             logger.debug("[entity_function] Operation: %s", context.operation_name)
 
             state_provider = AzureFunctionEntityStateProvider(context)
-            entity = AgentEntity(agent, callback, state_provider=state_provider)
+            entity = AgentEntity(agent, callback, state_provider=state_provider, prune_history=prune_history)
 
             operation = context.operation_name
 

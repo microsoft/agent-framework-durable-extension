@@ -244,6 +244,7 @@ class AgentFunctionApp(DFAppBase):
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
         enable_mcp_tool_trigger: bool = False,
         default_callback: AgentResponseCallbackProtocol | None = None,
+        prune_history: bool = False,
     ):
         """Initialize the AgentFunctionApp.
 
@@ -263,6 +264,10 @@ class AgentFunctionApp(DFAppBase):
         :param poll_interval_seconds: Delay in seconds between polling attempts.
             Defaults to ``DEFAULT_POLL_INTERVAL_SECONDS``.
         :param default_callback: Optional callback invoked for agents without specific callbacks.
+        :param prune_history: Default conversation-retention policy for agents hosted by this app
+            (including agents inside hosted workflows). When True, messages that compaction
+            excluded are physically deleted from durable state, bounding stored size. This is
+            lossy and off by default; ``add_agent`` can override it per agent.
 
         :note: If no agents are provided, they can be added later using :meth:`add_agent`.
         """
@@ -283,6 +288,7 @@ class AgentFunctionApp(DFAppBase):
         self.enable_http_endpoints = enable_http_endpoints
         self.enable_mcp_tool_trigger = enable_mcp_tool_trigger
         self.default_callback = default_callback
+        self._prune_history = prune_history
 
         try:
             retries = int(max_poll_retries)
@@ -826,6 +832,7 @@ class AgentFunctionApp(DFAppBase):
         enable_mcp_tool_trigger: bool | None = None,
         *,
         entity_id: str | None = None,
+        prune_history: bool | None = None,
     ) -> None:
         """Add an agent to the function app after initialization.
 
@@ -842,6 +849,8 @@ class AgentFunctionApp(DFAppBase):
                 durable entity (and the ``agents`` / ``get_agent`` key) matches the
                 identity the orchestrator dispatches to. Mirrors
                 ``DurableAIAgentWorker.add_agent(entity_id=...)``.
+            prune_history: Per-agent conversation-retention override. When None, the app-level
+                ``prune_history`` setting is used.
 
         Raises:
             ValueError: If the agent doesn't have a 'name' attribute.
@@ -890,9 +899,15 @@ class AgentFunctionApp(DFAppBase):
         )
 
         effective_callback = callback or self.default_callback
+        effective_prune_history = self._prune_history if prune_history is None else prune_history
 
         self._setup_agent_functions(
-            agent, registration_name, effective_callback, effective_enable_http_endpoint, effective_enable_mcp_endpoint
+            agent,
+            registration_name,
+            effective_callback,
+            effective_enable_http_endpoint,
+            effective_enable_mcp_endpoint,
+            prune_history=effective_prune_history,
         )
 
         logger.debug(f"[AgentFunctionApp] Agent '{registration_name}' added successfully")
@@ -937,6 +952,8 @@ class AgentFunctionApp(DFAppBase):
         callback: AgentResponseCallbackProtocol | None,
         enable_http_endpoint: bool,
         enable_mcp_tool_trigger: bool,
+        *,
+        prune_history: bool = False,
     ) -> None:
         """Set up the HTTP trigger, entity, and MCP tool trigger for a specific agent.
 
@@ -946,6 +963,7 @@ class AgentFunctionApp(DFAppBase):
             callback: Optional callback to receive response updates
             enable_http_endpoint: Whether to create HTTP endpoint
             enable_mcp_tool_trigger: Whether to create MCP tool trigger
+            prune_history: Whether excluded messages are deleted from durable state.
         """
         logger.debug(f"[AgentFunctionApp] Setting up functions for agent '{agent_name}'...")
 
@@ -956,7 +974,7 @@ class AgentFunctionApp(DFAppBase):
                 "[AgentFunctionApp] HTTP run route disabled for agent '%s'",
                 agent_name,
             )
-        self._setup_agent_entity(agent, agent_name, callback)
+        self._setup_agent_entity(agent, agent_name, callback, prune_history=prune_history)
 
         if enable_mcp_tool_trigger:
             agent_description = agent.description
@@ -1098,6 +1116,8 @@ class AgentFunctionApp(DFAppBase):
         agent: SupportsAgentRun,
         agent_name: str,
         callback: AgentResponseCallbackProtocol | None,
+        *,
+        prune_history: bool = False,
     ) -> None:
         """Register the durable entity responsible for agent state.
 
@@ -1105,6 +1125,7 @@ class AgentFunctionApp(DFAppBase):
             agent: The agent instance
             agent_name: The agent name (used for both entity identification and function naming)
             callback: Optional callback for response updates
+            prune_history: Whether excluded messages are deleted from durable state.
         """
         # Use the prefixed entity name for both registration and function naming
         entity_name_with_prefix = AgentSessionId.to_entity_name(agent_name)
@@ -1117,7 +1138,7 @@ class AgentFunctionApp(DFAppBase):
             - run_agent: (Deprecated) Execute the agent with a message
             - reset: Clear conversation history
             """
-            entity_handler = create_agent_entity(agent, callback)
+            entity_handler = create_agent_entity(agent, callback, prune_history=prune_history)
             entity_handler(context)
 
         # Set function name for Azure Functions (used in function.json generation)
