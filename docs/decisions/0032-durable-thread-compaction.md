@@ -341,13 +341,42 @@ to the rest of the user's configuration. Because the injected provider is a `His
 `load_messages=True`, core's own auto-injection sees a provider present and stands down - no
 duplicate provider.
 
-An explicit `DurableHistoryProvider` remains supported as an advanced escape hatch, for example to
-enable `prune_excluded`.
+An explicit `DurableHistoryProvider` remains supported as an advanced escape hatch, and takes
+precedence over anything the runtime would inject.
 
-**Side effect worth noting:** passing a session is what re-engages the context-provider pipeline, so
-external history providers (Cosmos, Redis, file) now function under the durable runtime as well -
-previously they were silently ignored because no session was ever created. Store-side compaction
-still no-ops for those providers (core interface gap 1 below); only the in-run filter applies.
+### When the entity manages history itself
+
+Two distinct decisions drive the entity, and conflating them caused bugs:
+
+1. **Who supplies conversation context?** If the agent exposes core's context-provider pipeline,
+   the providers do - so the entity passes a session and delivers **only the new messages**. This
+   holds whether history lives in durable state, an external store, or the model service.
+2. **Should durable state be bound?** Only when a `DurableHistoryProvider` is present.
+
+The entity therefore replays its own persisted history in exactly one case: an agent that does not
+expose the context pipeline at all (for example a fully custom agent). Routing external-store or
+service-backed agents down that path was incorrect - it either bypassed their provider entirely or
+re-sent history the service already had.
+
+**Consequence:** passing a session is what re-engages the pipeline, so external history providers
+(Cosmos, Redis, file) now function under the durable runtime - previously they were silently
+ignored because no session was ever created. Store-side compaction still no-ops for them (core
+interface gap 1 below); only the in-run filter applies.
+
+### Service-managed conversations
+
+When the model service stores the conversation, it identifies the thread with an id. The entity
+creates a fresh session per operation, so that id is **persisted in durable state and restored on
+the next turn**; without it the service would start a new thread every turn. The durable history
+provider additionally no-ops (neither loading nor flushing) for service-managed sessions.
+
+### Retention is a deployment policy, not agent configuration
+
+Compaction annotates; it does not delete. Physically deleting excluded messages bounds durable
+storage but is **lossy**, so it is opt-in via `prune_history` at **registration** (app-level default
+with a per-agent override) rather than on the agent. This keeps the agent definition portable - the
+same agent runs in-memory, where a retention policy would be meaningless - and places the setting
+next to its natural sibling, entity lifetime/TTL.
 
 ## More Information
 

@@ -326,25 +326,31 @@ class DurableAgentStateData:
 
     Attributes:
         conversation_history: Ordered list of conversation entries (requests and responses)
+        service_session_id: Conversation id issued by a model service that stores history
+            server-side. Persisted so later turns continue the same service thread.
         extension_data: Optional dictionary for custom metadata (not part of core schema)
     """
 
     conversation_history: list[DurableAgentStateEntry]
+    service_session_id: str | None
     extension_data: dict[str, Any] | None
 
     def __init__(
         self,
         conversation_history: list[DurableAgentStateEntry] | None = None,
         extension_data: dict[str, Any] | None = None,
+        service_session_id: str | None = None,
     ) -> None:
         """Initialize the data container.
 
         Args:
             conversation_history: Initial conversation history (defaults to empty list)
             extension_data: Optional custom metadata
+            service_session_id: Optional service-issued conversation id
         """
         self.conversation_history = conversation_history or []
         self.extension_data = extension_data
+        self.service_session_id = service_session_id
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -352,6 +358,8 @@ class DurableAgentStateData:
         }
         if self.extension_data is not None:
             result[DurableStateFields.EXTENSION_DATA] = self.extension_data
+        if self.service_session_id is not None:
+            result[DurableStateFields.SERVICE_SESSION_ID] = self.service_session_id
         return result
 
     @classmethod
@@ -359,6 +367,7 @@ class DurableAgentStateData:
         return cls(
             conversation_history=_parse_history_entries(data_dict),
             extension_data=data_dict.get(DurableStateFields.EXTENSION_DATA),
+            service_session_id=data_dict.get(DurableStateFields.SERVICE_SESSION_ID),
         )
 
 

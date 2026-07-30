@@ -161,3 +161,114 @@ class TestUserAgentIsNotMutated:
 
         assert isinstance(_history_providers(entity.agent)[0], DurableHistoryProvider)
         assert isinstance(_history_providers(agent)[0], InMemoryHistoryProvider)
+
+
+class TestPruneHistoryOptIn:
+    """Pruning is a deployment-level retention policy, set at registration."""
+
+    def test_off_by_default(self) -> None:
+        agent = Agent(client=_StubClient(), name="a")
+
+        prepared = ensure_durable_history(agent)
+
+        assert _history_providers(prepared)[0].prune_excluded is False
+
+    def test_enabled_via_registration(self) -> None:
+        agent = Agent(client=_StubClient(), name="a", context_providers=[InMemoryHistoryProvider()])
+
+        prepared = ensure_durable_history(agent, prune_history=True)
+
+        assert _history_providers(prepared)[0].prune_excluded is True
+
+    def test_entity_forwards_the_flag(self) -> None:
+        agent = Agent(client=_StubClient(), name="a")
+
+        entity = AgentEntity(agent, state_provider=_InMemoryStateProvider(), prune_history=True)
+
+        assert _history_providers(entity.agent)[0].prune_excluded is True
+
+    def test_explicit_provider_configuration_wins(self) -> None:
+        """A hand-configured provider is never overridden by the registration flag."""
+        explicit = DurableHistoryProvider(prune_excluded=False)
+        agent = Agent(client=_StubClient(), name="a", context_providers=[explicit])
+
+        prepared = ensure_durable_history(agent, prune_history=True)
+
+        assert _history_providers(prepared)[0] is explicit
+        assert explicit.prune_excluded is False
+
+
+class TestServiceManagedSessions:
+    """Service-backed agents let the service own the conversation."""
+
+    async def test_only_new_messages_are_sent(self) -> None:
+        """History must not be replayed locally when the service already holds it."""
+        recorded: list[list[Message]] = []
+
+        class _ServiceAgent:
+            name = "svc"
+            client = _ServiceStoringClient()
+            context_providers: list[Any] = []
+
+            def create_session(self, **kwargs: Any) -> Any:
+                from agent_framework import AgentSession
+
+                return AgentSession()
+
+            async def run(self, messages: Any = None, *, stream: bool = False, **kwargs: Any) -> Any:
+                from agent_framework import AgentResponse
+
+                if stream:
+                    raise TypeError("stream is not supported")
+                recorded.append(list(messages or []))
+                return AgentResponse(messages=[Message(role="assistant", contents=["ok"])])
+
+        entity = AgentEntity(_ServiceAgent(), state_provider=_InMemoryStateProvider())  # type: ignore[arg-type]
+
+        await entity.run({"message": "first", "correlationId": "c0"})
+        await entity.run({"message": "second", "correlationId": "c1"})
+
+        # Each turn delivers only its own message; the service supplies the rest.
+        assert len(recorded[1]) == 1
+        assert recorded[1][0].text == "second"
+
+    async def test_service_conversation_id_is_persisted_and_restored(self) -> None:
+        """Without this the service would start a new thread on every turn."""
+        seen_ids: list[str | None] = []
+
+        class _ThreadingAgent:
+            name = "svc"
+            client = _ServiceStoringClient()
+            context_providers: list[Any] = []
+
+            def create_session(self, **kwargs: Any) -> Any:
+                from agent_framework import AgentSession
+
+                return AgentSession()
+
+            async def run(
+                self,
+                messages: Any = None,
+                *,
+                stream: bool = False,
+                session: Any = None,
+                **kwargs: Any,
+            ) -> Any:
+                from agent_framework import AgentResponse
+
+                if stream:
+                    raise TypeError("stream is not supported")
+                seen_ids.append(getattr(session, "service_session_id", None))
+                # The service issues (or confirms) the thread id on the session.
+                session.service_session_id = "svc-thread-1"
+                return AgentResponse(messages=[Message(role="assistant", contents=["ok"])])
+
+        provider = _InMemoryStateProvider()
+        entity = AgentEntity(_ThreadingAgent(), state_provider=provider)  # type: ignore[arg-type]
+
+        await entity.run({"message": "first", "correlationId": "c0"})
+        await entity.run({"message": "second", "correlationId": "c1"})
+
+        assert seen_ids[0] is None  # first turn has no thread yet
+        assert seen_ids[1] == "svc-thread-1"  # second turn continues the same thread
+        assert provider._get_state_dict()["data"]["serviceSessionId"] == "svc-thread-1"

@@ -78,15 +78,21 @@ class DurableAIAgentWorker:
         self,
         worker: TaskHubGrpcWorker,
         callback: AgentResponseCallbackProtocol | None = None,
+        *,
+        prune_history: bool = False,
     ):
         """Initialize the worker wrapper.
 
         Args:
             worker: The durabletask worker instance to wrap
             callback: Optional callback for agent response notifications
+            prune_history: Default retention policy for registered agents. When True, messages
+                that compaction excluded are physically deleted from durable state, bounding
+                stored size. This is lossy and off by default.
         """
         self._worker = worker
         self._callback = callback
+        self._prune_history = prune_history
         self._registered_agents: dict[str, SupportsAgentRun] = {}
         self._workflows: dict[str, Workflow] = {}
         # Every workflow whose orchestration has been registered (top-level plus nested
@@ -102,6 +108,7 @@ class DurableAIAgentWorker:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         entity_id: str | None = None,
+        prune_history: bool | None = None,
     ) -> None:
         """Register an agent with the worker.
 
@@ -115,6 +122,8 @@ class DurableAIAgentWorker:
             entity_id: Optional identity to register the entity under instead of
                 ``agent.name``. Workflow hosting passes the executor's ``id`` so the
                 entity matches the identity the orchestrator dispatches to.
+            prune_history: Per-agent retention override. When None, the worker-level
+                ``prune_history`` setting is used.
 
         Raises:
             ValueError: If the agent doesn't have a name or is already registered
@@ -137,7 +146,12 @@ class DurableAIAgentWorker:
         effective_callback = callback or self._callback
 
         # Create a configured entity class using the factory
-        entity_class = self.__create_agent_entity(agent, effective_callback, entity_id=registration_name)
+        entity_class = self.__create_agent_entity(
+            agent,
+            effective_callback,
+            entity_id=registration_name,
+            prune_history=(self._prune_history if prune_history is None else prune_history),
+        )
 
         # Register the entity class with the worker
         # The worker.add_entity method takes a class
@@ -356,6 +370,7 @@ class DurableAIAgentWorker:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         entity_id: str | None = None,
+        prune_history: bool = False,
     ) -> type[DurableTaskEntityStateProvider]:
         """Factory function to create a DurableEntity class configured with an agent.
 
@@ -368,6 +383,7 @@ class DurableAIAgentWorker:
             entity_id: Optional identity to register the entity under instead of
                 ``agent.name`` (used by workflow hosting to key entities by
                 executor id).
+            prune_history: Whether excluded messages are physically deleted from durable state.
 
         Returns:
             A new DurableEntity subclass configured for this agent
@@ -385,6 +401,7 @@ class DurableAIAgentWorker:
                     agent=agent,
                     callback=callback,
                     state_provider=self,
+                    prune_history=prune_history,
                 )
                 logger.debug(
                     "[ConfiguredAgentEntity] Initialized entity for agent: %s (entity name: %s)",

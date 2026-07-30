@@ -125,10 +125,11 @@ class AgentEntity:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         state_provider: AgentEntityStateProviderMixin,
+        prune_history: bool = False,
     ) -> None:
         # Back the agent's conversation history with durable entity state so an agent that
         # already works in core runs durably without any configuration change.
-        self.agent = ensure_durable_history(agent)
+        self.agent = ensure_durable_history(agent, prune_history=prune_history)
         self.callback = callback
         self._state_provider = state_provider
 
@@ -184,6 +185,7 @@ class AgentEntity:
         self.state.data.conversation_history.append(state_request)
 
         durable_history = self._find_durable_history_provider()
+        uses_context_pipeline = self._has_context_pipeline()
         binding_token = (
             bind_durable_history(
                 DurableHistoryBinding(state_provider=self._state_provider, correlation_id=correlation_id)
@@ -193,11 +195,12 @@ class AgentEntity:
         )
 
         try:
-            if durable_history is not None:
-                # Provider-backed path: the DurableHistoryProvider loads prior turns straight
-                # from durable entity state, so history lives in exactly one place and only the
-                # newly received request messages are passed as run input. Core context providers
-                # (history and compaction) therefore work unchanged on the durable runtime.
+            if uses_context_pipeline:
+                # The agent's own context providers supply prior turns - durable-backed history,
+                # an external store (Cosmos/Redis/file), or the model service itself. Only the
+                # newly received request messages are passed as run input, so history lives in
+                # exactly one place and core providers work unchanged on the durable runtime.
+                session = self._create_session()
                 chat_messages = [
                     replayable_message
                     for m in state_request.messages
@@ -205,11 +208,13 @@ class AgentEntity:
                 ]
                 run_kwargs: dict[str, Any] = {
                     "messages": chat_messages,
-                    "session": self._create_session(),
+                    "session": session,
                     "options": options,
                 }
             else:
-                # Legacy path: replay the full persisted conversation on every turn.
+                # Fallback for agents without the core context pipeline (for example a fully
+                # custom agent): the entity replays the persisted conversation on every turn.
+                session = None
                 chat_messages = [
                     replayable_message
                     for entry in self.state.data.conversation_history
@@ -228,6 +233,7 @@ class AgentEntity:
 
             state_response = DurableAgentStateResponse.from_run_response(correlation_id, agent_run_response)
             self.state.data.conversation_history.append(state_response)
+            self._capture_service_session(session)
             self.persist_state()
 
             return agent_run_response
@@ -253,6 +259,27 @@ class AgentEntity:
         finally:
             if binding_token is not None:
                 unbind_durable_history(binding_token)
+
+    def _has_context_pipeline(self) -> bool:
+        """Whether the agent exposes core's context-provider pipeline.
+
+        When it does, the providers own conversation context and the entity delivers only the
+        new messages. Agents without it fall back to replaying persisted history.
+        """
+        return isinstance(getattr(self.agent, "context_providers", None), (list, tuple))
+
+    def _capture_service_session(self, session: Any) -> None:
+        """Persist a service-issued conversation id so later turns continue the same thread.
+
+        Service-backed agents keep the conversation on the service side and identify it with an
+        id. The entity creates a fresh session per operation, so without persisting this the
+        service would start a new thread on every turn.
+        """
+        if session is None:
+            return
+        service_session_id = getattr(session, "service_session_id", None)
+        if isinstance(service_session_id, str) and service_session_id:
+            self.state.data.service_session_id = service_session_id
 
     def _drop_already_stored(self, messages: list[DurableAgentStateMessage]) -> list[DurableAgentStateMessage]:
         """Filter out upstream context messages this entity has already recorded.
@@ -287,18 +314,24 @@ class AgentEntity:
         return None
 
     def _create_session(self) -> Any:
-        """Create a fresh session for a provider-backed run.
+        """Create the session for this operation.
 
-        No session state needs to persist: conversation history and any compaction
-        annotations live in durable entity state, loaded by the history provider.
+        Conversation history lives in the agent's context providers (durable entity state, an
+        external store, or the model service), so a fresh session per operation is enough. Any
+        previously issued service conversation id is restored so service-backed agents continue
+        the same thread.
         """
         create_session = getattr(self.agent, "create_session", None)
         if not callable(create_session):
             raise TypeError(
-                f"Agent {type(self.agent).__name__} is configured with a DurableHistoryProvider "
-                "but does not support create_session()."
+                f"Agent {type(self.agent).__name__} exposes context providers but does not support create_session()."
             )
-        return create_session()
+        session: Any = create_session()
+
+        service_session_id = self.state.data.service_session_id
+        if service_session_id and getattr(session, "service_session_id", None) is None:
+            session.service_session_id = service_session_id
+        return session
 
     @staticmethod
     def _to_replayable_message(message: DurableAgentStateMessage) -> Message | None:
