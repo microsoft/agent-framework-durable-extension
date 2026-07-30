@@ -293,6 +293,37 @@ class TestDurableHistoryProvider:
         ids = [m.message_id for m in _stored_messages(entity) if m.message_id]
         assert len(ids) == len(set(ids)), f"duplicate message ids persisted: {ids}"
 
+    async def test_service_managed_session_is_skipped(self) -> None:
+        """When the model service owns the conversation, the provider must not participate."""
+        from types import SimpleNamespace
+
+        from agent_framework_durabletask._history_provider import (
+            DurableHistoryBinding,
+            bind_durable_history,
+            unbind_durable_history,
+        )
+
+        client = RecordingChatClient()
+        provider = _InMemoryStateProvider()
+        entity = _make_entity(_build_agent(client), provider)
+        await _run_turns(entity, ["first", "second"])
+
+        history = DurableHistoryProvider()
+        token = bind_durable_history(DurableHistoryBinding(state_provider=provider))
+        try:
+            state: dict[str, Any] = {}
+            context = SimpleNamespace(session_id="s", extend_messages=lambda *_: None)
+            service_session = SimpleNamespace(service_session_id="svc-123", state={})
+
+            await history.before_run(agent=None, session=service_session, context=context, state=state)
+            # Nothing was loaded, so no working buffer was published.
+            assert "messages" not in state
+
+            # Flushing is likewise a no-op and must not raise.
+            await history.after_run(agent=None, session=service_session, context=context, state=state)
+        finally:
+            unbind_durable_history(token)
+
     async def test_without_durable_provider_legacy_replay_is_used(self) -> None:
         """Agents without the provider keep the original full-replay behavior."""
         client = RecordingChatClient()

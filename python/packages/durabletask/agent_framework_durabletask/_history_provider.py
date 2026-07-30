@@ -194,6 +194,25 @@ class DurableHistoryProvider(HistoryProvider):
         """No-op: the durable entity appends requests and responses to its own state."""
         return
 
+    @staticmethod
+    def _is_service_managed(session: Any) -> bool:
+        """Return whether the conversation is stored by the model service, not by us."""
+        return bool(getattr(session, "service_session_id", None))
+
+    async def before_run(
+        self,
+        *,
+        agent: Any,
+        session: Any,
+        context: Any,
+        state: dict[str, Any],
+    ) -> None:
+        """Load durable history into context, unless the service owns the conversation."""
+        if self._is_service_managed(session):
+            logger.debug("[DurableHistoryProvider] Session is service-managed; skipping durable history load.")
+            return
+        await super().before_run(agent=agent, session=session, context=context, state=state)
+
     async def after_run(
         self,
         *,
@@ -203,6 +222,8 @@ class DurableHistoryProvider(HistoryProvider):
         state: dict[str, Any],
     ) -> None:
         """Flush compaction annotations from the working buffer into durable state."""
+        if self._is_service_managed(session):
+            return
         self.flush(state)
 
     def flush(self, state: dict[str, Any]) -> None:

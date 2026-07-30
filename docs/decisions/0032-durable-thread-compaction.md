@@ -289,6 +289,32 @@ Consequence for ordering: core runs `before_run` forward and `after_run` in **re
 (convenient), but it sees history only as of the **previous** turn - so context reaches a steady
 state rather than shrinking immediately. This is expected, not a defect.
 
+## L3 Realization: Workflow Context Parity
+
+In-process workflows give a downstream `AgentExecutor` the upstream conversation through
+`AgentExecutorResponse.full_conversation`, governed by `context_mode` (`full` | `last_agent` |
+`custom` + `context_filter`). The durable orchestrator previously flattened that to the **last
+message's text**, so a downstream agent lost everything earlier nodes produced.
+
+Durable now projects the same conversation and delivers it to the agent entity:
+
+- The orchestrator reads the executor's `context_mode`/`context_filter` and projects
+  `full_conversation` accordingly.
+- The projection travels as `RunRequest.context_messages` (serialized `Message` values) and becomes
+  the request entry's messages, so it is persisted like any other conversation content and is
+  visible to compaction.
+- A node that runs more than once (a cycle) receives the whole upstream conversation again, so the
+  entity **drops messages whose id it has already recorded**, keeping at least the latest message so
+  the agent always has an input. This relies on the persisted `messageId` described above.
+
+Behavior difference that remains, by design: each agent node also keeps its **own durable history**
+(keyed by workflow instance + executor), so per-agent memory survives restarts and is compacted
+independently - a superset of the in-process behavior rather than a strict match.
+
+**Service-managed sessions** are a no-op at every layer: when a session carries a
+`service_session_id` the model service owns the conversation, so the durable history provider
+neither loads nor flushes.
+
 ## More Information
 
 - Builds on [ADR-0019](https://github.com/microsoft/agent-framework/blob/main/docs/decisions/0019-python-context-compaction-strategy.md) (context compaction strategy),

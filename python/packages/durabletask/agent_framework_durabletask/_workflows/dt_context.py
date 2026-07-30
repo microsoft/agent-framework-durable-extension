@@ -57,11 +57,17 @@ class DurableTaskWorkflowContext:
 
     # -- Agent / Activity dispatch --------------------------------------------
 
-    def prepare_agent_task(self, executor_id: str, message: str, orchestration_instance_id: str) -> Any:
+    def prepare_agent_task(
+        self,
+        executor_id: str,
+        message: str,
+        orchestration_instance_id: str,
+        context_messages: list[dict[str, Any]] | None = None,
+    ) -> Any:
         session_id = AgentSessionId(name=executor_id, key=orchestration_instance_id)
         session = DurableAgentSession(durable_session_id=session_id)
         agent = DurableAIAgent(self._executor, executor_id)
-        return agent.run(message, session=session)
+        return agent.run(message, session=session, context_messages=context_messages)
 
     def prepare_activity_task(self, activity_name: str, input_json: str) -> Any:
         return cast(Any, self._context.call_activity(activity_name, input=input_json))

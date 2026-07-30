@@ -611,10 +611,18 @@ class DurableAgentStateRequest(DurableAgentStateEntry):
 
     @staticmethod
     def from_run_request(request: RunRequest) -> DurableAgentStateRequest:
+        # A workflow may deliver the upstream conversation instead of a single message.
+        if request.context_messages:
+            messages = [
+                DurableAgentStateMessage.from_chat_message(Message.from_dict(raw)) for raw in request.context_messages
+            ]
+        else:
+            messages = [DurableAgentStateMessage.from_run_request(request)]
+
         # Determine response_type based on response_format
         return DurableAgentStateRequest(
             correlation_id=request.correlation_id,
-            messages=[DurableAgentStateMessage.from_run_request(request)],
+            messages=messages,
             created_at=_parse_created_at(request.created_at),
             response_type=request.request_response_format,
             response_schema=serialize_response_format(request.response_format),

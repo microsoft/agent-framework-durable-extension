@@ -92,6 +92,7 @@ class DurableAIAgent(SupportsAgentRun, Generic[TaskT]):
         stream: Literal[False] = False,
         session: AgentSession | None = None,
         options: dict[str, Any] | None = None,
+        context_messages: list[dict[str, Any]] | None = None,
     ) -> TaskT:
         """Execute the agent via the injected provider.
 
@@ -103,6 +104,9 @@ class DurableAIAgent(SupportsAgentRun, Generic[TaskT]):
             options: Optional options dictionary. Supported keys include
                 ``response_format``, ``enable_tool_calls``, and ``wait_for_response``.
                 Additional keys are forwarded to the agent execution.
+            context_messages: Optional upstream conversation (serialized ``Message`` dicts)
+                delivered to the agent as prior context. Workflows use this to give a
+                downstream agent the conversation produced by upstream nodes.
 
         Note:
             This method overrides SupportsAgentRun.run() with a different return type:
@@ -122,9 +126,13 @@ class DurableAIAgent(SupportsAgentRun, Generic[TaskT]):
             raise ValueError("DurableAIAgent does not support streaming mode (stream must be False)")
         message_str = self._normalize_messages(messages)
 
+        # Only forward context messages when a workflow supplied them, so executors that do
+        # not implement the parameter keep working unchanged.
+        extra: dict[str, Any] = {"context_messages": context_messages} if context_messages else {}
         run_request = self._executor.get_run_request(
             message=message_str,
             options=options,
+            **extra,
         )
 
         return self._executor.run_durable_agent(

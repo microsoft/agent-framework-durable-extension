@@ -160,6 +160,7 @@ class DurableAgentExecutor(ABC, Generic[TaskT]):
         message: str,
         *,
         options: dict[str, Any] | None = None,
+        context_messages: list[dict[str, Any]] | None = None,
     ) -> RunRequest:
         """Create a RunRequest from message and options."""
         correlation_id = self.generate_unique_id()
@@ -179,6 +180,7 @@ class DurableAgentExecutor(ABC, Generic[TaskT]):
             wait_for_response=wait_for_response,
             correlation_id=correlation_id,
             options=opts,
+            context_messages=context_messages,
         )
 
     def _create_acceptance_response(self, correlation_id: str) -> AgentResponse:
@@ -454,6 +456,7 @@ class OrchestrationAgentExecutor(DurableAgentExecutor[DurableAgentTask]):
         message: str,
         *,
         options: dict[str, Any] | None = None,
+        context_messages: list[dict[str, Any]] | None = None,
     ) -> RunRequest:
         """Get the current run request from the orchestration context.
 
@@ -463,6 +466,7 @@ class OrchestrationAgentExecutor(DurableAgentExecutor[DurableAgentTask]):
         request = super().get_run_request(
             message,
             options=options,
+            context_messages=context_messages,
         )
         request.orchestration_id = self._context.instance_id
         return request

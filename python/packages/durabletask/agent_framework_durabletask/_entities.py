@@ -176,6 +176,8 @@ class AgentEntity:
         logger.debug("[AgentEntity.run] Received SessionId %s Message: %s", session_id, run_request)
 
         state_request = DurableAgentStateRequest.from_run_request(run_request)
+        if run_request.context_messages:
+            state_request.messages = self._drop_already_stored(state_request.messages)
         self.state.data.conversation_history.append(state_request)
 
         durable_history = self._find_durable_history_provider()
@@ -248,6 +250,28 @@ class AgentEntity:
         finally:
             if binding_token is not None:
                 unbind_durable_history(binding_token)
+
+    def _drop_already_stored(self, messages: list[DurableAgentStateMessage]) -> list[DurableAgentStateMessage]:
+        """Filter out upstream context messages this entity has already recorded.
+
+        A workflow node that runs more than once (for example in a cycle) receives the whole
+        upstream conversation each time. Messages carrying an id that is already in this
+        entity's history are dropped so the conversation is not duplicated. The final message
+        is always kept so the agent still receives an input.
+        """
+        known_ids = {
+            stored.message_id
+            for entry in self.state.data.conversation_history
+            for stored in entry.messages
+            if stored.message_id
+        }
+        if not known_ids:
+            return messages
+
+        deduped = [m for m in messages if not m.message_id or m.message_id not in known_ids]
+        if not deduped and messages:
+            return [messages[-1]]
+        return deduped
 
     def _find_durable_history_provider(self) -> DurableHistoryProvider | None:
         """Return the agent's :class:`DurableHistoryProvider`, if it is configured with one."""
