@@ -13,13 +13,14 @@ See ADR-0032 (durable thread compaction).
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections.abc import Iterator, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from agent_framework import HistoryProvider, Message
+from agent_framework import HistoryProvider, InMemoryHistoryProvider, Message, SupportsAgentRun
 
 from ._durable_agent_state import DurableAgentStateEntry, DurableAgentStateMessage, DurableAgentStateResponse
 
@@ -313,3 +314,81 @@ class DurableHistoryProvider(HistoryProvider):
         remaining = [entry for entry in history if entry.messages]
         if len(remaining) != len(history):
             history[:] = remaining
+
+
+def _service_stores_history(agent: Any) -> bool:
+    """Return whether the agent's client keeps conversation history server-side."""
+    client = getattr(agent, "client", None)
+    return bool(getattr(client, "STORES_BY_DEFAULT", False))
+
+
+def ensure_durable_history(agent: SupportsAgentRun) -> SupportsAgentRun:
+    """Back an agent's conversation history with durable entity state.
+
+    Lets a user register an agent that already works in core and get durable behavior with no
+    configuration change. The agent is never mutated: when a substitution is needed a shallow
+    copy is returned with its own provider list.
+
+    The rules mirror what core would do, so behavior stays predictable:
+
+    * **No history provider** - a :class:`DurableHistoryProvider` is added. It uses the same
+      ``source_id`` core's auto-injected provider would have, so a ``CompactionProvider`` left on
+      its defaults still finds it.
+    * **In-memory history** - replaced by a :class:`DurableHistoryProvider` carrying the *same*
+      ``source_id`` and ``skip_excluded``, so any compaction wired to it keeps working untouched.
+    * **Any other history provider** (Cosmos, Redis, file, custom) - left alone. The user chose
+      where their conversation lives; durable still provides execution durability.
+    * **Service-managed history** - left alone. The model service owns the conversation.
+    * **Agents without the core context pipeline** - left alone; the entity falls back to
+      replaying its own persisted history.
+
+    Args:
+        agent: The agent being registered with the durable runtime.
+
+    Returns:
+        The agent to run, either unchanged or a shallow copy with durable-backed history.
+    """
+    providers = getattr(agent, "context_providers", None)
+    if not isinstance(providers, (list, tuple)):
+        return agent
+
+    if _service_stores_history(agent):
+        logger.debug(
+            "[DurableHistoryProvider] Agent %s stores history service-side; leaving providers unchanged.",
+            getattr(agent, "name", type(agent).__name__),
+        )
+        return agent
+
+    provider_list = list(cast("Sequence[Any]", providers))
+    existing = next(
+        (p for p in provider_list if isinstance(p, HistoryProvider) and p.load_messages),
+        None,
+    )
+
+    if existing is None:
+        # Match the source_id core's auto-injected provider would use so default-wired
+        # compaction keeps resolving.
+        updated = [DurableHistoryProvider(source_id=InMemoryHistoryProvider.DEFAULT_SOURCE_ID), *provider_list]
+    elif isinstance(existing, InMemoryHistoryProvider):
+        replacement = DurableHistoryProvider(
+            source_id=existing.source_id,
+            skip_excluded=existing.skip_excluded,
+        )
+        updated = [replacement if p is existing else p for p in provider_list]
+    else:
+        # A deliberate storage choice (external or custom); do not override it.
+        return agent
+
+    try:
+        clone = copy.copy(agent)
+        clone.context_providers = updated  # type: ignore[attr-defined]
+    except Exception:
+        logger.warning(
+            "[DurableHistoryProvider] Could not attach durable history to agent %s; "
+            "falling back to replaying persisted history.",
+            getattr(agent, "name", type(agent).__name__),
+            exc_info=True,
+        )
+        return agent
+
+    return clone

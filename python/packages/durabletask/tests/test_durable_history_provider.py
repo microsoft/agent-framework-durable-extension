@@ -324,12 +324,18 @@ class TestDurableHistoryProvider:
         finally:
             unbind_durable_history(token)
 
-    async def test_without_durable_provider_legacy_replay_is_used(self) -> None:
-        """Agents without the provider keep the original full-replay behavior."""
+    async def test_core_configured_agent_gets_durable_history_automatically(self) -> None:
+        """An agent configured the ordinary core way runs durably with no changes."""
         client = RecordingChatClient()
         agent = Agent(client=client, name="assistant", context_providers=[InMemoryHistoryProvider()])
         entity = _make_entity(agent, _InMemoryStateProvider())
 
         await _run_turns(entity, ["first", "second"])
 
+        # The entity swapped in durable-backed history without the user asking.
+        assert any(isinstance(p, DurableHistoryProvider) for p in entity.agent.context_providers)
+        # The caller's agent is untouched.
+        assert any(isinstance(p, InMemoryHistoryProvider) for p in agent.context_providers)
+        # History is served from durable state, so turn 2 sees turn 1.
+        assert len(client.received_messages[1]) > len(client.received_messages[0])
         assert len(entity.state.data.conversation_history) == 4

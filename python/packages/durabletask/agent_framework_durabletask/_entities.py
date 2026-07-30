@@ -33,6 +33,7 @@ from ._history_provider import (
     DurableHistoryBinding,
     DurableHistoryProvider,
     bind_durable_history,
+    ensure_durable_history,
     unbind_durable_history,
 )
 from ._models import RunRequest
@@ -125,7 +126,9 @@ class AgentEntity:
         *,
         state_provider: AgentEntityStateProviderMixin,
     ) -> None:
-        self.agent = agent
+        # Back the agent's conversation history with durable entity state so an agent that
+        # already works in core runs durably without any configuration change.
+        self.agent = ensure_durable_history(agent)
         self.callback = callback
         self._state_provider = state_provider
 

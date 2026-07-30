@@ -315,6 +315,40 @@ independently - a superset of the in-process behavior rather than a strict match
 `service_session_id` the model service owns the conversation, so the durable history provider
 neither loads nor flushes.
 
+## Zero-Configuration Registration
+
+The parity goal is only met if a user can take an agent that **already works in core**, register it
+with `AgentFunctionApp` (or the worker, or as a workflow node), and get durable behavior with **no
+edits to the agent**. Requiring them to add a durable-specific provider would just relocate the
+configuration burden.
+
+So the durable entity substitutes the history provider at construction time - covering every
+registration path, since both the worker and the Azure Functions host build the same entity. The
+agent is never mutated: when a substitution is needed, a shallow copy with its own provider list is
+used, so the caller's agent still behaves normally in-process.
+
+| User configured | Durable behavior |
+| --- | --- |
+| Nothing | Inject a durable history provider, using the `source_id` core's auto-injected provider would have - so default-wired compaction still resolves. No compaction by default (same as core). |
+| `InMemoryHistoryProvider` (± compaction) | Replace with the durable provider, **preserving `source_id` and `skip_excluded`** so any attached `CompactionProvider` keeps working untouched. |
+| Cosmos / Redis / file / custom provider | **Leave alone.** The user chose where their conversation lives; durable still supplies execution durability. |
+| Service-managed history | **Leave alone.** The model service owns the conversation. |
+| Agent without the core context pipeline | **Leave alone.** Falls back to replaying persisted history. |
+
+Preserving `source_id` is the load-bearing detail: `CompactionProvider` locates history through
+`history_source_id` (default `"in_memory"`), so a provider swapped in under the same id is invisible
+to the rest of the user's configuration. Because the injected provider is a `HistoryProvider` with
+`load_messages=True`, core's own auto-injection sees a provider present and stands down - no
+duplicate provider.
+
+An explicit `DurableHistoryProvider` remains supported as an advanced escape hatch, for example to
+enable `prune_excluded`.
+
+**Side effect worth noting:** passing a session is what re-engages the context-provider pipeline, so
+external history providers (Cosmos, Redis, file) now function under the durable runtime as well -
+previously they were silently ignored because no session was ever created. Store-side compaction
+still no-ops for those providers (core interface gap 1 below); only the in-run filter applies.
+
 ## More Information
 
 - Builds on [ADR-0019](https://github.com/microsoft/agent-framework/blob/main/docs/decisions/0019-python-context-compaction-strategy.md) (context compaction strategy),
