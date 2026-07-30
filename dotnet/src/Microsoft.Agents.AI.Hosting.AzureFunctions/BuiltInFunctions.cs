@@ -2,6 +2,7 @@
 
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Agents.AI.DurableTask;
@@ -25,6 +26,28 @@ internal static class BuiltInFunctions
     internal const string RespondFunctionSuffix = "-respond";
 
     private const string WaitForResponseHeaderName = "x-ms-wait-for-response";
+
+    /// <summary>
+    /// Query parameter used by the agent endpoints, which use snake_case names throughout their
+    /// query string, request body, and response body.
+    /// </summary>
+    /// <remarks>
+    /// Issue https://github.com/microsoft/agent-framework-durable-extension/issues/51 tracks the plan
+    /// to unify the query parameter naming across all endpoints.
+    /// </remarks>
+    private const string AgentWaitForResponseParameterName = "wait_for_response";
+
+    /// <summary>
+    /// Query parameter used by the workflow endpoints, which use camelCase names throughout their
+    /// query string, request body, and response body.
+    /// </summary>
+    private const string WorkflowWaitForResponseParameterName = "waitForResponse";
+
+    private const string WorkflowRunIdParameterName = "runId";
+    private const int MaxWorkflowRunIdLength = 100;
+    private const string WaitTimeoutSecondsParameterName = "timeoutSeconds";
+    private const int DefaultWaitTimeoutSeconds = 10;
+    private const int MaxWaitTimeoutSeconds = 200;
 
     private const string SessionIdHeaderName = "x-ms-session-id";
     private const string SessionIdParameterName = "session_id";
@@ -73,24 +96,60 @@ internal static class BuiltInFunctions
 
         if (string.IsNullOrEmpty(inputMessage))
         {
-            return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, "Workflow input cannot be empty.");
+            return await CreateErrorResponseAsync(
+                req,
+                context,
+                HttpStatusCode.BadRequest,
+                "Workflow input cannot be empty.",
+                ShouldReturnWorkflowJson(req));
+        }
+
+        if (!TryGetWorkflowWaitForResponse(req, out bool waitForResponse, out string? waitForResponseError))
+        {
+            return await CreateErrorResponseAsync(
+                req,
+                context,
+                HttpStatusCode.BadRequest,
+                waitForResponseError!,
+                ShouldReturnWorkflowJson(req));
+        }
+
+        TimeSpan waitTimeout = default;
+        if (waitForResponse && !TryGetWaitTimeout(req, out waitTimeout, out string? timeoutError))
+        {
+            return await CreateErrorResponseAsync(
+                req,
+                context,
+                HttpStatusCode.BadRequest,
+                timeoutError!,
+                ShouldReturnWorkflowJson(req));
+        }
+
+        string? instanceId = req.Query[WorkflowRunIdParameterName];
+        if (!TryValidateWorkflowRunId(instanceId, out string? runIdError))
+        {
+            return await CreateErrorResponseAsync(
+                req,
+                context,
+                HttpStatusCode.BadRequest,
+                runIdError!,
+                ShouldReturnWorkflowJson(req));
         }
 
         DurableWorkflowInput<string> orchestrationInput = new() { Input = inputMessage };
 
         // Allow users to provide a custom run ID via query string; otherwise, auto-generate one.
-        string? instanceId = req.Query["runId"];
         StartOrchestrationOptions? options = instanceId is not null ? new StartOrchestrationOptions(instanceId) : null;
         string resolvedInstanceId = await client.ScheduleNewOrchestrationInstanceAsync(orchestrationFunctionName, orchestrationInput, options);
 
-        if (ShouldWaitForResponse(req, defaultValue: false))
+        if (waitForResponse)
         {
-            return await WaitForWorkflowCompletionAsync(req, client, context, resolvedInstanceId);
+            return await WaitForWorkflowCompletionAsync(
+                req, client, context, workflowName, resolvedInstanceId, waitTimeout);
         }
 
-        HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
-        await response.WriteStringAsync($"Workflow orchestration started for {workflowName}. Orchestration runId: {resolvedInstanceId}");
-        return response;
+        return await CreateWorkflowAcceptedResponseAsync(
+            req, workflowName, resolvedInstanceId, context.CancellationToken);
     }
 
     /// <summary>
@@ -298,7 +357,7 @@ internal static class BuiltInFunctions
             message = await req.ReadAsStringAsync();
         }
 
-        // The session ID can come from the query string or the JSON body, under either the canonical
+        // The session ID can come from the query string or the request body, using either the canonical
         // "session_id" name or the deprecated "thread_id" alias. Conflicting values are rejected.
         if (!TryResolveSessionKey(
                 sessionIdFromBody,
@@ -329,7 +388,7 @@ internal static class BuiltInFunctions
         }
 
         // Check if we should wait for response (default is true)
-        bool waitForResponse = ShouldWaitForResponse(req, defaultValue: true);
+        bool waitForResponse = ShouldWaitForResponse(req, AgentWaitForResponseParameterName, defaultValue: true);
 
         AIAgent agentProxy = client.AsDurableAgentProxy(context, agentName);
 
@@ -462,23 +521,39 @@ internal static class BuiltInFunctions
     /// <summary>
     /// Waits for a workflow orchestration to complete and returns an appropriate HTTP response.
     /// </summary>
-    private static async Task<HttpResponseData> WaitForWorkflowCompletionAsync(
+    internal static async Task<HttpResponseData> WaitForWorkflowCompletionAsync(
         HttpRequestData req,
         DurableTaskClient client,
         FunctionContext context,
-        string instanceId)
+        string workflowName,
+        string instanceId,
+        TimeSpan timeout)
     {
-        bool acceptsJson = AcceptsJson(req);
+        bool returnJson = ShouldReturnWorkflowJson(req);
 
-        OrchestrationMetadata? metadata = await client.WaitForInstanceCompletionAsync(
-            instanceId,
-            getInputsAndOutputs: true,
-            cancellation: context.CancellationToken);
+        OrchestrationMetadata? metadata;
+        using (CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken))
+        {
+            timeoutSource.CancelAfter(timeout);
+
+            try
+            {
+                metadata = await client.WaitForInstanceCompletionAsync(
+                    instanceId,
+                    getInputsAndOutputs: true,
+                    cancellation: timeoutSource.Token);
+            }
+            catch (OperationCanceledException) when (!context.CancellationToken.IsCancellationRequested)
+            {
+                return await CreateWorkflowAcceptedResponseAsync(
+                    req, workflowName, instanceId, context.CancellationToken);
+            }
+        }
 
         if (metadata is null)
         {
             return await CreateErrorResponseAsync(req, context, HttpStatusCode.NotFound,
-                $"No workflow orchestration with ID '{instanceId}' was found.", acceptsJson);
+                $"No workflow orchestration with ID '{instanceId}' was found.", returnJson);
         }
 
         if (metadata.RuntimeStatus is OrchestrationRuntimeStatus.Failed)
@@ -486,7 +561,7 @@ internal static class BuiltInFunctions
             string errorMessage = metadata.FailureDetails?.ErrorMessage ?? "Unknown error";
             HttpResponseData failedResponse = req.CreateResponse(HttpStatusCode.OK);
 
-            if (acceptsJson)
+            if (returnJson)
             {
                 await failedResponse.WriteAsJsonAsync(
                     new WorkflowRunResponse(instanceId, metadata.RuntimeStatus.ToString(), Result: null, Error: errorMessage),
@@ -504,14 +579,14 @@ internal static class BuiltInFunctions
         if (metadata.RuntimeStatus is not OrchestrationRuntimeStatus.Completed)
         {
             return await CreateErrorResponseAsync(req, context, HttpStatusCode.InternalServerError,
-                $"Workflow orchestration '{instanceId}' ended with unexpected status '{metadata.RuntimeStatus}'.", acceptsJson);
+                $"Workflow orchestration '{instanceId}' ended with unexpected status '{metadata.RuntimeStatus}'.", returnJson);
         }
 
         string? result = metadata.ReadOutputAs<DurableWorkflowResult>()?.Result;
 
         HttpResponseData response = req.CreateResponse(HttpStatusCode.OK);
 
-        if (acceptsJson)
+        if (returnJson)
         {
             JsonElement? resultElement = null;
             if (!string.IsNullOrEmpty(result))
@@ -543,6 +618,35 @@ internal static class BuiltInFunctions
         {
             response.Headers.Add("Content-Type", "text/plain");
             await response.WriteStringAsync(result ?? string.Empty, context.CancellationToken);
+        }
+
+        return response;
+    }
+
+    /// <summary>
+    /// Creates the response returned when a workflow continues asynchronously.
+    /// </summary>
+    internal static async Task<HttpResponseData> CreateWorkflowAcceptedResponseAsync(
+        HttpRequestData req,
+        string workflowName,
+        string instanceId,
+        CancellationToken cancellationToken)
+    {
+        HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
+        if (ShouldReturnWorkflowJson(req))
+        {
+            await response.WriteAsJsonAsync(
+                new WorkflowAcceptedResponse(
+                    instanceId,
+                    $"Workflow orchestration started for {workflowName}."),
+                cancellationToken);
+        }
+        else
+        {
+            response.Headers.Add("Content-Type", "text/plain");
+            await response.WriteStringAsync(
+                $"Workflow orchestration started for {workflowName}. Orchestration runId: {instanceId}",
+                cancellationToken);
         }
 
         return response;
@@ -644,18 +748,131 @@ internal static class BuiltInFunctions
 
     /// <summary>
     /// Returns <see langword="true"/> when the caller has requested waiting for the workflow/agent to complete,
-    /// as indicated by the <c>x-ms-wait-for-response</c> header. Falls back to <paramref name="defaultValue"/>
-    /// when the header is absent or not a valid boolean.
+    /// as indicated by the <c>x-ms-wait-for-response</c> header or <paramref name="parameterName"/> query parameter.
+    /// The header takes precedence. Falls back to <paramref name="defaultValue"/> when neither value is valid.
     /// </summary>
-    private static bool ShouldWaitForResponse(HttpRequestData req, bool defaultValue)
+    internal static bool ShouldWaitForResponse(HttpRequestData req, string parameterName, bool defaultValue)
     {
         if (req.Headers.TryGetValues(WaitForResponseHeaderName, out IEnumerable<string>? values) &&
-            bool.TryParse(values.FirstOrDefault(), out bool parsed))
+            TryParseBoolean(values.FirstOrDefault(), out bool parsed))
+        {
+            return parsed;
+        }
+
+        if (TryParseBoolean(req.Query[parameterName], out parsed))
         {
             return parsed;
         }
 
         return defaultValue;
+    }
+
+    /// <summary>
+    /// Gets the workflow wait preference while rejecting invalid values of the new query parameter.
+    /// The legacy header retains precedence and its existing invalid-value fallback behavior.
+    /// </summary>
+    internal static bool TryGetWorkflowWaitForResponse(
+        HttpRequestData req,
+        out bool waitForResponse,
+        out string? error)
+    {
+        if (req.Headers.TryGetValues(WaitForResponseHeaderName, out IEnumerable<string>? values) &&
+            TryParseBoolean(values.FirstOrDefault(), out waitForResponse))
+        {
+            error = null;
+            return true;
+        }
+
+        string? queryValue = req.Query[WorkflowWaitForResponseParameterName];
+        if (queryValue is null)
+        {
+            waitForResponse = false;
+            error = null;
+            return true;
+        }
+
+        if (!TryParseBoolean(queryValue, out waitForResponse))
+        {
+            error = $"'{WorkflowWaitForResponseParameterName}' must be a boolean value.";
+            return false;
+        }
+
+        error = null;
+        return true;
+    }
+
+    private static bool TryParseBoolean(string? value, out bool result)
+    {
+        switch (value?.Trim().ToUpperInvariant())
+        {
+            case "TRUE":
+            case "1":
+            case "YES":
+            case "Y":
+            case "ON":
+                result = true;
+                return true;
+            case "FALSE":
+            case "0":
+            case "NO":
+            case "N":
+            case "OFF":
+                result = false;
+                return true;
+            default:
+                result = false;
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Gets the maximum time to wait for a synchronous workflow response.
+    /// </summary>
+    internal static bool TryGetWaitTimeout(HttpRequestData req, out TimeSpan timeout, out string? error)
+    {
+        string? value = req.Query[WaitTimeoutSecondsParameterName];
+        if (value is null)
+        {
+            timeout = TimeSpan.FromSeconds(DefaultWaitTimeoutSeconds);
+            error = null;
+            return true;
+        }
+
+        if (!int.TryParse(value, out int seconds) || seconds <= 0 || seconds > MaxWaitTimeoutSeconds)
+        {
+            timeout = default;
+            error = $"'{WaitTimeoutSecondsParameterName}' must be an integer between 1 and {MaxWaitTimeoutSeconds}.";
+            return false;
+        }
+
+        timeout = TimeSpan.FromSeconds(seconds);
+        error = null;
+        return true;
+    }
+
+    /// <summary>
+    /// Validates a caller-provided workflow run ID against the Durable Task instance ID contract.
+    /// </summary>
+    internal static bool TryValidateWorkflowRunId(string? runId, out string? error)
+    {
+        if (runId is null)
+        {
+            error = null;
+            return true;
+        }
+
+        if (runId.Length is < 1 or > MaxWorkflowRunIdLength ||
+            runId[0] == '@' ||
+            runId.IndexOfAny(['/', '\\', '#', '?']) >= 0 ||
+            runId.Any(char.IsControl))
+        {
+            error = $"'{WorkflowRunIdParameterName}' must be between 1 and {MaxWorkflowRunIdLength} characters, " +
+                "must not start with '@', and must not contain '/', '\\', '#', '?', or control characters.";
+            return false;
+        }
+
+        error = null;
+        return true;
     }
 
     /// <summary>
@@ -668,6 +885,36 @@ internal static class BuiltInFunctions
                 .SelectMany(v => v.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                 .Select(v => v.Split(';', 2)[0].Trim())
                 .Contains("application/json", StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Returns <see langword="false"/> only when the caller explicitly requests a text response
+    /// without also accepting JSON. Workflow endpoints otherwise default to JSON.
+    /// </summary>
+    internal static bool ShouldReturnWorkflowJson(HttpRequestData req)
+    {
+        if (!req.Headers.TryGetValues("Accept", out IEnumerable<string>? acceptValues))
+        {
+            return true;
+        }
+
+        string[] mediaTypes = acceptValues
+            .SelectMany(v => v.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .Select(v => MediaTypeWithQualityHeaderValue.TryParse(v, out MediaTypeWithQualityHeaderValue? mediaType)
+                ? mediaType
+                : null)
+            .OfType<MediaTypeWithQualityHeaderValue>()
+            .Where(v => (v.Quality ?? 1) > 0)
+            .Select(v => v.MediaType!)
+            .ToArray();
+
+        bool acceptsJson = mediaTypes.Contains("application/json", StringComparer.OrdinalIgnoreCase) ||
+            mediaTypes.Contains("application/*", StringComparer.OrdinalIgnoreCase) ||
+            mediaTypes.Contains("*/*", StringComparer.OrdinalIgnoreCase);
+        bool acceptsText = mediaTypes.Contains("text/plain", StringComparer.OrdinalIgnoreCase) ||
+            mediaTypes.Contains("text/*", StringComparer.OrdinalIgnoreCase);
+
+        return acceptsJson || !acceptsText;
     }
 
     /// <summary>
@@ -850,6 +1097,15 @@ internal static class BuiltInFunctions
         [property: JsonPropertyName("workflowStatus")] string WorkflowStatus,
         [property: JsonPropertyName("result")] JsonElement? Result,
         [property: JsonPropertyName("error"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Error = null);
+
+    /// <summary>
+    /// Represents a workflow run that continues asynchronously.
+    /// </summary>
+    /// <param name="RunId">The orchestration run ID.</param>
+    /// <param name="Message">A human-readable description of the accepted workflow run.</param>
+    private sealed record WorkflowAcceptedResponse(
+        [property: JsonPropertyName("runId")] string RunId,
+        [property: JsonPropertyName("message")] string Message);
 
     /// <summary>
     /// A service provider that combines the original service provider with an additional DurableTaskClient instance.

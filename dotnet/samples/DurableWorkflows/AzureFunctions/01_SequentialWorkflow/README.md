@@ -52,9 +52,14 @@ Invoke-RestMethod -Method Post `
 
 The response will confirm the workflow orchestration has started:
 
-```text
-Workflow orchestration started for CancelOrder. Orchestration runId: abc123def456
+```json
+{
+    "runId": "abc123def456",
+    "message": "Workflow orchestration started for CancelOrder."
+}
 ```
+
+Workflow run responses use JSON by default. Include `Accept: text/plain` to request the legacy plain-text representation instead.
 
 > **Tip:** You can provide a custom run ID by appending a `runId` query parameter:
 >
@@ -68,14 +73,13 @@ Workflow orchestration started for CancelOrder. Orchestration runId: abc123def45
 
 ### Wait for the Workflow Result
 
-By default, the HTTP endpoint returns `202 Accepted` immediately with the run ID. If you want to wait for the workflow to complete and get the result in the response, add the `x-ms-wait-for-response: true` header:
+By default, the HTTP endpoint returns `202 Accepted` immediately with the run ID. To wait for the workflow to complete, set `waitForResponse=true` in the query string. The endpoint waits for up to 10 seconds by default; set `timeoutSeconds` to use a timeout from 1 to 200 seconds. If the workflow is still running when the timeout expires, the endpoint returns the same `202 Accepted` response as the default asynchronous invocation.
 
 Bash (Linux/macOS/WSL):
 
 ```bash
-curl -X POST http://localhost:7071/api/workflows/CancelOrder/run \
+curl -X POST "http://localhost:7071/api/workflows/CancelOrder/run?waitForResponse=true&timeoutSeconds=30" \
     -H "Content-Type: text/plain" \
-    -H "x-ms-wait-for-response: true" \
     -d "12345"
 ```
 
@@ -83,27 +87,12 @@ PowerShell:
 
 ```powershell
 Invoke-RestMethod -Method Post `
-    -Uri http://localhost:7071/api/workflows/CancelOrder/run `
+    -Uri "http://localhost:7071/api/workflows/CancelOrder/run?waitForResponse=true&timeoutSeconds=30" `
     -ContentType text/plain `
-    -Headers @{ "x-ms-wait-for-response" = "true" } `
     -Body "12345"
 ```
 
-The response will contain the workflow result as plain text (200 OK):
-
-```text
-Cancellation email sent for order 12345 to jerry@example.com.
-```
-
-To get the result as JSON, also include the `Accept: application/json` header:
-
-```bash
-curl -X POST http://localhost:7071/api/workflows/CancelOrder/run \
-    -H "Content-Type: text/plain" \
-    -H "x-ms-wait-for-response: true" \
-    -H "Accept: application/json" \
-    -d "12345"
-```
+The response is JSON by default:
 
 ```json
 {
@@ -112,6 +101,21 @@ curl -X POST http://localhost:7071/api/workflows/CancelOrder/run \
     "result": "Cancellation email sent for order 12345 to jerry@example.com."
 }
 ```
+
+To get only the workflow result as plain text, include the `Accept: text/plain` header:
+
+```bash
+curl -X POST "http://localhost:7071/api/workflows/CancelOrder/run?waitForResponse=true" \
+    -H "Content-Type: text/plain" \
+    -H "Accept: text/plain" \
+    -d "12345"
+```
+
+```text
+Cancellation email sent for order 12345 to jerry@example.com.
+```
+
+The `x-ms-wait-for-response` header remains supported for backward compatibility. A wait timeout returns the same `202 Accepted` response as the default asynchronous invocation. Client request cancellation instead aborts the HTTP wait without returning a response, but the durable workflow continues; callers that need to recover should supply `runId` up front and query its status later.
 
 In the function app logs, you will see the sequential execution of each executor:
 

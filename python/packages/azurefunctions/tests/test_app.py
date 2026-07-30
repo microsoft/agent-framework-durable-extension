@@ -26,6 +26,10 @@ from agent_framework_durabletask import (
 )
 
 from agent_framework_azurefunctions import AgentFunctionApp
+from agent_framework_azurefunctions._app import (
+    _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS,
+    _MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS,
+)
 from agent_framework_azurefunctions._entities import create_agent_entity
 from agent_framework_azurefunctions._errors import IncomingRequestError
 
@@ -337,7 +341,7 @@ class TestWaitForResponseAndCorrelationId:
         assert app._should_wait_for_response(request, {WAIT_FOR_RESPONSE_FIELD: "0"}) is False
 
     def test_wait_for_response_query_parameter(self) -> None:
-        """Test that query parameter controls wait_for_response."""
+        """Test that the agent snake_case query parameter controls wait_for_response."""
         app = self._create_app()
         request = self._make_request(params={WAIT_FOR_RESPONSE_FIELD: "true"})
 
@@ -349,6 +353,77 @@ class TestWaitForResponseAndCorrelationId:
         request = self._make_request(params={WAIT_FOR_RESPONSE_FIELD: "false"})
 
         assert app._should_wait_for_response(request, {WAIT_FOR_RESPONSE_FIELD: "true"}) is False
+
+    def test_wait_for_response_query_parameter_is_surface_specific(self) -> None:
+        """Test that each surface only honors the query parameter matching its casing convention."""
+        app = self._create_app()
+        snake_case = self._make_request(params={WAIT_FOR_RESPONSE_FIELD: "true"})
+        camel_case = self._make_request(params={"waitForResponse": "true"})
+
+        # Agent endpoints default to the snake_case name.
+        assert app._should_wait_for_response(snake_case, {}, default_value=False) is True
+        assert app._should_wait_for_response(camel_case, {}, default_value=False) is False
+
+        # Workflow endpoints opt in to the camelCase name.
+        assert (
+            app._should_wait_for_response(camel_case, {}, query_parameter="waitForResponse", default_value=False)
+            is True
+        )
+        assert (
+            app._should_wait_for_response(snake_case, {}, query_parameter="waitForResponse", default_value=False)
+            is False
+        )
+
+    def test_invalid_wait_for_response_header_falls_back_to_query(self) -> None:
+        """Test that an invalid header does not suppress a valid query option."""
+        app = self._create_app()
+        request = self._make_request(
+            headers={WAIT_FOR_RESPONSE_HEADER: "invalid"},
+            params={WAIT_FOR_RESPONSE_FIELD: "true"},
+        )
+
+        assert app._should_wait_for_response(request, {}) is True
+
+    def test_wait_for_response_uses_configured_default(self) -> None:
+        """Test that callers can select the fallback behavior."""
+        app = self._create_app()
+        request = self._make_request()
+
+        assert app._should_wait_for_response(request, {}, default_value=False) is False
+        assert app._should_wait_for_response(request, {WAIT_FOR_RESPONSE_FIELD: "invalid"}) is True
+        assert (
+            app._should_wait_for_response(
+                request,
+                {WAIT_FOR_RESPONSE_FIELD: "invalid"},
+                default_value=False,
+            )
+            is False
+        )
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (None, _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS),
+            ("1", 1),
+            ("30", 30),
+            (str(_MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS), _MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS),
+        ],
+    )
+    def test_workflow_wait_timeout_seconds(self, value: str | None, expected: int) -> None:
+        """Test workflow wait timeout parsing."""
+        app = self._create_app()
+        request = self._make_request(params={"timeoutSeconds": value} if value is not None else None)
+
+        assert app._get_workflow_wait_timeout_seconds(request) == expected
+
+    @pytest.mark.parametrize("value", ["0", "-1", str(_MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS + 1), "invalid"])
+    def test_workflow_wait_timeout_seconds_rejects_invalid_values(self, value: str) -> None:
+        """Test workflow wait timeout validation."""
+        app = self._create_app()
+        request = self._make_request(params={"timeoutSeconds": value})
+
+        with pytest.raises(ValueError, match=rf"between 1 and {_MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS}"):
+            app._get_workflow_wait_timeout_seconds(request)
 
 
 class TestAgentEntityOperations:
@@ -939,6 +1014,318 @@ class TestHttpRunRoute:
         assert response.headers.get(SESSION_ID_HEADER) is not None
         assert response.get_body().decode("utf-8") == "Message is required"
         client.signal_entity.assert_not_called()
+
+
+class TestWorkflowRunRoute:
+    """Tests for the workflow HTTP run route behavior."""
+
+    @staticmethod
+    def _get_run_handler(workflow_name: str) -> Callable[[func.HttpRequest, Any], Awaitable[func.HttpResponse]]:
+        captured_handlers: dict[str | None, Callable[..., Awaitable[func.HttpResponse]]] = {}
+
+        def capture_decorator(*args: Any, **kwargs: Any) -> Callable[[FuncT], FuncT]:
+            def decorator(func: FuncT) -> FuncT:
+                return func
+
+            return decorator
+
+        def capture_route(*args: Any, **kwargs: Any) -> Callable[[FuncT], FuncT]:
+            def decorator(func: FuncT) -> FuncT:
+                captured_handlers[kwargs.get("route")] = func
+                return func
+
+            return decorator
+
+        workflow = Mock()
+        workflow.name = workflow_name
+        app = AgentFunctionApp(enable_health_check=False)
+
+        with (
+            patch.object(AgentFunctionApp, "function_name", new=capture_decorator),
+            patch.object(AgentFunctionApp, "route", new=capture_route),
+            patch.object(AgentFunctionApp, "durable_client_input", new=capture_decorator),
+        ):
+            app._register_workflow_routes(workflow)
+
+        return captured_handlers[f"workflow/{workflow_name}/run"]
+
+    async def test_wait_for_response_query_waits_with_timeout(self) -> None:
+        """Test synchronous workflow invocation through query options."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.headers = {}
+        request.params = {"waitForResponse": "true", "timeoutSeconds": "30", "runId": "custom-run"}
+        request.get_json.return_value = {"message": "hello"}
+
+        client = AsyncMock()
+        client.start_new.return_value = "custom-run"
+        client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
+            "completed", status_code=200
+        )
+        client.get_status.return_value = Mock(
+            instance_id="custom-run",
+            runtime_status=df.OrchestrationRuntimeStatus.Completed,
+            output="completed",
+        )
+
+        response = await handler(request, client)
+
+        assert response.status_code == 200
+        assert json.loads(response.get_body()) == {
+            "instanceId": "custom-run",
+            "runtimeStatus": "Completed",
+            "output": "completed",
+        }
+        client.wait_for_completion_or_create_check_status_response.assert_awaited_once_with(
+            request,
+            "custom-run",
+            timeout_in_milliseconds=30_000,
+            retry_interval_in_milliseconds=1000,
+        )
+        client.start_new.assert_awaited_once_with(
+            "dafx-test_workflow",
+            instance_id="custom-run",
+            client_input={"message": "hello"},
+        )
+
+    async def test_wait_for_response_header_waits_with_default_timeout(self) -> None:
+        """Test that the legacy wait header remains supported."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.headers = {WAIT_FOR_RESPONSE_HEADER: "true"}
+        request.params = {}
+        request.get_json.return_value = {"message": "hello"}
+
+        client = AsyncMock()
+        client.start_new.return_value = "instance-1"
+        client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
+            "completed", status_code=200
+        )
+        client.get_status.return_value = Mock(
+            instance_id="instance-1",
+            runtime_status=df.OrchestrationRuntimeStatus.Completed,
+            output="completed",
+        )
+
+        response = await handler(request, client)
+
+        assert response.status_code == 200
+        assert json.loads(response.get_body()) == {
+            "instanceId": "instance-1",
+            "runtimeStatus": "Completed",
+            "output": "completed",
+        }
+        client.wait_for_completion_or_create_check_status_response.assert_awaited_once_with(
+            request,
+            "instance-1",
+            timeout_in_milliseconds=_DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS * 1000,
+            retry_interval_in_milliseconds=1000,
+        )
+
+    async def test_default_returns_async_workflow_handle(self) -> None:
+        """Test that asynchronous workflow invocation remains the default."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.url = "http://localhost:7071/api/workflow/test_workflow/run"
+        request.headers = {}
+        request.params = {}
+        request.get_json.return_value = {"message": "hello"}
+
+        client = AsyncMock()
+        client.start_new.return_value = "instance-1"
+
+        response = await handler(request, client)
+
+        assert response.status_code == 202
+        assert json.loads(response.get_body())["instanceId"] == "instance-1"
+        client.wait_for_completion_or_create_check_status_response.assert_not_awaited()
+
+    async def test_wait_timeout_returns_same_async_workflow_handle(self) -> None:
+        """Test that a wait timeout preserves the default asynchronous response contract."""
+        handler = self._get_run_handler("test_workflow")
+        async_request = Mock()
+        async_request.url = "http://localhost:7071/api/workflow/test_workflow/run"
+        async_request.headers = {}
+        async_request.params = {}
+        async_request.get_json.return_value = {"message": "hello"}
+        async_client = AsyncMock()
+        async_client.start_new.return_value = "instance-1"
+
+        timeout_request = Mock()
+        timeout_request.url = async_request.url
+        timeout_request.headers = {}
+        timeout_request.params = {"waitForResponse": "true"}
+        timeout_request.get_json.return_value = {"message": "hello"}
+        timeout_client = AsyncMock()
+        timeout_client.start_new.return_value = "instance-1"
+        timeout_client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
+            json.dumps({"id": "instance-1", "statusQueryGetUri": "https://durable-webhook.example/status"}),
+            status_code=202,
+            mimetype=MIMETYPE_APPLICATION_JSON,
+        )
+
+        async_response = await handler(async_request, async_client)
+        timeout_response = await handler(timeout_request, timeout_client)
+
+        assert timeout_response.status_code == async_response.status_code
+        assert timeout_response.mimetype == async_response.mimetype
+        assert timeout_response.headers == async_response.headers
+        assert timeout_response.get_body() == async_response.get_body()
+
+    async def test_wait_failure_returns_domain_result(self) -> None:
+        """Test that workflow failure is returned as a successful HTTP domain result."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.url = "http://localhost:7071/api/workflow/test_workflow/run"
+        request.headers = {}
+        request.params = {"waitForResponse": "true"}
+        request.get_json.return_value = {"message": "hello"}
+        client = AsyncMock()
+        client.start_new.return_value = "instance-1"
+        client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
+            json.dumps({"runtimeStatus": "Failed", "output": "Something went wrong"}),
+            status_code=500,
+            mimetype=MIMETYPE_APPLICATION_JSON,
+        )
+        client.get_status.return_value = Mock(
+            instance_id="instance-1",
+            runtime_status=df.OrchestrationRuntimeStatus.Failed,
+            output="Something went wrong",
+        )
+
+        response = await handler(request, client)
+
+        assert response.status_code == 200
+        assert response.mimetype == MIMETYPE_APPLICATION_JSON
+        assert json.loads(response.get_body()) == {
+            "instanceId": "instance-1",
+            "runtimeStatus": "Failed",
+            "output": None,
+            "error": "Something went wrong",
+        }
+
+    async def test_wait_completion_decodes_typed_output(self) -> None:
+        """Test that synchronous completion uses the shared workflow output decoder."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.headers = {}
+        request.params = {"waitForResponse": "true"}
+        request.get_json.return_value = {"message": "hello"}
+        encoded_output = {"__pickled__": "checkpoint-data"}
+        client = AsyncMock()
+        client.start_new.return_value = "instance-1"
+        client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
+            json.dumps(encoded_output), status_code=200
+        )
+        client.get_status.return_value = Mock(
+            instance_id="instance-1",
+            runtime_status=df.OrchestrationRuntimeStatus.Completed,
+            output=encoded_output,
+        )
+
+        with patch(
+            "agent_framework_azurefunctions._app.deserialize_workflow_output",
+            return_value={"approved": True},
+        ) as deserialize:
+            response = await handler(request, client)
+
+        deserialize.assert_called_once_with(encoded_output)
+        assert json.loads(response.get_body())["output"] == {"approved": True}
+
+    async def test_wait_terminated_returns_unexpected_status_error(self) -> None:
+        """Test that an unexpected terminal status matches the .NET endpoint semantics."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.headers = {}
+        request.params = {"waitForResponse": "true"}
+        request.get_json.return_value = {"message": "hello"}
+        client = AsyncMock()
+        client.start_new.return_value = "instance-1"
+        client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
+            json.dumps({"runtimeStatus": "Terminated"}),
+            status_code=200,
+            mimetype=MIMETYPE_APPLICATION_JSON,
+        )
+        client.get_status.return_value = Mock(
+            instance_id="instance-1",
+            runtime_status=df.OrchestrationRuntimeStatus.Terminated,
+            output=None,
+        )
+
+        response = await handler(request, client)
+
+        assert response.status_code == 500
+        assert "unexpected status 'Terminated'" in response.get_body().decode("utf-8")
+
+    async def test_invalid_wait_timeout_does_not_start_workflow(self) -> None:
+        """Test invalid synchronous timeout rejection before scheduling."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.headers = {}
+        request.params = {"waitForResponse": "true", "timeoutSeconds": "0"}
+        client = AsyncMock()
+
+        response = await handler(request, client)
+
+        assert response.status_code == 400
+        client.start_new.assert_not_awaited()
+
+    async def test_invalid_wait_for_response_does_not_start_workflow(self) -> None:
+        """Test invalid synchronous wait rejection before scheduling."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.headers = {}
+        request.params = {"waitForResponse": "invalid"}
+        client = AsyncMock()
+
+        response = await handler(request, client)
+
+        assert response.status_code == 400
+        assert "waitForResponse" in response.get_body().decode("utf-8")
+        client.start_new.assert_not_awaited()
+
+    async def test_wait_header_takes_precedence_over_invalid_query(self) -> None:
+        """Test that the legacy wait header retains precedence over the query parameter."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.headers = {WAIT_FOR_RESPONSE_HEADER: "false"}
+        request.params = {"waitForResponse": "invalid"}
+        request.url = "http://localhost:7071/api/workflow/test_workflow/run"
+        request.get_json.return_value = {"message": "hello"}
+        client = AsyncMock()
+        client.start_new.return_value = "instance-1"
+
+        response = await handler(request, client)
+
+        assert response.status_code == 202
+        client.wait_for_completion_or_create_check_status_response.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "run_id",
+        [
+            "",
+            "@workflow",
+            "workflow/123",
+            "workflow\\123",
+            "workflow#123",
+            "workflow?123",
+            "workflow\n123",
+            "x" * 101,
+        ],
+    )
+    async def test_invalid_run_id_does_not_start_workflow(self, run_id: str) -> None:
+        """Test that invalid custom run IDs are rejected before scheduling."""
+        handler = self._get_run_handler("test_workflow")
+        request = Mock()
+        request.headers = {}
+        request.params = {"runId": run_id}
+        client = AsyncMock()
+
+        response = await handler(request, client)
+
+        assert response.status_code == 400
+        assert "runId" in response.get_body().decode("utf-8")
+        client.start_new.assert_not_awaited()
 
 
 class TestMCPToolEndpoint:

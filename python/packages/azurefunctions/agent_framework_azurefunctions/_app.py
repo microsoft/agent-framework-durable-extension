@@ -12,11 +12,12 @@ import asyncio
 import json
 import logging
 import re
+import unicodedata
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -61,10 +62,31 @@ from ._orchestration import AgentOrchestrationContextType, AgentTask, AzureFunct
 from ._routes import build_workflow_respond_url, build_workflow_status_url, split_request_url
 from ._workflow import run_workflow_orchestrator
 
+_DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS = 10
+_MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS = 200
+
+# The workflow endpoints use camelCase names throughout their query string, request body, and
+# response body. The agent endpoints use snake_case throughout, so they reuse the shared
+# ``SESSION_ID_FIELD`` / ``WAIT_FOR_RESPONSE_FIELD`` constants instead of the names below.
+_RUN_ID_QUERY_PARAMETER = "runId"
+_MAX_WORKFLOW_RUN_ID_LENGTH = 100
+_WORKFLOW_WAIT_FOR_RESPONSE_QUERY_PARAMETER = "waitForResponse"
+_WORKFLOW_WAIT_TIMEOUT_SECONDS_QUERY_PARAMETER = "timeoutSeconds"
+
 logger = logging.getLogger("agent_framework.azurefunctions")
 
 EntityHandler = Callable[[df.DurableEntityContext], None]
 HandlerT = TypeVar("HandlerT", bound=Callable[..., Any])
+
+
+class _WorkflowCompletionClient(Protocol):
+    async def wait_for_completion_or_create_check_status_response(
+        self,
+        request: func.HttpRequest,
+        instance_id: str,
+        timeout_in_milliseconds: int = 10_000,
+        retry_interval_in_milliseconds: int = 1_000,
+    ) -> func.HttpResponse: ...
 
 
 def _json_default(obj: Any) -> Any:
@@ -491,6 +513,19 @@ class AgentFunctionApp(DFAppBase):
         ) -> func.HttpResponse:
             """HTTP endpoint to start the workflow."""
             try:
+                wait_for_response = self._get_workflow_wait_for_response(req)
+                wait_timeout_seconds = _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS
+                if wait_for_response:
+                    wait_timeout_seconds = self._get_workflow_wait_timeout_seconds(req)
+            except ValueError as exc:
+                return self._build_error_response(str(exc), status_code=400)
+
+            try:
+                requested_instance_id = self._validate_workflow_run_id((req.params or {}).get(_RUN_ID_QUERY_PARAMETER))
+            except ValueError as exc:
+                return self._build_error_response(str(exc), status_code=400)
+
+            try:
                 client_input: Any = req.get_json()
             except ValueError:
                 # The orchestrator accepts plain strings as well as JSON objects, so fall
@@ -507,23 +542,28 @@ class AgentFunctionApp(DFAppBase):
             client_input = strip_subworkflow_markers(client_input)
             client_input = strip_pickle_markers(client_input)
 
-            instance_id = await client.start_new(orchestrator_name, client_input=client_input)
-
-            base_url, route_prefix = split_request_url(req.url)
-            status_url = build_workflow_status_url(base_url, workflow_name, instance_id, prefix=route_prefix)
-
-            return func.HttpResponse(
-                json.dumps({
-                    "instanceId": instance_id,
-                    "statusQueryGetUri": status_url,
-                    "respondUri": build_workflow_respond_url(
-                        base_url, workflow_name, instance_id, "{requestId}", prefix=route_prefix
-                    ),
-                    "message": "Workflow started",
-                }),
-                status_code=202,
-                mimetype="application/json",
+            instance_id = await client.start_new(
+                orchestrator_name,
+                instance_id=requested_instance_id,
+                client_input=client_input,
             )
+
+            if wait_for_response:
+                timeout_in_milliseconds = wait_timeout_seconds * 1000
+                # The SDK leaves the request parameter untyped, so use the local protocol
+                # to give pyright a complete signature for this runtime method.
+                completion_client = cast(_WorkflowCompletionClient, client)
+                completion_response = await completion_client.wait_for_completion_or_create_check_status_response(
+                    req,
+                    instance_id,
+                    timeout_in_milliseconds=timeout_in_milliseconds,
+                    retry_interval_in_milliseconds=1000,
+                )
+                if completion_response.status_code != 202:
+                    status = await client.get_status(instance_id)
+                    return self._build_workflow_terminal_response(status, instance_id)
+
+            return self._build_workflow_accepted_response(req, workflow_name, instance_id)
 
         @self.function_name(f"{orchestrator_name}-status")
         @self.route(route=f"workflow/{workflow_name}/status/{{instanceId}}", methods=["GET"])
@@ -1455,6 +1495,60 @@ class AgentFunctionApp(DFAppBase):
             correlation_id=correlation_id,
         )
 
+    @staticmethod
+    def _build_workflow_accepted_response(
+        req: func.HttpRequest, workflow_name: str, instance_id: str
+    ) -> func.HttpResponse:
+        """Build the response returned when a workflow continues asynchronously."""
+        base_url, route_prefix = split_request_url(req.url)
+        return func.HttpResponse(
+            json.dumps({
+                "instanceId": instance_id,
+                "statusQueryGetUri": build_workflow_status_url(
+                    base_url, workflow_name, instance_id, prefix=route_prefix
+                ),
+                "respondUri": build_workflow_respond_url(
+                    base_url, workflow_name, instance_id, "{requestId}", prefix=route_prefix
+                ),
+                "message": "Workflow started",
+            }),
+            status_code=202,
+            mimetype=MIMETYPE_APPLICATION_JSON,
+        )
+
+    def _build_workflow_terminal_response(self, status: Any, instance_id: str) -> func.HttpResponse:
+        """Build a compact response for a completed or failed workflow."""
+        if status is None or status.runtime_status is None:
+            return self._build_error_response(
+                f"Workflow orchestration '{instance_id}' returned no status.",
+                status_code=500,
+            )
+
+        runtime_status = status.runtime_status
+        if runtime_status not in {
+            df.OrchestrationRuntimeStatus.Completed,
+            df.OrchestrationRuntimeStatus.Failed,
+        }:
+            return self._build_error_response(
+                f"Workflow orchestration '{instance_id}' ended with unexpected status '{runtime_status.name}'.",
+                status_code=500,
+            )
+
+        decoded_output = deserialize_workflow_output(status.output) if status.output is not None else None
+        response: dict[str, Any] = {
+            "instanceId": status.instance_id or instance_id,
+            "runtimeStatus": runtime_status.name,
+            "output": decoded_output if runtime_status == df.OrchestrationRuntimeStatus.Completed else None,
+        }
+        if runtime_status == df.OrchestrationRuntimeStatus.Failed:
+            response["error"] = decoded_output
+
+        return func.HttpResponse(
+            json.dumps(response, default=_json_default),
+            status_code=200,
+            mimetype=MIMETYPE_APPLICATION_JSON,
+        )
+
     def _create_http_response(
         self,
         payload: dict[str, Any] | str,
@@ -1621,31 +1715,110 @@ class AgentFunctionApp(DFAppBase):
 
         return {}, message
 
-    def _should_wait_for_response(self, req: func.HttpRequest, req_body: dict[str, Any]) -> bool:
-        """Determine whether the caller requested to wait for the response."""
+    def _should_wait_for_response(
+        self,
+        req: func.HttpRequest,
+        req_body: dict[str, Any],
+        *,
+        query_parameter: str = WAIT_FOR_RESPONSE_FIELD,
+        default_value: bool = True,
+    ) -> bool:
+        """Determine whether the caller requested to wait for the response.
+
+        The ``x-ms-wait-for-response`` header takes precedence, followed by ``query_parameter``
+        (``wait_for_response`` for the snake_case agent endpoints, ``waitForResponse`` for the
+        camelCase workflow endpoints), and finally the ``wait_for_response`` request body field.
+        Values that cannot be parsed as a boolean are ignored so that the next source is consulted.
+        """
         headers: dict[str, str] = self._extract_normalized_headers(req)
         header_value: str | None = headers.get(WAIT_FOR_RESPONSE_HEADER)
 
-        if header_value is not None:
-            return self._coerce_to_bool(header_value)
+        parsed_header = self._try_coerce_to_bool(header_value)
+        if parsed_header is not None:
+            return parsed_header
 
         params = req.params or {}
-        if WAIT_FOR_RESPONSE_FIELD in params:
-            return self._coerce_to_bool(params.get(WAIT_FOR_RESPONSE_FIELD))
+        parsed_query = self._try_coerce_to_bool(params.get(query_parameter))
+        if parsed_query is not None:
+            return parsed_query
 
-        if WAIT_FOR_RESPONSE_FIELD in req_body:
-            return self._coerce_to_bool(req_body.get(WAIT_FOR_RESPONSE_FIELD))
+        parsed_body = self._try_coerce_to_bool(req_body.get(WAIT_FOR_RESPONSE_FIELD))
+        if parsed_body is not None:
+            return parsed_body
+        return default_value
 
-        return True
+    @staticmethod
+    def _get_workflow_wait_timeout_seconds(req: func.HttpRequest) -> int:
+        """Get the positive workflow wait timeout from the query string."""
+        value = (req.params or {}).get(_WORKFLOW_WAIT_TIMEOUT_SECONDS_QUERY_PARAMETER)
+        if value is None:
+            return _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS
 
-    def _coerce_to_bool(self, value: Any) -> bool:
-        """Convert various representations into a boolean flag."""
+        error_message = (
+            f"'{_WORKFLOW_WAIT_TIMEOUT_SECONDS_QUERY_PARAMETER}' must be an integer between "
+            f"1 and {_MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS}."
+        )
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(error_message) from exc
+
+        if seconds <= 0 or seconds > _MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS:
+            raise ValueError(error_message)
+
+        return seconds
+
+    def _get_workflow_wait_for_response(self, req: func.HttpRequest) -> bool:
+        """Get the workflow wait preference while rejecting an invalid query value."""
+        headers = self._extract_normalized_headers(req)
+        parsed_header = self._try_coerce_to_bool(headers.get(WAIT_FOR_RESPONSE_HEADER))
+        if parsed_header is not None:
+            return parsed_header
+
+        query_value = (req.params or {}).get(_WORKFLOW_WAIT_FOR_RESPONSE_QUERY_PARAMETER)
+        if query_value is None:
+            return False
+
+        parsed_query = self._try_coerce_to_bool(query_value)
+        if parsed_query is None:
+            raise ValueError(f"'{_WORKFLOW_WAIT_FOR_RESPONSE_QUERY_PARAMETER}' must be a boolean value.")
+
+        return parsed_query
+
+    @staticmethod
+    def _validate_workflow_run_id(run_id: str | None) -> str | None:
+        """Validate a custom workflow run ID against the Durable Task instance ID contract."""
+        if run_id is None:
+            return None
+
+        if (
+            not 1 <= len(run_id) <= _MAX_WORKFLOW_RUN_ID_LENGTH
+            or run_id.startswith("@")
+            or any(character in run_id for character in "/\\#?")
+            or any(unicodedata.category(character) == "Cc" for character in run_id)
+        ):
+            raise ValueError(
+                f"'{_RUN_ID_QUERY_PARAMETER}' must be between 1 and {_MAX_WORKFLOW_RUN_ID_LENGTH} characters, "
+                "must not start with '@', and must not contain '/', '\\', '#', '?', or control characters."
+            )
+
+        return run_id
+
+    @staticmethod
+    def _try_coerce_to_bool(value: Any) -> bool | None:
+        """Convert recognized boolean representations, or return None."""
         if isinstance(value, bool):
             return value
-        if value is None:
-            return False
         if isinstance(value, (int, float)):
             return bool(value)
         if isinstance(value, str):
-            return value.strip().lower() in {"true", "1", "yes", "y", "on"}
-        return False
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "y", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "n", "off"}:
+                return False
+        return None
+
+    def _coerce_to_bool(self, value: Any) -> bool:
+        """Convert various representations into a boolean flag."""
+        return bool(self._try_coerce_to_bool(value))
