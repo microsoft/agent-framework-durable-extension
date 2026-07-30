@@ -20,8 +20,7 @@ from durabletask.task import (
 )
 
 from .._executors import OrchestrationAgentExecutor
-from .._models import AgentSessionId, DurableAgentSession
-from .._shim import DurableAIAgent
+from .._shim import build_agent_task
 from .context import WorkflowOrchestrationContext
 
 logger = logging.getLogger(__name__)
@@ -64,10 +63,13 @@ class DurableTaskWorkflowContext:
         orchestration_instance_id: str,
         context_messages: list[dict[str, Any]] | None = None,
     ) -> Any:
-        session_id = AgentSessionId(name=executor_id, key=orchestration_instance_id)
-        session = DurableAgentSession(durable_session_id=session_id)
-        agent = DurableAIAgent(self._executor, executor_id)
-        return agent.run(message, session=session, context_messages=context_messages)
+        return build_agent_task(
+            self._executor,
+            executor_id,
+            message,
+            orchestration_instance_id,
+            context_messages,
+        )
 
     def prepare_activity_task(self, activity_name: str, input_json: str) -> Any:
         return cast(Any, self._context.call_activity(activity_name, input=input_json))

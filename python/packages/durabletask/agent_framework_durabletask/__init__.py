@@ -54,7 +54,7 @@ from ._history_provider import DurableHistoryBinding, DurableHistoryProvider
 from ._models import AgentSessionId, DurableAgentSession, RunRequest
 from ._orchestration_context import DurableAIAgentOrchestrationContext
 from ._response_utils import ensure_response_format, load_agent_response
-from ._shim import DurableAIAgent
+from ._shim import DurableAIAgent, build_agent_task
 from ._worker import DurableAIAgentWorker
 from ._workflows.activity import execute_workflow_activity
 from ._workflows.client import DurableWorkflowClient
@@ -169,6 +169,7 @@ __all__ = [
     "WorkflowOrchestrationContext",
     "WorkflowRegistrationPlan",
     "__version__",
+    "build_agent_task",
     "collect_hosted_workflows",
     "deserialize_workflow_output",
     "ensure_response_format",

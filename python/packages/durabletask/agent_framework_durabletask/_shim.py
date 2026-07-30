@@ -16,11 +16,41 @@ from agent_framework import AgentSession, ServiceSessionId, SupportsAgentRun, no
 from agent_framework._types import AgentRunInputs
 
 from ._executors import DurableAgentExecutor
-from ._models import DurableAgentSession
+from ._models import AgentSessionId, DurableAgentSession
 
 # TypeVar for the task type returned by executors
 # Covariant because TaskT only appears in return positions (output)
 TaskT = TypeVar("TaskT", covariant=True)
+
+
+def build_agent_task(
+    executor: DurableAgentExecutor[Any],
+    executor_id: str,
+    message: str,
+    orchestration_instance_id: str,
+    context_messages: list[dict[str, Any]] | None = None,
+) -> Any:
+    """Create the yieldable task that runs a workflow's agent node.
+
+    Shared by every host adapter: the only host-specific part of dispatching an agent is
+    which :class:`DurableAgentExecutor` drives it, so the surrounding session/agent wiring
+    lives here rather than being repeated per host.
+
+    Args:
+        executor: The host's executor, which knows how to reach the agent entity.
+        executor_id: The workflow-scoped agent identity to dispatch to.
+        message: The text message for this turn.
+        orchestration_instance_id: Used as the entity session key, keeping conversation
+            state isolated per workflow run.
+        context_messages: Optional upstream conversation delivered as prior context.
+
+    Returns:
+        A yieldable task whose result is an ``AgentResponse``.
+    """
+    session_id = AgentSessionId(name=executor_id, key=orchestration_instance_id)
+    session = DurableAgentSession(durable_session_id=session_id)
+    agent = DurableAIAgent(executor, executor_id)
+    return agent.run(message, session=session, context_messages=context_messages)
 
 
 class DurableAgentProvider(ABC, Generic[TaskT]):
