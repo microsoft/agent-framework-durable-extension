@@ -2,6 +2,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.AI;
 
 namespace Microsoft.Agents.AI.DurableTask.State;
@@ -23,6 +24,23 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 [JsonDerivedType(typeof(DurableAgentStateUnknownContent), "unknown")]
 internal abstract class DurableAgentStateContent
 {
+    /// <summary>
+    /// Type info for <see cref="object"/>, which dispatches on the runtime type of the value being
+    /// serialized.
+    /// </summary>
+    /// <remarks>
+    /// Serializing through <see cref="object"/> rather than the runtime type directly preserves the
+    /// <c>$type</c> discriminator for polymorphic types such as <see cref="AIContent"/>, which keeps the
+    /// persisted JSON self describing. This also matches how chat clients serialize loosely typed tool
+    /// values, so a value read back from durable state produces the same payload as the value that was
+    /// never persisted.
+    /// </remarks>
+    private static readonly JsonTypeInfo s_objectTypeInfo =
+        AIJsonUtilities.DefaultOptions.GetTypeInfo(typeof(object));
+
+    private static readonly JsonElement s_nullElement =
+        JsonSerializer.SerializeToElement(value: null, jsonTypeInfo: s_objectTypeInfo);
+
     /// <summary>
     /// Gets any additional data found during deserialization that does not map to known properties.
     /// </summary>
@@ -55,6 +73,30 @@ internal abstract class DurableAgentStateContent
             UriContent uriContent => DurableAgentStateUriContent.FromUriContent(uriContent),
             UsageContent usageContent => DurableAgentStateUsageContent.FromUsageContent(usageContent),
             _ => DurableAgentStateUnknownContent.FromUnknownContent(content)
+        };
+    }
+
+    /// <summary>
+    /// Encodes a loosely typed value as a <see cref="JsonElement"/> so that it can be persisted.
+    /// </summary>
+    /// <param name="value">
+    /// The value to encode. Values that are already a <see cref="JsonElement"/> are returned unchanged.
+    /// </param>
+    /// <returns>The encoded value.</returns>
+    /// <remarks>
+    /// <see cref="DurableAgentStateJsonContext"/> is source generated and has no reflection fallback, so
+    /// <see cref="object"/> typed members must be reduced to JSON before the state is written. Otherwise
+    /// serialization throws for any runtime type the context was not generated for, which fails the entity
+    /// operation after the model call has already happened.
+    /// See https://github.com/microsoft/agent-framework-durable-extension/issues/33.
+    /// </remarks>
+    protected static JsonElement ToJsonElement(object? value)
+    {
+        return value switch
+        {
+            null => s_nullElement,
+            JsonElement element => element,
+            _ => JsonSerializer.SerializeToElement(value: value, jsonTypeInfo: s_objectTypeInfo)
         };
     }
 }

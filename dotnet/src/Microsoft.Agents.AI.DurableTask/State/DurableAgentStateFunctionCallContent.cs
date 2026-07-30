@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 using System.Collections.Immutable;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
 
@@ -12,12 +13,19 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 internal sealed class DurableAgentStateFunctionCallContent : DurableAgentStateContent
 {
     /// <summary>
-    /// The function call arguments.
+    /// The function call arguments, each encoded as JSON.
     /// </summary>
+    /// <remarks>
+    /// Arguments produced by a chat client from a model response are already <see cref="JsonElement"/>
+    /// values, but callers can supply <see cref="FunctionCallContent"/> containing arbitrary objects (for
+    /// example when replaying history or resuming an approval). Those are encoded here using
+    /// <see cref="AIJsonUtilities.DefaultOptions"/> so that persisting the state cannot fail on a type the
+    /// state serializer has no metadata for.
+    /// </remarks>
     /// TODO: Consider ensuring that empty dictionaries are omitted from serialization.
     [JsonPropertyName("arguments")]
-    public required IReadOnlyDictionary<string, object?> Arguments { get; init; } =
-        ImmutableDictionary<string, object?>.Empty;
+    public required IReadOnlyDictionary<string, JsonElement> Arguments { get; init; } =
+        ImmutableDictionary<string, JsonElement>.Empty;
 
     /// <summary>
     /// Gets the function call identifier.
@@ -44,9 +52,18 @@ internal sealed class DurableAgentStateFunctionCallContent : DurableAgentStateCo
     /// </returns>
     public static DurableAgentStateFunctionCallContent FromFunctionCallContent(FunctionCallContent content)
     {
+        Dictionary<string, JsonElement> arguments = [];
+        if (content.Arguments is not null)
+        {
+            foreach (KeyValuePair<string, object?> argument in content.Arguments)
+            {
+                arguments[argument.Key] = ToJsonElement(argument.Value);
+            }
+        }
+
         return new DurableAgentStateFunctionCallContent()
         {
-            Arguments = content.Arguments?.ToDictionary() ?? [],
+            Arguments = arguments,
             CallId = content.CallId,
             Name = content.Name
         };
@@ -55,9 +72,12 @@ internal sealed class DurableAgentStateFunctionCallContent : DurableAgentStateCo
     /// <inheritdoc/>
     public override AIContent ToAIContent()
     {
-        return new FunctionCallContent(
-            this.CallId,
-            this.Name,
-            new Dictionary<string, object?>(this.Arguments));
+        Dictionary<string, object?> arguments = new(this.Arguments.Count);
+        foreach (KeyValuePair<string, JsonElement> argument in this.Arguments)
+        {
+            arguments[argument.Key] = argument.Value;
+        }
+
+        return new FunctionCallContent(this.CallId, this.Name, arguments);
     }
 }

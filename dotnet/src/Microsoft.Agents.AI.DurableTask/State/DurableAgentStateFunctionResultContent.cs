@@ -1,5 +1,6 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
 
@@ -21,11 +22,18 @@ internal sealed class DurableAgentStateFunctionResultContent : DurableAgentState
     public required string CallId { get; init; }
 
     /// <summary>
-    /// Gets the function result.
+    /// Gets the function result, encoded as JSON. Absent when the tool returned nothing.
     /// </summary>
+    /// <remarks>
+    /// Tools created via <c>AIFunctionFactory</c> already marshal their return values into a
+    /// <see cref="JsonElement"/>. Custom <see cref="AIFunction"/> implementations may return arbitrary
+    /// objects, and MCP tools return <see cref="AIContent"/> or a collection of it. All of these are
+    /// encoded here using <see cref="AIJsonUtilities.DefaultOptions"/> so that every result shape is
+    /// persisted under this single property.
+    /// </remarks>
     [JsonPropertyName("result")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public object? Result { get; init; }
+    public JsonElement? Result { get; init; }
 
     /// <summary>
     /// Creates a <see cref="DurableAgentStateFunctionResultContent"/> from a <see cref="FunctionResultContent"/>.
@@ -37,13 +45,18 @@ internal sealed class DurableAgentStateFunctionResultContent : DurableAgentState
         return new DurableAgentStateFunctionResultContent()
         {
             CallId = content.CallId,
-            Result = content.Result
+
+            // A null result is left absent rather than encoded as a JSON null so that it round trips
+            // back to a null FunctionResultContent.Result.
+            Result = content.Result is null ? null : ToJsonElement(content.Result)
         };
     }
 
     /// <inheritdoc/>
     public override AIContent ToAIContent()
     {
+        // Boxing a JsonElement? yields either a boxed JsonElement or null, matching the shape chat
+        // clients expect from a tool whose result was marshalled into JSON.
         return new FunctionResultContent(this.CallId, this.Result);
     }
 }
