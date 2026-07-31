@@ -12,19 +12,19 @@ the model, bounding context growth.
 This is the Azure Functions counterpart to the standalone ``13_conversation_compaction`` sample.
 
 Note on service-managed conversations: compaction applies to history the *client* owns. When a
-chat client keeps the conversation on the service (for example Foundry threads, or the Responses
-API with ``store=True``), the service owns the model's context and the durable entity keeps the
-full transcript purely as a record. This sample therefore uses ``store=False`` so history is
-client-side and compaction has something to compact.
+chat client keeps the conversation on the service (Foundry and the Responses API both do so by
+default), the service owns the model's context and the durable entity keeps the full transcript
+purely as a record. This sample therefore sets ``store=False`` so history is client-side and
+compaction has something to compact.
 
-Prerequisites: set `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_MODEL`, and sign in
+Prerequisites: set `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL`, and sign in
 with Azure CLI before starting the Functions host."""
 
 import os
 from typing import Any
 
 from agent_framework import Agent, CompactionProvider, InMemoryHistoryProvider, SlidingWindowStrategy
-from agent_framework.openai import OpenAIChatClient
+from agent_framework.foundry import FoundryChatClient
 from agent_framework_azurefunctions import AgentFunctionApp
 from azure.identity.aio import AzureCliCredential
 from dotenv import load_dotenv
@@ -50,9 +50,9 @@ def _create_agent() -> Any:
     )
 
     return Agent(
-        client=OpenAIChatClient(
-            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-            model=os.environ["AZURE_OPENAI_MODEL"],
+        client=FoundryChatClient(
+            project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
+            model=os.environ["FOUNDRY_MODEL"],
             credential=AzureCliCredential(),
         ),
         name="Historian",

@@ -38,16 +38,16 @@ which is lossy and therefore off by default.
 ### Client-side vs service-managed history
 
 Compaction only applies to history the **client** owns. When a chat client keeps the conversation on
-the service (Foundry threads, or the Responses API with `store=True`), the service owns the model's
+the service (Foundry and the Responses API both do so by default), the service owns the model's
 context, the durable entity keeps the transcript purely as a record, and the durable history provider
 stays out of the way. This sample sets `store=False` so history is client-side and compaction has
 something to compact.
 
 ## Prerequisites
 
-Follow the common setup steps in `../README.md` to install tooling, configure Azure OpenAI
+Follow the common setup steps in `../README.md` to install tooling, configure Foundry
 credentials, and install the Python dependencies for this sample. This sample uses
-`AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_MODEL`.
+`FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`.
 
 ## Running the Sample
 

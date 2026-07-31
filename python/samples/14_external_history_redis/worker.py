@@ -15,7 +15,7 @@ Contrast with ``13_conversation_compaction``, where an in-memory provider is tra
 swapped for a durable-backed one.
 
 Prerequisites:
-- Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_MODEL
+- Set FOUNDRY_PROJECT_ENDPOINT and FOUNDRY_MODEL
 - Sign in with Azure CLI for AzureCliCredential authentication
 - Start a Durable Task Scheduler and a Redis instance (e.g., using Docker)
 """
@@ -25,7 +25,7 @@ import logging
 import os
 
 from agent_framework import Agent
-from agent_framework.openai import OpenAIChatClient
+from agent_framework.foundry import FoundryChatClient
 from agent_framework_durabletask import DurableAIAgentWorker
 from azure.identity import AzureCliCredential
 from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential
@@ -50,9 +50,9 @@ def create_archivist_agent() -> Agent:
     history = RedisHistoryProvider(os.getenv("REDIS_CONNECTION_STRING", "redis://localhost:6379"))
 
     return Agent(
-        client=OpenAIChatClient(
-            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-            model=os.environ["AZURE_OPENAI_MODEL"],
+        client=FoundryChatClient(
+            project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
+            model=os.environ["FOUNDRY_MODEL"],
             credential=AsyncAzureCliCredential(),
         ),
         name="Archivist",

@@ -6,7 +6,7 @@ Runs both the worker and client in a single process. The worker is started first
 register the compacting agent, then the client drives a multi-turn conversation.
 
 Prerequisites:
-- Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_MODEL
+- Set FOUNDRY_PROJECT_ENDPOINT and FOUNDRY_MODEL
 - Sign in with Azure CLI for AzureCliCredential authentication
 - Durable Task Scheduler must be running (e.g., using Docker)
 

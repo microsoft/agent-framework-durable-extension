@@ -38,7 +38,7 @@ which is lossy and therefore off by default.
 ### Client-side vs service-managed history
 
 Compaction only applies to history the **client** owns. When a chat client keeps the conversation on
-the service (Foundry threads, or the Responses API with `store=True`), the service owns the model's
+the service (Foundry and the Responses API both do so by default), the service owns the model's
 context, the durable entity keeps the transcript purely as a record, and the durable history provider
 stays out of the way. This sample sets `store=False` so history is client-side and compaction has
 something to compact.
@@ -51,7 +51,7 @@ something to compact.
    docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 mcr.microsoft.com/dts/dts-emulator:latest
    ```
 
-2. Copy `.env.example` to `.env` and set `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_MODEL`.
+2. Copy `.env.example` to `.env` and set `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`.
 
 3. Sign in for `AzureCliCredential`:
 

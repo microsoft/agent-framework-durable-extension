@@ -14,13 +14,13 @@ runtime transparently swaps the history provider for a durable-backed one, so:
 No durable-specific configuration is required on the agent itself.
 
 Note on service-managed conversations: compaction applies to history the *client* owns. When a
-chat client keeps the conversation on the service (for example Foundry threads, or the Responses
-API with ``store=True``), the service owns the model's context and the durable entity keeps the
-full transcript purely as a record. This sample therefore uses ``store=False`` so history is
-client-side and compaction has something to compact.
+chat client keeps the conversation on the service (Foundry and the Responses API both do so by
+default), the service owns the model's context and the durable entity keeps the full transcript
+purely as a record. This sample therefore sets ``store=False`` so history is client-side and
+compaction has something to compact.
 
 Prerequisites:
-- Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_MODEL
+- Set FOUNDRY_PROJECT_ENDPOINT and FOUNDRY_MODEL
 - Sign in with Azure CLI for AzureCliCredential authentication
 - Start a Durable Task Scheduler (e.g., using Docker)
 """
@@ -30,7 +30,7 @@ import logging
 import os
 
 from agent_framework import Agent, CompactionProvider, InMemoryHistoryProvider, SlidingWindowStrategy
-from agent_framework.openai import OpenAIChatClient
+from agent_framework.foundry import FoundryChatClient
 from agent_framework_durabletask import DurableAIAgentWorker
 from azure.identity import AzureCliCredential
 from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential
@@ -66,9 +66,9 @@ def create_historian_agent() -> Agent:
     )
 
     return Agent(
-        client=OpenAIChatClient(
-            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-            model=os.environ["AZURE_OPENAI_MODEL"],
+        client=FoundryChatClient(
+            project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
+            model=os.environ["FOUNDRY_MODEL"],
             credential=AsyncAzureCliCredential(),
         ),
         name="Historian",

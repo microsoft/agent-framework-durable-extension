@@ -41,7 +41,7 @@ other backend.
    docker run -d --name redis -p 6379:6379 redis:latest
    ```
 
-2. Copy `.env.example` to `.env` and set `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_MODEL`.
+2. Copy `.env.example` to `.env` and set `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`.
 
 3. Sign in for `AzureCliCredential`:
 
