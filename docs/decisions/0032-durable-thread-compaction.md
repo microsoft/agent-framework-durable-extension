@@ -41,9 +41,14 @@ Core MAF already has a compaction system ([ADR-0019](https://github.com/microsof
 1. **In-run filter** — a `CompactionProvider` (`AIContextProvider`) / `compaction_strategy` runs
    before each model call. It is **non-lossy**: it filters the projection sent to the model and
    stores incremental group state in the `AgentSession.StateBag`; the underlying store is untouched.
-2. **Store reducer** — an `IChatReducer` on a `ChatHistoryProvider` (e.g. `InMemoryChatHistoryProvider`)
-   **lossily** rewrites the stored conversation. `strategy.AsChatReducer()` bridges any core strategy
-   into this hook, so it is the **same strategies** applied at the store instead of the model call.
+   This hook works with **any** history provider, since it acts on the messages already loaded into
+   the invocation context.
+2. **Store reducer** — **lossily** rewrites the stored conversation, applying the same strategies at
+   the store instead of at the model call. Unlike the in-run filter, this hook is tied to a specific
+   storage mechanism in both languages: .NET exposes an `IChatReducer` on `InMemoryChatHistoryProvider`
+   only (bridged from any strategy by `strategy.AsChatReducer()`), and Python's
+   `CompactionProvider.after_strategy` reads the messages out of session state. Neither offers it to
+   a provider backed by anything else - see "Core Interface Gaps" below.
 
 The durable layer benefits from **neither** today, because `AgentEntity` **bypasses the
 `ChatHistoryProvider`**: it creates a fresh session per operation (so the StateBag — and any history
@@ -95,10 +100,10 @@ bounded when the user opts into it?**
   automatically derive a lossy store reducer (`strategy.AsChatReducer()`) so durable storage is
   bounded even without an explicit reducer.
 - **Option 6 — Durable store as a `ChatHistoryProvider` (chosen).** Back the durable entity's
-  persisted conversation with a core `ChatHistoryProvider` implementation, so **both** core hooks
-  apply on the durable runtime unchanged: the in-run filter runs in the agent pipeline (L1), and a
-  user-configured `IChatReducer` bounds the store (L2, opt-in). The same seam makes external storage
-  backends (Cosmos, Valkey, blob) pluggable for capacity.
+  persisted conversation with a core `ChatHistoryProvider` implementation, so both core hooks apply
+  on the durable runtime from the user's unchanged configuration: the in-run filter runs in the
+  agent pipeline (L1), and a user-configured reducer/strategy bounds the store (L2, opt-in). The
+  same seam makes external storage backends (Cosmos, Valkey, blob) pluggable for capacity.
 
 ## Decision Outcome
 
@@ -112,7 +117,7 @@ Compaction applies at **three layers**, mapped directly onto the core hooks:
 | Layer | Core mechanism reused | Lossy? | Role |
 | --- | --- | --- | --- |
 | **L1 — in-run filter** | `CompactionProvider` in the agent pipeline | No | Always-on. Bounds the **model input** (context window, token cost). Identical to core. |
-| **L2 — store reducer** | `IChatReducer` on the durable `ChatHistoryProvider` | Yes | **Opt-in.** Bounds the **persisted store**, only when the user configures a reducer. Identical to core. |
+| **L2 — store reducer** | the store-rewrite hook applied to the durable provider's store | Yes | **Opt-in.** Bounds the **persisted store**, only when the user configures a reducer/strategy. Same strategies as core, but the hook is bound to session state upstream, so this layer needs a workaround - see "Core Interface Gaps". |
 | **L3 — workflow hook** | the same strategy as the `AgentExecutor` `context_filter` | Yes | Bounds the inter-executor `full_conversation`. |
 
 **Two accumulation surfaces:**
@@ -123,7 +128,7 @@ Compaction applies at **three layers**, mapped directly onto the core hooks:
 | **Inter-executor (workflow)** | `AgentExecutor.full_conversation`, checkpointed as envelopes | L3 |
 
 **Why Option 6 over bespoke entity compaction (Option 2).** Making the durable store a
-`ChatHistoryProvider` means L2 is core's existing `IChatReducer` path — not new compaction code —
+`ChatHistoryProvider` means L2 reuses core's strategies rather than introducing new compaction code,
 and the same abstraction is the seam for **external storage backends** (Cosmos/Valkey/blob) that
 relieve capacity. One abstraction delivers both the opt-in reducer and pluggable storage, all
 reused from core.
@@ -154,14 +159,16 @@ conversation, the client holds no history to compact.
 
 - Good: **configuration parity** — the same core strategies/hooks apply on the durable runtime with
   no changes; the model input is bounded identically to core.
-- Good: **no reinvention** — L2 is core's `IChatReducer` path; the `ChatHistoryProvider` seam also
-  makes external storage backends pluggable for capacity.
+- Good: **no reinvention** — L2 reuses core's strategies rather than a durable-only compaction API;
+  the history-provider seam also makes external storage backends pluggable for capacity.
 - Good: **no silent data loss** — the durable record is only reduced when the user opts into a
   reducer; capacity limits surface explicitly.
 - Good: durable workflows inherit L1+L2; L3 reuses the existing `context_filter` seam.
 - Neutral: making the durable store a `ChatHistoryProvider` is a larger change to the entity than a
   bespoke compaction pass would be, and must preserve the existing `ConversationHistory` consumer
   contract (`AgentRunHandle` response polling, audit/replay, TTL).
+- Bad: L2 carries workaround code, because upstream binds the store-rewrite hook to session state
+  rather than to the provider; that code can be deleted if the gap is closed upstream.
 - Bad: an opt-in LLM-based reducer runs inside the entity operation and re-runs on retry; mitigated
   by stable summary identity and (optionally) Option 3 to move heavy summarization off the request
   path.
@@ -169,7 +176,7 @@ conversation, the client holds no history to compact.
 ### Validation
 
 - **Unit tests (both languages):** a core `CompactionProvider` on a durable agent bounds the model
-  input; a configured `IChatReducer` bounds the persisted store; with no reducer the store is not
+  input; a configured reducer/strategy bounds the persisted store; with no reducer the store is not
   silently truncated; atomic groups preserved; reducer idempotent across simulated entity retries;
   service-managed sessions skipped.
 - **Integration tests:** the same agent config produces equivalent compaction behavior in core and
@@ -218,12 +225,14 @@ conversation, the client holds no history to compact.
 
 ### Option 6 — Durable store as a `ChatHistoryProvider` (chosen)
 
-- Good, because **both** core hooks apply unchanged: L1 filter in the pipeline, L2 reducer on the
-  store — full configuration parity.
+- Good, because the user's configuration carries over unchanged: L1 applies exactly as in core, and
+  L2 uses the same strategies rather than a durable-only API.
 - Good, because the same abstraction makes external storage backends (Cosmos/Valkey/blob) pluggable,
   relieving capacity without touching compaction.
 - Good, because it is core reuse rather than durable-specific compaction code.
 - Neutral, because L2 is opt-in — a store is only reduced when the user configures a reducer.
+- Bad, because L2 does **not** come for free: upstream binds the store-rewrite hook to session state,
+  so the provider has to publish a working buffer and reconcile it itself (see "Core Interface Gaps").
 - Bad, because it is a larger entity change and must preserve the `ConversationHistory` consumer
   contract (response polling, audit, TTL).
 
@@ -231,12 +240,12 @@ conversation, the client holds no history to compact.
 
 - **Configuration parity (discovery over new API).** The durable runtime honors the compaction the
   user already configured on the agent — the `CompactionProvider` in the pipeline (L1) and any
-  `IChatReducer` on the history provider (L2). A durable-specific option exists at most as an
-  optional override, never as the required path. Moving core → durable entity → durable workflow
-  requires no reconfiguration.
+  store-side reducer/strategy attached to the history provider (L2). A durable-specific option
+  exists at most as an optional override, never as the required path. Moving core → durable entity →
+  durable workflow requires no reconfiguration.
 - **Two hooks, mapped.** In-run filter (`CompactionProvider`) → L1, non-lossy, bounds the model
-  input. Store reducer (`IChatReducer` on the durable `ChatHistoryProvider`) → L2, lossy, opt-in,
-  bounds the persisted store. Both accept the same `CompactionStrategy` (via `strategy.AsChatReducer()`).
+  input. Store reducer applied to the durable provider's store → L2, lossy, opt-in, bounds the
+  persisted store. Both accept the same `CompactionStrategy` (on .NET via `strategy.AsChatReducer()`).
 - **Reducer trigger.** Honor the configured `ReducerTriggerEvent`; `AfterMessageAdded`
   (compact-on-write, before checkpoint) is the natural durable default so the checkpoint is already
   bounded. `BeforeMessagesRetrieval` also works (reduce-on-load, then persist).
@@ -258,31 +267,69 @@ conversation, the client holds no history to compact.
 
 ## Core Interface Gaps for Pluggable History Providers
 
-Prototyping the Python `DurableHistoryProvider` surfaced three places where the current contracts
-assume a *session-state-backed* history provider. They are recorded here because they affect **any**
-external provider (Cosmos, Valkey, durable), not just this one. The prototype works around them; the
-cleaner fix is upstream.
+Prototyping the Python `DurableHistoryProvider` surfaced places where the current contracts assume a
+*session-state-backed* history provider. They are recorded here because they affect **any** provider
+whose store is not session state (Cosmos, Valkey, durable), not just this one. The prototype works
+around them; the cleaner fix is upstream.
 
-1. **Compaction bypasses the provider.** `CompactionProvider.after_run` reads stored messages
-   directly from `session.state[history_source_id]["messages"]` rather than asking the provider.
-   A provider whose store is *not* session state therefore gets no post-run compaction - L2 silently
-   no-ops. *Workaround:* the provider publishes its loaded messages as a working buffer under that
-   key. *Upstream fix:* have compaction request messages from the history provider.
+1. **Store-side compaction is bound to session state rather than to the provider.** `CompactionProvider`
+   has two hooks and only one of them is coupled:
 
-2. **`save_messages()` is append-only.** It receives only the newly produced messages, so mutations
-   that compaction applies to *already stored* messages (setting `_excluded`, inserting a summary)
-   have no defined path back to the store. *Workaround (implemented):* the provider overrides
-   `after_run` and reconciles the working buffer itself **by `message_id`**, updating annotations on
-   known messages and inserting ones compaction added. This required persisting `messageId` in
-   durable state, which also gives summaries the **stable identity** the idempotency requirement
-   needs. *Upstream fix:* add an explicit replace/flush operation alongside append so every external
-   provider does not have to re-implement this reconciliation.
+   - `before_strategy` runs on messages already in the invocation context, whichever provider loaded
+     them. Every provider gets this, so **in-run context bounding already works for external stores**.
+   - `after_strategy` is documented as operating on "the accumulated messages stored by a history
+     provider in session state", and "requires `history_source_id` to locate the messages in session
+     state". It reads `session.state[history_source_id]["messages"]` and mutates that list in place,
+     treating mutation as persistence - which only holds when the store *is* session state.
+
+   So the missing capability is narrower than it first appears: an external provider can bound what
+   the model sees, but cannot have the framework rewrite its store.
+
+   Whether that is a defect depends on **who owns the store**. For a user-owned store (Cosmos, Redis)
+   the framework arguably *should not* rewrite it implicitly. For a framework-owned store (in-memory,
+   and durable entity state) rewriting is squarely in scope. Durable is the first framework-owned
+   store that is not session state, which is what turns this from a defensible omission into a real
+   problem.
+
+   It is also unresolved rather than decided. ADR-0019 names three compaction points (in-run,
+   pre-write, on existing storage), explicitly scopes in "local storage (e.g. `InMemoryHistoryProvider`,
+   Redis, Cosmos)", and then leaves the mechanism open:
+
+   > Should pre-write and existing-storage compaction share one unified configuration/setup to reduce
+   > duplicate strategy wiring, and then either: each write overrides the full storage, or only new
+   > messages are compacted while a separate interface can be called to compact the existing storage?
+
+   That question shipped unanswered, and the languages then diverged on where the hook lives: .NET
+   puts store reduction on the provider (`IChatReducer`) but only on `InMemoryChatHistoryProvider`
+   (`CosmosChatHistoryProvider` has none); Python puts it in `CompactionProvider` reaching into
+   session state. **Neither language offers it to external providers.**
+
+   *Workaround:* the provider publishes its loaded messages as a working buffer under the expected
+   session-state key. *Upstream fix:* bind the store-rewrite hook to the provider abstraction instead
+   of to session state as a storage mechanism - .NET's shape generalizes, Python's does not.
+
+2. **`save_messages()` is append-only.** The other half of the same open question. It receives only
+   the newly produced messages, so mutations that compaction applies to *already stored* messages
+   (setting `_excluded`, inserting a summary) have no defined path back to the store.
+   *Workaround (implemented):* the provider overrides `after_run` and reconciles the working buffer
+   itself **by `message_id`**, updating annotations on known messages and inserting ones compaction
+   added. This required persisting `messageId` in durable state, which also gives summaries the
+   **stable identity** the idempotency requirement needs. *Upstream fix:* add an explicit
+   replace/flush operation alongside append so every external provider does not have to re-implement
+   this reconciliation.
 
 3. **Message-level metadata was not persisted (durable schema).** `DurableAgentStateMessage.to_dict()`
    dropped `extension_data` while `from_dict()` read it - a write-lossy asymmetry that silently
    discarded compaction annotations on every state round-trip. Since annotations are what carry
-   compaction state, this had to be fixed for any of this to work. The Python side now serializes it;
-   **.NET and the shared state schema need the same treatment** for cross-language parity.
+   compaction state, this had to be fixed for any of this to work. This one is ours rather than
+   core's. The Python side now serializes it; **.NET and the shared state schema need the same
+   treatment** for cross-language parity, or compaction will appear to do nothing there for exactly
+   the same reason.
+
+Two further core gaps are recorded with the decisions they affect: the process-local **state type
+registry** (see "The session is persisted, not just its conversation id") and the absence of a public
+way to ask whether **the service owns history for a run** (see "Service-managed conversations"). Both
+forced this layer to re-implement logic core already has.
 
 Consequence for ordering: core runs `before_run` forward and `after_run` in **reverse**. With
 `[history, compaction]`, compaction annotates the buffer *before* the history provider flushes it
@@ -360,8 +407,9 @@ re-sent history the service already had.
 
 **Consequence:** passing a session is what re-engages the pipeline, so external history providers
 (Cosmos, Redis, file) now function under the durable runtime - previously they were silently
-ignored because no session was ever created. Store-side compaction still no-ops for them (core
-interface gap 1 below); only the in-run filter applies.
+ignored because no session was ever created. They get the in-run filter like any other provider;
+what they do not get is the framework rewriting their store, which no language offers today (core
+interface gap 1 above).
 
 That session must also carry the entity's **stable** session id rather than a generated one.
 External providers key their storage on `session.session_id`, so a per-operation id would make them
