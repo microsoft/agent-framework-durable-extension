@@ -63,8 +63,10 @@ class TestExternalHistoryProvider:
         """
         client = aioredis.from_url(self.redis_url, decode_responses=True)
         try:
-            entries: list[str] = await client.lrange(f"{KEY_PREFIX}:{session_id.key}", 0, -1)  # type: ignore[misc]
-            return entries
+            # The client is configured with decode_responses, so entries come back as strings.
+            # Coerce anyway, since redis-py types lrange as bytes or str depending on version.
+            entries: Any = await client.lrange(f"{KEY_PREFIX}:{session_id.key}", 0, -1)  # type: ignore[misc]
+            return [entry if isinstance(entry, str) else entry.decode() for entry in entries]
         finally:
             await client.aclose()
 
