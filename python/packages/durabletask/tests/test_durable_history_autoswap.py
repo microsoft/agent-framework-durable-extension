@@ -117,6 +117,29 @@ class TestAutomaticDurableHistory:
         assert prepared is agent
         assert not _history_providers(prepared)
 
+    def test_store_false_overrides_a_service_storing_client(self) -> None:
+        """``store=False`` puts history back in the client's hands, so durable must back it.
+
+        Mirrors core's precedence: an explicit ``store`` wins over ``STORES_BY_DEFAULT``. Without
+        this, an agent using the Responses API with ``store=False`` would keep a plain in-memory
+        provider that the durable runtime never persists, silently losing the conversation.
+        """
+        agent = Agent(client=_ServiceStoringClient(), name="a", default_options={"store": False})
+
+        prepared = ensure_durable_history(agent)
+
+        providers = _history_providers(prepared)
+        assert len(providers) == 1
+        assert isinstance(providers[0], DurableHistoryProvider)
+
+    def test_store_true_keeps_history_with_the_service(self) -> None:
+        agent = Agent(client=_StubClient(), name="a", default_options={"store": True})
+
+        prepared = ensure_durable_history(agent)
+
+        assert prepared is agent
+        assert not _history_providers(prepared)
+
     def test_existing_durable_provider_is_untouched(self) -> None:
         """Explicit configuration (for example to enable pruning) wins."""
         explicit = DurableHistoryProvider(prune_excluded=True)

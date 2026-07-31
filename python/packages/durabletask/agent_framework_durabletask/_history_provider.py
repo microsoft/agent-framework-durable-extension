@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -317,7 +317,18 @@ class DurableHistoryProvider(HistoryProvider):
 
 
 def _service_stores_history(agent: Any) -> bool:
-    """Return whether the agent's client keeps conversation history server-side."""
+    """Return whether the service keeps conversation history for this agent.
+
+    Mirrors core's precedence: an explicit ``store`` in the agent's default options wins, and only
+    when it is unset does the client's ``STORES_BY_DEFAULT`` apply. Clients that store by default
+    (such as the Responses API) can therefore be put back in client-side mode with ``store=False``,
+    in which case durable history is what makes the conversation survive.
+    """
+    default_options = getattr(agent, "default_options", None)
+    if isinstance(default_options, Mapping):
+        explicit_store = cast("Mapping[str, Any]", default_options).get("store")
+        if explicit_store is not None:
+            return bool(explicit_store)
     client = getattr(agent, "client", None)
     return bool(getattr(client, "STORES_BY_DEFAULT", False))
 

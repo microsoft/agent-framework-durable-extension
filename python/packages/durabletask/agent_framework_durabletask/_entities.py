@@ -317,16 +317,19 @@ class AgentEntity:
         """Create the session for this operation.
 
         Conversation history lives in the agent's context providers (durable entity state, an
-        external store, or the model service), so a fresh session per operation is enough. Any
-        previously issued service conversation id is restored so service-backed agents continue
-        the same thread.
+        external store, or the model service), so a fresh session per operation is enough - but it
+        must carry the entity's **stable** session id. External history providers (Cosmos, Redis,
+        file) key their storage on ``session.session_id``; with a freshly generated id they would
+        read and write a different key every turn and never see prior history. Any previously
+        issued service conversation id is restored so service-backed agents continue the same
+        thread.
         """
         create_session = getattr(self.agent, "create_session", None)
         if not callable(create_session):
             raise TypeError(
                 f"Agent {type(self.agent).__name__} exposes context providers but does not support create_session()."
             )
-        session: Any = create_session()
+        session: Any = create_session(session_id=self._state_provider.session_id)
 
         service_session_id = self.state.data.service_session_id
         if service_session_id and getattr(session, "service_session_id", None) is None:

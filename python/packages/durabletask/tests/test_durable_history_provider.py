@@ -16,6 +16,7 @@ from agent_framework import (
     ChatResponseUpdate,
     CompactionProvider,
     Content,
+    HistoryProvider,
     InMemoryHistoryProvider,
     Message,
     ResponseStream,
@@ -339,3 +340,44 @@ class TestDurableHistoryProvider:
         # History is served from durable state, so turn 2 sees turn 1.
         assert len(client.received_messages[1]) > len(client.received_messages[0])
         assert len(entity.state.data.conversation_history) == 4
+
+
+class TestExternalHistoryProviders:
+    """Providers that own their own storage (Cosmos, Redis, file) keep working durably."""
+
+    async def test_external_provider_receives_the_entity_session_id(self) -> None:
+        """Their storage is keyed by session id, so it must be the entity's stable id.
+
+        The entity builds a fresh session per operation. If that session carried a generated id,
+        an external provider would read and write a different key every turn and never see prior
+        history - broken continuity with no error to show for it.
+        """
+        seen: list[str | None] = []
+
+        class _RecordingExternalProvider(HistoryProvider):
+            def __init__(self) -> None:
+                super().__init__(source_id="external")
+
+            async def get_messages(self, session_id: str | None, **kwargs: Any) -> list[Message]:
+                seen.append(session_id)
+                return []
+
+            async def save_messages(self, session_id: str | None, messages: Any, **kwargs: Any) -> None:
+                seen.append(session_id)
+
+        agent = Agent(client=RecordingChatClient(), name="assistant", context_providers=[_RecordingExternalProvider()])
+        entity = _make_entity(agent, _InMemoryStateProvider(session_id="stable-session"))
+
+        await _run_turns(entity, ["first", "second"])
+
+        assert seen, "the external provider should have taken part in the run"
+        assert set(seen) == {"stable-session"}
+
+    async def test_external_provider_is_not_replaced(self) -> None:
+        """The user chose their own storage; durable must not swap it out."""
+        external = HistoryProvider(source_id="external")
+        agent = Agent(client=RecordingChatClient(), name="assistant", context_providers=[external])
+
+        entity = _make_entity(agent, _InMemoryStateProvider())
+
+        assert entity.agent.context_providers[0] is external
