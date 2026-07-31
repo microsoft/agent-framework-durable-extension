@@ -68,8 +68,8 @@ def _create_agent() -> Any:
 
 
 # 2. Register the agent with AgentFunctionApp so Azure Functions exposes the required triggers.
-#    Pass prune_history=True here to also delete compacted-out messages from durable storage;
-#    that is lossy, so the full record is kept by default.
+#    Pass prune_history=True here to also delete compacted-out messages from durable storage.
+#    That is lossy, so the full record is kept by default.
 app = AgentFunctionApp(agents=[_create_agent()], enable_health_check=True, max_poll_retries=50)
 
 """

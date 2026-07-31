@@ -63,7 +63,7 @@ class RedisHistoryProvider(HistoryProvider):
 
         Args:
             session_id: The session ID to retrieve messages for.
-            state: Unused; this provider keeps nothing in session state.
+            state: Unused, since this provider keeps nothing in session state.
             **kwargs: Additional arguments (unused).
 
         Returns:
@@ -85,7 +85,7 @@ class RedisHistoryProvider(HistoryProvider):
         Args:
             session_id: The session ID to store messages for.
             messages: The messages to persist.
-            state: Unused; this provider keeps nothing in session state.
+            state: Unused, since this provider keeps nothing in session state.
             **kwargs: Additional arguments (unused).
         """
         if not messages:

@@ -63,7 +63,7 @@ def _register_loaded_state_types() -> None:
     """Let core restore session state values as their own classes after a cold start.
 
     Core deserializes session state through a type registry that it seeds with exactly one entry
-    (``Message``); anything else must be registered explicitly, and the registry is process-local.
+    (``Message``). Anything else must be registered explicitly, and the registry is process-local.
     A durable entity routinely restores state in a process that never serialized it, so without
     this a provider's state comes back as a plain dict rather than its own class.
 
@@ -384,7 +384,7 @@ class AgentEntity:
         Conversation history lives in the agent's context providers (durable entity state, an
         external store, or the model service), so a fresh session per operation is enough - but it
         must carry the entity's **stable** session id. External history providers (Cosmos, Redis,
-        file) key their storage on ``session.session_id``; with a freshly generated id they would
+        file) key their storage on ``session.session_id``, and with a freshly generated id they would
         read and write a different key every turn and never see prior history.
         """
         create_session = getattr(self.agent, "create_session", None)
@@ -399,7 +399,7 @@ class AgentEntity:
     def _restore_session(self, session: Any) -> None:
         """Apply the previous turn's session state onto a freshly created session.
 
-        The agent's own ``create_session`` is used so its session type is preserved; only the
+        The agent's own ``create_session`` is used so its session type is preserved. Only the
         state bag and the service conversation id are carried over.
         """
         stored = self.state.data.session

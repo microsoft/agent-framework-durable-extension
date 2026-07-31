@@ -7,8 +7,8 @@ Framework. It is the Azure Functions counterpart to the standalone
 
 ## Key Concepts Demonstrated
 
-- Configuring compaction the ordinary core way — an `InMemoryHistoryProvider` plus a
-  `CompactionProvider` — with **no durable-specific configuration on the agent**.
+- Configuring compaction the ordinary core way, an `InMemoryHistoryProvider` plus a
+  `CompactionProvider`, with **no durable-specific configuration on the agent**.
 - The durable runtime swapping the in-memory provider for a durable-backed one at registration,
   preserving its `source_id` so the compaction provider stays wired to it.
 - Compaction annotations being persisted alongside the messages, so compaction state is not
@@ -31,9 +31,9 @@ agent = Agent(
 app = AgentFunctionApp(agents=[agent], enable_health_check=True)
 ```
 
-The full conversation remains in durable storage; compaction bounds what the *model* sees. To also
-bound what is *stored*, opt in at registration with `AgentFunctionApp(..., prune_history=True)` —
-that is lossy and therefore off by default.
+The full conversation remains in durable storage, and compaction bounds what the *model* sees. To
+also bound what is *stored*, opt in at registration with `AgentFunctionApp(..., prune_history=True)`,
+which is lossy and therefore off by default.
 
 ### Client-side vs service-managed history
 
@@ -52,7 +52,7 @@ credentials, and install the Python dependencies for this sample. This sample us
 ## Running the Sample
 
 Send several turns using the **same** session id so they form one conversation. `demo.http` contains
-a ready-made sequence; the equivalent with `curl` is:
+a ready-made sequence, and the equivalent with `curl` is:
 
 ```bash
 curl -X POST http://localhost:7071/api/agents/Historian/run \
@@ -71,7 +71,7 @@ window.
 
 The trade-off is the point of the sample: a sliding window keeps context bounded by *dropping* older
 turns from what the model sees, so facts from long-past turns are genuinely no longer available to
-the model. Those messages are **not deleted** — they remain in durable storage, marked as excluded,
+the model. Those messages are **not deleted**. They remain in durable storage, marked as excluded,
 so the conversation record stays complete and auditable. Choose a strategy accordingly: use
 summarization if old details must survive in the model's context, and a sliding window when only
 recent context matters.

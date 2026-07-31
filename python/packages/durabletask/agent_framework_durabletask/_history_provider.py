@@ -104,7 +104,7 @@ class DurableHistoryProvider(HistoryProvider):
             source_id: Unique identifier for this provider instance.
             skip_excluded: Omit compaction-excluded messages from loaded context.
             prune_excluded: Physically delete excluded messages from durable storage
-                on flush. Lossy; disabled by default.
+                on flush. Lossy, so it is disabled by default.
         """
         super().__init__(
             source_id=source_id or self.DEFAULT_SOURCE_ID,
@@ -120,7 +120,7 @@ class DurableHistoryProvider(HistoryProvider):
         binding = current_durable_history_binding()
         if binding is None:
             logger.warning(
-                "[DurableHistoryProvider] No durable binding is active; the provider yields no history. "
+                "[DurableHistoryProvider] No durable binding is active, so the provider yields no history. "
                 "This provider only works inside a durable agent entity operation."
             )
         return binding
@@ -210,7 +210,7 @@ class DurableHistoryProvider(HistoryProvider):
     ) -> None:
         """Load durable history into context, unless the service owns the conversation."""
         if self._is_service_managed(session):
-            logger.debug("[DurableHistoryProvider] Session is service-managed; skipping durable history load.")
+            logger.debug("[DurableHistoryProvider] Session is service-managed, skipping durable history load.")
             return
         await super().before_run(agent=agent, session=session, context=context, state=state)
 
@@ -348,9 +348,9 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_history: bool = Fal
     * **In-memory history** - replaced by a :class:`DurableHistoryProvider` carrying the *same*
       ``source_id`` and ``skip_excluded``, so any compaction wired to it keeps working untouched.
     * **Any other history provider** (Cosmos, Redis, file, custom) - left alone. The user chose
-      where their conversation lives; durable still provides execution durability.
+      where their conversation lives, and durable still provides execution durability.
     * **Service-managed history** - left alone. The model service owns the conversation.
-    * **Agents without the core context pipeline** - left alone; the entity falls back to
+    * **Agents without the core context pipeline** - left alone, and the entity falls back to
       replaying its own persisted history.
 
     Args:
@@ -370,7 +370,7 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_history: bool = Fal
 
     if _service_stores_history(agent):
         logger.debug(
-            "[DurableHistoryProvider] Agent %s stores history service-side; leaving providers unchanged.",
+            "[DurableHistoryProvider] Agent %s stores history service-side, leaving providers unchanged.",
             getattr(agent, "name", type(agent).__name__),
         )
         return agent
@@ -399,7 +399,7 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_history: bool = Fal
         )
         updated = [replacement if p is existing else p for p in provider_list]
     else:
-        # A deliberate storage choice (external or custom); do not override it.
+        # A deliberate storage choice (external or custom), so do not override it.
         return agent
 
     try:
@@ -407,7 +407,7 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_history: bool = Fal
         clone.context_providers = updated  # type: ignore[attr-defined]
     except Exception:
         logger.warning(
-            "[DurableHistoryProvider] Could not attach durable history to agent %s; "
+            "[DurableHistoryProvider] Could not attach durable history to agent %s, "
             "falling back to replaying persisted history.",
             getattr(agent, "name", type(agent).__name__),
             exc_info=True,

@@ -15,43 +15,43 @@ informed:
 > surfaced. **.NET is not implemented yet.**
 >
 > **Naming.** .NET's `ChatHistoryProvider` and Python's `HistoryProvider` are the same concept. The
-> decision sections use the .NET name; the implementation sections use the Python one.
+> decision sections use the .NET name, and the implementation sections use the Python one.
 
 ## Context and Problem Statement
 
 Long-running **durable** agents and workflows accumulate conversation history in durable
 storage and replay it on every turn. Durable agents persist a full `ConversationHistory` in
-entity state (`AgentEntity` → `DurableAgentState`); durable workflows persist inter-executor
-messages (`AgentExecutor.full_conversation`) as checkpointed envelopes. Unlike an in-memory agent
-— whose history lives in process RAM (gigabytes) and disappears when the process recycles — this
-history is **persisted, reloaded every turn, and permanent**.
+entity state (`AgentEntity` → `DurableAgentState`). Durable workflows persist inter-executor
+messages (`AgentExecutor.full_conversation`) as checkpointed envelopes. An in-memory agent keeps its
+history in process RAM, where it disappears when the process recycles. This history is instead
+**persisted, reloaded every turn, and permanent**.
 
-It helps to separate **three distinct pressures**, because they have different owners:
+It helps to separate **three distinct pressures**, because they have different owners.
 
 | Pressure | What bounds it | Same in core? | Owner |
 | --- | --- | --- | --- |
-| **Context window** — the model's max input per call | the model | **Yes** — identical in core and durable | Compaction (in-run filter) |
-| **Token cost / latency** — resending history each turn | tokens billed / round-trip | **Yes** — same mechanism | Compaction (in-run filter) |
-| **Storage capacity** — the cumulative persisted state | backend state-size limit | **No** — durable-only | Storage backend (built-in limit or external store) |
+| **Context window**, the model's max input per call | the model | **Yes**, identical in core and durable | Compaction (in-run filter) |
+| **Token cost / latency**, resending history each turn | tokens billed / round-trip | **Yes**, same mechanism | Compaction (in-run filter) |
+| **Storage capacity**, the cumulative persisted state | backend state-size limit | **No**, durable-only | Storage backend (built-in limit or external store) |
 
-The first two are per-operation and identical in both runtimes. The third is cumulative:
+The first two are per-operation and identical in both runtimes. The third is cumulative.
 `ConversationHistory` is one blob appended to every turn and re-persisted whole, so it is bounded by
 the backend's state-size limit (e.g. classic Azure Storage ~1 MB/entity), whereas a core process is
 bounded only by RAM and resets on restart. **Storage capacity is an infrastructure concern, not a
-context-window concern** - relieved by raising the limit or moving to an external store, not by
+context-window concern**, relieved by raising the limit or moving to an external store, not by
 trimming what the model sees.
 
-Core MAF already has a compaction system ([ADR-0019](https://github.com/microsoft/agent-framework/blob/main/docs/decisions/0019-python-context-compaction-strategy.md);
-.NET `Microsoft.Agents.AI.Compaction`; Python `agent_framework._compaction`) with **two hooks**:
+Core MAF already has a compaction system ([ADR-0019](https://github.com/microsoft/agent-framework/blob/main/docs/decisions/0019-python-context-compaction-strategy.md),
+.NET `Microsoft.Agents.AI.Compaction`, Python `agent_framework._compaction`) with **two hooks**.
 
-1. **In-run filter** — a `CompactionProvider` (`AIContextProvider`) / `compaction_strategy` runs
-   before each model call. It is **non-lossy**: it filters the projection sent to the model and
-   stores incremental group state in the `AgentSession.StateBag`; the underlying store is untouched.
-   This hook works with **any** history provider, since it acts on the messages already loaded into
-   the invocation context.
-2. **Store reducer** — **lossily** rewrites the stored conversation, applying the same strategies at
+1. **In-run filter.** A `CompactionProvider` (`AIContextProvider`) / `compaction_strategy` runs
+   before each model call. It is **non-lossy**. It filters the projection sent to the model and
+   stores incremental group state in the `AgentSession.StateBag`, leaving the underlying store
+   untouched. This hook works with **any** history provider, since it acts on the messages already
+   loaded into the invocation context.
+2. **Store reducer.** **Lossily** rewrites the stored conversation, applying the same strategies at
    the store instead of at the model call. Unlike the in-run filter, this hook is tied to a specific
-   storage mechanism in both languages: .NET exposes an `IChatReducer` on `InMemoryChatHistoryProvider`
+   storage mechanism in both languages. .NET exposes an `IChatReducer` on `InMemoryChatHistoryProvider`
    only (bridged from any strategy by `strategy.AsChatReducer()`), and Python's
    `CompactionProvider.after_strategy` reads the messages out of session state. Neither offers it to
    a provider backed by anything else - see "Core Interface Gaps" below.
@@ -71,61 +71,61 @@ bounded when the user opts into it?**
 
 ## Decision Drivers
 
-- **Configuration parity** — the same core compaction config (strategies, `CompactionProvider`,
+- **Configuration parity.** The same core compaction config (strategies, `CompactionProvider`,
   `IChatReducer`) must apply unchanged when moving core → durable entity → durable workflow. No
   parallel durable-only API.
-- **Reuse existing core hooks** — do not reinvent triggers/strategies/grouping; reuse the in-run
+- **Reuse existing core hooks.** Do not reinvent triggers, strategies or grouping. Reuse the in-run
   filter and the store reducer.
-- **Separate storage capacity from context management** — bound the model input with compaction
-  (parity with core); relieve persisted-storage capacity with infrastructure (backend limits /
-  external stores), not by silently trimming.
-- **No silent data loss in the durable record** — a durable system of record must not quietly
-  truncate history; lossy reduction is explicit opt-in, and hard capacity limits should surface a
-  clear error/warning.
-- **Determinism / idempotency** — durable entity operations can be retried; a lossy reducer
+- **Separate storage capacity from context management.** Bound the model input with compaction
+  (parity with core), and relieve persisted-storage capacity with infrastructure (backend limits,
+  external stores) rather than by silently trimming.
+- **No silent data loss in the durable record.** A durable system of record must not quietly
+  truncate history. Lossy reduction is explicit opt-in, and hard capacity limits should surface a
+  clear error or warning.
+- **Determinism and idempotency.** Durable entity operations can be retried, so a lossy reducer
   (especially LLM summarization) must not corrupt or diverge persisted state across retries.
-- **Message-list correctness** — preserve atomic groups (assistant tool-call + tool-result, and
+- **Message-list correctness.** Preserve atomic groups (assistant tool-call plus tool-result, and
   reasoning pairings) so the model input stays valid.
-- **Cover both surfaces** — durable agents **and** durable workflows, in **both** languages.
-- **No-op for service-managed storage** — when the service owns the conversation (a
-  `ConversationId`/`service_session_id` is set), the client has no history to compact.
+- **Cover both surfaces.** Durable agents **and** durable workflows, in **both** languages.
+- **No-op for service-managed storage.** When the service owns the conversation (a
+  `ConversationId` or `service_session_id` is set), the client has no history to compact.
 
 ## Considered Options
 
-- **Option 1 — In-run filter only.** Register the core `CompactionProvider` / `compaction_strategy`
-  on the inner agent; change nothing else in the durable layer.
-- **Option 2 — Bespoke pre-write compaction in the agent entity.** Add durable-specific code that
+- **Option 1, in-run filter only.** Register the core `CompactionProvider` / `compaction_strategy`
+  on the inner agent and change nothing else in the durable layer.
+- **Option 2, bespoke pre-write compaction in the agent entity.** Add durable-specific code that
   compacts `ConversationHistory` inside the entity operation before checkpoint.
-- **Option 3 — On-storage maintenance compaction.** Compact persisted history from a separate
-  entity signal/operation, decoupled from the request path.
-- **Option 4 — Workflow-level compaction hook.** Apply a strategy at the `AgentExecutor`
+- **Option 3, on-storage maintenance compaction.** Compact persisted history from a separate
+  entity signal or operation, decoupled from the request path.
+- **Option 4, workflow-level compaction hook.** Apply a strategy at the `AgentExecutor`
   `context_mode` / `context_filter` boundary that governs the `full_conversation` chained between
   agent executors.
-- **Option 5 — Auto-derive a durable store reducer.** When only an in-run filter is configured,
+- **Option 5, auto-derive a durable store reducer.** When only an in-run filter is configured,
   automatically derive a lossy store reducer (`strategy.AsChatReducer()`) so durable storage is
   bounded even without an explicit reducer.
-- **Option 6 — Durable store as a `ChatHistoryProvider` (chosen).** Back the durable entity's
+- **Option 6, durable store as a `ChatHistoryProvider` (chosen).** Back the durable entity's
   persisted conversation with a core `ChatHistoryProvider` implementation, so both core hooks apply
-  on the durable runtime from the user's unchanged configuration: the in-run filter runs in the
-  agent pipeline (L1), and a user-configured reducer/strategy bounds the store (L2, opt-in). The
+  on the durable runtime from the user's unchanged configuration. The in-run filter runs in the
+  agent pipeline (L1), and a user-configured reducer or strategy bounds the store (L2, opt-in). The
   same seam makes external storage backends (Cosmos, Valkey, blob) pluggable for capacity.
 
 ## Decision Outcome
 
-Chosen option: **Option 6 — express durable conversation storage as a core `ChatHistoryProvider`**,
+Chosen option: **Option 6, express durable conversation storage as a core `ChatHistoryProvider`**,
 combined with the workflow hook (Option 4). This makes core's two compaction hooks apply on the
 durable runtime with **no config change**, and cleanly separates context management from storage
 capacity.
 
-Compaction applies at **three layers**, mapped directly onto the core hooks:
+Compaction applies at **three layers**, mapped directly onto the core hooks.
 
 | Layer | Core mechanism reused | Lossy? | Role |
 | --- | --- | --- | --- |
-| **L1 — in-run filter** | `CompactionProvider` in the agent pipeline | No | Always-on. Bounds the **model input** (context window, token cost). Identical to core. |
-| **L2 — store reducer** | the store-rewrite hook applied to the durable provider's store | Yes | **Opt-in.** Bounds the **persisted store**, only when the user configures a reducer/strategy. Same strategies as core, but the hook is bound to session state upstream, so this layer needs a workaround - see "Core Interface Gaps". |
-| **L3 — workflow hook** | the same strategy as the `AgentExecutor` `context_filter` | Yes | Bounds the inter-executor `full_conversation`. |
+| **L1, in-run filter** | `CompactionProvider` in the agent pipeline | No | Always-on. Bounds the **model input** (context window, token cost). Identical to core. |
+| **L2, store reducer** | the store-rewrite hook applied to the durable provider's store | Yes | **Opt-in.** Bounds the **persisted store**, only when the user configures a reducer or strategy. Same strategies as core, but the hook is bound to session state upstream, so this layer needs a workaround (see "Core Interface Gaps"). |
+| **L3, workflow hook** | the same strategy as the `AgentExecutor` `context_filter` | Yes | Bounds the inter-executor `full_conversation`. |
 
-**Two accumulation surfaces:**
+**Two accumulation surfaces.**
 
 | Surface | Where it accumulates | Covered by |
 | --- | --- | --- |
@@ -139,8 +139,8 @@ separate concern. Auto-deriving a lossy reducer would use a context-window tool 
 problem and **silently destroy the durable record**. Capacity is addressed by the backend instead:
 the built-in store enforces a limit (surfacing a clear error as it is approached), and an external
 provider raises the ceiling. The ideal durable default is therefore the full record in a (possibly
-external) provider plus the L1 filter on the model input - never lose the record, always bound what
-the model sees; a lossy L2 reducer stays a deliberate opt-in.
+external) provider plus the L1 filter on the model input, never losing the record and always
+bounding what the model sees. A lossy L2 reducer stays a deliberate opt-in.
 
 **Why workflows largely come "for free."** Durable workflow agent execution
 (`DurableExecutorDispatcher.ExecuteAgentAsync`) runs an agent through the same
@@ -148,22 +148,23 @@ the model sees; a lossy L2 reducer stays a deliberate opt-in.
 inherited by workflow agent executors**. The workflow's own `full_conversation` between executors
 does not pass through the agent, so it needs the separate **L3** hook.
 
-**Service-managed storage** is out of scope, mirroring ADR-0019: when the service owns the
+**Service-managed storage** is out of scope, mirroring ADR-0019. When the service owns the
 conversation the client holds no history to compact. See "Service-managed conversations" for how the
 runtime detects and handles it.
 
 ### Consequences
 
-- Good: **configuration parity** - the same core strategies and hooks apply on the durable runtime
-  with no changes; durable workflows inherit L1+L2, and L3 reuses the existing `context_filter` seam.
-- Good: **no silent data loss** - the durable record is only reduced when the user opts into a
-  reducer; capacity limits surface explicitly rather than truncating.
+- Good: **configuration parity**, since the same core strategies and hooks apply on the durable
+  runtime with no changes. Durable workflows inherit L1+L2, and L3 reuses the existing
+  `context_filter` seam.
+- Good: **no silent data loss**, since the durable record is only reduced when the user opts into a
+  reducer. Capacity limits surface explicitly rather than truncating.
 - Neutral: a larger entity change than a bespoke compaction pass, and it must preserve the existing
   `ConversationHistory` consumer contract (`AgentRunHandle` response polling, audit/replay, TTL).
-- Bad: L2 carries workaround code because upstream binds the store-rewrite hook to session state;
-  deletable if that gap closes.
-- Bad: an opt-in LLM-based reducer runs inside the entity operation and re-runs on retry - mitigated
-  by stable summary identity, and optionally by Option 3 to move heavy summarization off the request
+- Bad: L2 carries workaround code because upstream binds the store-rewrite hook to session state.
+  That code is deletable if the gap closes.
+- Bad: an opt-in LLM-based reducer runs inside the entity operation and re-runs on retry, mitigated
+  by stable summary identity and optionally by Option 3 to move heavy summarization off the request
   path.
 
 ### Validation
@@ -175,13 +176,15 @@ assert that annotations and message ids survive entity serialization, that an ex
 keeps a whole conversation under one key, and that a downstream workflow agent can reference the
 upstream conversation.
 
-**Outstanding.** The .NET realization and its schema parity (gap 3); an external history provider
-storing history beyond the built-in state-size limit; idempotency of an LLM-based reducer across
-simulated entity retries.
+**Outstanding.** Three things are not covered yet.
+
+- The .NET realization and its schema parity (gap 3).
+- An external history provider storing history beyond the built-in state-size limit.
+- Idempotency of an LLM-based reducer across simulated entity retries.
 
 ## Pros and Cons of the Options
 
-The full argument is in **Decision Outcome** above; this is the summary.
+The full argument is in **Decision Outcome** above. This is the summary.
 
 - **Option 1 - In-run filter only.** Existing core feature, almost no new code, bounds the model
   input including long tool loops, and applies to workflow agent executors too. But it is non-lossy
@@ -191,7 +194,7 @@ The full argument is in **Decision Outcome** above; this is the summary.
   new durable-only code duplicating what core's store-reducer path already does, needs a
   `DurableAgentStateMessage` ⇄ message conversion, and gives no external-storage pluggability.
 - **Option 3 - On-storage maintenance compaction.** Keeps expensive summarization off the request
-  path and maps to ADR-0019's "on existing storage" point; can layer on top of Option 6 later
+  path and maps to ADR-0019's "on existing storage" point, and can layer on top of Option 6 later
   without rework. Adds scheduling machinery, leaves a window where state is un-compacted, and does
   not bound in-turn growth.
 - **Option 4 - Workflow-level hook.** Bounds the inter-executor `full_conversation` that agent-level
@@ -204,13 +207,13 @@ The full argument is in **Decision Outcome** above; this is the summary.
 - **Option 6 - Durable store as a history provider (chosen).** The user's configuration carries over
   unchanged, and the same abstraction makes external backends pluggable, so one seam delivers both
   the opt-in reducer and pluggable storage. Costs a larger entity change that must preserve the
-  `ConversationHistory` consumer contract (response polling, audit, TTL); and L2 does not come free -
-  upstream binds the store-rewrite hook to session state, so the provider publishes a working buffer
-  and reconciles it itself (see "Core Interface Gaps").
+  `ConversationHistory` consumer contract (response polling, audit, TTL). L2 also does not come free,
+  because upstream binds the store-rewrite hook to session state, so the provider publishes a working
+  buffer and reconciles it itself (see "Core Interface Gaps").
 
 ## Cross-Cutting Design Details
 
-- **Reducer trigger.** Honor the configured `ReducerTriggerEvent`; `AfterMessageAdded`
+- **Reducer trigger.** Honor the configured `ReducerTriggerEvent`. `AfterMessageAdded`
   (compact-on-write, before checkpoint) is the natural durable default so the checkpoint is already
   bounded. `BeforeMessagesRetrieval` also works (reduce-on-load, then persist).
 - **Determinism & idempotency.** An opt-in lossy reducer runs inside the entity operation and
@@ -220,7 +223,7 @@ The full argument is in **Decision Outcome** above; this is the summary.
   `ChatReducerCompactionStrategy` / `SummarizationCompactionStrategy`).
 - **Message-list correctness.** Reuse core grouping so atomic tool-call/result and reasoning
   pairings are preserved at every layer.
-- **Token counting.** Triggers must work without a live model call; use the estimator tokenizer
+- **Token counting.** Triggers must work without a live model call, so use the estimator tokenizer
   (`CharacterEstimatorTokenizer` / equivalent) unless a real tokenizer is supplied.
 - **Placement.** The durable history provider backs `AgentEntity` in both languages. L3 lives in the
   `AgentExecutor` context handling.
@@ -230,10 +233,10 @@ The full argument is in **Decision Outcome** above; this is the summary.
 Prototyping the Python `DurableHistoryProvider` surfaced places where the current contracts assume a
 *session-state-backed* history provider. They are recorded here because they affect **any** provider
 whose store is not session state (Cosmos, Valkey, durable), not just this one. The prototype works
-around them; the cleaner fix is upstream.
+around them, but the cleaner fix is upstream.
 
 1. **Store-side compaction is bound to session state rather than to the provider.** `CompactionProvider`
-   has two hooks and only one of them is coupled:
+   has two hooks and only one of them is coupled.
 
    - `before_strategy` runs on messages already in the invocation context, whichever provider loaded
      them. Every provider gets this, so **in-run context bounding already works for external stores**.
@@ -259,14 +262,14 @@ around them; the cleaner fix is upstream.
    > duplicate strategy wiring, and then either: each write overrides the full storage, or only new
    > messages are compacted while a separate interface can be called to compact the existing storage?
 
-   That question shipped unanswered, and the languages then diverged on where the hook lives: .NET
-   puts store reduction on the provider (`IChatReducer`) but only on `InMemoryChatHistoryProvider`
-   (`CosmosChatHistoryProvider` has none); Python puts it in `CompactionProvider` reaching into
+   That question shipped unanswered, and the languages then diverged on where the hook lives. .NET
+   puts store reduction on the provider (`IChatReducer`) but only on `InMemoryChatHistoryProvider`,
+   and `CosmosChatHistoryProvider` has none. Python puts it in `CompactionProvider` reaching into
    session state. **Neither language offers it to external providers.**
 
    *Workaround:* the provider publishes its loaded messages as a working buffer under the expected
    session-state key. *Upstream fix:* bind the store-rewrite hook to the provider abstraction instead
-   of to session state as a storage mechanism - .NET's shape generalizes, Python's does not.
+   of to session state as a storage mechanism, since .NET's shape generalizes and Python's does not.
 
 2. **`save_messages()` is append-only.** The other half of the same open question. It receives only
    the newly produced messages, so mutations that compaction applies to *already stored* messages
@@ -279,13 +282,13 @@ around them; the cleaner fix is upstream.
    this reconciliation.
 
 3. **Message-level metadata was not persisted (durable schema).** `DurableAgentStateMessage.to_dict()`
-   dropped `extension_data` while `from_dict()` read it - a write-lossy asymmetry that silently
+   dropped `extension_data` while `from_dict()` read it, a write-lossy asymmetry that silently
    discarded compaction annotations on every state round-trip. Since annotations are what carry
    compaction state, this had to be fixed for any of this to work. This one is ours rather than
    core's. The Python side now serializes it.
 
    **.NET needs the same treatment, and looks deceptively fine.** Its `DurableAgentStateMessage`
-   already has an `ExtensionData` property, but it is `[JsonExtensionData]` - System.Text.Json's
+   already has an `ExtensionData` property, but it is `[JsonExtensionData]`, System.Text.Json's
    overflow bucket for *unmapped JSON properties*, not a mapping of `ChatMessage.AdditionalProperties`
    where compaction annotations live. `FromChatMessage`/`ToChatMessage` copy neither
    `AdditionalProperties` nor `MessageId` (which .NET does not have at all), so annotations are lost
@@ -294,12 +297,12 @@ around them; the cleaner fix is upstream.
 
 4. **Provider cadence splits under per-service-call persistence.** With
    `require_per_service_call_history_persistence=True`, the agent's once-per-run loop skips history
-   providers because the per-service-call middleware drives `before_run`/`after_run` itself - once per
+   providers because the per-service-call middleware drives `before_run`/`after_run` itself, once per
    **model call** instead of once per run. `CompactionProvider` is not a `HistoryProvider`, so it
    stays on the once-per-run path. The pair is therefore split across two cadences, and compaction
    annotates the buffer *after* the history provider last flushed it, so annotations would not reach
    storage until the following flush. Only `HarnessAgent` sets this flag today, so this is latent
-   rather than live; it is recorded because the symptom would be missing annotations rather than an
+   rather than live. It is recorded because the symptom would be missing annotations rather than an
    error.
 
 Two further core gaps are recorded with the decisions they affect: the process-local **state type
@@ -348,16 +351,16 @@ used, so the caller's agent still behaves normally in-process.
 
 | User configured | Durable behavior |
 | --- | --- |
-| Nothing | Inject a durable history provider, using the `source_id` core's auto-injected provider would have - so default-wired compaction still resolves. No compaction by default (same as core). |
+| Nothing | Inject a durable history provider, using the `source_id` core's auto-injected provider would have, so default-wired compaction still resolves. No compaction by default (same as core). |
 | `InMemoryHistoryProvider` (± compaction) | Replace with the durable provider, **preserving `source_id` and `skip_excluded`** so any attached `CompactionProvider` keeps working untouched. |
-| Cosmos / Redis / file / custom provider | **Leave alone.** The user chose where their conversation lives; durable still supplies execution durability. |
-| Service-managed history | **Leave alone.** The model service owns the conversation. Decided by core's precedence: explicit `store` first, then the client's `STORES_BY_DEFAULT`. |
+| Cosmos / Redis / file / custom provider | **Leave alone.** The user chose where their conversation lives, and durable still supplies execution durability. |
+| Service-managed history | **Leave alone.** The model service owns the conversation. Decided by core's precedence, explicit `store` first and then the client's `STORES_BY_DEFAULT`. |
 | Agent without the core context pipeline | **Leave alone.** Falls back to replaying persisted history. |
 
-Preserving `source_id` is the load-bearing detail: `CompactionProvider` locates history through
+Preserving `source_id` is the load-bearing detail. `CompactionProvider` locates history through
 `history_source_id` (default `"in_memory"`), so a provider swapped in under the same id is invisible
 to the rest of the user's configuration. Because the injected provider is a `HistoryProvider` with
-`load_messages=True`, core's own auto-injection sees a provider present and stands down - no
+`load_messages=True`, core's own auto-injection sees a provider present and stands down, leaving no
 duplicate provider.
 
 An explicit `DurableHistoryProvider` remains supported as an advanced escape hatch, and takes
@@ -365,22 +368,22 @@ precedence over anything the runtime would inject.
 
 ### When the entity manages history itself
 
-Two distinct decisions drive the entity, and conflating them caused bugs:
+Two distinct decisions drive the entity, and conflating them caused bugs.
 
 1. **Who supplies conversation context?** If the agent exposes core's context-provider pipeline,
-   the providers do - so the entity passes a session and delivers **only the new messages**. This
+   the providers do, so the entity passes a session and delivers **only the new messages**. This
    holds whether history lives in durable state, an external store, or the model service.
 2. **Should durable state be bound?** Only when a `DurableHistoryProvider` is present.
 
-The entity therefore replays its own persisted history in exactly one case: an agent that does not
+The entity therefore replays its own persisted history in exactly one case, an agent that does not
 expose the context pipeline at all (for example a fully custom agent). Routing external-store or
-service-backed agents down that path was incorrect - it either bypassed their provider entirely or
-re-sent history the service already had.
+service-backed agents down that path was incorrect, because it either bypassed their provider
+entirely or re-sent history the service already had.
 
 **Consequence:** passing a session is what re-engages the pipeline, so external history providers
-(Cosmos, Redis, file) now function under the durable runtime - previously they were silently
-ignored because no session was ever created. They get the in-run filter like any other provider;
-what they do not get is the framework rewriting their store, which no language offers today (core
+(Cosmos, Redis, file) now function under the durable runtime. Previously they were silently
+ignored because no session was ever created. They get the in-run filter like any other provider.
+What they do not get is the framework rewriting their store, which no language offers today (core
 interface gap 1 above).
 
 That session must also carry the entity's **stable** session id rather than a generated one.
@@ -414,58 +417,58 @@ Restore applies the stored state onto a session created by the agent's own `crea
 the agent's session type is preserved.
 
 **Restoring values as their own types.** Core deserializes state through a type registry that it
-seeds with exactly one entry (`Message`); anything else must be registered explicitly, and the
-registry is process-local. `to_dict`-based types are never auto-registered - only Pydantic models
-are, and only as a side effect of serializing. A durable entity routinely restores in a process that
-never serialized the value, so state would come back as plain dicts instead of its own classes.
+seeds with exactly one entry (`Message`). Anything else must be registered explicitly, and the
+registry is process-local. `to_dict`-based types are never auto-registered, and only Pydantic models
+are, and then only as a side effect of serializing. A durable entity routinely restores in a process
+that never serialized the value, so state would come back as plain dicts instead of its own classes.
 
 Before restoring, the entity therefore registers the serializable types **already loaded in the
 process**. Nothing is imported from persisted data, so this cannot load code the application has not
-already loaded itself - and that is sufficient in practice, because whoever put a value in the state
+already loaded itself, and that is sufficient in practice, because whoever put a value in the state
 bag had to import its class to construct it. The walk is over `SerializationMixin` subclasses and
 costs tens of microseconds.
 
-Residual gaps, both better fixed in core:
+Residual gaps, both better fixed in core.
 
 - Pydantic values in state are keyed by `cls.__name__.lower()` and are not covered, since walking
   every `BaseModel` subclass in the process would be broad and collision-prone.
 - Core could seed the registry with the state types it ships, which would make this unnecessary.
   `register_state_type()` is already public and its documentation names cold-start restore as the
-  motivating case; nothing calls it today.
+  motivating case, yet nothing calls it today.
 
 ### Service-managed conversations
 
 When the model service stores the conversation, it identifies the thread with an id. The entity
 creates a fresh session per operation, so that id is **persisted in durable state and restored on
-the next turn** (as part of the serialized session, above); without it the service would start a new
+the next turn** (as part of the serialized session, above). Without it the service would start a new
 thread every turn. The durable history provider additionally no-ops (neither loading nor flushing)
 for service-managed sessions.
 
-Whether the service owns history is decided with **core's precedence, not the client class alone**:
-an explicit `store` in the agent's options wins, and only when it is unset does the client's
+Whether the service owns history is decided with **core's precedence, not the client class alone**.
+An explicit `store` in the agent's options wins, and only when it is unset does the client's
 `STORES_BY_DEFAULT` apply. This matters because clients that store by default (such as the Responses
 API) are routinely put back into client-side mode with `store=False`. Consulting only
 `STORES_BY_DEFAULT` would leave such an agent with a plain in-memory provider that the durable
-runtime never persists - silently losing the conversation between turns.
+runtime never persists, silently losing the conversation between turns.
 
 Core resolves this rule inside `Agent._run` and does not expose the result, so this layer
-**re-derives it** and can drift from core if the rule changes - with silent conversation loss as the
+**re-derives it** and can drift from core if the rule changes, with silent conversation loss as the
 symptom, which is exactly the bug this rule was written to fix. The unit tests here only pin *our*
-logic; the end-to-end net is the compaction sample, which runs `store=False` against a
+logic. The end-to-end net is the compaction sample, which runs `store=False` against a
 store-by-default client and asserts recall. *Upstream fix:* expose the resolved decision.
 
 ### Retention is a deployment policy, not agent configuration
 
-Compaction annotates; it does not delete. Physically deleting excluded messages bounds durable
+Compaction annotates, it does not delete. Physically deleting excluded messages bounds durable
 storage but is **lossy**, so it is opt-in via `prune_history` at **registration** (app-level default
-with a per-agent override) rather than on the agent. This keeps the agent definition portable - the
-same agent runs in-memory, where a retention policy would be meaningless - and places the setting
-next to its natural sibling, entity lifetime/TTL.
+with a per-agent override) rather than on the agent. This keeps the agent definition portable, since
+the same agent runs in-memory where a retention policy would be meaningless, and it places the
+setting next to its natural sibling, entity lifetime/TTL.
 
 ## Related Concern: Entity Lifetime (TTL) and Cleanup
 
-Compaction bounds the *size* of a conversation; entity **lifetime** - when the persisted state is
-deleted - is a separate axis. It is out of scope for the decision above, but is recorded here
+Compaction bounds the *size* of a conversation. Entity **lifetime**, when the persisted state is
+deleted, is a separate axis. It is out of scope for the decision above, but is recorded here
 because it is the natural sibling of the retention setting introduced by this ADR, and because it
 has a notable cross-language parity gap in this repository.
 

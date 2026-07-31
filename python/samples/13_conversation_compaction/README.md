@@ -31,9 +31,9 @@ Registering that agent with the durable runtime changes nothing about how you co
 - **Context stays bounded.** Only the messages the strategy keeps are sent to the model, so a long
   conversation does not grow the per-turn context without limit.
 
-The full conversation remains in durable storage; compaction bounds what the *model* sees. To also
-bound what is *stored*, opt in at registration with `add_agent(agent, prune_history=True)` — that is
-lossy and therefore off by default.
+The full conversation remains in durable storage, and compaction bounds what the *model* sees. To
+also bound what is *stored*, opt in at registration with `add_agent(agent, prune_history=True)`,
+which is lossy and therefore off by default.
 
 ### Client-side vs service-managed history
 
@@ -79,7 +79,7 @@ turn, which it answers correctly.
 
 The trade-off is the point of the sample: a sliding window keeps context bounded by *dropping* older
 turns from what the model sees, so facts from long-past turns are genuinely no longer available to
-the model. Those messages are **not deleted** — they remain in durable storage, marked as excluded,
+the model. Those messages are **not deleted**. They remain in durable storage, marked as excluded,
 so the conversation record stays complete and auditable. Choose a strategy accordingly: use
 summarization if old details must survive in the model's context, and a sliding window when only
 recent context matters.

@@ -19,8 +19,8 @@ agent = Agent(
 
 Registering that agent with the durable runtime changes nothing about how you configure it:
 
-- **Your provider is left alone.** Unlike an `InMemoryHistoryProvider` — which is swapped for a
-  durable-backed one (see [13_conversation_compaction](../13_conversation_compaction)) — a provider
+- **Your provider is left alone.** An `InMemoryHistoryProvider` is swapped for a durable-backed one
+  (see [13_conversation_compaction](../13_conversation_compaction)), but a provider
   you chose deliberately is never substituted. You picked where the conversation lives.
 - **It receives a stable session id.** The durable entity creates a fresh session per operation but
   gives it the entity's own session id, so the provider reads and writes the same key every turn.
@@ -28,7 +28,7 @@ Registering that agent with the durable runtime changes nothing about how you co
 - **Execution is still durable.** Retries, restarts, and orchestration guarantees are unchanged, and
   durable state still records the conversation for audit.
 
-`redis_history_provider.py` is deliberately small — roughly "read a list, append to a list" — to show
+`redis_history_provider.py` is deliberately small, roughly "read a list, append to a list", to show
 how little a bring-your-own-store provider needs. The same shape applies to Cosmos DB, a file, or any
 other backend.
 
@@ -65,7 +65,7 @@ other backend.
 ## What to look for
 
 The client states a fact and then asks for it back in a later turn. The agent answers correctly,
-which is only possible if Redis served the earlier turn back into the model's context — the durable
+which is only possible if Redis served the earlier turn back into the model's context. The durable
 runtime itself never replays history for this agent.
 
 To see it directly, inspect the Redis key while the sample runs:
