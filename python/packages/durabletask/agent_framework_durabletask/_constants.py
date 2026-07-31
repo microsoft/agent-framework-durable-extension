@@ -134,8 +134,8 @@ class DurableStateFields:
     # Stable per-message identity (used for compaction reconciliation and idempotency)
     MESSAGE_ID: Final[str] = "messageId"
 
-    # Service-issued conversation id, for agents whose provider stores history server-side
-    SERVICE_SESSION_ID: Final[str] = "serviceSessionId"
+    # Serialized AgentSession: the provider state bag plus any service-issued conversation id
+    SESSION: Final[str] = "session"
 
 
 class ContentTypes:

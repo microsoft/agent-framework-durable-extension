@@ -10,12 +10,15 @@ plugs in unchanged.
 from collections.abc import AsyncIterable, Awaitable, Sequence
 from typing import Any
 
+import pytest
 from agent_framework import (
     Agent,
+    AgentSession,
     ChatResponse,
     ChatResponseUpdate,
     CompactionProvider,
     Content,
+    ContextProvider,
     HistoryProvider,
     InMemoryHistoryProvider,
     Message,
@@ -167,7 +170,7 @@ class TestDurableHistoryProvider:
     """Durable entity state is the single store behind core's HistoryProvider."""
 
     async def test_history_is_stored_once(self) -> None:
-        """No side-car session blob: messages live only in conversation history."""
+        """Messages live only in conversation history, never duplicated into the session blob."""
         client = RecordingChatClient()
         provider = _InMemoryStateProvider()
         entity = _make_entity(_build_agent(client), provider)
@@ -175,8 +178,11 @@ class TestDurableHistoryProvider:
         await _run_turns(entity, ["first", "second"])
 
         persisted = provider._get_state_dict()["data"]
-        assert "sessionState" not in persisted
-        assert list(persisted.keys()) == ["conversationHistory"]
+        assert "conversationHistory" in persisted
+        # The session is persisted for provider state, but the history provider's slice - the
+        # only place messages would appear - is excluded from it.
+        session_state = persisted["session"]["state"]
+        assert not any("messages" in slice_ for slice_ in session_state.values() if isinstance(slice_, dict))
         assert len(entity.state.data.conversation_history) == 4
 
     async def test_provider_supplies_history_across_turns(self) -> None:
@@ -381,3 +387,115 @@ class TestExternalHistoryProviders:
         entity = _make_entity(agent, _InMemoryStateProvider())
 
         assert entity.agent.context_providers[0] is external
+
+
+class TestSessionStatePersistence:
+    """Provider state kept in the session bag survives across turns.
+
+    Core documents the per-provider ``state`` dict as durable for the life of the session and
+    persists it through ``AgentSession.to_dict()``. The entity builds a fresh session per
+    operation, so it has to carry that state forward - otherwise providers silently start from
+    scratch every turn (tool approval rules and queued approval requests, todo lists, memory
+    extraction state).
+    """
+
+    async def test_provider_state_survives_across_turns(self) -> None:
+        seen: list[dict[str, Any]] = []
+
+        class _CountingProvider(ContextProvider):
+            def __init__(self) -> None:
+                super().__init__("counter")
+
+            async def before_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+                seen.append(dict(state))
+
+            async def after_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+                state["runs"] = state.get("runs", 0) + 1
+
+        agent = Agent(client=RecordingChatClient(), name="assistant", context_providers=[_CountingProvider()])
+        entity = _make_entity(agent, _InMemoryStateProvider())
+
+        await _run_turns(entity, ["first", "second", "third"])
+
+        assert seen[0] == {}  # nothing stored yet on the first turn
+        assert seen[1] == {"runs": 1}
+        assert seen[2] == {"runs": 2}
+
+    async def test_state_is_persisted_as_plain_data(self) -> None:
+        """Values go through core's serialization, so entity state stays JSON-safe."""
+
+        class _StoringProvider(ContextProvider):
+            def __init__(self) -> None:
+                super().__init__("storer")
+
+            async def after_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+                state.setdefault("note", Message(role="user", contents=["remember me"]))
+
+        provider = _InMemoryStateProvider()
+        agent = Agent(client=RecordingChatClient(), name="assistant", context_providers=[_StoringProvider()])
+        await _run_turns(_make_entity(agent, provider), ["first"])
+
+        session_payload = provider._get_state_dict()["data"]["session"]
+        assert isinstance(session_payload["state"]["storer"]["note"], dict)
+        # ...and comes back as a Message, because core pre-registers that type.
+        restored = AgentSession.from_dict(dict(session_payload))
+        assert isinstance(restored.state["storer"]["note"], Message)
+
+    async def test_service_conversation_id_rides_along(self) -> None:
+        """It is part of the serialized session, so it needs no field of its own."""
+        provider = _InMemoryStateProvider()
+        agent = Agent(client=RecordingChatClient(), name="assistant", context_providers=[InMemoryHistoryProvider()])
+        entity = _make_entity(agent, provider)
+
+        await _run_turns(entity, ["first"])
+        assert "service_session_id" in provider._get_state_dict()["data"]["session"]
+
+    async def test_tool_approval_state_survives_a_turn(self) -> None:
+        """The motivating case: standing approvals must outlive the turn that granted them.
+
+        Also pins the known limitation - core only pre-registers ``Message`` in its state type
+        registry, and that registry is populated per process, so a ``to_dict``-based value comes
+        back as plain data rather than its original class. The data survives, which is what the
+        approval middleware needs (its accessor takes either form), but the type does not.
+        """
+        # The harness is experimental; skip rather than fail if it moves.
+        tool_approval = pytest.importorskip("agent_framework._harness._tool_approval")
+        ToolApprovalRule = tool_approval.ToolApprovalRule
+        ToolApprovalState = tool_approval.ToolApprovalState
+
+        seen: list[Any] = []
+        approval_key = "_tool_approval"
+
+        class _ApprovalCarryingProvider(ContextProvider):
+            def __init__(self) -> None:
+                super().__init__("approvals")
+
+            async def before_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+                seen.append(session.state.get(approval_key))
+
+            async def after_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+                session.state.setdefault(
+                    approval_key,
+                    ToolApprovalState(rules=[ToolApprovalRule("delete_file")]),
+                )
+
+        agent = Agent(client=RecordingChatClient(), name="assistant", context_providers=[_ApprovalCarryingProvider()])
+        await _run_turns(_make_entity(agent, _InMemoryStateProvider()), ["first", "second"])
+
+        assert seen[0] is None  # nothing granted yet
+        restored = seen[1]
+        assert restored is not None, "the approval granted on turn 1 was lost"
+        rules = restored["rules"] if isinstance(restored, dict) else restored.rules
+        assert rules[0]["tool_name"] == "delete_file"
+
+    async def test_durable_history_slice_is_not_persisted(self) -> None:
+        """That slice is derived from conversation_history; storing it would duplicate it."""
+        provider = _InMemoryStateProvider()
+        agent = Agent(client=RecordingChatClient(), name="assistant", context_providers=[InMemoryHistoryProvider()])
+        entity = _make_entity(agent, provider)
+
+        await _run_turns(entity, ["first", "second"])
+
+        durable_history = next(p for p in entity.agent.context_providers if isinstance(p, DurableHistoryProvider))
+        session_state = provider._get_state_dict()["data"]["session"]["state"]
+        assert durable_history.source_id not in session_state

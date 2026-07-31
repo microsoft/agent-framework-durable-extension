@@ -200,6 +200,18 @@
           "type": "array",
           "description": "Ordered list of conversation entries.",
           "items": { "$ref": "#/$defs/conversationEntry" }
+        },
+        "session": {
+          "type": "object",
+          "description": "Serialized agent session carried between turns: the per-provider state bag and any service-issued conversation id. The agent's own history provider slice is excluded, since conversationHistory is the record of truth.",
+          "properties": {
+            "session_id": { "type": "string" },
+            "service_session_id": { "type": ["string", "null"] },
+            "state": {
+              "type": "object",
+              "description": "Provider state keyed by context provider source id."
+            }
+          }
         }
       }
     }

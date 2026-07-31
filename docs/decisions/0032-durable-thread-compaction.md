@@ -368,12 +368,46 @@ External providers key their storage on `session.session_id`, so a per-operation
 read and write a different key every turn - the conversation would silently restart each time with
 nothing to indicate a problem.
 
+### The session is persisted, not just its conversation id
+
+Core documents the per-provider `state` dict handed to `before_run`/`after_run` as durable for the
+life of the session, and persists it through `AgentSession.to_dict()`. The entity builds a fresh
+session per operation, so anything providers keep there was previously discarded at the end of every
+turn: tool approval rules and **queued approval requests**, todo lists, background-task state, memory
+extraction state. On .NET the same bag (`AgentSessionStateBag`) is a first-class part of the
+`AIContextProvider` contract via `StateKeys`, so the gap is wider there.
+
+That is a poor fit for a durable runtime whose headline scenario is long-running human-in-the-loop:
+an approval flow that spans turns cannot work if the pending requests are dropped between them.
+
+So the entity persists the **whole serialized session** rather than individual fields. Two
+consequences:
+
+- The service-issued conversation id needs no bespoke field of its own - it is already part of
+  `AgentSession.to_dict()`. This replaces a hand-rolled `serviceSessionId` state field and its
+  capture/restore helpers with one general mechanism that matches core's own serialization contract.
+- The durable history provider's own slice is **excluded** before persisting. It is derived from
+  `conversationHistory` on every turn, so storing it would duplicate the transcript and let the copy
+  drift from the record of truth.
+
+Restore applies the stored state onto a session created by the agent's own `create_session()`, so
+the agent's session type is preserved.
+
+**Known limitation.** Core's state type registry is process-local and, for `to_dict`-based types, is
+only populated by an explicit `register_state_type()` call - of which core makes exactly one, for
+`Message`. A durable entity routinely deserializes in a process that never serialized the value, so
+such types come back as plain dicts rather than their original class. Core's own state is mostly
+plain JSON data (and its tool-approval accessor tolerates both forms), so this is latent rather than
+breaking, but a provider that assumes it gets its class back will not. The fix belongs in core:
+pre-register the state types it ships.
+
 ### Service-managed conversations
 
 When the model service stores the conversation, it identifies the thread with an id. The entity
 creates a fresh session per operation, so that id is **persisted in durable state and restored on
-the next turn**; without it the service would start a new thread every turn. The durable history
-provider additionally no-ops (neither loading nor flushing) for service-managed sessions.
+the next turn** (as part of the serialized session, above); without it the service would start a new
+thread every turn. The durable history provider additionally no-ops (neither loading nor flushing)
+for service-managed sessions.
 
 Whether the service owns history is decided with **core's precedence, not the client class alone**:
 an explicit `store` in the agent's options wins, and only when it is unset does the client's

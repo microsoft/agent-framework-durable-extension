@@ -14,6 +14,7 @@ from typing import Any, cast
 from agent_framework import (
     AgentResponse,
     AgentResponseUpdate,
+    AgentSession,
     Content,
     Message,
     ResponseStream,
@@ -39,6 +40,10 @@ from ._history_provider import (
 from ._models import RunRequest
 
 logger = logging.getLogger("agent_framework.durabletask")
+
+# Keys produced by core's ``AgentSession.to_dict()``.
+_SESSION_ID_KEY = "session_id"
+_SESSION_STATE_KEY = "state"
 
 
 class AgentEntityStateProviderMixin:
@@ -233,7 +238,7 @@ class AgentEntity:
 
             state_response = DurableAgentStateResponse.from_run_response(correlation_id, agent_run_response)
             self.state.data.conversation_history.append(state_response)
-            self._capture_service_session(session)
+            self._capture_session(session)
             self.persist_state()
 
             return agent_run_response
@@ -268,18 +273,32 @@ class AgentEntity:
         """
         return isinstance(getattr(self.agent, "context_providers", None), (list, tuple))
 
-    def _capture_service_session(self, session: Any) -> None:
-        """Persist a service-issued conversation id so later turns continue the same thread.
+    def _capture_session(self, session: Any) -> None:
+        """Persist the session so provider state survives to the next turn.
 
-        Service-backed agents keep the conversation on the service side and identify it with an
-        id. The entity creates a fresh session per operation, so without persisting this the
-        service would start a new thread on every turn.
+        The entity creates a fresh session per operation, so anything the context providers keep
+        in the session state bag - tool approval rules and queued approval requests, todo lists,
+        memory extraction state - would otherwise be discarded at the end of every turn. Core
+        documents that state as durable for the life of the session, so agents that rely on it
+        must behave the same way here. The serialized session also carries the service-issued
+        conversation id, so service-backed agents continue the same thread.
+
+        The durable history provider's own slice is dropped before persisting: it is derived from
+        ``conversation_history`` on every turn, so storing it would duplicate the transcript and
+        let the copy drift from the record of truth.
         """
         if session is None:
             return
-        service_session_id = getattr(session, "service_session_id", None)
-        if isinstance(service_session_id, str) and service_session_id:
-            self.state.data.service_session_id = service_session_id
+        to_dict = getattr(session, "to_dict", None)
+        if not callable(to_dict):
+            return
+
+        payload = cast("dict[str, Any]", to_dict())
+        state = payload.get(_SESSION_STATE_KEY)
+        durable_history = self._find_durable_history_provider()
+        if isinstance(state, dict) and durable_history is not None:
+            cast("dict[str, Any]", state).pop(durable_history.source_id, None)
+        self.state.data.session = payload
 
     def _drop_already_stored(self, messages: list[DurableAgentStateMessage]) -> list[DurableAgentStateMessage]:
         """Filter out upstream context messages this entity has already recorded.
@@ -314,15 +333,13 @@ class AgentEntity:
         return None
 
     def _create_session(self) -> Any:
-        """Create the session for this operation.
+        """Create the session for this operation and restore what the last turn left on it.
 
         Conversation history lives in the agent's context providers (durable entity state, an
         external store, or the model service), so a fresh session per operation is enough - but it
         must carry the entity's **stable** session id. External history providers (Cosmos, Redis,
         file) key their storage on ``session.session_id``; with a freshly generated id they would
-        read and write a different key every turn and never see prior history. Any previously
-        issued service conversation id is restored so service-backed agents continue the same
-        thread.
+        read and write a different key every turn and never see prior history.
         """
         create_session = getattr(self.agent, "create_session", None)
         if not callable(create_session):
@@ -330,11 +347,23 @@ class AgentEntity:
                 f"Agent {type(self.agent).__name__} exposes context providers but does not support create_session()."
             )
         session: Any = create_session(session_id=self._state_provider.session_id)
-
-        service_session_id = self.state.data.service_session_id
-        if service_session_id and getattr(session, "service_session_id", None) is None:
-            session.service_session_id = service_session_id
+        self._restore_session(session)
         return session
+
+    def _restore_session(self, session: Any) -> None:
+        """Apply the previous turn's session state onto a freshly created session.
+
+        The agent's own ``create_session`` is used so its session type is preserved; only the
+        state bag and the service conversation id are carried over.
+        """
+        stored = self.state.data.session
+        if not stored or _SESSION_ID_KEY not in stored:
+            return
+
+        restored = AgentSession.from_dict(dict(stored))
+        session.state.update(restored.state)
+        if getattr(session, "service_session_id", None) is None:
+            session.service_session_id = restored.service_session_id
 
     @staticmethod
     def _to_replayable_message(message: DurableAgentStateMessage) -> Message | None:

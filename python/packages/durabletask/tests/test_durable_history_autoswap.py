@@ -294,4 +294,4 @@ class TestServiceManagedSessions:
 
         assert seen_ids[0] is None  # first turn has no thread yet
         assert seen_ids[1] == "svc-thread-1"  # second turn continues the same thread
-        assert provider._get_state_dict()["data"]["serviceSessionId"] == "svc-thread-1"
+        assert provider._get_state_dict()["data"]["session"]["service_session_id"] == "svc-thread-1"
