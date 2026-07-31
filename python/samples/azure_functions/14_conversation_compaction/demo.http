@@ -1,0 +1,63 @@
+### Conversation Compaction Sample Interactions
+@baseUrl = http://localhost:7071
+@agentName = Historian
+@agentRoute = {{baseUrl}}/api/agents/{{agentName}}
+@healthRoute = {{baseUrl}}/api/health
+@sessionId = compaction-demo-001
+
+### Health Check
+GET {{healthRoute}}
+
+### Turn 1 - filler
+POST {{agentRoute}}/run
+Content-Type: application/json
+
+{
+  "message": "Name a color.",
+  "session_id": "{{sessionId}}"
+}
+
+### Turn 2 - filler
+POST {{agentRoute}}/run
+Content-Type: application/json
+
+{
+  "message": "Name a country.",
+  "session_id": "{{sessionId}}"
+}
+
+### Turn 3 - filler
+POST {{agentRoute}}/run
+Content-Type: application/json
+
+{
+  "message": "Name a fruit.",
+  "session_id": "{{sessionId}}"
+}
+
+### Turn 4 - filler
+POST {{agentRoute}}/run
+Content-Type: application/json
+
+{
+  "message": "Name a musical instrument.",
+  "session_id": "{{sessionId}}"
+}
+
+### Turn 5 - state the fact to recall later
+POST {{agentRoute}}/run
+Content-Type: application/json
+
+{
+  "message": "My project codename is BLUEHERON.",
+  "session_id": "{{sessionId}}"
+}
+
+### Turn 6 - the fact is inside the retained window, so it is answered
+POST {{agentRoute}}/run
+Content-Type: application/json
+
+{
+  "message": "What is my project codename? Reply with just the codename.",
+  "session_id": "{{sessionId}}"
+}

@@ -70,6 +70,10 @@ az account show
 - **[11_subworkflow](11_subworkflow/)**: Compose workflows by embedding an inner `Workflow` as a node via `WorkflowExecutor`. On the durable host the inner workflow runs as its own child orchestration, and a single `configure_workflow` call registers both.
 - **[12_subworkflow_hitl](12_subworkflow_hitl/)**: A human-in-the-loop pause that lives **inside a sub-workflow**. The nested request surfaces to the client with a qualified request id (`{executor}~{ordinal}~{requestId}`) behind a single top-level addressing surface.
 
+### Conversation History
+- **[13_conversation_compaction](13_conversation_compaction/)**: Persist conversation history durably and compact it as it grows. An agent configured the ordinary core way (`InMemoryHistoryProvider` + `CompactionProvider`) gets durable-backed history automatically, with compaction annotations persisted alongside the messages.
+- **[14_external_history_redis](14_external_history_redis/)**: Keep conversation history in a store you chose (Redis here) instead of durable state. The durable runtime leaves your provider alone and hands it the entity's stable session id, so it continues the conversation across turns and restarts.
+
 ### Azure Functions Hosting
 
 These samples host workflows and agents on Azure Durable Functions (`func start`) instead of the worker-client model above. Each has its own setup steps in its README, and shared environment setup lives in [azure_functions/README.md](azure_functions/README.md).
@@ -87,6 +91,7 @@ These samples host workflows and agents on Azure Durable Functions (`func start`
 - **[azure_functions/11_workflow_parallel](azure_functions/11_workflow_parallel/)**: Parallel execution of executors and agents in an Azure Durable Functions workflow.
 - **[azure_functions/12_workflow_hitl](azure_functions/12_workflow_hitl/)**: The workflow human-in-the-loop pattern on Azure Durable Functions, with the reviewer notified from inside the workflow via `WorkflowHitlContext`.
 - **[azure_functions/13_subworkflow_hitl](azure_functions/13_subworkflow_hitl/)**: A human-in-the-loop pause inside a sub-workflow on Azure Durable Functions, exposed through a single top-level respond surface.
+- **[azure_functions/14_conversation_compaction](azure_functions/14_conversation_compaction/)**: Persist conversation history durably and compact it as it grows, on Azure Functions. The Functions counterpart to [13_conversation_compaction](13_conversation_compaction/).
 
 ## Running the Samples
 

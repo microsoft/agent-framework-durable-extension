@@ -93,13 +93,13 @@ class TestSampleSingleAgent:
         assert response.headers.get("x-ms-thread-id") is None
 
     def test_conversation_continuity(self) -> None:
-        """Test conversation context is maintained across requests."""
+        """History must accumulate *and* reach the model on later turns."""
         session_id = "test-continuity"
 
-        # First message
+        # First message establishes a fact that exists nowhere else.
         response1 = self.helper.post_json(
             f"{self.base_url}/run",
-            {"message": "Tell me a short joke about weather in Seattle.", "session_id": session_id},
+            {"message": "My favorite animal is the axolotl. Tell me a short joke about it.", "session_id": session_id},
         )
         assert response1.status_code in [200, 202]
 
@@ -107,13 +107,17 @@ class TestSampleSingleAgent:
             data1 = response1.json()
             assert data1["message_count"] == 2  # Initial + reply
 
-            # Second message in same session
+            # Second message in same session; only answerable from persisted history.
             response2 = self.helper.post_json(
-                f"{self.base_url}/run", {"message": "What about San Francisco?", "session_id": session_id}
+                f"{self.base_url}/run",
+                {"message": "What is my favorite animal? Reply with just the animal name.", "session_id": session_id},
             )
             assert response2.status_code == 200
             data2 = response2.json()
             assert data2["message_count"] == 4
+            assert "axolotl" in str(data2["response"]).lower(), (
+                f"Agent lost conversation context across turns. Got: {data2['response']!r}"
+            )
         else:
             # In async mode, we can't easily test message count
             # Just verify we can make multiple calls
