@@ -722,13 +722,19 @@ class DurableAgentStateMessage:
         contents: List of content items (text, function calls, errors, etc.)
         author_name: Optional name of the message author (typically set for assistant messages)
         created_at: Optional timestamp when the message was created
-        extension_data: Optional additional metadata (not serialized per schema)
+        message_id: Optional stable identifier for the message. Persisted so context-management
+            state (for example compaction summaries that reference the messages they replace)
+            can be reconciled across entity operations.
+        extension_data: Optional additional metadata. Carries a message's
+            ``additional_properties``, including compaction annotations, so that context
+            management state survives across entity operations.
     """
 
     role: str
     contents: list[DurableAgentStateContent]
     author_name: str | None = None
     created_at: datetime | None = None
+    message_id: str | None = None
     extension_data: dict[str, Any] | None = None
 
     def __init__(
@@ -738,11 +744,13 @@ class DurableAgentStateMessage:
         author_name: str | None = None,
         created_at: datetime | None = None,
         extension_data: dict[str, Any] | None = None,
+        message_id: str | None = None,
     ) -> None:
         self.role = role
         self.contents = contents
         self.author_name = author_name
         self.created_at = created_at
+        self.message_id = message_id
         self.extension_data = extension_data
 
     def to_dict(self) -> dict[str, Any]:
@@ -763,6 +771,10 @@ class DurableAgentStateMessage:
             result[DurableStateFields.CREATED_AT] = self.created_at.isoformat()
         if self.author_name is not None:
             result[DurableStateFields.AUTHOR_NAME] = self.author_name
+        if self.message_id is not None:
+            result[DurableStateFields.MESSAGE_ID] = self.message_id
+        if self.extension_data:
+            result[DurableStateFields.EXTENSION_DATA] = self.extension_data
         return result
 
     @classmethod
@@ -775,6 +787,7 @@ class DurableAgentStateMessage:
             contents=_parse_contents(data),
             author_name=data.get(DurableStateFields.AUTHOR_NAME),
             created_at=created_at,
+            message_id=data.get(DurableStateFields.MESSAGE_ID),
             extension_data=data.get(DurableStateFields.EXTENSION_DATA),
         )
 
@@ -820,6 +833,7 @@ class DurableAgentStateMessage:
             role=chat_message.role if hasattr(chat_message.role, "value") else str(chat_message.role),
             contents=contents_list,
             author_name=chat_message.author_name,
+            message_id=getattr(chat_message, "message_id", None),
             extension_data=dict(chat_message.additional_properties) if chat_message.additional_properties else None,
         )
 
@@ -840,6 +854,9 @@ class DurableAgentStateMessage:
 
         if self.author_name is not None:
             kwargs["author_name"] = self.author_name
+
+        if self.message_id is not None:
+            kwargs["message_id"] = self.message_id
 
         if self.extension_data is not None:
             kwargs["additional_properties"] = self.extension_data

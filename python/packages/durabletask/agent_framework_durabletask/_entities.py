@@ -7,6 +7,7 @@ from __future__ import annotations
 import inspect
 import logging
 import warnings
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -27,6 +28,12 @@ from ._durable_agent_state import (
     DurableAgentStateMessage,
     DurableAgentStateRequest,
     DurableAgentStateResponse,
+)
+from ._history_provider import (
+    DurableHistoryBinding,
+    DurableHistoryProvider,
+    bind_durable_history,
+    unbind_durable_history,
 )
 from ._models import RunRequest
 
@@ -171,16 +178,41 @@ class AgentEntity:
         state_request = DurableAgentStateRequest.from_run_request(run_request)
         self.state.data.conversation_history.append(state_request)
 
-        try:
-            chat_messages: list[Message] = [
-                replayable_message
-                for entry in self.state.data.conversation_history
-                if not self._is_error_response(entry)
-                for m in entry.messages
-                if (replayable_message := self._to_replayable_message(m)) is not None
-            ]
+        durable_history = self._find_durable_history_provider()
+        binding_token = (
+            bind_durable_history(
+                DurableHistoryBinding(state_provider=self._state_provider, correlation_id=correlation_id)
+            )
+            if durable_history is not None
+            else None
+        )
 
-            run_kwargs: dict[str, Any] = {"messages": chat_messages, "options": options}
+        try:
+            if durable_history is not None:
+                # Provider-backed path: the DurableHistoryProvider loads prior turns straight
+                # from durable entity state, so history lives in exactly one place and only the
+                # newly received request messages are passed as run input. Core context providers
+                # (history and compaction) therefore work unchanged on the durable runtime.
+                chat_messages = [
+                    replayable_message
+                    for m in state_request.messages
+                    if (replayable_message := self._to_replayable_message(m)) is not None
+                ]
+                run_kwargs: dict[str, Any] = {
+                    "messages": chat_messages,
+                    "session": self._create_session(),
+                    "options": options,
+                }
+            else:
+                # Legacy path: replay the full persisted conversation on every turn.
+                chat_messages = [
+                    replayable_message
+                    for entry in self.state.data.conversation_history
+                    if not self._is_error_response(entry)
+                    for m in entry.messages
+                    if (replayable_message := self._to_replayable_message(m)) is not None
+                ]
+                run_kwargs = {"messages": chat_messages, "options": options}
 
             agent_run_response: AgentResponse = await self._invoke_agent(
                 run_kwargs=run_kwargs,
@@ -212,6 +244,34 @@ class AgentEntity:
             self.persist_state()
 
             return error_response
+
+        finally:
+            if binding_token is not None:
+                unbind_durable_history(binding_token)
+
+    def _find_durable_history_provider(self) -> DurableHistoryProvider | None:
+        """Return the agent's :class:`DurableHistoryProvider`, if it is configured with one."""
+        providers = getattr(self.agent, "context_providers", None)
+        if not isinstance(providers, (list, tuple)):
+            return None
+        for provider in cast("Sequence[Any]", providers):
+            if isinstance(provider, DurableHistoryProvider):
+                return provider
+        return None
+
+    def _create_session(self) -> Any:
+        """Create a fresh session for a provider-backed run.
+
+        No session state needs to persist: conversation history and any compaction
+        annotations live in durable entity state, loaded by the history provider.
+        """
+        create_session = getattr(self.agent, "create_session", None)
+        if not callable(create_session):
+            raise TypeError(
+                f"Agent {type(self.agent).__name__} is configured with a DurableHistoryProvider "
+                "but does not support create_session()."
+            )
+        return create_session()
 
     @staticmethod
     def _to_replayable_message(message: DurableAgentStateMessage) -> Message | None:

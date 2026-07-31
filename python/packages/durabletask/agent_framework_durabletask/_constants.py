@@ -131,6 +131,9 @@ class DurableStateFields:
     # History field
     CONVERSATION_HISTORY: Final[str] = "conversationHistory"
 
+    # Stable per-message identity (used for compaction reconciliation and idempotency)
+    MESSAGE_ID: Final[str] = "messageId"
+
 
 class ContentTypes:
     """Content type discriminator values for the $type field.

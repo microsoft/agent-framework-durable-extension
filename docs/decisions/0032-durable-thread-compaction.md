@@ -256,6 +256,39 @@ conversation, the client holds no history to compact.
 - **Placement.** The durable `ChatHistoryProvider` backs `AgentEntity` (.NET) / `AgentEntity` in
   `_entities.py` (Python). L3 lives in the `AgentExecutor` context handling in both languages.
 
+## Core Interface Gaps for Pluggable History Providers
+
+Prototyping the Python `DurableHistoryProvider` surfaced three places where the current contracts
+assume a *session-state-backed* history provider. They are recorded here because they affect **any**
+external provider (Cosmos, Valkey, durable), not just this one. The prototype works around them; the
+cleaner fix is upstream.
+
+1. **Compaction bypasses the provider.** `CompactionProvider.after_run` reads stored messages
+   directly from `session.state[history_source_id]["messages"]` rather than asking the provider.
+   A provider whose store is *not* session state therefore gets no post-run compaction - L2 silently
+   no-ops. *Workaround:* the provider publishes its loaded messages as a working buffer under that
+   key. *Upstream fix:* have compaction request messages from the history provider.
+
+2. **`save_messages()` is append-only.** It receives only the newly produced messages, so mutations
+   that compaction applies to *already stored* messages (setting `_excluded`, inserting a summary)
+   have no defined path back to the store. *Workaround (implemented):* the provider overrides
+   `after_run` and reconciles the working buffer itself **by `message_id`**, updating annotations on
+   known messages and inserting ones compaction added. This required persisting `messageId` in
+   durable state, which also gives summaries the **stable identity** the idempotency requirement
+   needs. *Upstream fix:* add an explicit replace/flush operation alongside append so every external
+   provider does not have to re-implement this reconciliation.
+
+3. **Message-level metadata was not persisted (durable schema).** `DurableAgentStateMessage.to_dict()`
+   dropped `extension_data` while `from_dict()` read it - a write-lossy asymmetry that silently
+   discarded compaction annotations on every state round-trip. Since annotations are what carry
+   compaction state, this had to be fixed for any of this to work. The Python side now serializes it;
+   **.NET and the shared state schema need the same treatment** for cross-language parity.
+
+Consequence for ordering: core runs `before_run` forward and `after_run` in **reverse**. With
+`[history, compaction]`, compaction annotates the buffer *before* the history provider flushes it
+(convenient), but it sees history only as of the **previous** turn - so context reaches a steady
+state rather than shrinking immediately. This is expected, not a defect.
+
 ## More Information
 
 - Builds on [ADR-0019](https://github.com/microsoft/agent-framework/blob/main/docs/decisions/0019-python-context-compaction-strategy.md) (context compaction strategy),

@@ -50,6 +50,7 @@ from ._durable_agent_state import (
 )
 from ._entities import AgentEntity, AgentEntityStateProviderMixin
 from ._executors import DurableAgentExecutor
+from ._history_provider import DurableHistoryBinding, DurableHistoryProvider
 from ._models import AgentSessionId, DurableAgentSession, RunRequest
 from ._orchestration_context import DurableAIAgentOrchestrationContext
 from ._response_utils import ensure_response_format, load_agent_response
@@ -159,6 +160,8 @@ __all__ = [
     "DurableAgentStateUriContent",
     "DurableAgentStateUsage",
     "DurableAgentStateUsageContent",
+    "DurableHistoryBinding",
+    "DurableHistoryProvider",
     "DurableStateFields",
     "DurableTaskWorkflowContext",
     "DurableWorkflowClient",
