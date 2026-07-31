@@ -248,7 +248,7 @@ class DurableHistoryProvider(HistoryProvider):
         buffer = cast("list[Message]", raw_buffer)
         stored_by_id = cast("dict[str, tuple[DurableAgentStateEntry, int]]", raw_positions)
 
-        pruned: list[tuple[DurableAgentStateEntry, int]] = []
+        pruned: list[tuple[DurableAgentStateEntry, DurableAgentStateMessage]] = []
         # Messages that compaction added (summaries) are inserted right after the last
         # known message so ordering in durable state matches the compacted conversation.
         last_known: tuple[DurableAgentStateEntry, int] | None = None
@@ -260,6 +260,9 @@ class DurableHistoryProvider(HistoryProvider):
             if position is None:
                 inserted = self._insert_new_message(binding, message, after=last_known)
                 if inserted is not None:
+                    # The insertion pushed everything after it in that entry along by one, so the
+                    # recorded positions have to move too or later updates land on the wrong message.
+                    self._shift_positions(stored_by_id, inserted)
                     last_known = inserted
                 continue
 
@@ -268,12 +271,28 @@ class DurableHistoryProvider(HistoryProvider):
             stored.extension_data = annotations
             last_known = position
             if self.prune_excluded and annotations and annotations.get(EXCLUDED_KEY):
-                pruned.append(position)
+                pruned.append((entry, stored))
 
         if pruned:
             self._prune(binding, pruned)
 
         binding.state_provider.persist_state()
+
+    @staticmethod
+    def _shift_positions(
+        stored_by_id: dict[str, tuple[DurableAgentStateEntry, int]],
+        inserted: tuple[DurableAgentStateEntry, int],
+    ) -> None:
+        """Move recorded positions that an insertion pushed further along their entry.
+
+        Args:
+            stored_by_id: Recorded ``message_id`` to position mapping, updated in place.
+            inserted: The entry and index the new message was inserted at.
+        """
+        entry, index = inserted
+        for message_id, (stored_entry, stored_index) in list(stored_by_id.items()):
+            if stored_entry is entry and stored_index >= index:
+                stored_by_id[message_id] = (stored_entry, stored_index + 1)
 
     @staticmethod
     def _insert_new_message(
@@ -297,18 +316,20 @@ class DurableHistoryProvider(HistoryProvider):
         return first, 0
 
     @staticmethod
-    def _prune(binding: DurableHistoryBinding, pruned: list[tuple[DurableAgentStateEntry, int]]) -> None:
-        """Physically remove excluded messages (and any entries left empty)."""
-        by_entry: dict[int, list[int]] = {}
-        for entry, index in pruned:
-            by_entry.setdefault(id(entry), []).append(index)
+    def _prune(
+        binding: DurableHistoryBinding,
+        pruned: list[tuple[DurableAgentStateEntry, DurableAgentStateMessage]],
+    ) -> None:
+        """Physically remove excluded messages (and any entries left empty).
 
-        for entry, _ in pruned:
-            indexes = by_entry.pop(id(entry), None)
-            if indexes is None:
-                continue
-            for index in sorted(indexes, reverse=True):
-                del entry.messages[index]
+        Removal is by identity rather than index, since insertions earlier in this flush may have
+        moved messages within their entry.
+        """
+        for entry, stored in pruned:
+            for index, candidate in enumerate(entry.messages):
+                if candidate is stored:
+                    del entry.messages[index]
+                    break
 
         history = binding.state_provider.state.data.conversation_history
         remaining = [entry for entry in history if entry.messages]

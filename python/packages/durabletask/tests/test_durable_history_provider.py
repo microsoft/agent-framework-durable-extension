@@ -328,6 +328,54 @@ class TestDurableHistoryProvider:
         ids = [m.message_id for m in _stored_messages(entity) if m.message_id]
         assert len(ids) == len(set(ids)), f"duplicate message ids persisted: {ids}"
 
+    async def test_insertion_keeps_later_positions_valid(self) -> None:
+        """Inserting into an entry shifts its later messages, so recorded positions must follow.
+
+        Entries normally hold a single message, which hides this. A workflow node receives the
+        upstream conversation as several messages in one request entry, so a summary inserted in
+        the middle of that entry invalidates the recorded index of everything after it, and the
+        annotation lands on the wrong stored message.
+        """
+
+        async def _insert_then_exclude_up3(messages: list[Message]) -> bool:
+            if any((m.additional_properties or {}).get("_marker") for m in messages):
+                return False
+            summary = Message(
+                role="assistant",
+                contents=["summary"],
+                message_id="summary_mid",
+                additional_properties={"_marker": True},
+            )
+            # Insert near the front, so messages later in the *same* durable entry shift.
+            messages.insert(1, summary)
+            for message in messages:
+                if message.message_id == "up-3":
+                    message.additional_properties = dict(message.additional_properties or {}) | {"_excluded": True}
+            return True
+
+        client = RecordingChatClient()
+        entity = _make_entity(
+            _build_agent(client, with_compaction=True, strategy=_insert_then_exclude_up3),
+            _InMemoryStateProvider(),
+        )
+
+        # An upstream conversation delivered as one multi-message request entry.
+        context = [
+            Message(role="user", contents=["upstream one"], message_id="up-1").to_dict(),
+            Message(role="assistant", contents=["upstream two"], message_id="up-2").to_dict(),
+            Message(role="user", contents=["upstream three"], message_id="up-3").to_dict(),
+        ]
+        await entity.run({"message": "upstream three", "correlationId": "c0", "contextMessages": context})
+        await entity.run({"message": "next", "correlationId": "c1"})
+
+        stored = {m.message_id: m for m in _stored_messages(entity) if m.message_id}
+        assert "up-3" in stored, f"expected the upstream messages to be persisted: {list(stored)}"
+
+        # The annotation must land on up-3 itself, not on the neighbour that shifted when the
+        # summary was inserted earlier in the same entry.
+        assert (stored["up-3"].extension_data or {}).get("_excluded"), "annotation did not reach up-3"
+        assert not (stored["up-2"].extension_data or {}).get("_excluded"), "annotation shifted onto up-2"
+
     async def test_service_managed_session_is_skipped(self) -> None:
         """When the model service owns the conversation, the provider must not participate."""
         from types import SimpleNamespace

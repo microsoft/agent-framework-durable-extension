@@ -160,7 +160,11 @@ class TestEntityContextIngestion:
         assert [m.message_id for m in entry.messages] == ["m1"]
 
     def test_fully_duplicate_context_keeps_last_message(self) -> None:
-        """The agent must always receive at least one input message."""
+        """The agent must always receive at least one input message.
+
+        The kept copy loses its id, because storing two messages under one id would collide in the
+        compaction position map and send annotations or pruning to the wrong stored message.
+        """
         provider = _InMemoryStateProvider()
         entity = AgentEntity(_stub_agent(), state_provider=provider)
 
@@ -172,7 +176,25 @@ class TestEntityContextIngestion:
         entry = DurableAgentStateRequest.from_run_request(self._request(messages, "corr-1"))
         entry.messages = entity._drop_already_stored(entry.messages)
 
-        assert [m.message_id for m in entry.messages] == ["m0"]
+        assert len(entry.messages) == 1
+        assert entry.messages[0].message_id is None
+        assert entry.messages[0].to_chat_message().text == "hello"
+
+    def test_repeated_context_does_not_duplicate_message_ids(self) -> None:
+        """A cycle that re-delivers the whole upstream conversation must not collide ids."""
+        provider = _InMemoryStateProvider()
+        entity = AgentEntity(_stub_agent(), state_provider=provider)
+
+        messages = [Message(role="user", contents=["hello"], message_id="m0")]
+        for index in range(3):
+            entry = DurableAgentStateRequest.from_run_request(self._request(messages, f"corr-{index}"))
+            entry.messages = entity._drop_already_stored(entry.messages)
+            entity.state.data.conversation_history.append(entry)
+
+        stored_ids = [
+            m.message_id for entry in entity.state.data.conversation_history for m in entry.messages if m.message_id
+        ]
+        assert len(stored_ids) == len(set(stored_ids)), f"duplicate message ids persisted: {stored_ids}"
 
 
 class TestRunRequestRoundTrip:

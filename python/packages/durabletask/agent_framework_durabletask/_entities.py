@@ -365,7 +365,12 @@ class AgentEntity:
 
         deduped = [m for m in messages if not m.message_id or m.message_id not in known_ids]
         if not deduped and messages:
-            return [messages[-1]]
+            # Keep the newest message so the agent still has an input, but drop the id it shares
+            # with the copy already in history. Two stored messages under one id collide in the
+            # compaction position map, so annotations and pruning would target the wrong one.
+            repeated = messages[-1]
+            repeated.message_id = None
+            return [repeated]
         return deduped
 
     def _find_durable_history_provider(self) -> DurableHistoryProvider | None:
