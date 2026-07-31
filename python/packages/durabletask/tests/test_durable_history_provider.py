@@ -453,10 +453,9 @@ class TestSessionStatePersistence:
     async def test_tool_approval_state_survives_a_turn(self) -> None:
         """The motivating case: standing approvals must outlive the turn that granted them.
 
-        Also pins the known limitation - core only pre-registers ``Message`` in its state type
-        registry, and that registry is populated per process, so a ``to_dict``-based value comes
-        back as plain data rather than its original class. The data survives, which is what the
-        approval middleware needs (its accessor takes either form), but the type does not.
+        It also comes back as ``ToolApprovalState`` rather than a plain dict. Core seeds its state
+        type registry with only ``Message``, so the entity registers the serializable types loaded
+        in this process before restoring.
         """
         # The harness is experimental; skip rather than fail if it moves.
         tool_approval = pytest.importorskip("agent_framework._harness._tool_approval")
@@ -484,9 +483,8 @@ class TestSessionStatePersistence:
 
         assert seen[0] is None  # nothing granted yet
         restored = seen[1]
-        assert restored is not None, "the approval granted on turn 1 was lost"
-        rules = restored["rules"] if isinstance(restored, dict) else restored.rules
-        assert rules[0]["tool_name"] == "delete_file"
+        assert isinstance(restored, ToolApprovalState), f"approval state came back as {type(restored).__name__}"
+        assert restored.rules[0].tool_name == "delete_file"
 
     async def test_durable_history_slice_is_not_persisted(self) -> None:
         """That slice is derived from conversation_history; storing it would duplicate it."""

@@ -19,6 +19,7 @@ from agent_framework import (
     Message,
     ResponseStream,
     SupportsAgentRun,
+    register_state_type,
 )
 from durabletask.entities import DurableEntity
 
@@ -44,6 +45,51 @@ logger = logging.getLogger("agent_framework.durabletask")
 # Keys produced by core's ``AgentSession.to_dict()``.
 _SESSION_ID_KEY = "session_id"
 _SESSION_STATE_KEY = "state"
+
+try:
+    # Root of core's serializable state types. Not part of core's public surface, so a move must
+    # not break the entity: without it, restored provider state simply stays as plain dicts,
+    # which is core's own behavior.
+    from agent_framework._serialization import SerializationMixin
+
+    _SerializableStateRoot: type | None = SerializationMixin
+except ImportError:  # pragma: no cover - depends on the installed core version
+    _SerializableStateRoot = None
+
+_registered_state_types: set[type] = set()
+
+
+def _register_loaded_state_types() -> None:
+    """Let core restore session state values as their own classes after a cold start.
+
+    Core deserializes session state through a type registry that it seeds with exactly one entry
+    (``Message``); anything else must be registered explicitly, and the registry is process-local.
+    A durable entity routinely restores state in a process that never serialized it, so without
+    this a provider's state comes back as a plain dict rather than its own class.
+
+    Only classes already imported in this process are registered - nothing is imported from
+    persisted data - so this cannot load code the application has not already loaded itself. That
+    is enough in practice, because whoever put a value in the state bag had to import its class to
+    construct it.
+    """
+    if _SerializableStateRoot is None:
+        return
+
+    seen: set[type] = set()
+    pending: list[type] = [_SerializableStateRoot]
+    while pending:
+        for subclass in pending.pop().__subclasses__():
+            if subclass in seen:
+                continue
+            seen.add(subclass)
+            pending.append(subclass)
+            if subclass in _registered_state_types:
+                continue
+            _registered_state_types.add(subclass)
+            try:
+                register_state_type(subclass)
+            except Exception:
+                logger.debug("Could not register session state type %s", subclass, exc_info=True)
 
 
 class AgentEntityStateProviderMixin:
@@ -359,6 +405,10 @@ class AgentEntity:
         stored = self.state.data.session
         if not stored or _SESSION_ID_KEY not in stored:
             return
+
+        # Done here rather than at import: by now the agent and its providers are built, so the
+        # classes their state uses are loaded and can be resolved.
+        _register_loaded_state_types()
 
         restored = AgentSession.from_dict(dict(stored))
         session.state.update(restored.state)

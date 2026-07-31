@@ -393,13 +393,25 @@ consequences:
 Restore applies the stored state onto a session created by the agent's own `create_session()`, so
 the agent's session type is preserved.
 
-**Known limitation.** Core's state type registry is process-local and, for `to_dict`-based types, is
-only populated by an explicit `register_state_type()` call - of which core makes exactly one, for
-`Message`. A durable entity routinely deserializes in a process that never serialized the value, so
-such types come back as plain dicts rather than their original class. Core's own state is mostly
-plain JSON data (and its tool-approval accessor tolerates both forms), so this is latent rather than
-breaking, but a provider that assumes it gets its class back will not. The fix belongs in core:
-pre-register the state types it ships.
+**Restoring values as their own types.** Core deserializes state through a type registry that it
+seeds with exactly one entry (`Message`); anything else must be registered explicitly, and the
+registry is process-local. `to_dict`-based types are never auto-registered - only Pydantic models
+are, and only as a side effect of serializing. A durable entity routinely restores in a process that
+never serialized the value, so state would come back as plain dicts instead of its own classes.
+
+Before restoring, the entity therefore registers the serializable types **already loaded in the
+process**. Nothing is imported from persisted data, so this cannot load code the application has not
+already loaded itself - and that is sufficient in practice, because whoever put a value in the state
+bag had to import its class to construct it. The walk is over `SerializationMixin` subclasses and
+costs tens of microseconds.
+
+Residual gaps, both better fixed in core:
+
+- Pydantic values in state are keyed by `cls.__name__.lower()` and are not covered, since walking
+  every `BaseModel` subclass in the process would be broad and collision-prone.
+- Core could seed the registry with the state types it ships, which would make this unnecessary.
+  `register_state_type()` is already public and its documentation names cold-start restore as the
+  motivating case; nothing calls it today.
 
 ### Service-managed conversations
 
