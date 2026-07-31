@@ -63,23 +63,42 @@ class TestMultiAgentOrchestrationConditionals:
         assert email_agent is not None
         assert email_agent.name == EMAIL_AGENT_NAME
 
-    def test_conditional_branching(self):
-        """Test that conditional branching works correctly."""
-        # Test with obvious spam
-        spam_payload = {
-            "email_id": "spam-001",
-            "email_content": "Buy cheap medications online! No prescription needed! Limited time offer!",
-        }
+    def test_conditional_branching(self) -> None:
+        """Spam takes the spam-handler branch and legitimate mail takes the reply branch.
 
+        Asserting only that the orchestration completed would pass even if the condition sent
+        every email down the same branch, so each case checks the branch-specific output.
+        """
         spam_instance_id = self.dts_client.schedule_new_orchestration(
             orchestrator="spam_detection_orchestration",
-            input=spam_payload,
+            input={
+                "email_id": "spam-001",
+                "email_content": "Buy cheap medications online! No prescription needed! Limited time offer!",
+            },
         )
-
-        # Both should complete successfully (different branches)
-        spam_metadata = self.orch_helper.wait_for_orchestration(
+        spam_metadata, spam_output = self.orch_helper.wait_for_orchestration_with_output(
             instance_id=spam_instance_id,
             timeout=300.0,
         )
 
         assert spam_metadata.runtime_status == OrchestrationStatus.COMPLETED
+        # The spam handler returns "Email marked as spam: ..."; the other branch returns "Email sent: ...".
+        assert "marked as spam" in str(spam_output).lower(), f"spam took the wrong branch: {spam_output}"
+
+        legit_instance_id = self.dts_client.schedule_new_orchestration(
+            orchestrator="spam_detection_orchestration",
+            input={
+                "email_id": "legit-001",
+                "email_content": (
+                    "Hi team, please confirm receipt of purchase order PRJ-4417 for the new lab "
+                    "hardware, and let me know the expected delivery date."
+                ),
+            },
+        )
+        legit_metadata, legit_output = self.orch_helper.wait_for_orchestration_with_output(
+            instance_id=legit_instance_id,
+            timeout=300.0,
+        )
+
+        assert legit_metadata.runtime_status == OrchestrationStatus.COMPLETED
+        assert "email sent" in str(legit_output).lower(), f"legitimate mail took the wrong branch: {legit_output}"

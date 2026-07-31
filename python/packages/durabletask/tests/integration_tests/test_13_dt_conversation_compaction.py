@@ -65,6 +65,34 @@ class TestConversationCompaction:
         assert agent is not None
         assert agent.name == "Historian"
 
+    def test_session_is_persisted_and_scoped(self) -> None:
+        """The serialized session survives real entity storage with the right shape.
+
+        Unit tests keep the session dict in memory, so they cannot show that the blob survives the
+        entity's JSON encoding, that it carries the entity's **own** session id, or that the durable
+        history provider's slice really is kept out of it.
+        """
+        agent = self.agent_client.get_agent("Historian")
+        session = agent.create_session()
+
+        assert agent.run("Name a color.", session=session) is not None
+        assert agent.run("Name a fruit.", session=session) is not None
+
+        stored = self._read_state(session.durable_session_id).data.session
+        assert stored is not None, "the session was not persisted"
+
+        # The entity's own id rather than a per-operation one. External history providers key
+        # their storage on this, so a generated id would restart their conversation every turn.
+        assert stored["session_id"] == session.durable_session_id.key
+
+        slices = stored["state"]
+        # The compaction provider's own slice is carried across turns...
+        assert "compaction" in slices, f"expected provider state to be persisted, got {slices}"
+        # ...but the durable history provider's is not, since it is derived from
+        # conversationHistory and would otherwise duplicate the transcript. "in_memory" is the
+        # source_id the sample's provider keeps after the durable swap.
+        assert "in_memory" not in slices, f"durable history slice leaked into the session: {slices}"
+
     def test_recent_context_survives_compaction(self) -> None:
         """A fact inside the retained window is still answerable after several turns."""
         agent = self.agent_client.get_agent("Historian")
