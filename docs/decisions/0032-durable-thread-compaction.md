@@ -332,7 +332,7 @@ used, so the caller's agent still behaves normally in-process.
 | Nothing | Inject a durable history provider, using the `source_id` core's auto-injected provider would have - so default-wired compaction still resolves. No compaction by default (same as core). |
 | `InMemoryHistoryProvider` (± compaction) | Replace with the durable provider, **preserving `source_id` and `skip_excluded`** so any attached `CompactionProvider` keeps working untouched. |
 | Cosmos / Redis / file / custom provider | **Leave alone.** The user chose where their conversation lives; durable still supplies execution durability. |
-| Service-managed history | **Leave alone.** The model service owns the conversation. |
+| Service-managed history | **Leave alone.** The model service owns the conversation. Decided by core's precedence: explicit `store` first, then the client's `STORES_BY_DEFAULT`. |
 | Agent without the core context pipeline | **Leave alone.** Falls back to replaying persisted history. |
 
 Preserving `source_id` is the load-bearing detail: `CompactionProvider` locates history through
@@ -363,12 +363,24 @@ re-sent history the service already had.
 ignored because no session was ever created. Store-side compaction still no-ops for them (core
 interface gap 1 below); only the in-run filter applies.
 
+That session must also carry the entity's **stable** session id rather than a generated one.
+External providers key their storage on `session.session_id`, so a per-operation id would make them
+read and write a different key every turn - the conversation would silently restart each time with
+nothing to indicate a problem.
+
 ### Service-managed conversations
 
 When the model service stores the conversation, it identifies the thread with an id. The entity
 creates a fresh session per operation, so that id is **persisted in durable state and restored on
 the next turn**; without it the service would start a new thread every turn. The durable history
 provider additionally no-ops (neither loading nor flushing) for service-managed sessions.
+
+Whether the service owns history is decided with **core's precedence, not the client class alone**:
+an explicit `store` in the agent's options wins, and only when it is unset does the client's
+`STORES_BY_DEFAULT` apply. This matters because clients that store by default (such as the Responses
+API) are routinely put back into client-side mode with `store=False`. Consulting only
+`STORES_BY_DEFAULT` would leave such an agent with a plain in-memory provider that the durable
+runtime never persists - silently losing the conversation between turns.
 
 ### Retention is a deployment policy, not agent configuration
 
@@ -377,6 +389,33 @@ storage but is **lossy**, so it is opt-in via `prune_history` at **registration*
 with a per-agent override) rather than on the agent. This keeps the agent definition portable - the
 same agent runs in-memory, where a retention policy would be meaningless - and places the setting
 next to its natural sibling, entity lifetime/TTL.
+
+## Related Concern: Entity Lifetime (TTL) and Cleanup
+
+Compaction bounds the *size* of a conversation; entity **lifetime** - when the persisted state is
+deleted - is a separate axis. It is out of scope for the decision above, but is recorded here
+because it is the natural sibling of the retention setting introduced by this ADR, and because it
+has a notable cross-language parity gap in this repository.
+
+- **.NET agents:** `DurableAgentsOptions.DefaultTimeToLive` (default 14 days) provides a global TTL,
+  with a per-agent override via `AddAIAgent(agent, ttl)`. Idle entities self-delete via an
+  `ExpirationTimeUtc` + `CheckAndDeleteIfExpired` self-signal.
+- **.NET workflows:** workflow agent executors are auto-registered *without* a TTL
+  (`DurableWorkflowOptions` calls `AddAIAgent(agent)`) and inherit the global default. There is **no
+  workflow-scoped TTL option**, and each agent-node invocation spawns a fresh, single-use entity that
+  then lingers for the full default (14 days) - far longer than needed for throwaway per-node state.
+- **Python (agents *and* workflows):** there is **no TTL/cleanup mechanism at all** - no global
+  default, no per-agent option, no `expirationTimeUtc` in the state schema, and no deletion. Entities
+  persist indefinitely until manually deleted. This is a **.NET/Python parity gap**.
+
+Follow-ups (tracked separately from the compaction decision):
+
+1. **Port the TTL mechanism to Python** - a global default TTL, per-agent override, an
+   `expirationTimeUtc` state field (for cross-language schema parity), and idle-based self-deletion.
+2. **Expose a configurable global TTL consistently** across both languages, for agents and workflows.
+3. **Give workflow-spawned agent entities a sensible lifetime** - a short workflow-scoped default TTL,
+   or deterministic cleanup when the workflow completes, instead of the 14-day agent default (with an
+   idle-TTL backstop for workflows that pause or never reach a terminal state).
 
 ## More Information
 
