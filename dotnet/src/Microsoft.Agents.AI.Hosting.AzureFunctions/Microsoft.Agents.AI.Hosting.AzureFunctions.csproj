@@ -3,6 +3,7 @@
   <PropertyGroup>
     <TargetFrameworks>$(TargetFrameworksCore)</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
+    <IsReleaseCandidate>true</IsReleaseCandidate>
     <!-- CA2007: This rule should generally be suppressed in Durable Task libraries. Also, this is not library code. -->
     <!-- AD0001: Temporary workaround for Microsoft.DurableTask.Analyzers v0.2.0 bug (ArgumentNullException on 'node'). Remove when upgrading to a fixed analyzer version. -->
     <NoWarn>$(NoWarn);CA2007;AD0001</NoWarn>
