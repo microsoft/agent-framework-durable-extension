@@ -55,6 +55,10 @@ class TestExternalHistoryProvider:
     async def _history_entries(self, session_id: Any) -> list[str]:
         """Read the raw history entries the sample's provider wrote for a session.
 
+        The provider keys on the core session id, which qualifies the entity key with the entity
+        name so that agent nodes sharing a key in a workflow run stay separate. The exact name
+        casing is the runtime's, so the key is discovered rather than reconstructed.
+
         Args:
             session_id: The durable session id used for the conversation.
 
@@ -63,9 +67,14 @@ class TestExternalHistoryProvider:
         """
         client = aioredis.from_url(self.redis_url, decode_responses=True)
         try:
+            matches: Any = await client.keys(f"{KEY_PREFIX}:*{session_id.key}")  # type: ignore[misc]
+            keys = [k if isinstance(k, str) else k.decode() for k in matches]
+            assert len(keys) <= 1, f"the conversation was scattered across keys: {keys}"
+            if not keys:
+                return []
             # The client is configured with decode_responses, so entries come back as strings.
             # Coerce anyway, since redis-py types lrange as bytes or str depending on version.
-            entries: Any = await client.lrange(f"{KEY_PREFIX}:{session_id.key}", 0, -1)  # type: ignore[misc]
+            entries: Any = await client.lrange(keys[0], 0, -1)  # type: ignore[misc]
             return [entry if isinstance(entry, str) else entry.decode() for entry in entries]
         finally:
             await client.aclose()

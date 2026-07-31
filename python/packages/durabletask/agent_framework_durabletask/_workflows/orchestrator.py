@@ -83,6 +83,11 @@ SOURCE_WORKFLOW_START = "__workflow_start__"
 SOURCE_ORCHESTRATOR = "__orchestrator__"
 SOURCE_HITL_RESPONSE = "__hitl_response__"
 
+# Identifies the workflow's own input in the conversation forwarded between agent nodes. Agent
+# entities use message ids to recognize context they have already recorded, so every message the
+# workflow puts in that conversation needs one.
+WORKFLOW_INPUT_MESSAGE_ID = "wf_input_0"
+
 # A WorkflowExecutor node runs its inner workflow as a durable child orchestration.
 # The parent wraps the node's input in SUBWORKFLOW_INPUT_KEY (defined alongside the
 # trust-boundary sanitizer in serialization.py) so the child orchestrator can tell a
@@ -231,7 +236,15 @@ def build_agent_executor_response(
     if isinstance(previous_message, AgentExecutorResponse) and previous_message.full_conversation:
         full_conversation.extend(previous_message.full_conversation)
     elif isinstance(previous_message, str):
-        full_conversation.append(Message(role="user", contents=[previous_message]))
+        full_conversation.append(
+            Message(role="user", contents=[previous_message], message_id=WORKFLOW_INPUT_MESSAGE_ID)
+        )
+    # Core leaves message_id unset, and a node that runs more than once receives this
+    # conversation again every time. Without an id the entity cannot tell the repeat from new
+    # input, so it re-records the whole conversation on each visit and state grows without bound.
+    # The position is fixed once a message joins the conversation and the orchestrator rebuilds
+    # the same sequence on replay, so deriving the id from it is both unique and replay-safe.
+    assistant_message.message_id = f"wf_{executor_id}_{len(full_conversation)}"
     full_conversation.append(assistant_message)
 
     return AgentExecutorResponse(

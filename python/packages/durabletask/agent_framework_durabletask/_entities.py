@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import warnings
 from collections.abc import Sequence
@@ -42,9 +43,8 @@ from ._models import RunRequest
 
 logger = logging.getLogger("agent_framework.durabletask")
 
-# Keys produced by core's ``AgentSession.to_dict()``.
+# Key produced by core's ``AgentSession.to_dict()``.
 _SESSION_ID_KEY = "session_id"
-_SESSION_STATE_KEY = "state"
 
 try:
     # Root of core's serializable state types. Not part of core's public surface, so a move must
@@ -122,9 +122,32 @@ class AgentEntityStateProviderMixin:
             return cast(str, legacy_hook())
         raise NotImplementedError
 
+    def _get_entity_name_from_entity(self) -> str:
+        """Return the entity name, when the host exposes one.
+
+        Optional, so state providers written before this hook existed keep working. They fall
+        back to a core session id built from the key alone.
+        """
+        return ""
+
     @property
     def session_id(self) -> str:
         return self._get_session_id_from_entity()
+
+    @property
+    def core_session_id(self) -> str:
+        """Identity handed to core's ``create_session``, unique to this entity.
+
+        ``session_id`` is only the entity key, which is not unique on its own. Every agent node
+        in one workflow run shares a key (the orchestration instance id) and is told apart by
+        entity name, so an external history provider keyed on the key alone would mix the
+        histories of different nodes. The name is included here to keep them separate.
+
+        Uses the same ``@name@key`` form as :class:`AgentSessionId`, so the result parses back.
+        """
+        name = self._get_entity_name_from_entity()
+        key = self.session_id
+        return f"@{name}@{key}" if name else key
 
     @property
     def thread_id(self) -> str:
@@ -331,7 +354,15 @@ class AgentEntity:
 
         The durable history provider's own slice is dropped before persisting: it is derived from
         ``conversation_history`` on every turn, so storing it would duplicate the transcript and
-        let the copy drift from the record of truth.
+        let the copy drift from the record of truth. It is removed *before* serializing rather
+        than after, because that slice holds the working message buffer and its position index,
+        and serializing the whole transcript only to discard it is pure waste.
+
+        Provider state is arbitrary, so the payload is checked before it replaces the last good
+        one. Core neither raises nor warns on a value it cannot serialize, it passes the live
+        object through, and the entity state provider serializes eagerly. An unusable payload
+        would therefore fail the save, and fail it again from the error handler, masking whatever
+        the agent actually returned.
         """
         if session is None:
             return
@@ -339,11 +370,31 @@ class AgentEntity:
         if not callable(to_dict):
             return
 
-        payload = cast("dict[str, Any]", to_dict())
-        state = payload.get(_SESSION_STATE_KEY)
         durable_history = self._find_durable_history_provider()
-        if isinstance(state, dict) and durable_history is not None:
-            cast("dict[str, Any]", state).pop(durable_history.source_id, None)
+        session_state = getattr(session, "state", None)
+        transient: Any = None
+        has_transient = False
+        if durable_history is not None and isinstance(session_state, dict):
+            bag = cast("dict[str, Any]", session_state)
+            if durable_history.source_id in bag:
+                transient = bag.pop(durable_history.source_id)
+                has_transient = True
+        try:
+            payload = cast("dict[str, Any]", to_dict())
+        finally:
+            if has_transient:
+                cast("dict[str, Any]", session_state)[durable_history.source_id] = transient  # type: ignore[union-attr]
+
+        try:
+            json.dumps(payload)
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "[AgentEntity] Session state could not be serialized and was not persisted, so the "
+                "previous turn's state is kept. A context provider is holding a value that is not "
+                "JSON-compatible: %s",
+                exc,
+            )
+            return
         self.state.data.session = payload
 
     def _drop_already_stored(self, messages: list[DurableAgentStateMessage]) -> list[DurableAgentStateMessage]:
@@ -391,13 +442,16 @@ class AgentEntity:
         must carry the entity's **stable** session id. External history providers (Cosmos, Redis,
         file) key their storage on ``session.session_id``, and with a freshly generated id they would
         read and write a different key every turn and never see prior history.
+
+        The id is qualified with the entity name (see ``core_session_id``) because the key alone
+        collides across the agent nodes of one workflow run.
         """
         create_session = getattr(self.agent, "create_session", None)
         if not callable(create_session):
             raise TypeError(
                 f"Agent {type(self.agent).__name__} exposes context providers but does not support create_session()."
             )
-        session: Any = create_session(session_id=self._state_provider.session_id)
+        session: Any = create_session(session_id=self._state_provider.core_session_id)
         self._restore_session(session)
         return session
 
@@ -579,3 +633,6 @@ class DurableTaskEntityStateProvider(DurableEntity, AgentEntityStateProviderMixi
 
     def _get_session_id_from_entity(self) -> str:
         return self.entity_context.entity_id.key
+
+    def _get_entity_name_from_entity(self) -> str:
+        return self.entity_context.entity_id.entity

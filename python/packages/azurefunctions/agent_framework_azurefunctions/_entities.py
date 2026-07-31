@@ -47,6 +47,9 @@ class AzureFunctionEntityStateProvider(AgentEntityStateProviderMixin):
     def _get_session_id_from_entity(self) -> str:
         return str(self._context.entity_key)
 
+    def _get_entity_name_from_entity(self) -> str:
+        return str(self._context.entity_name)
+
 
 def create_agent_entity(
     agent: SupportsAgentRun,

@@ -81,10 +81,20 @@ class TestConversationCompaction:
         stored = self._read_state(session.durable_session_id).data.session
         assert stored is not None, "the session was not persisted"
 
-        # The entity's own id rather than a per-operation one. External history providers key
+        # The entity's own identity rather than a per-operation id. External history providers key
         # their storage on this, so a generated id would restart their conversation every turn.
+        # It carries the entity name as well as the key, because agent nodes in one workflow run
+        # share a key and would otherwise all resolve to the same conversation.
         assert session.durable_session_id is not None
-        assert stored["session_id"] == session.durable_session_id.key
+        key = session.durable_session_id.key
+        assert stored["session_id"].endswith(f"@{key}"), (
+            f"expected the session id to end with the entity key {key}, got {stored['session_id']}"
+        )
+        # The runtime lowercases entity names, so compare that way.
+        entity_name = session.durable_session_id.entity_name.lower()
+        assert entity_name in stored["session_id"].lower(), (
+            f"expected the entity name in the session id, got {stored['session_id']}"
+        )
 
         slices = stored["state"]
         # The compaction provider's own slice is carried across turns...

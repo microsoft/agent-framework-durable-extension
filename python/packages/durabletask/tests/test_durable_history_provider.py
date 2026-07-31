@@ -7,6 +7,7 @@ interface, so conversation history is persisted exactly once and core compaction
 plugs in unchanged.
 """
 
+import json
 from collections.abc import AsyncIterable, Awaitable, Sequence
 from copy import deepcopy
 from typing import Any
@@ -86,6 +87,9 @@ class _InMemoryStateProvider(AgentEntityStateProviderMixin):
         return self._state_dict
 
     def _set_state_dict(self, state: dict[str, Any]) -> None:
+        # The durable SDK serializes entity state as it is set, so a value it cannot encode
+        # surfaces here rather than later. Mirrored so tests see the same failure the host does.
+        json.dumps(state)
         self._state_dict = state
 
     def _get_session_id_from_entity(self) -> str:
@@ -605,3 +609,56 @@ class TestSessionStatePersistence:
         durable_history = next(p for p in _providers_of(entity) if isinstance(p, DurableHistoryProvider))
         session_state = provider._get_state_dict()["data"]["session"]["state"]
         assert durable_history.source_id not in session_state
+
+    async def test_durable_history_slice_is_dropped_before_serializing(self) -> None:
+        """Not after. That slice holds the working buffer, so serializing it is wasted work.
+
+        It also keeps a position index whose values reference durable state objects, so the less
+        of it that reaches core's serializer the better.
+        """
+        serialized_keys: list[list[str]] = []
+
+        class _SpySession:
+            def __init__(self, state: dict[str, Any]) -> None:
+                self.state = state
+                self.service_session_id = None
+
+            def to_dict(self) -> dict[str, Any]:
+                serialized_keys.append(sorted(self.state))
+                return {"session_id": "spy", "state": dict(self.state)}
+
+        entity = _make_entity(_build_agent(RecordingChatClient()), _InMemoryStateProvider())
+        durable_history = next(p for p in _providers_of(entity) if isinstance(p, DurableHistoryProvider))
+        session = _SpySession({durable_history.source_id: {"messages": ["transcript"]}, "other": {"keep": 1}})
+
+        entity._capture_session(session)
+
+        assert serialized_keys == [["other"]], f"the durable slice was serialized: {serialized_keys}"
+        assert durable_history.source_id in session.state, "the caller's session was left modified"
+
+    async def test_unserializable_provider_state_does_not_break_the_turn(self) -> None:
+        """Core passes a value it cannot serialize straight through, without raising or warning.
+
+        Assigning that to entity state fails the save, and the error handler saves again with the
+        same payload, so the second failure escapes and masks whatever the agent returned. The
+        payload is checked first instead, keeping the last good session.
+        """
+
+        class _UnserializableProvider(ContextProvider):
+            def __init__(self) -> None:
+                super().__init__("unserializable")
+
+            async def after_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+                state["handle"] = object()
+
+        provider = _InMemoryStateProvider()
+        agent = _agent([InMemoryHistoryProvider(), _UnserializableProvider()])
+        entity = _make_entity(agent, provider)
+
+        await _run_turns(entity, ["first"])
+
+        stored = provider._get_state_dict()
+        assert stored["data"].get("session") is None, "an unusable session payload was persisted"
+        # The turn still completed and the conversation was recorded.
+        assert len(entity.state.data.conversation_history) == 2
+        json.dumps(stored)

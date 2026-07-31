@@ -23,7 +23,10 @@ from agent_framework_durabletask import (
     DurableAgentStateRequest,
     RunRequest,
 )
-from agent_framework_durabletask._workflows.orchestrator import _build_context_messages
+from agent_framework_durabletask._workflows.orchestrator import (
+    _build_context_messages,
+    build_agent_executor_response,
+)
 
 
 class _StubAgent:
@@ -44,8 +47,9 @@ class _StubAgent:
 
 
 class _InMemoryStateProvider(AgentEntityStateProviderMixin):
-    def __init__(self, *, session_id: str = "wf-session") -> None:
+    def __init__(self, *, session_id: str = "wf-session", entity_name: str = "") -> None:
         self._session_id = session_id
+        self._entity_name = entity_name
         self._state_dict: dict[str, Any] = {}
 
     def _get_state_dict(self) -> dict[str, Any]:
@@ -56,6 +60,9 @@ class _InMemoryStateProvider(AgentEntityStateProviderMixin):
 
     def _get_session_id_from_entity(self) -> str:
         return self._session_id
+
+    def _get_entity_name_from_entity(self) -> str:
+        return self._entity_name
 
 
 def _upstream_response(*, texts: list[str], agent_text: str) -> AgentExecutorResponse:
@@ -195,6 +202,84 @@ class TestEntityContextIngestion:
             m.message_id for entry in entity.state.data.conversation_history for m in entry.messages if m.message_id
         ]
         assert len(stored_ids) == len(set(stored_ids)), f"duplicate message ids persisted: {stored_ids}"
+
+
+class TestWorkflowConversationIdentity:
+    """Messages the workflow itself builds must carry ids, or a repeated node cannot spot them.
+
+    Core leaves ``message_id`` unset, and the entity's duplicate check treats a message without one
+    as new. An unstamped conversation therefore defeats the check entirely, and a node in a cycle
+    re-records the whole conversation on every visit.
+    """
+
+    def _cycle_ids(self) -> list[str]:
+        conversation: Any = "start"
+        for node in ["A", "B", "A", "B"]:
+            conversation = build_agent_executor_response(node, f"{node} says", None, conversation)
+        return [m.message_id or "" for m in conversation.full_conversation]
+
+    def test_every_built_message_carries_an_id(self) -> None:
+        response = build_agent_executor_response("writer", "drafted", None, "start")
+
+        ids = [m.message_id for m in response.full_conversation]
+        assert all(ids), f"a message went out without an id: {ids}"
+
+    def test_ids_stay_unique_around_a_cycle(self) -> None:
+        ids = self._cycle_ids()
+
+        assert all(ids), f"a message went out without an id: {ids}"
+        assert len(ids) == len(set(ids)), f"ids collided around the cycle: {ids}"
+
+    def test_ids_are_replay_stable(self) -> None:
+        """The orchestrator rebuilds this conversation on replay, so the ids must not move."""
+        assert self._cycle_ids() == self._cycle_ids()
+
+    def test_a_revisited_node_records_only_what_is_new(self) -> None:
+        provider = _InMemoryStateProvider()
+        entity = AgentEntity(_stub_agent(), state_provider=provider)
+
+        def _deliver_to_a(context: list[Message], correlation_id: str) -> int:
+            request = RunRequest(
+                message=context[-1].text or "",
+                correlation_id=correlation_id,
+                context_messages=[m.to_dict() for m in context],
+            )
+            entry = DurableAgentStateRequest.from_run_request(request)
+            entry.messages = entity._drop_already_stored(entry.messages)
+            entity.state.data.conversation_history.append(entry)
+            return len(entry.messages)
+
+        conversation: Any = "start"
+        conversation = build_agent_executor_response("A", "a1", None, conversation)
+        conversation = build_agent_executor_response("B", "b1", None, conversation)
+        first = _deliver_to_a(list(conversation.full_conversation), "corr-1")
+
+        conversation = build_agent_executor_response("A", "a2", None, conversation)
+        conversation = build_agent_executor_response("B", "b2", None, conversation)
+        second = _deliver_to_a(list(conversation.full_conversation), "corr-2")
+
+        assert first == 3, f"expected the first delivery to be recorded whole, got {first}"
+        assert second == 2, f"expected only the two new messages, got {second} of 5 delivered"
+
+
+class TestCoreSessionIdentity:
+    """The id handed to core must identify one entity, not one workflow run."""
+
+    def test_workflow_nodes_do_not_share_a_core_session_id(self) -> None:
+        """Nodes of one workflow share the entity key and differ only by entity name.
+
+        An external history provider keys its storage on the core session id, so taking the key
+        alone would file every node's conversation under one entry.
+        """
+        writer = _InMemoryStateProvider(session_id="run-1", entity_name="dafx-writer")
+        reviewer = _InMemoryStateProvider(session_id="run-1", entity_name="dafx-reviewer")
+
+        assert writer.session_id == reviewer.session_id
+        assert writer.core_session_id != reviewer.core_session_id, f"both nodes resolved to {writer.core_session_id}"
+
+    def test_core_session_id_falls_back_to_the_key(self) -> None:
+        """State providers predating the entity-name hook keep working."""
+        assert _InMemoryStateProvider(session_id="solo").core_session_id == "solo"
 
 
 class TestRunRequestRoundTrip:
