@@ -322,9 +322,25 @@ around them; the cleaner fix is upstream.
    dropped `extension_data` while `from_dict()` read it - a write-lossy asymmetry that silently
    discarded compaction annotations on every state round-trip. Since annotations are what carry
    compaction state, this had to be fixed for any of this to work. This one is ours rather than
-   core's. The Python side now serializes it; **.NET and the shared state schema need the same
-   treatment** for cross-language parity, or compaction will appear to do nothing there for exactly
-   the same reason.
+   core's. The Python side now serializes it.
+
+   **.NET needs the same treatment, and looks deceptively fine.** Its `DurableAgentStateMessage`
+   already has an `ExtensionData` property, but it is `[JsonExtensionData]` - System.Text.Json's
+   overflow bucket for *unmapped JSON properties*, not a mapping of `ChatMessage.AdditionalProperties`
+   where compaction annotations live. `FromChatMessage`/`ToChatMessage` copy neither
+   `AdditionalProperties` nor `MessageId` (which .NET does not have at all), so annotations are lost
+   at the **conversion** boundary rather than the JSON one. Anyone checking for "is extension data
+   persisted?" will see the property and wrongly conclude parity is done.
+
+4. **Provider cadence splits under per-service-call persistence.** With
+   `require_per_service_call_history_persistence=True`, the agent's once-per-run loop skips history
+   providers because the per-service-call middleware drives `before_run`/`after_run` itself - once per
+   **model call** instead of once per run. `CompactionProvider` is not a `HistoryProvider`, so it
+   stays on the once-per-run path. The pair is therefore split across two cadences, and compaction
+   annotates the buffer *after* the history provider last flushed it, so annotations would not reach
+   storage until the following flush. Only `HarnessAgent` sets this flag today, so this is latent
+   rather than live; it is recorded because the symptom would be missing annotations rather than an
+   error.
 
 Two further core gaps are recorded with the decisions they affect: the process-local **state type
 registry** (see "The session is persisted, not just its conversation id") and the absence of a public
@@ -475,6 +491,12 @@ an explicit `store` in the agent's options wins, and only when it is unset does 
 API) are routinely put back into client-side mode with `store=False`. Consulting only
 `STORES_BY_DEFAULT` would leave such an agent with a plain in-memory provider that the durable
 runtime never persists - silently losing the conversation between turns.
+
+Core resolves this rule inside `Agent._run` and does not expose the result, so this layer
+**re-derives it** and can drift from core if the rule changes - with silent conversation loss as the
+symptom, which is exactly the bug this rule was written to fix. The unit tests here only pin *our*
+logic; the end-to-end net is the compaction sample, which runs `store=False` against a
+store-by-default client and asserts recall. *Upstream fix:* expose the resolved decision.
 
 ### Retention is a deployment policy, not agent configuration
 
