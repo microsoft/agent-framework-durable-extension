@@ -1,17 +1,17 @@
 ---
 # These are optional elements. Feel free to remove any of them.
-status: accepted
+status: proposed
 contact: ahmedmuhsin
 date: 2026-07-27
-deciders: ahmedmuhsin
-consulted: eavanvalkenburg
+deciders:
+consulted:
 informed:
 ---
 
 # Thread Compaction for Durable Agents and Workflows
 
-> **How to read this.** Everything through "Pros and Cons of the Options" is the design decision.
-> Everything after it records how that decision was realized in Python and what the realization
+> **How to read this.** Everything through "Pros and Cons of the Options" is the proposed design.
+> Everything after it records how that design was prototyped in Python and what the prototype
 > surfaced. **.NET is not implemented yet.**
 >
 > **Naming.** .NET's `ChatHistoryProvider` and Python's `HistoryProvider` are the same concept. The
