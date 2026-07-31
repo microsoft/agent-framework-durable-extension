@@ -8,6 +8,7 @@ plugs in unchanged.
 """
 
 from collections.abc import AsyncIterable, Awaitable, Sequence
+from copy import deepcopy
 from typing import Any
 
 import pytest
@@ -375,6 +376,37 @@ class TestDurableHistoryProvider:
         # summary was inserted earlier in the same entry.
         assert (stored["up-3"].extension_data or {}).get("_excluded"), "annotation did not reach up-3"
         assert not (stored["up-2"].extension_data or {}).get("_excluded"), "annotation shifted onto up-2"
+
+    async def test_generated_ids_survive_a_cold_start(self) -> None:
+        """Ids synthesized for messages stored without one must derive from persisted state.
+
+        A cold start or a retried flush rebuilds the entry objects at fresh addresses, so an id
+        taken from object identity would differ every run, and a recycled address could even
+        collide with an id an earlier run already persisted.
+        """
+        provider = _InMemoryStateProvider()
+        entity = _make_entity(_build_agent(RecordingChatClient()), provider)
+        await _run_turns(entity, ["first", "second"])
+
+        # History as a producer that does not stamp message ids would have written it.
+        raw = deepcopy(provider._get_state_dict())
+        for entry in raw["data"]["conversationHistory"]:
+            for message in entry["messages"]:
+                message.pop("messageId", None)
+
+        async def _synthesized_ids() -> list[str]:
+            restarted_provider = _InMemoryStateProvider()
+            restarted_provider._set_state_dict(deepcopy(raw))
+            restarted = _make_entity(_build_agent(RecordingChatClient()), restarted_provider)
+            await restarted.run({"message": "third", "correlationId": "corr-restart"})
+            return [m.message_id for m in _stored_messages(restarted) if (m.message_id or "").startswith("durable_")]
+
+        first = await _synthesized_ids()
+        second = await _synthesized_ids()
+
+        assert first, "expected ids to be synthesized for the messages that had none"
+        assert len(first) == len(set(first)), f"synthesized ids collided within one run: {first}"
+        assert first == second, f"synthesized ids changed across a cold start: {first} != {second}"
 
     async def test_service_managed_session_is_skipped(self) -> None:
         """When the model service owns the conversation, the provider must not participate."""

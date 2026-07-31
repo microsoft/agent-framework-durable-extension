@@ -137,6 +137,26 @@ class DurableHistoryProvider(HistoryProvider):
                 yield entry, index
 
     @staticmethod
+    def _synthetic_message_id(entry: DurableAgentStateEntry, index: int) -> str:
+        """Build an id for a stored message that arrived without one.
+
+        The id comes from persisted fields, so a cold start or a retried flush regenerates the
+        same value. An id derived from object identity would not, and a recycled address could
+        collide with an id an earlier run already persisted.
+
+        Args:
+            entry: History entry holding the message.
+            index: Position of the message within that entry.
+
+        Returns:
+            An id unique within the conversation history.
+        """
+        # A request and its response share a correlation id, so the entry type is what tells the
+        # two sides of an exchange apart.
+        scope = entry.correlation_id or entry.created_at.isoformat()
+        return f"durable_{entry.json_type.value}_{scope}_{index}"
+
+    @staticmethod
     def _to_message(stored: DurableAgentStateMessage) -> Message | None:
         """Convert a persisted message into one that is safe to replay to a chat client."""
         chat_message: Message = stored.to_chat_message()
@@ -169,7 +189,7 @@ class DurableHistoryProvider(HistoryProvider):
             if not message.message_id:
                 # Give every loaded message a stable identity so compaction results can be
                 # reconciled back onto durable state on flush.
-                message.message_id = f"durable_{id(entry):x}_{index}"
+                message.message_id = self._synthetic_message_id(entry, index)
                 stored.message_id = message.message_id
             loaded.append(message)
             id_map[message.message_id] = (entry, index)
