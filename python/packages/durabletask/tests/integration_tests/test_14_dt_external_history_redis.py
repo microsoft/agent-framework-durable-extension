@@ -63,7 +63,8 @@ class TestExternalHistoryProvider:
         """
         client = aioredis.from_url(self.redis_url, decode_responses=True)
         try:
-            return await client.lrange(f"{KEY_PREFIX}:{session_id.key}", 0, -1)
+            entries: list[str] = await client.lrange(f"{KEY_PREFIX}:{session_id.key}", 0, -1)  # type: ignore[misc]
+            return entries
         finally:
             await client.aclose()
 

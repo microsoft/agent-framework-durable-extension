@@ -63,6 +63,16 @@ class _InMemoryStateProvider(AgentEntityStateProviderMixin):
         return self._session_id
 
 
+def _agent(client: Any = None, **kwargs: Any) -> Agent:
+    """Build an agent with a stub client.
+
+    The stubs cover the parts of the client protocol these tests exercise but not its full generic
+    signature, so the type is relaxed here rather than at every call site.
+    """
+    chat_client: Any = client if client is not None else _StubClient()
+    return Agent(client=chat_client, name="a", **kwargs)
+
+
 def _history_providers(agent: Any) -> list[Any]:
     return [p for p in agent.context_providers if isinstance(p, HistoryProvider)]
 
@@ -71,7 +81,7 @@ class TestAutomaticDurableHistory:
     """The durable runtime substitutes durable-backed history where appropriate."""
 
     def test_agent_without_providers_gets_durable_history(self) -> None:
-        agent = Agent(client=_StubClient(), name="a")
+        agent = _agent()
 
         prepared = ensure_durable_history(agent)
 
@@ -83,11 +93,7 @@ class TestAutomaticDurableHistory:
         assert providers[0].source_id == InMemoryHistoryProvider.DEFAULT_SOURCE_ID
 
     def test_in_memory_history_is_replaced_preserving_source_id(self) -> None:
-        agent = Agent(
-            client=_StubClient(),
-            name="a",
-            context_providers=[InMemoryHistoryProvider(source_id="custom_slot", skip_excluded=True)],
-        )
+        agent = _agent(context_providers=[InMemoryHistoryProvider(source_id="custom_slot", skip_excluded=True)])
 
         prepared = ensure_durable_history(agent)
 
@@ -102,7 +108,7 @@ class TestAutomaticDurableHistory:
     def test_external_history_provider_is_left_alone(self) -> None:
         """The user deliberately chose their own storage; durable must not override it."""
         external = _ExternalHistoryProvider()
-        agent = Agent(client=_StubClient(), name="a", context_providers=[external])
+        agent = _agent(context_providers=[external])
 
         prepared = ensure_durable_history(agent)
 
@@ -110,7 +116,7 @@ class TestAutomaticDurableHistory:
         assert _history_providers(prepared) == [external]
 
     def test_service_managed_history_is_left_alone(self) -> None:
-        agent = Agent(client=_ServiceStoringClient(), name="a")
+        agent = _agent(_ServiceStoringClient())
 
         prepared = ensure_durable_history(agent)
 
@@ -124,7 +130,7 @@ class TestAutomaticDurableHistory:
         this, an agent using the Responses API with ``store=False`` would keep a plain in-memory
         provider that the durable runtime never persists, silently losing the conversation.
         """
-        agent = Agent(client=_ServiceStoringClient(), name="a", default_options={"store": False})
+        agent = _agent(_ServiceStoringClient(), default_options={"store": False})
 
         prepared = ensure_durable_history(agent)
 
@@ -133,7 +139,7 @@ class TestAutomaticDurableHistory:
         assert isinstance(providers[0], DurableHistoryProvider)
 
     def test_store_true_keeps_history_with_the_service(self) -> None:
-        agent = Agent(client=_StubClient(), name="a", default_options={"store": True})
+        agent = _agent(default_options={"store": True})
 
         prepared = ensure_durable_history(agent)
 
@@ -143,7 +149,7 @@ class TestAutomaticDurableHistory:
     def test_existing_durable_provider_is_untouched(self) -> None:
         """Explicit configuration (for example to enable pruning) wins."""
         explicit = DurableHistoryProvider(prune_excluded=True)
-        agent = Agent(client=_StubClient(), name="a", context_providers=[explicit])
+        agent = _agent(context_providers=[explicit])
 
         prepared = ensure_durable_history(agent)
 
@@ -168,7 +174,7 @@ class TestUserAgentIsNotMutated:
 
     def test_original_agent_keeps_its_providers(self) -> None:
         original_provider = InMemoryHistoryProvider()
-        agent = Agent(client=_StubClient(), name="a", context_providers=[original_provider])
+        agent = _agent(context_providers=[original_provider])
         original_list = agent.context_providers
 
         prepared = ensure_durable_history(agent)
@@ -178,7 +184,7 @@ class TestUserAgentIsNotMutated:
         assert agent.context_providers == [original_provider]
 
     def test_entity_construction_does_not_mutate_the_agent(self) -> None:
-        agent = Agent(client=_StubClient(), name="a", context_providers=[InMemoryHistoryProvider()])
+        agent = _agent(context_providers=[InMemoryHistoryProvider()])
 
         entity = AgentEntity(agent, state_provider=_InMemoryStateProvider())
 
@@ -190,21 +196,21 @@ class TestPruneHistoryOptIn:
     """Pruning is a deployment-level retention policy, set at registration."""
 
     def test_off_by_default(self) -> None:
-        agent = Agent(client=_StubClient(), name="a")
+        agent = _agent()
 
         prepared = ensure_durable_history(agent)
 
         assert _history_providers(prepared)[0].prune_excluded is False
 
     def test_enabled_via_registration(self) -> None:
-        agent = Agent(client=_StubClient(), name="a", context_providers=[InMemoryHistoryProvider()])
+        agent = _agent(context_providers=[InMemoryHistoryProvider()])
 
         prepared = ensure_durable_history(agent, prune_history=True)
 
         assert _history_providers(prepared)[0].prune_excluded is True
 
     def test_entity_forwards_the_flag(self) -> None:
-        agent = Agent(client=_StubClient(), name="a")
+        agent = _agent()
 
         entity = AgentEntity(agent, state_provider=_InMemoryStateProvider(), prune_history=True)
 
@@ -213,7 +219,7 @@ class TestPruneHistoryOptIn:
     def test_explicit_provider_configuration_wins(self) -> None:
         """A hand-configured provider is never overridden by the registration flag."""
         explicit = DurableHistoryProvider(prune_excluded=False)
-        agent = Agent(client=_StubClient(), name="a", context_providers=[explicit])
+        agent = _agent(context_providers=[explicit])
 
         prepared = ensure_durable_history(agent, prune_history=True)
 

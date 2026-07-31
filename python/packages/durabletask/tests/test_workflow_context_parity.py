@@ -69,11 +69,20 @@ def _upstream_response(*, texts: list[str], agent_text: str) -> AgentExecutorRes
     )
 
 
+def _stub_agent() -> Any:
+    """Return the stub agent typed loosely.
+
+    It implements the parts of the agent protocol these tests exercise but not its full signature,
+    so the type is relaxed here rather than at every call site.
+    """
+    return _StubAgent()
+
+
 class TestContextProjection:
     """The orchestrator projects upstream conversation per context_mode."""
 
     def test_full_mode_forwards_entire_conversation(self) -> None:
-        executor = AgentExecutor(_StubAgent(), id="downstream")
+        executor = AgentExecutor(_stub_agent(), id="downstream")
         upstream = _upstream_response(texts=["first", "second"], agent_text="reply")
 
         projected = _build_context_messages(executor, upstream)
@@ -82,7 +91,7 @@ class TestContextProjection:
         assert len(projected) == 3
 
     def test_last_agent_mode_forwards_only_agent_messages(self) -> None:
-        executor = AgentExecutor(_StubAgent(), id="downstream", context_mode="last_agent")
+        executor = AgentExecutor(_stub_agent(), id="downstream", context_mode="last_agent")
         upstream = _upstream_response(texts=["first", "second"], agent_text="reply")
 
         projected = _build_context_messages(executor, upstream)
@@ -92,7 +101,7 @@ class TestContextProjection:
 
     def test_custom_mode_uses_context_filter(self) -> None:
         executor = AgentExecutor(
-            _StubAgent(),
+            _stub_agent(),
             id="downstream",
             context_mode="custom",
             context_filter=lambda messages: messages[-2:],
@@ -106,7 +115,7 @@ class TestContextProjection:
 
     def test_non_agent_input_has_no_upstream_context(self) -> None:
         """The first node receives raw input, so there is no conversation to forward."""
-        executor = AgentExecutor(_StubAgent(), id="downstream")
+        executor = AgentExecutor(_stub_agent(), id="downstream")
 
         assert _build_context_messages(executor, "plain input") is None
 
@@ -134,7 +143,7 @@ class TestEntityContextIngestion:
     def test_repeated_context_is_not_duplicated(self) -> None:
         """A node that runs twice in a cycle must not re-record the same conversation."""
         provider = _InMemoryStateProvider()
-        entity = AgentEntity(_StubAgent(), state_provider=provider)
+        entity = AgentEntity(_stub_agent(), state_provider=provider)
 
         first = [Message(role="user", contents=["hello"], message_id="m0")]
         entity.state.data.conversation_history.append(
@@ -153,7 +162,7 @@ class TestEntityContextIngestion:
     def test_fully_duplicate_context_keeps_last_message(self) -> None:
         """The agent must always receive at least one input message."""
         provider = _InMemoryStateProvider()
-        entity = AgentEntity(_StubAgent(), state_provider=provider)
+        entity = AgentEntity(_stub_agent(), state_provider=provider)
 
         messages = [Message(role="user", contents=["hello"], message_id="m0")]
         entity.state.data.conversation_history.append(

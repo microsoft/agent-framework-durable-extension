@@ -134,6 +134,34 @@ async def _summarize_oldest(messages: list[Message]) -> bool:
     return True
 
 
+def _agent(providers: list[Any], client: RecordingChatClient | None = None) -> Agent:
+    """Build an agent with the given context providers.
+
+    The stub client covers the parts of the client protocol these tests exercise but not its full
+    generic signature, so the type is relaxed here rather than at every call site.
+    """
+    chat_client: Any = client or RecordingChatClient()
+    return Agent(client=chat_client, name="assistant", context_providers=providers)
+
+
+def _providers_of(entity: AgentEntity) -> list[Any]:
+    """Return the context providers on the entity's (possibly substituted) agent."""
+    return list(getattr(entity.agent, "context_providers", []))
+
+
+class _StubExternalProvider(HistoryProvider):
+    """Stand-in for a provider the user configured deliberately (Cosmos, Redis, file)."""
+
+    def __init__(self) -> None:
+        super().__init__(source_id="external")
+
+    async def get_messages(self, session_id: str | None, **kwargs: Any) -> list[Message]:
+        return []
+
+    async def save_messages(self, session_id: str | None, messages: Any, **kwargs: Any) -> None:
+        return None
+
+
 def _build_agent(
     client: RecordingChatClient,
     *,
@@ -150,7 +178,7 @@ def _build_agent(
                 history_source_id=history.source_id,
             )
         )
-    return Agent(client=client, name="assistant", context_providers=providers)
+    return _agent(providers, client)
 
 
 def _make_entity(agent: Agent, provider: _InMemoryStateProvider) -> AgentEntity:
@@ -334,13 +362,13 @@ class TestDurableHistoryProvider:
     async def test_core_configured_agent_gets_durable_history_automatically(self) -> None:
         """An agent configured the ordinary core way runs durably with no changes."""
         client = RecordingChatClient()
-        agent = Agent(client=client, name="assistant", context_providers=[InMemoryHistoryProvider()])
+        agent = _agent([InMemoryHistoryProvider()], client)
         entity = _make_entity(agent, _InMemoryStateProvider())
 
         await _run_turns(entity, ["first", "second"])
 
         # The entity swapped in durable-backed history without the user asking.
-        assert any(isinstance(p, DurableHistoryProvider) for p in entity.agent.context_providers)
+        assert any(isinstance(p, DurableHistoryProvider) for p in _providers_of(entity))
         # The caller's agent is untouched.
         assert any(isinstance(p, InMemoryHistoryProvider) for p in agent.context_providers)
         # History is served from durable state, so turn 2 sees turn 1.
@@ -371,7 +399,7 @@ class TestExternalHistoryProviders:
             async def save_messages(self, session_id: str | None, messages: Any, **kwargs: Any) -> None:
                 seen.append(session_id)
 
-        agent = Agent(client=RecordingChatClient(), name="assistant", context_providers=[_RecordingExternalProvider()])
+        agent = _agent([_RecordingExternalProvider()])
         entity = _make_entity(agent, _InMemoryStateProvider(session_id="stable-session"))
 
         await _run_turns(entity, ["first", "second"])
@@ -381,12 +409,12 @@ class TestExternalHistoryProviders:
 
     async def test_external_provider_is_not_replaced(self) -> None:
         """The user chose their own storage; durable must not swap it out."""
-        external = HistoryProvider(source_id="external")
-        agent = Agent(client=RecordingChatClient(), name="assistant", context_providers=[external])
+        external = _StubExternalProvider()
+        agent = _agent([external])
 
         entity = _make_entity(agent, _InMemoryStateProvider())
 
-        assert entity.agent.context_providers[0] is external
+        assert _providers_of(entity)[0] is external
 
 
 class TestSessionStatePersistence:
@@ -412,7 +440,7 @@ class TestSessionStatePersistence:
             async def after_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
                 state["runs"] = state.get("runs", 0) + 1
 
-        agent = Agent(client=RecordingChatClient(), name="assistant", context_providers=[_CountingProvider()])
+        agent = _agent([_CountingProvider()])
         entity = _make_entity(agent, _InMemoryStateProvider())
 
         await _run_turns(entity, ["first", "second", "third"])
@@ -432,7 +460,7 @@ class TestSessionStatePersistence:
                 state.setdefault("note", Message(role="user", contents=["remember me"]))
 
         provider = _InMemoryStateProvider()
-        agent = Agent(client=RecordingChatClient(), name="assistant", context_providers=[_StoringProvider()])
+        agent = _agent([_StoringProvider()])
         await _run_turns(_make_entity(agent, provider), ["first"])
 
         session_payload = provider._get_state_dict()["data"]["session"]
@@ -444,7 +472,7 @@ class TestSessionStatePersistence:
     async def test_service_conversation_id_rides_along(self) -> None:
         """It is part of the serialized session, so it needs no field of its own."""
         provider = _InMemoryStateProvider()
-        agent = Agent(client=RecordingChatClient(), name="assistant", context_providers=[InMemoryHistoryProvider()])
+        agent = _agent([InMemoryHistoryProvider()])
         entity = _make_entity(agent, provider)
 
         await _run_turns(entity, ["first"])
@@ -478,7 +506,7 @@ class TestSessionStatePersistence:
                     ToolApprovalState(rules=[ToolApprovalRule("delete_file")]),
                 )
 
-        agent = Agent(client=RecordingChatClient(), name="assistant", context_providers=[_ApprovalCarryingProvider()])
+        agent = _agent([_ApprovalCarryingProvider()])
         await _run_turns(_make_entity(agent, _InMemoryStateProvider()), ["first", "second"])
 
         assert seen[0] is None  # nothing granted yet
@@ -489,11 +517,11 @@ class TestSessionStatePersistence:
     async def test_durable_history_slice_is_not_persisted(self) -> None:
         """That slice is derived from conversation_history; storing it would duplicate it."""
         provider = _InMemoryStateProvider()
-        agent = Agent(client=RecordingChatClient(), name="assistant", context_providers=[InMemoryHistoryProvider()])
+        agent = _agent([InMemoryHistoryProvider()])
         entity = _make_entity(agent, provider)
 
         await _run_turns(entity, ["first", "second"])
 
-        durable_history = next(p for p in entity.agent.context_providers if isinstance(p, DurableHistoryProvider))
+        durable_history = next(p for p in _providers_of(entity) if isinstance(p, DurableHistoryProvider))
         session_state = provider._get_state_dict()["data"]["session"]["state"]
         assert durable_history.source_id not in session_state

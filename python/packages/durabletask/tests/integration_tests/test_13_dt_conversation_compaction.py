@@ -83,6 +83,7 @@ class TestConversationCompaction:
 
         # The entity's own id rather than a per-operation one. External history providers key
         # their storage on this, so a generated id would restart their conversation every turn.
+        assert session.durable_session_id is not None
         assert stored["session_id"] == session.durable_session_id.key
 
         slices = stored["state"]
