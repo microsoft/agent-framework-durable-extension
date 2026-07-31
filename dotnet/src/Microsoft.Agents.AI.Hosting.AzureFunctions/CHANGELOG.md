@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Prepared package metadata for the 1.16.0-rc1 release ([#58](https://github.com/microsoft/agent-framework-durable-extension/pull/58))
+
 ## v1.16.0-rc1
 
 - [BREAKING] Support bounded synchronous workflow HTTP invocation through query parameters and default workflow run responses to JSON, with `Accept: text/plain` available for the legacy text format and the same negotiated asynchronous response returned on timeout ([#52](https://github.com/microsoft/agent-framework-durable-extension/pull/52))

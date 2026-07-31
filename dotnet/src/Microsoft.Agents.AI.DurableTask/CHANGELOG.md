@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Prepared package metadata for the 1.16.0-rc1 release ([#58](https://github.com/microsoft/agent-framework-durable-extension/pull/58))
+
 ## v1.16.0-rc1
 
 - Fixed a `JsonTypeInfo metadata ... was not provided` failure when persisting agent state for function calls or results that carry values the state serializer has no metadata for, such as the `AIContent` results returned by MCP tools ([#57](https://github.com/microsoft/agent-framework-durable-extension/pull/57))
