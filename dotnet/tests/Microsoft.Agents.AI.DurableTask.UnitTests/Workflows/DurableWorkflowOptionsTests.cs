@@ -33,10 +33,14 @@ public sealed class DurableWorkflowOptionsTests
     {
         // Arrange - workflow names are compared case-insensitively because they map to orchestration names.
         DurableWorkflowOptions options = new DurableOptions().Workflows;
-        options.AddWorkflow(CreateWorkflow("OrderPipeline", "StepA"));
+        Workflow first = CreateWorkflow("OrderPipeline", "StepA");
+        options.AddWorkflow(first);
 
-        // Act & Assert
+        // Act
         Assert.Throws<ArgumentException>(() => options.AddWorkflow(CreateWorkflow("orderpipeline", "StepB")));
+
+        // Assert - the original registration is left untouched.
+        Assert.Same(first, Assert.Single(options.Workflows).Value);
     }
 
     [Fact]
