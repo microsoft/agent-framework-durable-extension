@@ -5,8 +5,9 @@ pipelines:
     retail:
       source:
         eslint:
-          lastModifiedDate: 2026-07-19
+          lastModifiedDate: 2026-08-10
         psscriptanalyzer:
-          lastModifiedDate: 2026-07-19
+          lastModifiedDate: 2026-08-10
         armory:
-          lastModifiedDate: 2026-07-19
+          lastModifiedDate: 2026-08-10
+    usedNonDefaultBranch: true
