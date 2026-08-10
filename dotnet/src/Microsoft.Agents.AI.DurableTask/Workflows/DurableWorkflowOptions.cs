@@ -43,12 +43,21 @@ public sealed class DurableWorkflowOptions
     /// <param name="workflow">The workflow instance to add. Cannot be null.</param>
     /// <returns>The options instance, so that multiple calls can be chained.</returns>
     /// <remarks>
+    /// <para>
     /// When a workflow is added, all executors are registered in the executor registry.
     /// Any AI agent executors will also be automatically registered with the
     /// <see cref="DurableAgentsOptions"/> if available.
+    /// </para>
+    /// <para>
+    /// Workflow names must be unique because they identify the orchestration that runs the workflow.
+    /// Adding the same workflow instance more than once is a no-op, so a sub-workflow that is also
+    /// registered explicitly is not reported as a conflict when it is discovered during registration.
+    /// </para>
     /// </remarks>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="workflow"/> is null.</exception>
-    /// <exception cref="ArgumentException">Thrown when the workflow does not have a valid name.</exception>
+    /// <exception cref="ArgumentException">
+    /// Thrown when the workflow does not have a valid name, or when a different workflow with the same name has already been registered.
+    /// </exception>
     public DurableWorkflowOptions AddWorkflow(Workflow workflow)
     {
         ArgumentNullException.ThrowIfNull(workflow);
@@ -56,6 +65,17 @@ public sealed class DurableWorkflowOptions
         if (string.IsNullOrEmpty(workflow.Name))
         {
             throw new ArgumentException("Workflow must have a valid Name property.", nameof(workflow));
+        }
+
+        if (this._workflows.TryGetValue(workflow.Name, out Workflow? existingWorkflow))
+        {
+            if (!ReferenceEquals(existingWorkflow, workflow))
+            {
+                throw new ArgumentException($"A workflow with name '{workflow.Name}' has already been registered.", nameof(workflow));
+            }
+
+            // The same instance was already registered, so its executors are registered too.
+            return this;
         }
 
         this._workflows[workflow.Name] = workflow;
