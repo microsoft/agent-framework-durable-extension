@@ -96,9 +96,10 @@ public static class FunctionsApplicationBuilderExtensions
         // Ensure FunctionsDurableOptions is registered BEFORE the core extension creates a plain DurableOptions
         FunctionsDurableOptions sharedOptions = GetOrCreateSharedOptions(builder.Services);
 
+        // Agent names are case-insensitive everywhere else, so this snapshot must match that comparer.
         HashSet<string> agentsBeforeConfigure = applyDefaultAgentOptions
-            ? [.. sharedOptions.Agents.GetAgentFactories().Keys]
-            : [];
+            ? new HashSet<string>(sharedOptions.Agents.GetAgentFactories().Keys, StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         builder.Services.ConfigureDurableOptions(configure);
 
