@@ -18,6 +18,10 @@ public static class FunctionsApplicationBuilderExtensions
     /// <summary>
     /// Configures the application to use durable agents with a builder pattern.
     /// </summary>
+    /// <remarks>
+    /// Multiple calls to this method, and calls combined with <see cref="ConfigureDurableWorkflows"/> or
+    /// <see cref="ConfigureDurableOptions"/>, are supported and compose additively.
+    /// </remarks>
     /// <param name="builder">The functions application builder.</param>
     /// <param name="configure">A delegate to configure the durable agents.</param>
     /// <returns>The functions application builder.</returns>
@@ -25,31 +29,10 @@ public static class FunctionsApplicationBuilderExtensions
         this FunctionsApplicationBuilder builder,
         Action<DurableAgentsOptions> configure)
     {
+        ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(configure);
 
-        // Create/get shared options BEFORE the DurableTask library call so it can find them.
-        FunctionsDurableOptions sharedOptions = GetOrCreateSharedOptions(builder.Services);
-
-        // The main agent services registration is done in Microsoft.DurableTask.Agents.
-        builder.Services.ConfigureDurableAgents(configure);
-
-        // Ensure all agents registered through this path have default FunctionsAgentOptions.
-        // This distinguishes them from agents auto-registered by workflows.
-        DurableAgentsOptionsExtensions.EnsureDefaultOptionsForAll(sharedOptions.Agents.GetAgentFactories().Keys);
-
-        builder.Services.TryAddSingleton<IFunctionsAgentOptionsProvider>(_ =>
-            new DefaultFunctionsAgentOptionsProvider(DurableAgentsOptionsExtensions.GetAgentOptionsSnapshot()));
-
-        builder.Services.AddSingleton<IFunctionMetadataTransformer, DurableAgentFunctionMetadataTransformer>();
-
-        // Handling of built-in function execution for Agent HTTP, MCP tool, or Entity invocations.
-        builder.UseWhen<BuiltInFunctionExecutionMiddleware>(static context =>
-            string.Equals(context.FunctionDefinition.EntryPoint, BuiltInFunctions.RunAgentHttpFunctionEntryPoint, StringComparison.Ordinal) ||
-            string.Equals(context.FunctionDefinition.EntryPoint, BuiltInFunctions.RunAgentMcpToolFunctionEntryPoint, StringComparison.Ordinal) ||
-            string.Equals(context.FunctionDefinition.EntryPoint, BuiltInFunctions.RunAgentEntityFunctionEntryPoint, StringComparison.Ordinal));
-        builder.Services.AddSingleton<BuiltInFunctionExecutor>();
-
-        return builder;
+        return ConfigureDurableCore(builder, options => configure(options.Agents), applyDefaultAgentOptions: true);
     }
 
     /// <summary>
@@ -69,10 +52,61 @@ public static class FunctionsApplicationBuilderExtensions
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(configure);
 
+        return ConfigureDurableCore(builder, configure, applyDefaultAgentOptions: false);
+    }
+
+    /// <summary>
+    /// Configures durable workflow support for the specified Azure Functions application builder.
+    /// </summary>
+    /// <remarks>
+    /// Multiple calls to this method, and calls combined with <see cref="ConfigureDurableAgents"/> or
+    /// <see cref="ConfigureDurableOptions"/>, are supported and compose additively.
+    /// </remarks>
+    /// <param name="builder">The <see cref="FunctionsApplicationBuilder"/> instance to configure for durable workflows.</param>
+    /// <param name="configure">An action that configures the <see cref="DurableWorkflowOptions"/>, allowing customization of durable workflow behavior.</param>
+    /// <returns>The updated <see cref="FunctionsApplicationBuilder"/> instance, enabling method chaining.</returns>
+    public static FunctionsApplicationBuilder ConfigureDurableWorkflows(
+         this FunctionsApplicationBuilder builder,
+         Action<DurableWorkflowOptions> configure)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(configure);
+
+        return ConfigureDurableCore(builder, options => configure(options.Workflows), applyDefaultAgentOptions: false);
+    }
+
+    /// <summary>
+    /// Applies a configuration delegate to the shared <see cref="DurableOptions"/> instance and registers the
+    /// Functions-specific services. All public configuration entry points funnel through here so that agents and
+    /// workflows are wired identically no matter which combination of methods the application calls, or in which
+    /// order.
+    /// </summary>
+    /// <param name="builder">The functions application builder.</param>
+    /// <param name="configure">A delegate to apply to the shared durable options.</param>
+    /// <param name="applyDefaultAgentOptions">
+    /// When <see langword="true"/>, agents added by <paramref name="configure"/> that have no explicit
+    /// <see cref="FunctionsAgentOptions"/> receive the defaults for the agent-focused entry point. Agents already
+    /// present, such as those auto-registered by a previously configured workflow, are left untouched.
+    /// </param>
+    private static FunctionsApplicationBuilder ConfigureDurableCore(
+        FunctionsApplicationBuilder builder,
+        Action<DurableOptions> configure,
+        bool applyDefaultAgentOptions)
+    {
         // Ensure FunctionsDurableOptions is registered BEFORE the core extension creates a plain DurableOptions
         FunctionsDurableOptions sharedOptions = GetOrCreateSharedOptions(builder.Services);
 
+        HashSet<string> agentsBeforeConfigure = applyDefaultAgentOptions
+            ? [.. sharedOptions.Agents.GetAgentFactories().Keys]
+            : [];
+
         builder.Services.ConfigureDurableOptions(configure);
+
+        if (applyDefaultAgentOptions)
+        {
+            DurableAgentsOptionsExtensions.EnsureDefaultOptionsForAll(
+                sharedOptions.Agents.GetAgentFactories().Keys.Where(name => !agentsBeforeConfigure.Contains(name)));
+        }
 
         if (DurableAgentsOptionsExtensions.GetAgentOptionsSnapshot().Count > 0)
         {
@@ -89,21 +123,6 @@ public static class FunctionsApplicationBuilderExtensions
         EnsureMiddlewareRegistered(builder);
 
         return builder;
-    }
-
-    /// <summary>
-    /// Configures durable workflow support for the specified Azure Functions application builder.
-    /// </summary>
-    /// <param name="builder">The <see cref="FunctionsApplicationBuilder"/> instance to configure for durable workflows.</param>
-    /// <param name="configure">An action that configures the <see cref="DurableWorkflowOptions"/>, allowing customization of durable workflow behavior.</param>
-    /// <returns>The updated <see cref="FunctionsApplicationBuilder"/> instance, enabling method chaining.</returns>
-    public static FunctionsApplicationBuilder ConfigureDurableWorkflows(
-         this FunctionsApplicationBuilder builder,
-         Action<DurableWorkflowOptions> configure)
-    {
-        ArgumentNullException.ThrowIfNull(configure);
-
-        return builder.ConfigureDurableOptions(options => configure(options.Workflows));
     }
 
     private static void EnsureMiddlewareRegistered(FunctionsApplicationBuilder builder)
