@@ -1,8 +1,12 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
-// This sample demonstrates using ConfigureDurableOptions to register BOTH agents AND workflows
-// in a single Azure Functions app. It uses a workflow to translate text and a standalone AI agent
-// accessible via HTTP and MCP tool triggers.
+// This sample demonstrates registering BOTH agents AND workflows in a single Azure Functions app.
+// It uses a workflow to translate text and a standalone AI agent accessible via HTTP and MCP tool
+// triggers.
+//
+// ConfigureDurableAgents and ConfigureDurableWorkflows compose: call them in any order, as many
+// times as you like, and the configurations are additive. ConfigureDurableOptions is an equivalent
+// alternative that configures both from a single delegate - see the README for that variant.
 
 #pragma warning disable IDE0002 // Simplify Member Access
 
@@ -49,17 +53,15 @@ Workflow translateWorkflow = new WorkflowBuilder(translateText)
     .AddEdge(translateText, formatOutput)
     .Build();
 
-// Use ConfigureDurableOptions to register both agents and workflows together
+// Register agents and workflows through separate, composable calls.
 using IHost app = FunctionsApplication
     .CreateBuilder(args)
     .ConfigureFunctionsWebApplication()
-    .ConfigureDurableOptions(options =>
-    {
-        // Register the standalone agent with HTTP and MCP tool triggers
-        options.Agents.AddAIAgent(assistant, enableHttpTrigger: true, enableMcpToolTrigger: true);
 
-        // Register the workflow with an HTTP endpoint and MCP tool trigger
-        options.Workflows.AddWorkflow(translateWorkflow, enableStatusEndpoint: false, enableMcpToolTrigger: true);
-    })
+    // Register the standalone agent with HTTP and MCP tool triggers
+    .ConfigureDurableAgents(agents => agents.AddAIAgent(assistant, enableHttpTrigger: true, enableMcpToolTrigger: true))
+
+    // Register the workflow with an HTTP endpoint and MCP tool trigger
+    .ConfigureDurableWorkflows(workflows => workflows.AddWorkflow(translateWorkflow, enableStatusEndpoint: false, enableMcpToolTrigger: true))
     .Build();
 app.Run();
