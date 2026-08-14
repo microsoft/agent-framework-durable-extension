@@ -212,7 +212,7 @@ class AgentEntity:
     ) -> None:
         # Back the agent's conversation history with durable entity state so an agent that
         # already works in core runs durably without any configuration change.
-        self.agent = ensure_durable_history(agent, prune_history=prunes_excluded(retention))
+        self.agent = ensure_durable_history(agent, prune_excluded=prunes_excluded(retention))
         self.callback = callback
         self._state_provider = state_provider
         self._retention = retention

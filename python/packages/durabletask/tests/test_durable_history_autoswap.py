@@ -192,8 +192,8 @@ class TestUserAgentIsNotMutated:
         assert isinstance(_history_providers(agent)[0], InMemoryHistoryProvider)
 
 
-class TestPruneHistoryOptIn:
-    """Pruning is a deployment-level retention policy, set at registration."""
+class TestFollowCompactionRetention:
+    """Follow-compaction retention physically deletes exclusions."""
 
     def test_off_by_default(self) -> None:
         agent = _agent()
@@ -205,7 +205,7 @@ class TestPruneHistoryOptIn:
     def test_enabled_via_registration(self) -> None:
         agent = _agent(context_providers=[InMemoryHistoryProvider()])
 
-        prepared = ensure_durable_history(agent, prune_history=True)
+        prepared = ensure_durable_history(agent, prune_excluded=True)
 
         assert _history_providers(prepared)[0].prune_excluded is True
 
@@ -228,7 +228,7 @@ class TestPruneHistoryOptIn:
         explicit = DurableHistoryProvider(prune_excluded=False)
         agent = _agent(context_providers=[explicit])
 
-        prepared = ensure_durable_history(agent, prune_history=True)
+        prepared = ensure_durable_history(agent, prune_excluded=True)
 
         assert _history_providers(prepared)[0] is explicit
         assert explicit.prune_excluded is False

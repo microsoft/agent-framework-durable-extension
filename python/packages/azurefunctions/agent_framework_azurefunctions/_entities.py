@@ -67,8 +67,8 @@ def create_agent_entity(
 
     Keyword Args:
         retention: How much of the conversation durable state may discard. ``auto`` deletes only
-            under storage pressure, ``keep_all`` never deletes, and ``follow_compaction`` also
-            deletes what compaction excluded.
+            under storage pressure, ``keep_all`` never deletes, and ``follow_compaction`` first
+            deletes what compaction excluded, then uses pressure eviction if needed.
         max_state_bytes: Budget for serialized entity state.
 
     Returns:

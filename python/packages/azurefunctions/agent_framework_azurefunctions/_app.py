@@ -48,7 +48,6 @@ from agent_framework_durabletask._retention import (
     DEFAULT_MAX_STATE_BYTES,
     DEFAULT_RETENTION,
     RetentionMode,
-    resolve_retention,
 )
 from agent_framework_durabletask._workflows.naming import (
     SUBWORKFLOW_REQUEST_SEPARATOR,
@@ -250,7 +249,6 @@ class AgentFunctionApp(DFAppBase):
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
         enable_mcp_tool_trigger: bool = False,
         default_callback: AgentResponseCallbackProtocol | None = None,
-        prune_history: bool | None = None,
         retention: RetentionMode = DEFAULT_RETENTION,
         workflow_retention: RetentionMode | None = None,
         max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
@@ -273,12 +271,12 @@ class AgentFunctionApp(DFAppBase):
         :param poll_interval_seconds: Delay in seconds between polling attempts.
             Defaults to ``DEFAULT_POLL_INTERVAL_SECONDS``.
         :param default_callback: Optional callback invoked for agents without specific callbacks.
-        :param prune_history: Deprecated. ``True`` maps to ``retention='follow_compaction'``.
         :param retention: Default conversation retention for agents hosted by this app, including
             agents inside hosted workflows. ``auto`` deletes only under storage pressure,
             ``keep_all`` never deletes and lets the entity fail at the backend limit, and
-            ``follow_compaction`` also deletes what compaction excluded. ``add_agent`` can
-            override it per agent.
+            ``follow_compaction`` first deletes what compaction excluded, then uses the same
+            pressure eviction as ``auto`` if that is not enough. ``add_agent`` can override it
+            per agent.
         :param max_state_bytes: Budget for serialized entity state.
         :param workflow_retention: Retention for agent nodes inside hosted workflows. When None,
             ``retention`` applies. Worth setting separately, since a workflow node's entity lives
@@ -303,7 +301,7 @@ class AgentFunctionApp(DFAppBase):
         self.enable_http_endpoints = enable_http_endpoints
         self.enable_mcp_tool_trigger = enable_mcp_tool_trigger
         self.default_callback = default_callback
-        self._retention: RetentionMode = resolve_retention(retention, prune_history)
+        self._retention: RetentionMode = retention
         self._workflow_retention: RetentionMode | None = workflow_retention
         self._max_state_bytes = max_state_bytes
 
@@ -850,7 +848,6 @@ class AgentFunctionApp(DFAppBase):
         enable_mcp_tool_trigger: bool | None = None,
         *,
         entity_id: str | None = None,
-        prune_history: bool | None = None,
         retention: RetentionMode | None = None,
     ) -> None:
         """Add an agent to the function app after initialization.
@@ -868,7 +865,6 @@ class AgentFunctionApp(DFAppBase):
                 durable entity (and the ``agents`` / ``get_agent`` key) matches the
                 identity the orchestrator dispatches to. Mirrors
                 ``DurableAIAgentWorker.add_agent(entity_id=...)``.
-            prune_history: Deprecated. ``True`` maps to ``retention='follow_compaction'``.
             retention: Per-agent retention override. When None, the app-level setting is used.
 
         Raises:
@@ -926,7 +922,7 @@ class AgentFunctionApp(DFAppBase):
             effective_callback,
             effective_enable_http_endpoint,
             effective_enable_mcp_endpoint,
-            retention=resolve_retention(effective_retention, prune_history),
+            retention=effective_retention,
         )
 
         logger.debug(f"[AgentFunctionApp] Agent '{registration_name}' added successfully")

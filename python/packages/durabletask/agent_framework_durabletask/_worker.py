@@ -20,7 +20,6 @@ from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentResponseCallbackProtocol
 from ._entities import AgentEntity, DurableTaskEntityStateProvider
 from ._retention import DEFAULT_MAX_STATE_BYTES, DEFAULT_RETENTION, RetentionMode
-from ._retention import resolve_retention as _resolve_retention
 from ._workflows.activity import execute_workflow_activity
 from ._workflows.dt_context import DurableTaskWorkflowContext
 from ._workflows.naming import (
@@ -83,7 +82,6 @@ class DurableAIAgentWorker:
         *,
         retention: RetentionMode = DEFAULT_RETENTION,
         max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
-        prune_history: bool | None = None,
     ):
         """Initialize the worker wrapper.
 
@@ -92,14 +90,14 @@ class DurableAIAgentWorker:
             callback: Optional callback for agent response notifications
             retention: Default conversation retention for registered agents. ``auto`` deletes only
                 under storage pressure, ``keep_all`` never deletes and lets the entity fail at the
-                backend limit, and ``follow_compaction`` also deletes what compaction excluded.
+                backend limit, and ``follow_compaction`` first deletes what compaction excluded,
+                then uses the same pressure eviction as ``auto`` if that is not enough.
             max_state_bytes: Budget for serialized entity state. Raise it when large payload
                 offload is configured on the worker and client.
-            prune_history: Deprecated. ``True`` maps to ``follow_compaction``.
         """
         self._worker = worker
         self._callback = callback
-        self._retention: RetentionMode = _resolve_retention(retention, prune_history)
+        self._retention: RetentionMode = retention
         self._max_state_bytes = max_state_bytes
         self._registered_agents: dict[str, SupportsAgentRun] = {}
         self._workflows: dict[str, Workflow] = {}
@@ -117,7 +115,6 @@ class DurableAIAgentWorker:
         *,
         entity_id: str | None = None,
         retention: RetentionMode | None = None,
-        prune_history: bool | None = None,
     ) -> None:
         """Register an agent with the worker.
 
@@ -132,7 +129,6 @@ class DurableAIAgentWorker:
                 ``agent.name``. Workflow hosting passes the executor's ``id`` so the
                 entity matches the identity the orchestrator dispatches to.
             retention: Per-agent retention override. When None, the worker-level setting is used.
-            prune_history: Deprecated. ``True`` maps to ``follow_compaction``.
 
         Raises:
             ValueError: If the agent doesn't have a name or is already registered
@@ -160,7 +156,7 @@ class DurableAIAgentWorker:
             agent,
             effective_callback,
             entity_id=registration_name,
-            retention=_resolve_retention(effective_retention, prune_history),
+            retention=effective_retention,
             max_state_bytes=self._max_state_bytes,
         )
 

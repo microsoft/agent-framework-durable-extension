@@ -44,7 +44,7 @@ app-wide on the worker.
 | --- | --- |
 | `auto` (default) | Deletes only when state approaches the backend limit, and only enough to get back under it. Nothing changes for a conversation that never gets close. |
 | `keep_all` | Never deletes. The entity may reach the limit and fail. Choose this when the complete record matters more than staying available. |
-| `follow_compaction` | Also deletes whatever compaction excluded, every turn. The most aggressive, and the old `prune_history=True`. |
+| `follow_compaction` | Deletes whatever compaction excluded every turn. If that does not free enough space, it also uses the same pressure eviction as `auto`. |
 
 `auto` exists because the alternative is an agent that simply stops working mid-conversation, with
 no warning. It evicts oldest-first, keeps system messages and tool-call groups intact, never touches

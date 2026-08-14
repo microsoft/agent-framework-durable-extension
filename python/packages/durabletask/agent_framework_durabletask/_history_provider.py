@@ -411,7 +411,7 @@ def _service_stores_history(agent: Any) -> bool:
     return bool(getattr(client, "STORES_BY_DEFAULT", False))
 
 
-def ensure_durable_history(agent: SupportsAgentRun, *, prune_history: bool = False) -> SupportsAgentRun:
+def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = False) -> SupportsAgentRun:
     """Back an agent's conversation history with durable entity state.
 
     Lets a user register an agent that already works in core and get durable behavior with no
@@ -435,7 +435,7 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_history: bool = Fal
         agent: The agent being registered with the durable runtime.
 
     Keyword Args:
-        prune_history: When True, the injected provider physically deletes messages that
+        prune_excluded: When True, the injected provider physically deletes messages that
             compaction excluded, bounding durable storage. This is a **lossy retention policy**
             and is off by default. It only affects providers this function creates.
 
@@ -465,7 +465,7 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_history: bool = Fal
         updated = [
             DurableHistoryProvider(
                 source_id=InMemoryHistoryProvider.DEFAULT_SOURCE_ID,
-                prune_excluded=prune_history,
+                prune_excluded=prune_excluded,
             ),
             *provider_list,
         ]
@@ -473,7 +473,7 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_history: bool = Fal
         replacement = DurableHistoryProvider(
             source_id=existing.source_id,
             skip_excluded=existing.skip_excluded,
-            prune_excluded=prune_history,
+            prune_excluded=prune_excluded,
         )
         updated = [replacement if p is existing else p for p in provider_list]
     else:

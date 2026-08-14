@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import logging
-import warnings
 from typing import Literal, cast
 
 from agent_framework import (
@@ -40,7 +39,8 @@ RetentionMode = Literal["keep_all", "auto", "follow_compaction"]
 ``auto``
     Delete only under storage pressure, and only down to the low watermark. The default.
 ``follow_compaction``
-    Also delete whatever compaction excluded, every turn.
+    Delete whatever compaction excluded every turn, then use the same pressure eviction as
+    ``auto`` if the remaining state is still too large.
 """
 
 DEFAULT_RETENTION: RetentionMode = "auto"
@@ -72,27 +72,6 @@ _MAX_PASSES = 3
 def prunes_excluded(retention: RetentionMode) -> bool:
     """Whether compaction exclusions should be deleted as they are made."""
     return retention == "follow_compaction"
-
-
-def resolve_retention(retention: RetentionMode, prune_history: bool | None) -> RetentionMode:
-    """Fold the deprecated ``prune_history`` flag into the retention setting.
-
-    Args:
-        retention: The retention mode the caller asked for.
-        prune_history: The deprecated flag, or None when it was not supplied.
-
-    Returns:
-        The effective retention mode.
-    """
-    if prune_history is None:
-        return retention
-    warnings.warn(
-        "prune_history is deprecated; use retention='follow_compaction' to delete what compaction "
-        "excluded, or retention='keep_all' to never delete.",
-        DeprecationWarning,
-        stacklevel=3,
-    )
-    return "follow_compaction" if prune_history else retention
 
 
 async def enforce_budget(state: DurableAgentState, *, max_state_bytes: int = DEFAULT_MAX_STATE_BYTES) -> int:

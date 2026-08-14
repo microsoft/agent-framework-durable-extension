@@ -32,8 +32,9 @@ app = AgentFunctionApp(agents=[agent], enable_health_check=True)
 ```
 
 The full conversation remains in durable storage, and compaction bounds what the *model* sees. To
-also bound what is *stored*, opt in at registration with `AgentFunctionApp(..., prune_history=True)`,
-which is lossy and therefore off by default.
+also delete what compaction excluded, use
+`AgentFunctionApp(..., retention="follow_compaction")`. It deletes exclusions every turn, then
+uses the same pressure eviction as `auto` if the remaining state is still too large.
 
 ### Client-side vs service-managed history
 

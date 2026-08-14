@@ -35,7 +35,6 @@ from agent_framework_durabletask._retention import (
     LOW_WATERMARK,
     enforce_budget,
     prunes_excluded,
-    resolve_retention,
 )
 
 BUDGET = 40_000
@@ -109,31 +108,6 @@ class TestRetentionModes:
         assert prunes_excluded("follow_compaction") is True
         assert prunes_excluded("auto") is False
         assert prunes_excluded("keep_all") is False
-
-    def test_deprecated_flag_maps_onto_a_mode(self) -> None:
-        import warnings
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            assert resolve_retention("auto", True) == "follow_compaction"
-        assert any(issubclass(w.category, DeprecationWarning) for w in caught)
-
-    def test_unset_flag_leaves_the_mode_alone(self) -> None:
-        assert resolve_retention("auto", None) == "auto"
-        assert resolve_retention("keep_all", None) == "keep_all"
-
-    def test_the_deprecated_flag_still_works_through_the_worker(self) -> None:
-        """Callers who set prune_history=True must keep the behavior they had."""
-        import warnings
-
-        from agent_framework_durabletask import DurableAIAgentWorker
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            worker = DurableAIAgentWorker(cast(Any, object()), prune_history=True)
-
-        assert worker._retention == "follow_compaction"
-        assert any(issubclass(w.category, DeprecationWarning) for w in caught)
 
     def test_the_default_is_auto(self) -> None:
         """Which is the deliberate behavior change: previously nothing bounded storage."""
@@ -337,6 +311,14 @@ class TestTheWholeLoopStaysUnderBudget:
     async def test_state_stays_bounded_across_many_turns(self) -> None:
         provider, _ = await self._drive(max_state_bytes=self.LIMIT)
         assert len(json.dumps(provider._get_state_dict())) <= self.LIMIT
+
+    async def test_follow_compaction_falls_back_to_pressure_eviction(self) -> None:
+        """With nothing to prune, only the shared pressure fallback can bound this run."""
+        provider, _ = await self._drive(retention="follow_compaction", max_state_bytes=self.LIMIT)
+        state = DurableAgentState.from_dict(provider._get_state_dict())
+
+        assert len(json.dumps(provider._get_state_dict())) <= self.LIMIT
+        assert 0 < len(state.data.conversation_history) < self.TURNS * 2
 
     async def test_every_turn_still_gets_its_own_answer(self) -> None:
         """Eviction must not disturb the response the caller is waiting on."""
