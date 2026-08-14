@@ -381,6 +381,14 @@ around them, but the cleaner fix is upstream.
    compaction state, this had to be fixed for any of this to work. This one is ours rather than
    core's. The Python side now serializes it.
 
+   The shared schema also under-declared what is persisted. `messageId` and `extensionData` are both
+   load-bearing for compaction and neither appeared in `chatMessage`, so an implementer reading the
+   contract had no way to know they must round-trip. Nothing would have *failed* validation, since
+   the schema permits extra properties, which is precisely why it went unnoticed. They are declared
+   now, `session` is described as an opaque runtime-discriminated payload rather than pinning
+   Python's shape onto .NET, and a test validates real persisted state against the schema so the two
+   cannot drift apart again silently.
+
    **.NET needs the same treatment, and looks deceptively fine.** Its `DurableAgentStateMessage`
    already has an `ExtensionData` property, but it is `[JsonExtensionData]`, System.Text.Json's
    overflow bucket for *unmapped JSON properties*, not a mapping of `ChatMessage.AdditionalProperties`.
@@ -456,8 +464,8 @@ Durable now projects the same conversation and delivers it to the agent entity:
   the request entry's messages, so it is persisted like any other conversation content and is
   visible to compaction.
 - A node that runs more than once (a cycle) receives the whole upstream conversation again, so the
-  entity **drops messages whose id it has already recorded**, keeping at least the latest message so
-  the agent always has an input. This relies on the persisted `messageId` described above.
+  entity **drops the part it has already recorded**, keeping at least the latest message so the
+  agent always has an input.
 
 **Dedup is tracked by position, not by stored identity.** Comparing against the ids currently in
 `ConversationHistory` breaks the moment retention evicts any of them: their ids leave the comparison

@@ -252,6 +252,7 @@ class AgentFunctionApp(DFAppBase):
         default_callback: AgentResponseCallbackProtocol | None = None,
         prune_history: bool | None = None,
         retention: RetentionMode = DEFAULT_RETENTION,
+        workflow_retention: RetentionMode | None = None,
         max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
     ):
         """Initialize the AgentFunctionApp.
@@ -279,6 +280,9 @@ class AgentFunctionApp(DFAppBase):
             ``follow_compaction`` also deletes what compaction excluded. ``add_agent`` can
             override it per agent.
         :param max_state_bytes: Budget for serialized entity state.
+        :param workflow_retention: Retention for agent nodes inside hosted workflows. When None,
+            ``retention`` applies. Worth setting separately, since a workflow node's entity lives
+            for one orchestration while a standalone agent's can live indefinitely.
 
         :note: If no agents are provided, they can be added later using :meth:`add_agent`.
         """
@@ -300,6 +304,7 @@ class AgentFunctionApp(DFAppBase):
         self.enable_mcp_tool_trigger = enable_mcp_tool_trigger
         self.default_callback = default_callback
         self._retention: RetentionMode = resolve_retention(retention, prune_history)
+        self._workflow_retention: RetentionMode | None = workflow_retention
         self._max_state_bytes = max_state_bytes
 
         try:
@@ -437,6 +442,7 @@ class AgentFunctionApp(DFAppBase):
                 agent_executor.agent,
                 callback=self.default_callback,
                 entity_id=workflow_scoped_executor_id(workflow.name, agent_executor.id),
+                retention=self._workflow_retention,
             )
         for executor in plan.activity_executors:
             # Set up a Functions activity trigger for each non-agent executor, scoped

@@ -47,6 +47,7 @@ from ._retention import (
     enforce_budget,
     prunes_excluded,
 )
+from ._workflows.naming import parse_workflow_message_id
 
 logger = logging.getLogger("agent_framework.durabletask")
 
@@ -421,31 +422,58 @@ class AgentEntity:
         self.state.data.session = payload
 
     def _drop_already_stored(self, messages: list[DurableAgentStateMessage]) -> list[DurableAgentStateMessage]:
-        """Filter out upstream context messages this entity has already recorded.
+        """Filter out chained conversation this entity has already recorded.
 
         A workflow node that runs more than once (for example in a cycle) receives the whole
-        upstream conversation each time. Messages carrying an id that is already in this
-        entity's history are dropped so the conversation is not duplicated. The final message
-        is always kept so the agent still receives an input.
+        upstream conversation each time. Without filtering it re-records all of it on every visit.
+
+        Filtering is by **position**, not by stored identity. The obvious check, "is this id
+        already in my history", stops working the moment retention evicts anything: those ids
+        leave the comparison set, the orchestrator re-sends them because its own conversation is
+        never evicted, and the entity re-records exactly what was deleted. That oscillates instead
+        of settling. A high-water mark per producing executor is unaffected by deletion, and is
+        per executor rather than global because a fan-out gives two branches the same position.
+
+        Messages without a workflow id fall back to the identity check, which is enough for them
+        because nothing re-delivers them.
+
+        The final message is always kept so the agent still receives an input.
         """
+        ingested = dict(self.state.data.ingested_positions or {})
+        seen: dict[str, int] = {}
+        kept: list[DurableAgentStateMessage] = []
+
         known_ids = {
             stored.message_id
             for entry in self.state.data.conversation_history
             for stored in entry.messages
             if stored.message_id
         }
-        if not known_ids:
-            return messages
 
-        deduped = [m for m in messages if not m.message_id or m.message_id not in known_ids]
-        if not deduped and messages:
+        for message in messages:
+            marker = parse_workflow_message_id(message.message_id)
+            if marker is not None:
+                executor, position = marker
+                seen[executor] = max(seen.get(executor, -1), position)
+                if position <= ingested.get(executor, -1):
+                    continue
+            elif message.message_id and message.message_id in known_ids:
+                continue
+            kept.append(message)
+
+        for executor, position in seen.items():
+            ingested[executor] = max(ingested.get(executor, -1), position)
+        if ingested:
+            self.state.data.ingested_positions = ingested
+
+        if not kept and messages:
             # Keep the newest message so the agent still has an input, but drop the id it shares
             # with the copy already in history. Two stored messages under one id collide in the
             # compaction position map, so annotations and pruning would target the wrong one.
             repeated = messages[-1]
             repeated.message_id = None
             return [repeated]
-        return deduped
+        return kept
 
     def _find_durable_history_provider(self) -> DurableHistoryProvider | None:
         """Return the agent's :class:`DurableHistoryProvider`, if it is configured with one."""

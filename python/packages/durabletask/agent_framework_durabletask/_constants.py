@@ -137,6 +137,10 @@ class DurableStateFields:
     # Serialized AgentSession: the provider state bag plus any service-issued conversation id
     SESSION: Final[str] = "session"
 
+    # Highest chained-conversation position ingested from each workflow executor. Survives
+    # retention, which identity-based duplicate detection cannot.
+    INGESTED_POSITIONS: Final[str] = "ingestedPositions"
+
 
 class ContentTypes:
     """Content type discriminator values for the $type field.

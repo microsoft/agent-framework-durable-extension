@@ -10,6 +10,8 @@ Covers the behavior an agent gets by simply being registered with the durable ru
 - the full conversation record is retained in storage even though the model sees less.
 """
 
+import json
+from pathlib import Path
 from typing import Any, Protocol
 
 import pytest
@@ -103,6 +105,30 @@ class TestConversationCompaction:
         # conversationHistory and would otherwise duplicate the transcript. "in_memory" is the
         # source_id the sample's provider keeps after the durable swap.
         assert "in_memory" not in slices, f"durable history slice leaked into the session: {slices}"
+
+    def test_persisted_state_matches_the_shared_schema(self) -> None:
+        """Real scheduler round-tripped state must satisfy the cross-language contract.
+
+        Unit tests validate a synthetic dict. This validates what the entity actually wrote and
+        the scheduler actually stored, which is where drift between the two would show up.
+        """
+        jsonschema = pytest.importorskip("jsonschema")
+        schema_path = Path(__file__).resolve().parents[5] / "schemas" / "durable-agent-entity-state.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+        agent = self.agent_client.get_agent("Historian")
+        session = agent.create_session()
+        assert agent.run("Name a city.", session=session) is not None
+        # A second turn, because message ids are assigned when history is first loaded rather
+        # than when it is written. After one turn there is nothing to load and nothing to stamp.
+        assert agent.run("Name another.", session=session) is not None
+
+        state = self._read_state(session.durable_session_id)
+        jsonschema.Draft202012Validator(schema).validate(state.to_dict())
+
+        # The fields compaction depends on must actually be present, not merely permitted.
+        stored = [m for entry in state.data.conversation_history for m in entry.messages]
+        assert any(m.message_id for m in stored), "no message carried an id through real storage"
 
     def test_recent_context_survives_compaction(self) -> None:
         """A fact inside the retained window is still answerable after several turns."""

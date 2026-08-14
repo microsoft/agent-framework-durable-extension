@@ -118,7 +118,7 @@ async def enforce_budget(state: DurableAgentState, *, max_state_bytes: int = DEF
 
     history = state.data.conversation_history
     target = int(max_state_bytes * LOW_WATERMARK)
-    removed = 0
+    removed: list[str] = []
 
     for attempt in range(_MAX_PASSES):
         # Tighten on each pass, since the byte-to-token conversion is a heuristic and a first
@@ -126,30 +126,32 @@ async def enforce_budget(state: DurableAgentState, *, max_state_bytes: int = DEF
         evicted = await _evict_once(history, serialized_size=size, target_bytes=target >> attempt)
         if not evicted:
             break
-        removed += evicted
+        removed.extend(evicted)
         size = _serialized_size(state)
         if size < high:
             break
 
     if removed:
         logger.warning(
-            "[Retention] Durable state reached %d bytes of a %d budget, so %d message(s) were "
-            "evicted oldest-first to %d bytes. Configure retention='keep_all' to disable this, or "
-            "raise max_state_bytes if large payload offload is enabled.",
+            "[Retention] Durable state passed %d bytes of a %d budget, so %d message(s) were "
+            "evicted oldest-first (%s .. %s), leaving %d bytes. Set retention='keep_all' to "
+            "disable this, or raise max_state_bytes if large payload offload is enabled.",
             high,
             max_state_bytes,
-            removed,
+            len(removed),
+            removed[0],
+            removed[-1],
             size,
         )
     elif size >= high:
         logger.error(
             "[Retention] Durable state is %d bytes against a %d budget and nothing could be "
-            "evicted. A single turn is likely larger than the budget itself, which retention "
-            "cannot resolve.",
+            "evicted. The newest exchange is never evicted, so a single turn larger than the "
+            "budget cannot be resolved by retention.",
             size,
             max_state_bytes,
         )
-    return removed
+    return len(removed)
 
 
 def _serialized_size(state: DurableAgentState) -> int:
@@ -162,8 +164,8 @@ async def _evict_once(
     *,
     serialized_size: int,
     target_bytes: int,
-) -> int:
-    """Run one eviction pass, returning how many messages were removed.
+) -> list[str]:
+    """Run one eviction pass, returning the ids of the messages removed.
 
     Core already knows how to drop oldest groups to a budget while preserving system messages and
     keeping tool-call groups whole, so that judgement is borrowed rather than reimplemented.
@@ -187,7 +189,7 @@ async def _evict_once(
         origins.append((entry, stored))
 
     if not candidates:
-        return 0
+        return []
 
     strategy = TokenBudgetComposedStrategy(
         token_budget=_token_budget(candidates, serialized_size=serialized_size, target_bytes=target_bytes),
@@ -200,14 +202,14 @@ async def _evict_once(
     await strategy(candidates)
 
     evicted = [
-        origins[position]
+        (position, origins[position])
         for position, message in enumerate(candidates)
         if message.additional_properties.get(EXCLUDED_KEY)
     ]
     if not evicted:
-        return 0
-    prune_messages(history, evicted)
-    return len(evicted)
+        return []
+    prune_messages(history, [origin for _, origin in evicted])
+    return [candidates[position].message_id or "<no id>" for position, _ in evicted]
 
 
 def _newest_exchange(history: list[DurableAgentStateEntry]) -> list[DurableAgentStateEntry]:

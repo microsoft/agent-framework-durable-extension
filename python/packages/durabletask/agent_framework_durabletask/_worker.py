@@ -220,6 +220,8 @@ class DurableAIAgentWorker:
         self,
         workflow: Workflow,
         callback: AgentResponseCallbackProtocol | None = None,
+        *,
+        retention: RetentionMode | None = None,
     ) -> None:
         """Register a :class:`Workflow` for automatic orchestration.
 
@@ -245,6 +247,9 @@ class DurableAIAgentWorker:
                 across restarts and would break durable resume). Every nested
                 sub-workflow must likewise be named.
             callback: Optional callback for agent response notifications.
+            retention: Retention for this workflow's agent nodes. When None, the worker-level
+                setting is used. Worth setting separately, since a workflow node's entity lives
+                for one orchestration while a standalone agent's can live indefinitely.
 
         Raises:
             ValueError: If the workflow (or a nested sub-workflow) name is missing,
@@ -291,12 +296,13 @@ class DurableAIAgentWorker:
         for hosted in hosted_workflows:
             if hosted.name.casefold() in self._registered_orchestrations:
                 continue
-            self._register_single_workflow(hosted, callback)
+            self._register_single_workflow(hosted, callback, retention)
 
     def _register_single_workflow(
         self,
         workflow: Workflow,
         callback: AgentResponseCallbackProtocol | None,
+        retention: RetentionMode | None = None,
     ) -> None:
         """Register one workflow's durable primitives (no recursion into sub-workflows).
 
@@ -316,7 +322,7 @@ class DurableAIAgentWorker:
         for agent_executor in plan.agent_executors:
             scoped_id = workflow_scoped_executor_id(workflow.name, agent_executor.id)
             if scoped_id not in self._registered_agents:
-                self.add_agent(agent_executor.agent, callback=callback, entity_id=scoped_id)
+                self.add_agent(agent_executor.agent, callback=callback, entity_id=scoped_id, retention=retention)
 
         # Register non-agent executors as durable activities, scoped by workflow name.
         # WorkflowExecutor nodes are intentionally not registered as activities: their

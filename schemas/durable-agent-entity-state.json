@@ -142,7 +142,15 @@
           "type": "array",
           "items": { "$ref": "#/$defs/chatContentItem" }
         },
-        "createdAt": { "type": "string", "format": "date-time", "description": "When this message was created (RFC 3339)." }
+        "createdAt": { "type": "string", "format": "date-time", "description": "When this message was created (RFC 3339)." },
+        "messageId": {
+          "type": "string",
+          "description": "Stable identity for this message. Context management reconciles its results back onto stored messages by this value, so an implementation that drops it on round-trip silently loses compaction state. Assigned by the runtime when the producer left it unset."
+        },
+        "extensionData": {
+          "type": "object",
+          "description": "Message-level metadata, carrying the annotations context management writes (for example exclusion markers and summary markers). Must round-trip: discarding it loses compaction state rather than failing loudly."
+        }
       },
       "required": ["role"]
     },
@@ -203,15 +211,12 @@
         },
         "session": {
           "type": "object",
-          "description": "Serialized agent session carried between turns: the per-provider state bag and any service-issued conversation id. The agent's own history provider slice is excluded, since conversationHistory is the record of truth.",
-          "properties": {
-            "session_id": { "type": "string" },
-            "service_session_id": { "type": ["string", "null"] },
-            "state": {
-              "type": "object",
-              "description": "Provider state keyed by context provider source id."
-            }
-          }
+          "description": "Serialized agent session carried between turns, holding the per-provider state bag and any service-issued conversation id. The shape is the hosting runtime's own and is deliberately not fixed here: .NET serializes conversationId plus stateBag, Python serializes session_id, service_session_id and state. Treat it as opaque and discriminate on the properties present. The agent's own history provider slice is excluded, since conversationHistory is the record of truth."
+        },
+        "ingestedPositions": {
+          "type": "object",
+          "description": "Highest chained-conversation position this entity has taken from each workflow executor, keyed by executor id. A workflow re-sends the whole conversation on every visit, so this is what lets a repeated node recognize context it already recorded. Kept separately from the messages because retention may delete them.",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
         }
       }
     }

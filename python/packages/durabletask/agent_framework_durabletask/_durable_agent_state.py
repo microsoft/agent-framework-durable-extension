@@ -330,11 +330,16 @@ class DurableAgentStateData:
             bag plus any service-issued conversation id. Core treats session state as durable
             across turns, so it is persisted here rather than discarded with the per-operation
             session.
+        ingested_positions: Highest chained-conversation position taken from each workflow
+            executor. A workflow re-sends the whole conversation on every visit, and comparing
+            against stored ids stops working once retention deletes any of them, so the mark is
+            kept separately.
         extension_data: Optional dictionary for custom metadata (not part of core schema)
     """
 
     conversation_history: list[DurableAgentStateEntry]
     session: dict[str, Any] | None
+    ingested_positions: dict[str, int] | None
     extension_data: dict[str, Any] | None
 
     def __init__(
@@ -342,6 +347,7 @@ class DurableAgentStateData:
         conversation_history: list[DurableAgentStateEntry] | None = None,
         extension_data: dict[str, Any] | None = None,
         session: dict[str, Any] | None = None,
+        ingested_positions: dict[str, int] | None = None,
     ) -> None:
         """Initialize the data container.
 
@@ -349,10 +355,13 @@ class DurableAgentStateData:
             conversation_history: Initial conversation history (defaults to empty list)
             extension_data: Optional custom metadata
             session: Optional serialized ``AgentSession`` from the previous turn
+            ingested_positions: Highest chained-conversation position taken from each workflow
+                executor, used to recognize context this entity has already recorded
         """
         self.conversation_history = conversation_history or []
         self.extension_data = extension_data
         self.session = session
+        self.ingested_positions = ingested_positions
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -362,6 +371,8 @@ class DurableAgentStateData:
             result[DurableStateFields.EXTENSION_DATA] = self.extension_data
         if self.session is not None:
             result[DurableStateFields.SESSION] = self.session
+        if self.ingested_positions:
+            result[DurableStateFields.INGESTED_POSITIONS] = self.ingested_positions
         return result
 
     @classmethod
@@ -370,6 +381,7 @@ class DurableAgentStateData:
             conversation_history=_parse_history_entries(data_dict),
             extension_data=data_dict.get(DurableStateFields.EXTENSION_DATA),
             session=data_dict.get(DurableStateFields.SESSION),
+            ingested_positions=data_dict.get(DurableStateFields.INGESTED_POSITIONS),
         )
 
 
@@ -403,7 +415,7 @@ class DurableAgentState:
     """
 
     # Durable Agent Schema version
-    SCHEMA_VERSION: str = "1.1.0"
+    SCHEMA_VERSION: str = "1.2.0"
 
     data: DurableAgentStateData
     schema_version: str = SCHEMA_VERSION

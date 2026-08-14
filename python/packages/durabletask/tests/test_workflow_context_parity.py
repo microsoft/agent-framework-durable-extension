@@ -20,6 +20,7 @@ from agent_framework import (
 from agent_framework_durabletask import (
     AgentEntity,
     AgentEntityStateProviderMixin,
+    DurableAgentState,
     DurableAgentStateRequest,
     RunRequest,
 )
@@ -260,6 +261,68 @@ class TestWorkflowConversationIdentity:
 
         assert first == 3, f"expected the first delivery to be recorded whole, got {first}"
         assert second == 2, f"expected only the two new messages, got {second} of 5 delivered"
+
+
+class TestDedupSurvivesRetention:
+    """Duplicate detection must not depend on the messages still being there.
+
+    Retention deletes oldest-first, which removes exactly the ids an identity check relies on. The
+    orchestrator's own conversation is never evicted, so it re-sends them, and an entity comparing
+    against stored ids would re-record precisely what was just deleted.
+    """
+
+    def _deliver(self, entity: AgentEntity, context: list[Message], correlation_id: str) -> int:
+        request = RunRequest(
+            message=context[-1].text or "",
+            correlation_id=correlation_id,
+            context_messages=[m.to_dict() for m in context],
+        )
+        entry = DurableAgentStateRequest.from_run_request(request)
+        entry.messages = entity._drop_already_stored(entry.messages)
+        entity.state.data.conversation_history.append(entry)
+        return len(entry.messages)
+
+    def test_evicted_context_is_not_re_ingested(self) -> None:
+        provider = _InMemoryStateProvider()
+        entity = AgentEntity(_stub_agent(), state_provider=provider)
+
+        conversation: Any = "start"
+        conversation = build_agent_executor_response("A", "a1", None, conversation)
+        conversation = build_agent_executor_response("B", "b1", None, conversation)
+        self._deliver(entity, list(conversation.full_conversation), "corr-1")
+
+        # Retention deletes the oldest messages, taking their ids with them.
+        entity.state.data.conversation_history.clear()
+
+        conversation = build_agent_executor_response("A", "a2", None, conversation)
+        conversation = build_agent_executor_response("B", "b2", None, conversation)
+        recorded = self._deliver(entity, list(conversation.full_conversation), "corr-2")
+
+        assert recorded == 2, f"expected only the two new messages after eviction, got {recorded} of 5"
+
+    def test_the_mark_is_kept_per_executor(self) -> None:
+        """A fan-out gives two branches the same position, so one global mark would conflate them."""
+        provider = _InMemoryStateProvider()
+        entity = AgentEntity(_stub_agent(), state_provider=provider)
+
+        conversation: Any = "start"
+        conversation = build_agent_executor_response("A", "a1", None, conversation)
+        conversation = build_agent_executor_response("B", "b1", None, conversation)
+        self._deliver(entity, list(conversation.full_conversation), "corr-1")
+
+        marks = entity.state.data.ingested_positions or {}
+        assert set(marks) == {"input", "A", "B"}, f"expected a mark per producing executor, got {marks}"
+
+    def test_the_mark_round_trips_through_durable_state(self) -> None:
+        provider = _InMemoryStateProvider()
+        entity = AgentEntity(_stub_agent(), state_provider=provider)
+
+        conversation: Any = build_agent_executor_response("A", "a1", None, "start")
+        self._deliver(entity, list(conversation.full_conversation), "corr-1")
+        entity.persist_state()
+
+        restored = DurableAgentState.from_dict(provider._get_state_dict())
+        assert restored.data.ingested_positions == entity.state.data.ingested_positions
 
 
 class TestCoreSessionIdentity:
