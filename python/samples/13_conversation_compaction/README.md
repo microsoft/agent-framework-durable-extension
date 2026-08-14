@@ -31,9 +31,24 @@ Registering that agent with the durable runtime changes nothing about how you co
 - **Context stays bounded.** Only the messages the strategy keeps are sent to the model, so a long
   conversation does not grow the per-turn context without limit.
 
-The full conversation remains in durable storage, and compaction bounds what the *model* sees. To
-also bound what is *stored*, opt in at registration with `add_agent(agent, prune_history=True)`,
-which is lossy and therefore off by default.
+The full conversation remains in durable storage, and compaction bounds what the *model* sees.
+
+### Retention: what durable storage is allowed to discard
+
+Compaction and retention answer different questions. Compaction decides what the model should read.
+Retention decides what durable state can afford to hold, and an exclusion made to save tokens is not
+consent to delete the record. Set it at registration with `add_agent(agent, retention=...)`, or
+app-wide on the worker.
+
+| Mode | Behavior |
+| --- | --- |
+| `auto` (default) | Deletes only when state approaches the backend limit, and only enough to get back under it. Nothing changes for a conversation that never gets close. |
+| `keep_all` | Never deletes. The entity may reach the limit and fail. Choose this when the complete record matters more than staying available. |
+| `follow_compaction` | Also deletes whatever compaction excluded, every turn. The most aggressive, and the old `prune_history=True`. |
+
+`auto` exists because the alternative is an agent that simply stops working mid-conversation, with
+no warning. It evicts oldest-first, keeps system messages and tool-call groups intact, never touches
+the exchange that just completed, and logs what it removed.
 
 ### Client-side vs service-managed history
 

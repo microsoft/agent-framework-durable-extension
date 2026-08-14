@@ -8,12 +8,23 @@ for token cost is not consent to delete the record.
 """
 
 import json
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
-from agent_framework import Message
+from agent_framework import (
+    Agent,
+    BaseChatClient,
+    ChatResponse,
+    ChatResponseUpdate,
+    Content,
+    Message,
+    ResponseStream,
+)
 
 from agent_framework_durabletask import (
+    AgentEntity,
+    AgentEntityStateProviderMixin,
     DurableAgentState,
     DurableAgentStateMessage,
     DurableAgentStateRequest,
@@ -110,6 +121,25 @@ class TestRetentionModes:
     def test_unset_flag_leaves_the_mode_alone(self) -> None:
         assert resolve_retention("auto", None) == "auto"
         assert resolve_retention("keep_all", None) == "keep_all"
+
+    def test_the_deprecated_flag_still_works_through_the_worker(self) -> None:
+        """Callers who set prune_history=True must keep the behavior they had."""
+        import warnings
+
+        from agent_framework_durabletask import DurableAIAgentWorker
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            worker = DurableAIAgentWorker(cast(Any, object()), prune_history=True)
+
+        assert worker._retention == "follow_compaction"
+        assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+
+    def test_the_default_is_auto(self) -> None:
+        """Which is the deliberate behavior change: previously nothing bounded storage."""
+        from agent_framework_durabletask import DurableAIAgentWorker
+
+        assert DurableAIAgentWorker(cast(Any, object()))._retention == "auto"
 
 
 class TestBudgetEnforcement:
@@ -240,3 +270,86 @@ class TestStateShape:
 def test_watermarks_leave_room_to_work() -> None:
     """The gap between them is what stops eviction running on every turn."""
     assert 0 < LOW_WATERMARK < HIGH_WATERMARK < 1
+
+
+class _VerboseClient(BaseChatClient):
+    """A client whose answers are long enough to reach the budget in a handful of turns."""
+
+    def __init__(self, *, reply_chars: int = 4_000) -> None:
+        super().__init__()
+        self._reply_chars = reply_chars
+
+    def _inner_get_response(self, *, messages: Any, stream: bool, options: Any, **kwargs: Any) -> Any:
+        del options, kwargs
+        # Keyed off the question rather than a counter, so a retried call answers the same thing.
+        asked = next(
+            (m.text for m in reversed(list(messages)) if str(getattr(m.role, "value", m.role)) == "user"),
+            "?",
+        )
+        body = f"answering:{asked} " + ("x" * self._reply_chars)
+        if stream:
+
+            async def _updates() -> AsyncIterator[ChatResponseUpdate]:
+                yield ChatResponseUpdate(role="assistant", contents=[Content.from_text(text=body)])
+
+            return ResponseStream(_updates(), finalizer=ChatResponse.from_updates)
+
+        async def _response() -> ChatResponse:
+            return ChatResponse(messages=[Message(role="assistant", contents=[body])])
+
+        return _response()
+
+
+class _EntityState(AgentEntityStateProviderMixin):
+    def __init__(self) -> None:
+        self._state_dict: dict[str, Any] = {}
+
+    def _get_state_dict(self) -> dict[str, Any]:
+        return self._state_dict
+
+    def _set_state_dict(self, state: dict[str, Any]) -> None:
+        # The real provider hands state to the SDK, which serializes it eagerly.
+        json.dumps(state)
+        self._state_dict = state
+
+    def _get_session_id_from_entity(self) -> str:
+        return "retention-e2e"
+
+
+class TestTheWholeLoopStaysUnderBudget:
+    """Drives the real entity, not just enforce_budget, because the value is in the wiring."""
+
+    LIMIT = 60_000
+    TURNS = 20
+
+    async def _drive(self, **entity_kwargs: Any) -> tuple[_EntityState, list[str]]:
+        client = _VerboseClient()
+        agent = Agent(client=cast(Any, client), name="verbose")
+        provider = _EntityState()
+        entity = AgentEntity(agent, state_provider=provider, **entity_kwargs)
+
+        replies: list[str] = []
+        for turn in range(self.TURNS):
+            result = await entity.run({"message": f"question {turn}", "correlationId": f"corr-{turn}"})
+            replies.append(result.text)
+        return provider, replies
+
+    async def test_state_stays_bounded_across_many_turns(self) -> None:
+        provider, _ = await self._drive(max_state_bytes=self.LIMIT)
+        assert len(json.dumps(provider._get_state_dict())) <= self.LIMIT
+
+    async def test_every_turn_still_gets_its_own_answer(self) -> None:
+        """Eviction must not disturb the response the caller is waiting on."""
+        _, replies = await self._drive(max_state_bytes=self.LIMIT)
+        assert [r.split(" x")[0] for r in replies] == [f"answering:question {i}" for i in range(self.TURNS)]
+
+    async def test_history_is_actually_trimmed_not_just_small(self) -> None:
+        """Without this the bounded assertion above could pass for the wrong reason."""
+        provider, _ = await self._drive(max_state_bytes=self.LIMIT)
+        kept = len(DurableAgentState.from_dict(provider._get_state_dict()).data.conversation_history)
+        assert 0 < kept < self.TURNS * 2
+
+    async def test_keep_all_lets_it_grow_past_the_limit(self) -> None:
+        """Proves the run is genuinely over budget, so the bounded case is a real result."""
+        provider, _ = await self._drive(retention="keep_all", max_state_bytes=self.LIMIT)
+        assert len(json.dumps(provider._get_state_dict())) > self.LIMIT
