@@ -215,7 +215,13 @@ likely to hit the limit. It would leave every other configuration exactly as exp
 changing behavior for users who were never at risk.
 
 **Why not rely on blob offload alone.** It raises the ceiling roughly tenfold and does not remove it.
-It is preview, it needs a storage account, and its Functions support is currently .NET only.
+It is preview, it needs a storage account, and on the Durable Functions Python path it is currently
+unreachable. `azure-functions-durable` 1.x does not depend on the durabletask SDK at all, because the
+host extension owns persistence, so there is no Python-side seam to configure. The 2.x preview does
+depend on `durabletask>=1.9.0`, whose worker and client both accept `payload_store`, but its
+`DurableFunctionsWorker.__init__` takes no parameters and hardcodes the `super().__init__` call, and
+`DurableFunctionsClient.__init__` takes only a connection string. Neither forwards `**kwargs`, so the
+inherited capability cannot be reached without an upstream change (gap 6).
 
 **Service-managed storage** is out of scope, mirroring ADR-0019. When the model provider owns the
 conversation the client holds no history to compact. See "Service-managed conversations".
@@ -260,12 +266,13 @@ upstream conversation.
 
 **Outstanding.** Not covered yet.
 
-- **Retention.** The `auto` and `keep_all` modes are designed but not built. Only the behavior now
-  called `follow_compaction` exists, under its former name. Nothing measures state size today, so an
-  entity approaching the scheduler limit gets no warning and no relief.
+- **Retention.** All three modes are built and covered, including an end-to-end test that drives a
+  real agent through the entity for twenty turns against a small budget, with `keep_all` as the
+  control proving the same run exceeds it. What is not yet covered is a conversation crossing the
+  real scheduler limit against a real backend, rather than a lowered one in-process.
 - The .NET realization and its schema parity (gap 3), and the .NET compaction-state blocker (gap 4).
-- Blob offload (Option 7) against a real scheduler, and whether the Durable Functions Python path can
-  reach it at all.
+- Blob offload (Option 7) against a real scheduler. Whether the Durable Functions Python path can
+  reach it is now answered: it cannot, in either 1.x or the 2.x preview (gap 6).
 - An external history provider storing history beyond the built-in state-size limit.
 - Idempotency of an LLM-based reducer across simulated entity retries.
 
@@ -302,8 +309,9 @@ The full argument is in **Decision Outcome** above. This is the summary.
 - **Option 7 - Blob offload.** Raises the ceiling roughly tenfold with no data loss, needs no code
   from this layer since the payload store is passed to the worker and client the caller already
   builds, and mirrors what the Azure Storage backend does internally. But it is preview, needs a
-  storage account, does not remove the ceiling, and its Durable Functions support is .NET only
-  today. **Adopted as the first capacity answer, ahead of any deletion.**
+  storage account, does not remove the ceiling, and is unreachable on the Durable Functions Python
+  path in both 1.x and the 2.x preview (gap 6). **Adopted as the first capacity answer on the
+  durabletask path, ahead of any deletion.**
 
 ## Cross-Cutting Design Details
 
@@ -430,6 +438,20 @@ around them, but the cleaner fix is upstream.
    storage until the following flush. Only `HarnessAgent` sets this flag today, so this is latent
    rather than live. It is recorded because the symptom would be missing annotations rather than an
    error.
+
+6. **Blob offload is unreachable on the Durable Functions Python path.** Not a core gap but an
+   upstream one, recorded here because it is what forces this layer to own a capacity answer at all.
+   `azure-functions-durable` 1.x, which this package pins (`>=1.3.1,<2`), does not depend on the
+   durabletask SDK, since the host extension owns persistence. There is no Python-side seam to
+   configure and the word payload does not appear in the package. The 2.x preview (`2.0.0b1`,
+   `2.0.0b2`, both requiring Python 3.13+) does depend on `durabletask>=1.9.0`, and
+   `DurableFunctionsWorker` subclasses `TaskHubGrpcWorker`, whose constructor accepts
+   `payload_store`. But `DurableFunctionsWorker.__init__` takes no parameters and hardcodes its
+   `super().__init__` arguments, and `DurableFunctionsClient.__init__` takes only a connection
+   string. Neither forwards `**kwargs`, so the inherited capability is unreachable. The durabletask
+   path has no such problem, because the caller constructs the worker and client and can pass
+   `payload_store` directly. *Upstream fix:* expose `payload_store` on `DurableFunctionsWorker` and
+   `DurableFunctionsClient`.
 
 Two further core gaps are recorded with the decisions they affect: the process-local **state type
 registry** (see "The session is persisted, not just its conversation id") and the absence of a public
