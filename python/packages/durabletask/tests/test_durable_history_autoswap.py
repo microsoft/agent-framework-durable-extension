@@ -212,9 +212,16 @@ class TestPruneHistoryOptIn:
     def test_entity_forwards_the_flag(self) -> None:
         agent = _agent()
 
-        entity = AgentEntity(agent, state_provider=_InMemoryStateProvider(), prune_history=True)
+        entity = AgentEntity(agent, state_provider=_InMemoryStateProvider(), retention="follow_compaction")
 
         assert _history_providers(entity.agent)[0].prune_excluded is True
+
+    def test_other_retention_modes_do_not_prune_on_write(self) -> None:
+        """Only ``follow_compaction`` treats a compaction exclusion as consent to delete."""
+        for mode in ("auto", "keep_all"):
+            entity = AgentEntity(_agent(), state_provider=_InMemoryStateProvider(), retention=mode)
+
+            assert _history_providers(entity.agent)[0].prune_excluded is False, mode
 
     def test_explicit_provider_configuration_wins(self) -> None:
         """A hand-configured provider is never overridden by the registration flag."""

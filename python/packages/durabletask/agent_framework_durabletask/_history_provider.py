@@ -127,14 +127,10 @@ class DurableHistoryProvider(HistoryProvider):
 
     def _replayable_entries(self, binding: DurableHistoryBinding) -> Iterator[tuple[DurableAgentStateEntry, int]]:
         """Yield (entry, message_index) pairs that participate in model context."""
-        for entry in binding.state_provider.state.data.conversation_history:
-            if isinstance(entry, DurableAgentStateResponse) and entry.is_error:
-                continue
-            if binding.correlation_id is not None and entry.correlation_id == binding.correlation_id:
-                # The in-flight request is delivered as run input, not as history.
-                continue
-            for index in range(len(entry.messages)):
-                yield entry, index
+        yield from replayable_entries(
+            binding.state_provider.state.data.conversation_history,
+            correlation_id=binding.correlation_id,
+        )
 
     @staticmethod
     def _synthetic_message_id(entry: DurableAgentStateEntry, index: int) -> str:
@@ -345,16 +341,57 @@ class DurableHistoryProvider(HistoryProvider):
         Removal is by identity rather than index, since insertions earlier in this flush may have
         moved messages within their entry.
         """
-        for entry, stored in pruned:
-            for index, candidate in enumerate(entry.messages):
-                if candidate is stored:
-                    del entry.messages[index]
-                    break
+        prune_messages(binding.state_provider.state.data.conversation_history, pruned)
 
-        history = binding.state_provider.state.data.conversation_history
-        remaining = [entry for entry in history if entry.messages]
-        if len(remaining) != len(history):
-            history[:] = remaining
+
+def replayable_entries(
+    history: list[DurableAgentStateEntry],
+    *,
+    correlation_id: str | None = None,
+) -> Iterator[tuple[DurableAgentStateEntry, int]]:
+    """Yield (entry, message_index) pairs that participate in model context.
+
+    Shared by the history provider and by retention, so both agree on which stored messages are
+    real conversation rather than bookkeeping.
+
+    Args:
+        history: The entity's conversation history.
+        correlation_id: The in-flight request, which is delivered as run input rather than history.
+
+    Yields:
+        Each replayable message as its owning entry and its index within that entry.
+    """
+    for entry in history:
+        if isinstance(entry, DurableAgentStateResponse) and entry.is_error:
+            continue
+        if correlation_id is not None and entry.correlation_id == correlation_id:
+            continue
+        for index in range(len(entry.messages)):
+            yield entry, index
+
+
+def prune_messages(
+    history: list[DurableAgentStateEntry],
+    pruned: list[tuple[DurableAgentStateEntry, DurableAgentStateMessage]],
+) -> None:
+    """Physically remove the given messages, and any entries left empty.
+
+    Removal is by identity rather than index, since an insertion elsewhere in the same pass may
+    have moved messages within their entry.
+
+    Args:
+        history: The entity's conversation history, modified in place.
+        pruned: The messages to remove, each with the entry that owns it.
+    """
+    for entry, stored in pruned:
+        for index, candidate in enumerate(entry.messages):
+            if candidate is stored:
+                del entry.messages[index]
+                break
+
+    remaining = [entry for entry in history if entry.messages]
+    if len(remaining) != len(history):
+        history[:] = remaining
 
 
 def _service_stores_history(agent: Any) -> bool:

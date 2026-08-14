@@ -40,6 +40,13 @@ from ._history_provider import (
     unbind_durable_history,
 )
 from ._models import RunRequest
+from ._retention import (
+    DEFAULT_MAX_STATE_BYTES,
+    DEFAULT_RETENTION,
+    RetentionMode,
+    enforce_budget,
+    prunes_excluded,
+)
 
 logger = logging.getLogger("agent_framework.durabletask")
 
@@ -199,13 +206,16 @@ class AgentEntity:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         state_provider: AgentEntityStateProviderMixin,
-        prune_history: bool = False,
+        retention: RetentionMode = DEFAULT_RETENTION,
+        max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
     ) -> None:
         # Back the agent's conversation history with durable entity state so an agent that
         # already works in core runs durably without any configuration change.
-        self.agent = ensure_durable_history(agent, prune_history=prune_history)
+        self.agent = ensure_durable_history(agent, prune_history=prunes_excluded(retention))
         self.callback = callback
         self._state_provider = state_provider
+        self._retention = retention
+        self._max_state_bytes = max_state_bytes
 
         logger.debug("[AgentEntity] Initialized with agent type: %s", type(agent).__name__)
 
@@ -308,6 +318,7 @@ class AgentEntity:
             state_response = DurableAgentStateResponse.from_run_response(correlation_id, agent_run_response)
             self.state.data.conversation_history.append(state_response)
             self._capture_session(session)
+            await self._enforce_retention()
             self.persist_state()
 
             return agent_run_response
@@ -326,6 +337,7 @@ class AgentEntity:
             error_state_response = DurableAgentStateResponse.from_run_response(correlation_id, error_response)
             error_state_response.is_error = True
             self.state.data.conversation_history.append(error_state_response)
+            await self._enforce_retention()
             self.persist_state()
 
             return error_response
@@ -333,6 +345,17 @@ class AgentEntity:
         finally:
             if binding_token is not None:
                 unbind_durable_history(binding_token)
+
+    async def _enforce_retention(self) -> None:
+        """Bound durable state before it is persisted, unless the caller asked to keep everything.
+
+        This lives on the entity rather than the history provider because the entity records the
+        conversation in every configuration, including external providers, service-managed agents
+        and agents with no context pipeline. Those are exactly the cases with no other mitigation.
+        """
+        if self._retention == "keep_all":
+            return
+        await enforce_budget(self.state, max_state_bytes=self._max_state_bytes)
 
     def _has_context_pipeline(self) -> bool:
         """Whether the agent exposes core's context-provider pipeline.

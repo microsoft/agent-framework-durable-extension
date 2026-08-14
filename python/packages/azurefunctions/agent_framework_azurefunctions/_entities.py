@@ -21,6 +21,7 @@ from agent_framework_durabletask import (
     AgentResponseCallbackProtocol,
     run_agent_coroutine,
 )
+from agent_framework_durabletask._retention import DEFAULT_MAX_STATE_BYTES, DEFAULT_RETENTION, RetentionMode
 
 logger = logging.getLogger("agent_framework.azurefunctions")
 
@@ -55,7 +56,8 @@ def create_agent_entity(
     agent: SupportsAgentRun,
     callback: AgentResponseCallbackProtocol | None = None,
     *,
-    prune_history: bool = False,
+    retention: RetentionMode = DEFAULT_RETENTION,
+    max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
 ) -> Callable[[df.DurableEntityContext], None]:
     """Factory function to create an agent entity class.
 
@@ -64,8 +66,10 @@ def create_agent_entity(
         callback: Optional callback invoked during streaming and final responses
 
     Keyword Args:
-        prune_history: When True, messages that compaction excluded are physically deleted
-            from durable state. Lossy retention policy; off by default.
+        retention: How much of the conversation durable state may discard. ``auto`` deletes only
+            under storage pressure, ``keep_all`` never deletes, and ``follow_compaction`` also
+            deletes what compaction excluded.
+        max_state_bytes: Budget for serialized entity state.
 
     Returns:
         Entity function configured with the agent
@@ -78,7 +82,13 @@ def create_agent_entity(
             logger.debug("[entity_function] Operation: %s", context.operation_name)
 
             state_provider = AzureFunctionEntityStateProvider(context)
-            entity = AgentEntity(agent, callback, state_provider=state_provider, prune_history=prune_history)
+            entity = AgentEntity(
+                agent,
+                callback,
+                state_provider=state_provider,
+                retention=retention,
+                max_state_bytes=max_state_bytes,
+            )
 
             operation = context.operation_name
 
