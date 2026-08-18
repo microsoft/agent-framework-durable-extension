@@ -379,8 +379,18 @@ class AgentEntity:
         except Exception as exc:
             logger.exception("[AgentEntity.run] Agent execution failed.")
 
+            # The entity absorbs failures rather than faulting, so the session survives and the
+            # caller can take the next turn. That is only reasonable if the caller can tell what
+            # happened: error content alone leaves ``response.text`` empty, which reads as the
+            # agent having nothing to say. The text carries the same message the error content
+            # already holds, so callers inspecting contents see no change.
+            detail = f"{type(exc).__name__}: {exc}"
             error_message = Message(
-                role="assistant", contents=[Content.from_error(message=str(exc), error_code=type(exc).__name__)]
+                role="assistant",
+                contents=[
+                    Content.from_error(message=str(exc), error_code=type(exc).__name__),
+                    Content.from_text(detail),
+                ],
             )
             error_response = AgentResponse(
                 messages=[error_message],

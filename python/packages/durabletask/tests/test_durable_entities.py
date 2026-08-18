@@ -641,6 +641,38 @@ class TestErrorHandling:
         content = result.messages[0].contents[0]
         assert isinstance(content, Content)
 
+    async def test_failed_run_reports_the_reason_in_the_reply_text(self) -> None:
+        """A failure must not read as the agent having nothing to say.
+
+        The entity absorbs exceptions so the session survives, but error content alone leaves
+        ``text`` empty, so a caller reading the reply the normal way sees silence and has to go
+        digging to find out that anything went wrong at all.
+        """
+        mock_agent = Mock()
+        mock_agent.run = _create_mock_run(side_effect=ValueError("no such deployment"))
+
+        entity = _make_entity(mock_agent)
+
+        result = await entity.run({"message": "Message", "correlationId": "corr-entity-error-5"})
+
+        assert "no such deployment" in result.text
+        assert "ValueError" in result.text
+        # The typed error content is still first, so callers inspecting contents are unaffected.
+        assert result.messages[0].contents[0].type == "error"
+
+    async def test_failed_turns_are_not_replayed_to_the_model(self) -> None:
+        """The error text is for the caller, not for the model's context."""
+        mock_agent = Mock()
+        mock_agent.run = _create_mock_run(side_effect=ValueError("boom"))
+
+        entity = _make_entity(mock_agent)
+        await entity.run({"message": "first", "correlationId": "corr-entity-error-6"})
+
+        replayed = [message.text for message in entity._replay_all_messages()]
+
+        assert "first" in replayed
+        assert not any("boom" in text for text in replayed)
+
 
 class TestConversationHistory:
     """Test suite for conversation history tracking."""
