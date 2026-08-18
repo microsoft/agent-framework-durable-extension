@@ -33,9 +33,9 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          # Core Tools 4.12.1 predates the Python 3.13 proxy-worker fix for
-          # monorepo-level virtual environments (azure-functions-python-worker#1833).
-          python-version: "3.12"
+          # azure-functions-durable 2.x requires Python 3.13. Core Tools 4.13.0 is the
+          # first release carrying a host new enough to run it.
+          python-version: "3.13"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
@@ -75,10 +75,17 @@ jobs:
         working-directory: python
         run: uv sync --all-packages --group dev --group test
 
+      # agent-framework-azurefunctions is a standalone uv project (it requires
+      # Python 3.13 via azure-functions-durable 2.x), so it has its own lockfile
+      # and environment rather than being a member of the workspace above.
+      - name: Sync azurefunctions project
+        working-directory: python/packages/azurefunctions
+        run: uv sync --group dev --group test
+
       - name: Integration tests
         working-directory: python
         run: uv run pytest packages/durabletask/tests/integration_tests -m integration -n 4 --dist loadscope --timeout 480
 
       - name: Azure Functions integration tests
-        working-directory: python
-        run: uv run pytest packages/azurefunctions/tests/integration_tests -m integration -n 4 --dist loadscope --timeout 480
+        working-directory: python/packages/azurefunctions
+        run: uv run pytest tests/integration_tests -m integration -n 4 --dist loadscope --timeout 480
