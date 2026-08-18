@@ -24,13 +24,13 @@ from agent_framework_durabletask import (
     DurableAgentState,
     workflow_orchestrator_name,
 )
+from durabletask.client import OrchestrationStatus
 
 from agent_framework_azurefunctions import AgentFunctionApp
 from agent_framework_azurefunctions._app import (
     _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS,
     _MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS,
 )
-from agent_framework_azurefunctions._entities import create_agent_entity
 from agent_framework_azurefunctions._errors import IncomingRequestError
 
 FuncT = TypeVar("FuncT", bound=Callable[..., Any])
@@ -512,233 +512,6 @@ class TestAgentEntityOperations:
         assert len(entity.state.data.conversation_history) == 0
 
 
-class TestAgentEntityFactory:
-    """Test suite for the entity factory function."""
-
-    def test_create_agent_entity_returns_function(self) -> None:
-        """Test that create_agent_entity returns a function."""
-        mock_agent = Mock()
-        entity_function = create_agent_entity(mock_agent)
-
-        assert callable(entity_function)
-
-    def test_entity_function_handles_run_operation(self) -> None:
-        """Test that the entity function handles the run operation."""
-        mock_agent = Mock()
-        mock_agent.run = AsyncMock(
-            return_value=AgentResponse(messages=[Message(role="assistant", contents=["Response"])])
-        )
-
-        entity_function = create_agent_entity(mock_agent)
-
-        # Mock context
-        mock_context = Mock()
-        mock_context.operation_name = "run"
-        mock_context.get_input.return_value = {
-            "message": "Test message",
-            "correlationId": "corr-app-factory-1",
-        }
-        mock_context.get_state.return_value = None
-
-        # Execute entity function
-        entity_function(mock_context)
-
-        # Verify result was set
-        assert mock_context.set_result.called
-        assert mock_context.set_state.called
-        result_call = mock_context.set_result.call_args[0][0]
-        assert "error" not in result_call
-
-    def test_entity_function_handles_run_agent_operation(self) -> None:
-        """Test that the entity function handles the deprecated run_agent operation for backward compatibility."""
-        mock_agent = Mock()
-        mock_agent.run = AsyncMock(
-            return_value=AgentResponse(messages=[Message(role="assistant", contents=["Response"])])
-        )
-
-        entity_function = create_agent_entity(mock_agent)
-
-        # Mock context
-        mock_context = Mock()
-        mock_context.operation_name = "run_agent"
-        mock_context.get_input.return_value = {
-            "message": "Test message",
-            "correlationId": "corr-app-factory-1",
-        }
-        mock_context.get_state.return_value = None
-
-        # Execute entity function
-        entity_function(mock_context)
-
-        # Verify result was set
-        assert mock_context.set_result.called
-        assert mock_context.set_state.called
-        result_call = mock_context.set_result.call_args[0][0]
-        assert "error" not in result_call
-
-    def test_entity_function_handles_reset_operation(self) -> None:
-        """Test that the entity function handles the reset operation."""
-        mock_agent = Mock()
-        entity_function = create_agent_entity(mock_agent)
-
-        # Mock context
-        mock_context = Mock()
-        mock_context.operation_name = "reset"
-        mock_context.get_state.return_value = {
-            "schemaVersion": "1.0.0",
-            "data": {
-                "conversationHistory": [
-                    {
-                        "$type": "request",
-                        "correlationId": "corr-reset-test",
-                        "createdAt": "2024-01-01T00:00:00Z",
-                        "messages": [
-                            {
-                                "role": "user",
-                                "contents": [
-                                    {
-                                        "$type": "text",
-                                        "text": "test",
-                                    }
-                                ],
-                            }
-                        ],
-                    }
-                ],
-            },
-        }
-
-        # Execute entity function
-        entity_function(mock_context)
-
-        # Verify result was set
-        assert mock_context.set_result.called
-        result_call = mock_context.set_result.call_args[0][0]
-        assert result_call["status"] == "reset"
-
-    def test_entity_function_handles_unknown_operation(self) -> None:
-        """Test that the entity function handles an unknown operation."""
-        mock_agent = Mock()
-        entity_function = create_agent_entity(mock_agent)
-
-        # Mock context with unknown operation
-        mock_context = Mock()
-        mock_context.operation_name = "unknown_operation"
-        mock_context.get_state.return_value = None
-
-        # Execute entity function
-        entity_function(mock_context)
-
-        # Verify error result was set
-        assert mock_context.set_result.called
-        result_call = mock_context.set_result.call_args[0][0]
-        assert "error" in result_call
-        assert "unknown_operation" in result_call["error"]
-
-    def test_entity_function_restores_state(self) -> None:
-        """Test that the entity function restores state from the context."""
-        mock_agent = Mock()
-        entity_function = create_agent_entity(mock_agent)
-
-        # Mock context with existing state
-        existing_state = {
-            "schemaVersion": "1.0.0",
-            "data": {
-                "conversationHistory": [
-                    {
-                        "$type": "request",
-                        "correlationId": "corr-existing-1",
-                        "createdAt": "2024-01-01T00:00:00Z",
-                        "messages": [
-                            {
-                                "role": "user",
-                                "contents": [
-                                    {
-                                        "$type": "text",
-                                        "text": "msg1",
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "$type": "response",
-                        "correlationId": "corr-existing-1",
-                        "createdAt": "2024-01-01T00:05:00Z",
-                        "messages": [
-                            {
-                                "role": "assistant",
-                                "contents": [
-                                    {
-                                        "$type": "text",
-                                        "text": "resp1",
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                ],
-            },
-        }
-
-        mock_context = Mock()
-        mock_context.operation_name = "run"
-        mock_context.get_input.return_value = {
-            "message": "Test message",
-            "correlationId": "corr-restore-1",
-        }
-        mock_context.get_state.return_value = existing_state
-
-        with patch.object(DurableAgentState, "from_dict", wraps=DurableAgentState.from_dict) as from_dict_mock:
-            entity_function(mock_context)
-
-        from_dict_mock.assert_called_once_with(existing_state)
-
-
-class TestErrorHandling:
-    """Test suite for error handling."""
-
-    async def test_entity_handles_agent_error(self) -> None:
-        """Test that the entity handles agent execution errors."""
-        mock_agent = Mock()
-        mock_agent.run = AsyncMock(side_effect=Exception("Agent error"))
-
-        entity = AgentEntity(mock_agent, state_provider=_InMemoryStateProvider(session_id="conv-1"))
-
-        result = await entity.run({
-            "message": "Test message",
-            "correlationId": "corr-app-error-1",
-        })
-
-        assert isinstance(result, AgentResponse)
-        assert len(result.messages) == 1
-        content = result.messages[0].contents[0]
-        assert content.type == "error"
-        assert "Agent error" in (content.message or "")
-        assert content.error_code == "Exception"
-
-    def test_entity_function_handles_exception(self) -> None:
-        """Test that the entity function handles exceptions gracefully."""
-        mock_agent = Mock()
-        # Force an exception by making get_input fail
-        mock_agent.run = AsyncMock(side_effect=Exception("Test error"))
-
-        entity_function = create_agent_entity(mock_agent)
-
-        mock_context = Mock()
-        mock_context.operation_name = "run"
-        mock_context.get_input.side_effect = Exception("Input error")
-        mock_context.get_state.return_value = None
-
-        # Execute entity function - should not raise
-        entity_function(mock_context)
-
-        # Verify error result was set
-        assert mock_context.set_result.called
-        result_call = mock_context.set_result.call_args[0][0]
-        assert "error" in result_call
-
-
 class TestIncomingRequestParsing:
     """Tests for parsing run requests with JSON and plain text bodies."""
 
@@ -1058,14 +831,14 @@ class TestWorkflowRunRoute:
         request.get_json.return_value = {"message": "hello"}
 
         client = AsyncMock()
-        client.start_new.return_value = "custom-run"
+        client.schedule_new_orchestration.return_value = "custom-run"
         client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
             "completed", status_code=200
         )
-        client.get_status.return_value = Mock(
+        client.get_orchestration_state.return_value = Mock(
             instance_id="custom-run",
-            runtime_status=df.OrchestrationRuntimeStatus.Completed,
-            output="completed",
+            runtime_status=OrchestrationStatus.COMPLETED,
+            get_output=Mock(return_value="completed"),
         )
 
         response = await handler(request, client)
@@ -1082,10 +855,10 @@ class TestWorkflowRunRoute:
             timeout_in_milliseconds=30_000,
             retry_interval_in_milliseconds=1000,
         )
-        client.start_new.assert_awaited_once_with(
+        client.schedule_new_orchestration.assert_awaited_once_with(
             "dafx-test_workflow",
             instance_id="custom-run",
-            client_input={"message": "hello"},
+            input={"message": "hello"},
         )
 
     async def test_wait_for_response_header_waits_with_default_timeout(self) -> None:
@@ -1097,14 +870,14 @@ class TestWorkflowRunRoute:
         request.get_json.return_value = {"message": "hello"}
 
         client = AsyncMock()
-        client.start_new.return_value = "instance-1"
+        client.schedule_new_orchestration.return_value = "instance-1"
         client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
             "completed", status_code=200
         )
-        client.get_status.return_value = Mock(
+        client.get_orchestration_state.return_value = Mock(
             instance_id="instance-1",
-            runtime_status=df.OrchestrationRuntimeStatus.Completed,
-            output="completed",
+            runtime_status=OrchestrationStatus.COMPLETED,
+            get_output=Mock(return_value="completed"),
         )
 
         response = await handler(request, client)
@@ -1132,7 +905,7 @@ class TestWorkflowRunRoute:
         request.get_json.return_value = {"message": "hello"}
 
         client = AsyncMock()
-        client.start_new.return_value = "instance-1"
+        client.schedule_new_orchestration.return_value = "instance-1"
 
         response = await handler(request, client)
 
@@ -1149,7 +922,7 @@ class TestWorkflowRunRoute:
         async_request.params = {}
         async_request.get_json.return_value = {"message": "hello"}
         async_client = AsyncMock()
-        async_client.start_new.return_value = "instance-1"
+        async_client.schedule_new_orchestration.return_value = "instance-1"
 
         timeout_request = Mock()
         timeout_request.url = async_request.url
@@ -1157,7 +930,7 @@ class TestWorkflowRunRoute:
         timeout_request.params = {"waitForResponse": "true"}
         timeout_request.get_json.return_value = {"message": "hello"}
         timeout_client = AsyncMock()
-        timeout_client.start_new.return_value = "instance-1"
+        timeout_client.schedule_new_orchestration.return_value = "instance-1"
         timeout_client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
             json.dumps({"id": "instance-1", "statusQueryGetUri": "https://durable-webhook.example/status"}),
             status_code=202,
@@ -1181,16 +954,16 @@ class TestWorkflowRunRoute:
         request.params = {"waitForResponse": "true"}
         request.get_json.return_value = {"message": "hello"}
         client = AsyncMock()
-        client.start_new.return_value = "instance-1"
+        client.schedule_new_orchestration.return_value = "instance-1"
         client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
             json.dumps({"runtimeStatus": "Failed", "output": "Something went wrong"}),
             status_code=500,
             mimetype=MIMETYPE_APPLICATION_JSON,
         )
-        client.get_status.return_value = Mock(
+        client.get_orchestration_state.return_value = Mock(
             instance_id="instance-1",
-            runtime_status=df.OrchestrationRuntimeStatus.Failed,
-            output="Something went wrong",
+            runtime_status=OrchestrationStatus.FAILED,
+            get_output=Mock(return_value="Something went wrong"),
         )
 
         response = await handler(request, client)
@@ -1213,14 +986,14 @@ class TestWorkflowRunRoute:
         request.get_json.return_value = {"message": "hello"}
         encoded_output = {"__pickled__": "checkpoint-data"}
         client = AsyncMock()
-        client.start_new.return_value = "instance-1"
+        client.schedule_new_orchestration.return_value = "instance-1"
         client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
             json.dumps(encoded_output), status_code=200
         )
-        client.get_status.return_value = Mock(
+        client.get_orchestration_state.return_value = Mock(
             instance_id="instance-1",
-            runtime_status=df.OrchestrationRuntimeStatus.Completed,
-            output=encoded_output,
+            runtime_status=OrchestrationStatus.COMPLETED,
+            get_output=Mock(return_value=encoded_output),
         )
 
         with patch(
@@ -1240,16 +1013,16 @@ class TestWorkflowRunRoute:
         request.params = {"waitForResponse": "true"}
         request.get_json.return_value = {"message": "hello"}
         client = AsyncMock()
-        client.start_new.return_value = "instance-1"
+        client.schedule_new_orchestration.return_value = "instance-1"
         client.wait_for_completion_or_create_check_status_response.return_value = func.HttpResponse(
             json.dumps({"runtimeStatus": "Terminated"}),
             status_code=200,
             mimetype=MIMETYPE_APPLICATION_JSON,
         )
-        client.get_status.return_value = Mock(
+        client.get_orchestration_state.return_value = Mock(
             instance_id="instance-1",
-            runtime_status=df.OrchestrationRuntimeStatus.Terminated,
-            output=None,
+            runtime_status=OrchestrationStatus.TERMINATED,
+            get_output=Mock(return_value=None),
         )
 
         response = await handler(request, client)
@@ -1268,7 +1041,7 @@ class TestWorkflowRunRoute:
         response = await handler(request, client)
 
         assert response.status_code == 400
-        client.start_new.assert_not_awaited()
+        client.schedule_new_orchestration.assert_not_awaited()
 
     async def test_invalid_wait_for_response_does_not_start_workflow(self) -> None:
         """Test invalid synchronous wait rejection before scheduling."""
@@ -1282,7 +1055,7 @@ class TestWorkflowRunRoute:
 
         assert response.status_code == 400
         assert "waitForResponse" in response.get_body().decode("utf-8")
-        client.start_new.assert_not_awaited()
+        client.schedule_new_orchestration.assert_not_awaited()
 
     async def test_wait_header_takes_precedence_over_invalid_query(self) -> None:
         """Test that the legacy wait header retains precedence over the query parameter."""
@@ -1293,7 +1066,7 @@ class TestWorkflowRunRoute:
         request.url = "http://localhost:7071/api/workflow/test_workflow/run"
         request.get_json.return_value = {"message": "hello"}
         client = AsyncMock()
-        client.start_new.return_value = "instance-1"
+        client.schedule_new_orchestration.return_value = "instance-1"
 
         response = await handler(request, client)
 
@@ -1325,7 +1098,7 @@ class TestWorkflowRunRoute:
 
         assert response.status_code == 400
         assert "runId" in response.get_body().decode("utf-8")
-        client.start_new.assert_not_awaited()
+        client.schedule_new_orchestration.assert_not_awaited()
 
 
 class TestMCPToolEndpoint:
@@ -1468,7 +1241,7 @@ class TestMCPToolEndpoint:
             "schemaVersion": "1.0.0",
             "data": {"conversationHistory": []},
         }
-        client.read_entity_state.return_value = mock_state
+        client.get_entity.return_value = mock_state
 
         # Create JSON string context
         context = '{"arguments": {"query": "test query", "sessionId": "test-session"}}'
@@ -1495,7 +1268,7 @@ class TestMCPToolEndpoint:
             "schemaVersion": "1.0.0",
             "data": {"conversationHistory": []},
         }
-        client.read_entity_state.return_value = mock_state
+        client.get_entity.return_value = mock_state
 
         # Create JSON string context
         context = json.dumps({"arguments": {"query": "test query", "sessionId": "test-session"}})
@@ -1550,7 +1323,7 @@ class TestMCPToolEndpoint:
             "schemaVersion": "1.0.0",
             "data": {"conversationHistory": []},
         }
-        client.read_entity_state.return_value = mock_state
+        client.get_entity.return_value = mock_state
 
         context = '{"arguments": {"query": "test query"}}'
 
@@ -1574,7 +1347,7 @@ class TestMCPToolEndpoint:
             "schemaVersion": "1.0.0",
             "data": {"conversationHistory": []},
         }
-        client.read_entity_state.return_value = mock_state
+        client.get_entity.return_value = mock_state
 
         # Session ID contains a different agent name (@StockAdvisor@poc123)
         # but we're invoking PlantAdvisor - it should use PlantAdvisor's entity
@@ -1590,8 +1363,11 @@ class TestMCPToolEndpoint:
             call_args = client.signal_entity.call_args
             entity_id = call_args[0][0]
 
-            # Entity name should be dafx-PlantAdvisor, not dafx-StockAdvisor
-            assert entity_id.name == "dafx-PlantAdvisor"
+            # Entity name should resolve to PlantAdvisor, not StockAdvisor.
+            # durabletask's EntityInstanceId normalizes the entity name to lowercase
+            # (the standalone DurableTask host has always behaved this way), so compare
+            # case-insensitively rather than against the registered casing.
+            assert entity_id.entity.casefold() == "dafx-plantadvisor"
             assert entity_id.key == "test123"
 
     async def test_handle_mcp_tool_invocation_uses_plain_session_id_as_key(self) -> None:
@@ -1607,7 +1383,7 @@ class TestMCPToolEndpoint:
             "schemaVersion": "1.0.0",
             "data": {"conversationHistory": []},
         }
-        client.read_entity_state.return_value = mock_state
+        client.get_entity.return_value = mock_state
 
         # Plain session id without @name@key format
         context = json.dumps({"arguments": {"query": "test query", "sessionId": "simple-session-123"}})
@@ -1621,7 +1397,8 @@ class TestMCPToolEndpoint:
             call_args = client.signal_entity.call_args
             entity_id = call_args[0][0]
 
-            assert entity_id.name == "dafx-TestAgent"
+            # See the note above: EntityInstanceId normalizes entity names to lowercase.
+            assert entity_id.entity.casefold() == "dafx-testagent"
             assert entity_id.key == "simple-session-123"
 
     async def test_handle_mcp_tool_invocation_accepts_legacy_thread_id(self) -> None:
@@ -1637,7 +1414,7 @@ class TestMCPToolEndpoint:
             "schemaVersion": "1.0.0",
             "data": {"conversationHistory": []},
         }
-        client.read_entity_state.return_value = mock_state
+        client.get_entity.return_value = mock_state
 
         context = json.dumps({"arguments": {"query": "test query", "threadId": "legacy-key-123"}})
 
@@ -1662,7 +1439,7 @@ class TestMCPToolEndpoint:
             "schemaVersion": "1.0.0",
             "data": {"conversationHistory": []},
         }
-        client.read_entity_state.return_value = mock_state
+        client.get_entity.return_value = mock_state
 
         context = json.dumps({
             "arguments": {"query": "test query", "sessionId": "canonical-key", "threadId": "legacy-key"}
@@ -1816,7 +1593,7 @@ class TestAgentFunctionAppErrorPaths:
 
         mock_state = Mock()
         mock_state.entity_state = {"schemaVersion": "1.0.0", "data": {"conversationHistory": []}}
-        client.read_entity_state.return_value = mock_state
+        client.get_entity.return_value = mock_state
 
         context = json.dumps({"arguments": {"query": "q", "sessionId": "   ", "threadId": "legacy-key"}})
 
@@ -2356,7 +2133,7 @@ class TestWorkflowOrchestrationScoping:
         assert app._is_owned_orchestration(status, "orders") is True
 
     def test_rejects_none_status(self) -> None:
-        # client.get_status returns None when no instance resolves for the ID.
+        # client.get_orchestration_state returns None when no instance resolves for the ID.
         app = self._app_for("orders")
         assert app._is_owned_orchestration(None, "orders") is False
 
@@ -2403,17 +2180,17 @@ class TestAgentFunctionAppSubworkflowHitl:
 
     @staticmethod
     def _client(by_instance: dict[str, dict | None]) -> AsyncMock:
-        """An AsyncMock durable client whose get_status returns a per-instance custom status."""
+        """An AsyncMock durable client whose get_orchestration_state returns a per-instance custom status."""
 
         async def _get_status(instance_id: str) -> Mock | None:
             if instance_id not in by_instance:
                 return None
             status = Mock()
-            status.custom_status = by_instance[instance_id]
+            status.get_custom_status.return_value = by_instance[instance_id]
             return status
 
         client = AsyncMock()
-        client.get_status.side_effect = _get_status
+        client.get_orchestration_state.side_effect = _get_status
         return client
 
     async def test_gather_returns_top_level_requests_unqualified(self) -> None:

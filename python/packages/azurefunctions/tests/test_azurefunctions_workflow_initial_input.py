@@ -67,8 +67,8 @@ async def test_workflow_run_route_neutralizes_reserved_marker_shaped_input() -> 
     request.params = {}
     request.url = "https://example.test/api/workflow/input_boundary/run"
     client = AsyncMock()
-    client.start_new.return_value = "instance-1"
+    client.schedule_new_orchestration.return_value = "instance-1"
 
     await handler(request, client)
 
-    assert client.start_new.await_args.kwargs["client_input"] is None
+    assert client.schedule_new_orchestration.await_args.kwargs["input"] is None
