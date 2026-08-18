@@ -65,7 +65,7 @@ def _workflow(name: str, *agents: Agent, child: Mock | None = None) -> Mock:
 
 def _consumer_settings(grpc_worker: Mock, index: int = 0) -> dict[str, Any]:
     entity_class = grpc_worker.add_entity.call_args_list[index].args[0]
-    with patch("agent_framework_durabletask._worker.AgentEntity") as consumer:
+    with patch("agent_framework_durabletask._entities.AgentEntity") as consumer:
         entity = entity_class()
     consumer.assert_called_once()
     kwargs = consumer.call_args.kwargs
@@ -342,7 +342,7 @@ def test_registration_validates_without_replacing_the_users_history_provider() -
     worker = DurableAIAgentWorker(grpc_worker, retention="follow_compaction")
     agent = _agent()
     original_providers = agent.context_providers
-    with patch("agent_framework_durabletask._worker.AgentEntity") as consumer:
+    with patch("agent_framework_durabletask._entities.AgentEntity") as consumer:
         worker.add_agent(agent)
     consumer.assert_not_called()
     assert agent.context_providers is original_providers
