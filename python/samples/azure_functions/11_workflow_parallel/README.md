@@ -46,21 +46,26 @@ This sample showcases three different parallel execution patterns:
 ## How Parallel Execution Works
 
 ### Activities (Executors)
-When multiple executors are pending in the same iteration (e.g., after a fan-out edge), they are batched and executed using `task_all()`:
+When multiple executors are pending in the same iteration (e.g., after a fan-out edge), they are batched and executed using `when_all()`:
 
 ```python
-# In _workflow.py - activities execute in parallel
-activity_tasks = [context.call_activity("ExecuteExecutor", input) for ...]
-results = yield context.task_all(activity_tasks)  # All run concurrently!
+from durabletask.task import when_all
+
+activity_tasks = [
+   context.call_activity("ExecuteExecutor", input=executor_input)
+   for executor_input in executor_inputs
+]
+results = yield when_all(activity_tasks)
 ```
 
 ### Agents (Entities)
 Different agents can also run in parallel when they're pending in the same iteration:
 
 ```python
-# Different agents run in parallel
-agent_tasks = [agent_a.run(...), agent_b.run(...)]
-responses = yield context.task_all(agent_tasks)  # Both agents run concurrently!
+from durabletask.task import when_all
+
+agent_tasks = [agent_a.run(message), agent_b.run(message)]
+responses = yield when_all(agent_tasks)
 ```
 
 **Note:** Multiple messages to the *same* agent are processed sequentially to maintain conversation coherence.
