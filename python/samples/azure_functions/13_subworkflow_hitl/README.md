@@ -79,7 +79,7 @@ workflow is driven as a child orchestration, not addressed directly.
 
 ## Running
 
-1. Start Azurite: `azurite --silent --location .`
+1. Start Azurite: `azurite --silent --location . --skipApiVersionCheck`
 2. Start the Durable Task Scheduler emulator on `localhost:8080`.
 3. Copy `local.settings.json.sample` to `local.settings.json`.
 4. `func start`

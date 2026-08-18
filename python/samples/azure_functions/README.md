@@ -73,8 +73,11 @@ Start the Durable Task Scheduler emulator and Azurite before `func start`:
 ```bash
 docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 \
   mcr.microsoft.com/dts/dts-emulator:latest
-azurite
+azurite --skipApiVersionCheck
 ```
+
+`--skipApiVersionCheck` is required because the preview extension bundle's durable
+extension uses a newer Azure Storage API version than Azurite currently recognises.
 
 The scheduler endpoint is `http://localhost:8080`; its dashboard is available at
 `http://localhost:8082`.

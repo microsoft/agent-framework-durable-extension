@@ -55,7 +55,7 @@ SharedState allows executors to pass large payloads (like email content) by refe
 
 3. Start Azurite:
    ```bash
-   azurite --silent
+   azurite --silent --skipApiVersionCheck
    ```
 
 4. Run the function app:

@@ -33,7 +33,7 @@ This sample hosts **no AI agents**, so it needs only the Durable Task Scheduler 
 Azurite (no model credentials).
 
 Prerequisites:
-- Start Azurite: ``azurite --silent --location .``
+- Start Azurite: ``azurite --silent --location . --skipApiVersionCheck``
 - Start a Durable Task Scheduler emulator on ``localhost:8080``.
 - Run: ``func start``
 """

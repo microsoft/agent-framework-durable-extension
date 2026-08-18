@@ -13,7 +13,7 @@ Prerequisites:
 
 Usage:
     # Start Azurite (if not already running)
-    azurite &
+    azurite --skipApiVersionCheck &
 
     # Run tests
     uv run pytest packages/azurefunctions/tests/integration_tests/test_10_workflow_no_shared_state.py -v

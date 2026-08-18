@@ -131,7 +131,7 @@ When running on Durable Functions, the HITL pattern maps to:
 3. Start the local emulators:
    ```bash
    # Terminal 1: Start Azurite
-   azurite --silent --location .
+   azurite --silent --location . --skipApiVersionCheck
 
    # Terminal 2: Start Durable Task Scheduler (if using local emulator)
    # Follow Durable Task Scheduler setup instructions

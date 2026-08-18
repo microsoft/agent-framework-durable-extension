@@ -140,7 +140,7 @@ The sample can run locally without Azure Functions infrastructure using DevUI:
 
 5. Start Azurite (or use VS Code extension):
    ```bash
-   azurite --silent
+   azurite --silent --skipApiVersionCheck
    ```
 
 6. Run the function app (ensure `durable=True` in `function_app.py`):
