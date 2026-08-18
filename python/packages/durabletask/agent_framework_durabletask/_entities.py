@@ -32,6 +32,7 @@ from agent_framework._sessions import is_local_history_conversation_id
 from durabletask.entities import DurableEntity
 from pydantic import BaseModel, ValidationError
 
+from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentCallbackContext, AgentResponseCallbackProtocol
 from ._configuration import validate_response_delivery_window
 from ._constants import DELIVERY_WINDOW_SECONDS, DurableStateFields
@@ -46,10 +47,15 @@ from ._history_provider import (
     unbind_durable_history,
 )
 from ._invocation_safety import DurableServiceClient, DurableToolGuard, InvocationProgress
-from ._json_payload import JsonState
+from ._json_payload import JsonMigration, JsonPayload, JsonState
 from ._message_identity import message_identity
 from ._models import RunRequest
-from ._response_utils import is_terminal_agent_response, load_agent_response, preserve_input_envelope
+from ._response_utils import (
+    is_terminal_agent_response,
+    load_agent_response,
+    preserve_input_envelope,
+    serialize_agent_response,
+)
 from ._retention import (
     DEFAULT_MAX_STATE_BYTES,
     DEFAULT_RETENTION,
@@ -1437,3 +1443,97 @@ class DurableTaskEntityStateProvider(DurableEntity, AgentEntityStateProviderMixi
             return entity_name
         name = getattr(entity_id, "name", "")
         return name if isinstance(name, str) else ""
+
+
+def create_agent_entity_class(
+    agent: SupportsAgentRun,
+    callback: AgentResponseCallbackProtocol | None = None,
+    *,
+    entity_id: str | None = None,
+    retention: RetentionMode = DEFAULT_RETENTION,
+    max_state_bytes: int | None = None,
+    high_watermark: float = HIGH_WATERMARK,
+    low_watermark: float = LOW_WATERMARK,
+    response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
+) -> type[DurableTaskEntityStateProvider]:
+    """Build a ``DurableEntity`` subclass bound to a specific agent instance.
+
+    Both hosts register the same entity implementation: the standalone DurableTask
+    worker passes the class to ``TaskHubGrpcWorker.add_entity``, and the Azure
+    Functions host passes it to ``DFApp.entity_trigger`` (azure-functions-durable 2.x
+    accepts a class-based ``DurableEntity`` as well as a function).
+
+    Args:
+        agent: The agent instance to wrap.
+        callback: Optional callback invoked for streaming and final responses.
+        entity_id: Optional identity to register the entity under instead of
+            ``agent.name``. Workflow hosting passes the executor's ``id`` so the
+            entity matches the identity the orchestrator dispatches to.
+        retention: Eager pruning policy, independent of pressure eviction.
+        max_state_bytes: Resolved pressure budget, or None to disable pressure eviction.
+        high_watermark: Budget fraction at which pressure eviction starts.
+        low_watermark: Target budget fraction after pressure eviction.
+        response_delivery_window_seconds: Response delivery window in seconds.
+
+    Returns:
+        A new ``DurableTaskEntityStateProvider`` subclass configured for this agent,
+        named ``dafx-{agent_name}``.
+    """
+    agent_name = entity_id or agent.name or type(agent).__name__
+    entity_name = f"dafx-{agent_name}"
+
+    class ConfiguredAgentEntity(DurableTaskEntityStateProvider):
+        """Durable entity configured with a specific agent instance."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._agent_entity = AgentEntity(
+                agent=agent,
+                callback=callback,
+                state_provider=self,
+                retention=retention,
+                max_state_bytes=max_state_bytes,
+                high_watermark=high_watermark,
+                low_watermark=low_watermark,
+                response_delivery_window_seconds=response_delivery_window_seconds,
+            )
+            logger.debug(
+                "[ConfiguredAgentEntity] Initialized entity for agent: %s (entity name: %s)",
+                agent_name,
+                entity_name,
+            )
+
+        def run(self, request: JsonPayload) -> Any:
+            """Handle run requests from clients or orchestrations.
+
+            Args:
+                request: RunRequest as dict or string
+
+            Returns:
+                AgentResponse as dict
+            """
+            logger.debug("[ConfiguredAgentEntity.run] Executing agent: %s", agent_name)
+            # Run on the shared persistent loop so async resources created by
+            # shared agent clients/credentials stay bound to a live loop across
+            # successive entity invocations (avoids cross-loop hangs).
+            response = run_agent_coroutine(self._agent_entity.run(cast(Any, request)))
+            return serialize_agent_response(response)
+
+        def reset(self) -> None:
+            """Delegate reset to the configured AgentEntity."""
+            logger.debug("[ConfiguredAgentEntity.reset] Resetting agent: %s", agent_name)
+            self._agent_entity.reset()
+
+        def expire_responses(self) -> int:
+            """Remove expired payloads when signaled by application-owned maintenance."""
+            return self._agent_entity.expire_responses()
+
+        def migrate(self, request: JsonMigration) -> dict[str, str]:
+            """Import an authorized legacy export into a separate empty destination."""
+            return self._agent_entity.migrate(cast(Any, request))
+
+    # The runtime derives the registered entity name from the class name.
+    ConfiguredAgentEntity.__name__ = entity_name
+    ConfiguredAgentEntity.__qualname__ = entity_name
+
+    return ConfiguredAgentEntity

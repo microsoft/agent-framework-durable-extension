@@ -19,9 +19,22 @@ from durabletask.entities import EntityContext, EntityInstanceId
 from durabletask.internal.entity_state_shim import StateShim
 from durabletask.serialization import JsonDataConverter
 
-from agent_framework_durabletask import AgentEntity, DurableAgentState, DurableAIAgentWorker, load_agent_response
+from agent_framework_durabletask import (
+    AgentEntity,
+    DurableAgentState,
+    DurableAIAgentWorker,
+    load_agent_response,
+)
+from agent_framework_durabletask._entities import create_agent_entity_class
 
 UTC_NOW = datetime(2026, 9, 18, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_entity_factory_is_internal() -> None:
+    import agent_framework_durabletask
+
+    assert "create_agent_entity_class" not in agent_framework_durabletask.__all__
+    assert not hasattr(agent_framework_durabletask, "create_agent_entity_class")
 
 
 class _CoreClient(BaseChatClient):
@@ -66,7 +79,7 @@ def _sdk_provider(state_json: str | None, *, entity_name: str = "dafx-runtime", 
     shim = StateShim(state_json, converter, is_serialized=True)
     entity_id = EntityInstanceId(entity_name, session_id)
     context = EntityContext("orchestration", "operation", shim, entity_id, converter)
-    entity = DurableAIAgentWorker(Mock(), deployment_mode="isolated_v2")._DurableAIAgentWorker__create_agent_entity(  # type: ignore[attr-defined]
+    entity = create_agent_entity_class(
         Agent(client=RecordingChatClient(), name="bootstrap"),
         None,
         entity_id="bootstrap",
