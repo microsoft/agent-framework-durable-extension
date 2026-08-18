@@ -52,7 +52,7 @@ and [metric semantics](../../packages/azurefunctions/README.md#retention-metrics
 
 Install and verify these tools before [Environment Setup](#environment-setup):
 
-- **[Python 3.10 or later](https://www.python.org/downloads/)**
+- **[Python 3.13 or later](https://www.python.org/downloads/)**, required by azure-functions-durable 2.x
 - **[Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local?tabs=windows%2Cpython%2Cv2&pivots=programming-language-python#install-the-azure-functions-core-tools)** – run samples locally with `func start`
 - **[Azurite](https://learn.microsoft.com/azure/storage/common/storage-install-azurite)** – local storage emulator, required before `func start`
 - **[Docker](https://docs.docker.com/get-docker/)** and the **[Durable Task Scheduler emulator](https://learn.microsoft.com/azure/durable-task/scheduler/develop-with-durable-task-scheduler#durable-task-scheduler-emulator)** are optional for the [DTS backend](#optional-durable-task-scheduler-backend), not required by the shipped Azure Storage configuration.
