@@ -19,9 +19,10 @@ from typing import Any
 import azure.functions as func
 from agent_framework import Agent
 from agent_framework.foundry import FoundryChatClient
-from agent_framework_azurefunctions import AgentFunctionApp
-from azure.durable_functions import DurableOrchestrationClient, DurableOrchestrationContext
+from agent_framework_azurefunctions import AgentFunctionApp, runtime_status_name
+from azure.durable_functions import DurableFunctionsClient
 from azure.identity.aio import AzureCliCredential
+from durabletask.task import OrchestrationContext
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +55,9 @@ app = AgentFunctionApp(agents=[_create_writer_agent()], enable_health_check=True
 
 
 # 4. Orchestration that runs the agent sequentially on a shared session for chaining behaviour.
+# Orchestrators take (context, input) since azure-functions-durable 2.x. This one needs no input.
 @app.orchestration_trigger(context_name="context")
-def single_agent_orchestration(context: DurableOrchestrationContext) -> Generator[Any, Any, str]:
+def single_agent_orchestration(context: OrchestrationContext, _input: Any) -> Generator[Any, Any, str]:
     """Run the writer agent twice on the same session to mirror chaining behaviour."""
 
     writer = app.get_agent(context, WRITER_AGENT_NAME)
@@ -81,13 +83,11 @@ def single_agent_orchestration(context: DurableOrchestrationContext) -> Generato
 @app.durable_client_input(client_name="client")
 async def start_single_agent_orchestration(
     req: func.HttpRequest,
-    client: DurableOrchestrationClient,
+    client: DurableFunctionsClient,
 ) -> func.HttpResponse:
     """Start the orchestration and return status metadata."""
 
-    instance_id = await client.start_new(
-        orchestration_function_name="single_agent_orchestration",
-    )
+    instance_id = await client.schedule_new_orchestration("single_agent_orchestration")
 
     logger.info("[HTTP] Started orchestration with instance_id: %s", instance_id)
 
@@ -111,7 +111,7 @@ async def start_single_agent_orchestration(
 @app.durable_client_input(client_name="client")
 async def get_orchestration_status(
     req: func.HttpRequest,
-    client: DurableOrchestrationClient,
+    client: DurableFunctionsClient,
 ) -> func.HttpResponse:
     """Return orchestration runtime status."""
 
@@ -123,18 +123,26 @@ async def get_orchestration_status(
             mimetype="application/json",
         )
 
-    status = await client.get_status(instance_id)
+    status = await client.get_orchestration_state(instance_id)
+    if status is None:
+        return func.HttpResponse(
+            body=json.dumps({"error": f"No orchestration found for instance '{instance_id}'"}),
+            status_code=404,
+            mimetype="application/json",
+        )
 
     response_data: dict[str, Any] = {
         "instanceId": status.instance_id,
-        "runtimeStatus": status.runtime_status.name if status.runtime_status else None,
+        "runtimeStatus": runtime_status_name(status.runtime_status),
     }
 
-    if status.input_ is not None:
-        response_data["input"] = status.input_
+    orchestration_input = status.get_input()
+    if orchestration_input is not None:
+        response_data["input"] = orchestration_input
 
-    if status.output is not None:
-        response_data["output"] = status.output
+    output = status.get_output()
+    if output is not None:
+        response_data["output"] = output
 
     return func.HttpResponse(
         body=json.dumps(response_data),
