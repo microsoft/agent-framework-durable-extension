@@ -20,6 +20,7 @@ from agent_framework import (
 )
 from durabletask.entities import DurableEntity
 
+from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentCallbackContext, AgentResponseCallbackProtocol
 from ._durable_agent_state import (
     DurableAgentState,
@@ -372,3 +373,74 @@ class DurableTaskEntityStateProvider(DurableEntity, AgentEntityStateProviderMixi
 
     def _get_session_id_from_entity(self) -> str:
         return self.entity_context.entity_id.key
+
+
+def create_agent_entity_class(
+    agent: SupportsAgentRun,
+    callback: AgentResponseCallbackProtocol | None = None,
+    *,
+    entity_id: str | None = None,
+) -> type[DurableTaskEntityStateProvider]:
+    """Build a ``DurableEntity`` subclass bound to a specific agent instance.
+
+    Both hosts register the same entity implementation: the standalone DurableTask
+    worker passes the class to ``TaskHubGrpcWorker.add_entity``, and the Azure
+    Functions host passes it to ``DFApp.entity_trigger`` (2.x accepts a class-based
+    ``DurableEntity`` as well as a function).
+
+    Args:
+        agent: The agent instance to wrap.
+        callback: Optional callback invoked for streaming and final responses.
+        entity_id: Optional identity to register the entity under instead of
+            ``agent.name``. Workflow hosting passes the executor's ``id`` so the
+            entity matches the identity the orchestrator dispatches to.
+
+    Returns:
+        A new ``DurableTaskEntityStateProvider`` subclass configured for this agent,
+        named ``dafx-{agent_name}``.
+    """
+    agent_name = entity_id or agent.name or type(agent).__name__
+    entity_name = f"dafx-{agent_name}"
+
+    class ConfiguredAgentEntity(DurableTaskEntityStateProvider):
+        """Durable entity configured with a specific agent instance."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._agent_entity = AgentEntity(
+                agent=agent,
+                callback=callback,
+                state_provider=self,
+            )
+            logger.debug(
+                "[ConfiguredAgentEntity] Initialized entity for agent: %s (entity name: %s)",
+                agent_name,
+                entity_name,
+            )
+
+        def run(self, request: Any) -> Any:
+            """Handle run requests from clients or orchestrations.
+
+            Args:
+                request: RunRequest as dict or string
+
+            Returns:
+                AgentResponse as dict
+            """
+            logger.debug("[ConfiguredAgentEntity.run] Executing agent: %s", agent_name)
+            # Run on the shared persistent loop so async resources created by
+            # shared agent clients/credentials stay bound to a live loop across
+            # successive entity invocations (avoids cross-loop hangs).
+            response = run_agent_coroutine(self._agent_entity.run(request))
+            return response.to_dict()
+
+        def reset(self) -> None:
+            """Reset the agent's conversation history."""
+            logger.debug("[ConfiguredAgentEntity.reset] Resetting agent: %s", agent_name)
+            self._agent_entity.reset()
+
+    # The runtime derives the registered entity name from the class name.
+    ConfiguredAgentEntity.__name__ = entity_name
+    ConfiguredAgentEntity.__qualname__ = entity_name
+
+    return ConfiguredAgentEntity
