@@ -49,7 +49,6 @@ class TestMcpServerSample:
             streamable_http_client(f"{base_url}/runtime/webhooks/mcp") as (
                 read_stream,
                 write_stream,
-                _,
             ),
             ClientSession(read_stream, write_stream) as session,
         ):
@@ -65,5 +64,5 @@ class TestMcpServerSample:
                 ("PlantAdvisor", "Recommend a low-light indoor plant."),
             ):
                 result = await session.call_tool(tool_name, {"query": query})
-                assert result.isError is False
+                assert result.is_error is False
                 assert _response_text(result).strip()
