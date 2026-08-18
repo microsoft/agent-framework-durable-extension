@@ -1336,13 +1336,12 @@ class AgentFunctionApp(df.DFApp):
         if entity is None:
             return None
 
-        state_payload = entity.get_state()
-        if not isinstance(state_payload, dict):
+        # get_state() returns the raw serialized JSON payload, not a mapping.
+        state_json = entity.get_state()
+        if not state_json:
             return None
 
-        typed_state_payload = cast(dict[str, Any], state_payload)
-
-        return DurableAgentState.from_dict(typed_state_payload)
+        return DurableAgentState.from_json(state_json)
 
     async def _get_response_from_entity(
         self,

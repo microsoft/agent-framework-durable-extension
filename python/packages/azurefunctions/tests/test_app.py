@@ -6,6 +6,7 @@
 
 import json
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import Any, TypeVar
 from unittest.mock import ANY, AsyncMock, Mock, patch
 
@@ -25,6 +26,9 @@ from agent_framework_durabletask import (
     workflow_orchestrator_name,
 )
 from durabletask.client import OrchestrationStatus
+from durabletask.entities.entity_instance_id import EntityInstanceId
+from durabletask.entities.entity_metadata import EntityMetadata
+from durabletask.serialization import DEFAULT_DATA_CONVERTER
 
 from agent_framework_azurefunctions import AgentFunctionApp
 from agent_framework_azurefunctions._app import (
@@ -2299,6 +2303,61 @@ class TestAgentFunctionAppSubworkflowHitl:
         resolved = await app._resolve_hitl_target(client, "parent", "auto::0")
 
         assert resolved == ("parent", "auto::0")
+
+
+class TestReadCachedState:
+    """Coverage for reading agent state back out of a durable entity."""
+
+    @staticmethod
+    def _entity_metadata(state: Any) -> EntityMetadata:
+        """Build a real EntityMetadata so the test tracks the SDK's own get_state contract."""
+        return EntityMetadata(
+            id=EntityInstanceId(entity="dafx-testagent", key="test-session"),
+            last_modified=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            backlog_queue_size=0,
+            locked_by="",
+            includes_state=True,
+            state=state,
+            data_converter=DEFAULT_DATA_CONVERTER,
+        )
+
+    async def test_reads_state_from_raw_json_payload(self) -> None:
+        """get_state returns the serialized JSON payload rather than a mapping.
+
+        Treating it as a mapping silently yields no state, which leaves the HTTP
+        endpoints polling a completed entity until they time out.
+        """
+        mock_agent = Mock()
+        mock_agent.name = "TestAgent"
+        app = AgentFunctionApp(agents=[mock_agent])
+
+        client = AsyncMock()
+        client.get_entity.return_value = self._entity_metadata(DurableAgentState().to_json())
+
+        state = await app._read_cached_state(client, EntityInstanceId(entity="dafx-testagent", key="test-session"))
+
+        assert state is not None
+        assert state.schema_version == DurableAgentState.SCHEMA_VERSION
+
+    async def test_missing_entity_returns_none(self) -> None:
+        mock_agent = Mock()
+        mock_agent.name = "TestAgent"
+        app = AgentFunctionApp(agents=[mock_agent])
+
+        client = AsyncMock()
+        client.get_entity.return_value = None
+
+        assert await app._read_cached_state(client, EntityInstanceId(entity="dafx-testagent", key="k")) is None
+
+    async def test_entity_without_state_returns_none(self) -> None:
+        mock_agent = Mock()
+        mock_agent.name = "TestAgent"
+        app = AgentFunctionApp(agents=[mock_agent])
+
+        client = AsyncMock()
+        client.get_entity.return_value = self._entity_metadata(None)
+
+        assert await app._read_cached_state(client, EntityInstanceId(entity="dafx-testagent", key="k")) is None
 
 
 if __name__ == "__main__":
