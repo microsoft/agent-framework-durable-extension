@@ -923,6 +923,7 @@ class AgentFunctionApp(DFAppBase):
             effective_enable_http_endpoint,
             effective_enable_mcp_endpoint,
             retention=effective_retention,
+            max_state_bytes=self._max_state_bytes,
         )
 
         logger.debug(f"[AgentFunctionApp] Agent '{registration_name}' added successfully")
@@ -969,6 +970,7 @@ class AgentFunctionApp(DFAppBase):
         enable_mcp_tool_trigger: bool,
         *,
         retention: RetentionMode = DEFAULT_RETENTION,
+        max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
     ) -> None:
         """Set up the HTTP trigger, entity, and MCP tool trigger for a specific agent.
 
@@ -979,6 +981,7 @@ class AgentFunctionApp(DFAppBase):
             enable_http_endpoint: Whether to create HTTP endpoint
             enable_mcp_tool_trigger: Whether to create MCP tool trigger
             retention: How much of the conversation durable state may discard.
+            max_state_bytes: Budget for serialized entity state.
         """
         logger.debug(f"[AgentFunctionApp] Setting up functions for agent '{agent_name}'...")
 
@@ -989,7 +992,7 @@ class AgentFunctionApp(DFAppBase):
                 "[AgentFunctionApp] HTTP run route disabled for agent '%s'",
                 agent_name,
             )
-        self._setup_agent_entity(agent, agent_name, callback, retention=retention)
+        self._setup_agent_entity(agent, agent_name, callback, retention=retention, max_state_bytes=max_state_bytes)
 
         if enable_mcp_tool_trigger:
             agent_description = agent.description
@@ -1133,6 +1136,7 @@ class AgentFunctionApp(DFAppBase):
         callback: AgentResponseCallbackProtocol | None,
         *,
         retention: RetentionMode = DEFAULT_RETENTION,
+        max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
     ) -> None:
         """Register the durable entity responsible for agent state.
 
@@ -1141,6 +1145,7 @@ class AgentFunctionApp(DFAppBase):
             agent_name: The agent name (used for both entity identification and function naming)
             callback: Optional callback for response updates
             retention: How much of the conversation durable state may discard.
+            max_state_bytes: Budget for serialized entity state.
         """
         # Use the prefixed entity name for both registration and function naming
         entity_name_with_prefix = AgentSessionId.to_entity_name(agent_name)
@@ -1153,7 +1158,7 @@ class AgentFunctionApp(DFAppBase):
             - run_agent: (Deprecated) Execute the agent with a message
             - reset: Clear conversation history
             """
-            entity_handler = create_agent_entity(agent, callback, retention=retention)
+            entity_handler = create_agent_entity(agent, callback, retention=retention, max_state_bytes=max_state_bytes)
             entity_handler(context)
 
         # Set function name for Azure Functions (used in function.json generation)

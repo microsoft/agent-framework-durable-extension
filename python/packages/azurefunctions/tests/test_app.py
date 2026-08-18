@@ -24,6 +24,7 @@ from agent_framework_durabletask import (
     DurableAgentState,
     workflow_orchestrator_name,
 )
+from agent_framework_durabletask._retention import DEFAULT_MAX_STATE_BYTES
 
 from agent_framework_azurefunctions import AgentFunctionApp
 from agent_framework_azurefunctions._app import (
@@ -269,7 +270,9 @@ class TestAgentFunctionAppSetup:
             app.add_agent(mock_agent, enable_http_endpoint=True)
 
         http_route_mock.assert_called_once_with("OverrideAgent")
-        agent_entity_mock.assert_called_once_with(mock_agent, "OverrideAgent", None, retention="auto")
+        agent_entity_mock.assert_called_once_with(
+            mock_agent, "OverrideAgent", None, retention="auto", max_state_bytes=DEFAULT_MAX_STATE_BYTES
+        )
         assert app._agent_metadata["OverrideAgent"].http_endpoint_enabled is True
 
     def test_agent_override_disables_http_route_when_app_enabled(self) -> None:
@@ -286,8 +289,44 @@ class TestAgentFunctionAppSetup:
             app.add_agent(mock_agent, enable_http_endpoint=False)
 
         http_route_mock.assert_not_called()
-        agent_entity_mock.assert_called_once_with(mock_agent, "DisabledOverride", None, retention="auto")
+        agent_entity_mock.assert_called_once_with(
+            mock_agent, "DisabledOverride", None, retention="auto", max_state_bytes=DEFAULT_MAX_STATE_BYTES
+        )
         assert app._agent_metadata["DisabledOverride"].http_endpoint_enabled is False
+
+    def test_configured_state_budget_reaches_the_entity(self) -> None:
+        """A budget set on the app has to bound the entity, not just sit on the app.
+
+        Asserting that ``_setup_agent_entity`` was called is not enough, because the value can
+        still be dropped below that point and the agent would silently keep the default budget.
+        So the registered entity function is invoked and the factory call is inspected.
+        """
+        mock_agent = Mock()
+        mock_agent.name = "BudgetAgent"
+        registered: list[Callable[[Any], None]] = []
+
+        def _capture_entity_trigger(**kwargs: Any) -> Callable[[FuncT], FuncT]:
+            def decorator(entity_function: FuncT) -> FuncT:
+                registered.append(entity_function)
+                return entity_function
+
+            return decorator
+
+        with (
+            patch.object(AgentFunctionApp, "entity_trigger", side_effect=_capture_entity_trigger),
+            patch("agent_framework_azurefunctions._app.create_agent_entity") as create_entity_mock,
+        ):
+            app = AgentFunctionApp(
+                enable_health_check=False,
+                enable_http_endpoints=False,
+                max_state_bytes=4096,
+            )
+            app.add_agent(mock_agent)
+
+            assert registered, "no entity function was registered"
+            registered[0](Mock())
+
+        assert create_entity_mock.call_args.kwargs["max_state_bytes"] == 4096
 
     def test_multiple_apps_independent(self) -> None:
         """Test that multiple AgentFunctionApp instances are independent."""
