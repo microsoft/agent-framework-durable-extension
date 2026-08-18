@@ -69,11 +69,17 @@ environments = [
 ]
 
 [tool.uv.workspace]
-members = ["packages/durabletask", "packages/azurefunctions"]
+# agent-framework-azurefunctions is deliberately NOT a member. It depends on
+# azure-functions-durable 2.x, which requires Python >=3.13, and uv resolves a
+# workspace to a single lock over the intersection of its members'
+# requires-python. Keeping it here would drag this workspace (and therefore
+# agent-framework-durabletask, which supports >=3.10 and needs no part of Azure
+# Functions) up to 3.13. It is a standalone uv project under
+# packages/azurefunctions with its own lockfile.
+members = ["packages/durabletask"]
 
 [tool.uv.sources]
 agent-framework-durabletask = { workspace = true }
-agent-framework-azurefunctions = { workspace = true }
 
 [tool.ruff]
 line-length = 120
