@@ -8,7 +8,7 @@ import inspect
 import json
 import logging
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -65,6 +65,38 @@ except ImportError:  # pragma: no cover - depends on the installed core version
     _SerializableStateRoot = None
 
 _registered_state_types: set[type] = set()
+
+# Provider error code for a conversation id the service will not accept as a parent turn.
+_MISSING_PREVIOUS_RESPONSE_CODE = "previous_response_not_found"
+
+
+def _is_missing_previous_response(exc: BaseException) -> bool:
+    """Return whether the service refused the conversation id from the previous turn.
+
+    A service that keeps the conversation can hand back the id of a finished response before that
+    response is durably readable, so the next turn is refused even though the id is genuine and
+    was captured correctly. The conversation is not lost, it is simply unreachable by id, and
+    resending the transcript recovers it.
+
+    Matching is deliberately narrow. Replaying the transcript is only correct for this one
+    failure, and a looser test would swallow real request errors and quietly answer without the
+    context the caller asked for. So the provider's structured error ``code`` is used rather than
+    a substring of the message, and the cause chain is walked because layers above the provider
+    may wrap the original error.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if getattr(current, "code", None) == _MISSING_PREVIOUS_RESPONSE_CODE:
+            return True
+        body = getattr(current, "body", None)
+        if isinstance(body, Mapping) and cast("Mapping[str, Any]", body).get("code") == (
+            _MISSING_PREVIOUS_RESPONSE_CODE
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _register_loaded_state_types() -> None:
@@ -300,21 +332,41 @@ class AgentEntity:
                 # Fallback for agents without the core context pipeline (for example a fully
                 # custom agent): the entity replays the persisted conversation on every turn.
                 session = None
-                chat_messages = [
-                    replayable_message
-                    for entry in self.state.data.conversation_history
-                    if not self._is_error_response(entry)
-                    for m in entry.messages
-                    if (replayable_message := self._to_replayable_message(m)) is not None
-                ]
+                chat_messages = self._replay_all_messages()
                 run_kwargs = {"messages": chat_messages, "options": options}
 
-            agent_run_response: AgentResponse = await self._invoke_agent(
-                run_kwargs=run_kwargs,
-                correlation_id=correlation_id,
-                session_id=session_id,
-                request_message=message,
-            )
+            try:
+                agent_run_response: AgentResponse = await self._invoke_agent(
+                    run_kwargs=run_kwargs,
+                    correlation_id=correlation_id,
+                    session_id=session_id,
+                    request_message=message,
+                )
+            except Exception as exc:
+                if session is None or not _is_missing_previous_response(exc):
+                    raise
+                # The service is holding this conversation but will not accept the id we stored
+                # for it. Drop the id and resend the transcript, which is what the entity does
+                # for agents whose history it owns. A successful retry mints a fresh id that
+                # gets persisted below, so the session recovers rather than failing again.
+                logger.warning(
+                    "[AgentEntity.run] Service rejected the stored conversation id for session %s; "
+                    "replaying the transcript instead. %s",
+                    session_id,
+                    exc,
+                )
+                session.service_session_id = None
+                run_kwargs = {
+                    "messages": self._replay_all_messages(),
+                    "session": session,
+                    "options": options,
+                }
+                agent_run_response = await self._invoke_agent(
+                    run_kwargs=run_kwargs,
+                    correlation_id=correlation_id,
+                    session_id=session_id,
+                    request_message=message,
+                )
 
             state_response = DurableAgentStateResponse.from_run_response(correlation_id, agent_run_response)
             self.state.data.conversation_history.append(state_response)
@@ -525,6 +577,24 @@ class AgentEntity:
         if getattr(session, "service_session_id", None) is None:
             session.service_session_id = restored.service_session_id
 
+    def _replay_all_messages(self) -> list[Message]:
+        """Build run input from the whole persisted transcript.
+
+        Used whenever history cannot come from anywhere else: agents with no context pipeline,
+        where the entity owns the conversation outright, and recovery for a service-managed agent
+        whose stored conversation id the service would not accept.
+
+        Failed turns are skipped so an error reply is never presented back to the model as
+        something it said.
+        """
+        return [
+            replayable_message
+            for entry in self.state.data.conversation_history
+            if not self._is_error_response(entry)
+            for m in entry.messages
+            if (replayable_message := self._to_replayable_message(m)) is not None
+        ]
+
     @staticmethod
     def _to_replayable_message(message: DurableAgentStateMessage) -> Message | None:
         """Convert persisted history into a message safe to replay into chat clients."""
@@ -576,6 +646,10 @@ class AgentEntity:
                 type_error,
             )
         except Exception as stream_error:
+            if _is_missing_previous_response(stream_error):
+                # Falling back to run() would resend the id the service just refused and fail the
+                # same way. Surface it so the caller can rebuild the request without that id.
+                raise
             logger.warning(
                 "run(stream=True) failed; falling back to run(): %s",
                 stream_error,

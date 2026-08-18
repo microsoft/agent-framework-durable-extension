@@ -63,6 +63,39 @@ class _InMemoryStateProvider(AgentEntityStateProviderMixin):
         return self._session_id
 
 
+class _PreviousResponseNotFound(Exception):
+    """Shaped like the provider's refusal of a conversation id it previously issued.
+
+    Mirrors the real payload field for field, because the entity matches on the structured
+    ``code`` rather than on the message text.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Error code: 400 - {'error': {'message': \"Previous response with id 'resp_x' not "
+            "found.\", 'type': 'invalid_request_error', 'param': 'previous_response_id', "
+            "'code': 'previous_response_not_found'}}"
+        )
+        self.status_code = 400
+        self.code = "previous_response_not_found"
+        self.param = "previous_response_id"
+        self.body = {
+            "message": "Previous response with id 'resp_x' not found.",
+            "type": "invalid_request_error",
+            "param": "previous_response_id",
+            "code": "previous_response_not_found",
+        }
+
+
+class _ContextLengthExceeded(Exception):
+    """A different 400, which must not be mistaken for a lost conversation."""
+
+    def __init__(self) -> None:
+        super().__init__("Error code: 400 - context_length_exceeded")
+        self.status_code = 400
+        self.code = "context_length_exceeded"
+
+
 def _agent(client: Any = None, **kwargs: Any) -> Agent:
     """Build an agent with a stub client.
 
@@ -308,3 +341,176 @@ class TestServiceManagedSessions:
         assert seen_ids[0] is None  # first turn has no thread yet
         assert seen_ids[1] == "svc-thread-1"  # second turn continues the same thread
         assert provider._get_state_dict()["data"]["session"]["service_session_id"] == "svc-thread-1"
+
+
+class TestRejectedConversationIdRecovery:
+    """A service can hand back a conversation id it will not accept on the next turn.
+
+    The id is captured correctly and the conversation still exists, it is just briefly
+    unreachable. Losing the turn over that would be unreasonable, so the entity drops the id and
+    resends the transcript, which is what it already does for agents whose history it owns.
+    """
+
+    async def test_rejected_id_replays_the_full_transcript(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        class _ForgetfulAgent:
+            name = "svc"
+            client = _ServiceStoringClient()
+            context_providers: list[Any] = []
+
+            def create_session(self, **kwargs: Any) -> Any:
+                from agent_framework import AgentSession
+
+                return AgentSession()
+
+            async def run(
+                self,
+                messages: Any = None,
+                *,
+                stream: bool = False,
+                session: Any = None,
+                **kwargs: Any,
+            ) -> Any:
+                from agent_framework import AgentResponse
+
+                if stream:
+                    raise TypeError("stream is not supported")
+                previous = getattr(session, "service_session_id", None)
+                calls.append({"previous": previous, "texts": [m.text for m in (messages or [])]})
+                # Any turn that arrives carrying a conversation id is refused.
+                if previous is not None:
+                    raise _PreviousResponseNotFound
+                session.service_session_id = f"thread-{len(calls)}"
+                return AgentResponse(messages=[Message(role="assistant", contents=["ok"])])
+
+        provider = _InMemoryStateProvider()
+        entity = AgentEntity(_ForgetfulAgent(), state_provider=provider)  # type: ignore[arg-type]
+
+        await entity.run({"message": "first", "correlationId": "c0"})
+        response = await entity.run({"message": "second", "correlationId": "c1"})
+
+        # Three calls: the first turn, the refused attempt, and the replay.
+        assert len(calls) == 3
+        # The refused attempt chained on the stored id and sent only the new message.
+        assert calls[1]["previous"] == "thread-1"
+        assert calls[1]["texts"] == ["second"]
+        # The replay dropped the id and carried the whole conversation instead.
+        assert calls[2]["previous"] is None
+        assert calls[2]["texts"] == ["first", "ok", "second"]
+        # The turn succeeded rather than surfacing an empty reply.
+        assert response.text == "ok"
+        # The fresh id is persisted, so the session recovers instead of failing every turn.
+        assert provider._get_state_dict()["data"]["session"]["service_session_id"] == "thread-3"
+
+    async def test_streaming_rejection_does_not_retry_with_the_same_id(self) -> None:
+        """Falling back to a non-streamed call with the refused id only wastes a round trip."""
+        attempts: list[tuple[str, str | None]] = []
+
+        class _StreamingForgetfulAgent:
+            name = "svc"
+            client = _ServiceStoringClient()
+            context_providers: list[Any] = []
+
+            def create_session(self, **kwargs: Any) -> Any:
+                from agent_framework import AgentSession
+
+                return AgentSession()
+
+            async def run(
+                self,
+                messages: Any = None,
+                *,
+                stream: bool = False,
+                session: Any = None,
+                **kwargs: Any,
+            ) -> Any:
+                from agent_framework import AgentResponse
+
+                previous = getattr(session, "service_session_id", None)
+                attempts.append(("stream" if stream else "nonstream", previous))
+                if previous is not None:
+                    raise _PreviousResponseNotFound
+                if stream:
+                    raise TypeError("stream is not supported")
+                session.service_session_id = "thread-1"
+                return AgentResponse(messages=[Message(role="assistant", contents=["ok"])])
+
+        entity = AgentEntity(_StreamingForgetfulAgent(), state_provider=_InMemoryStateProvider())  # type: ignore[arg-type]
+
+        await entity.run({"message": "first", "correlationId": "c0"})
+        await entity.run({"message": "second", "correlationId": "c1"})
+
+        # The streamed attempt carrying the stale id is refused, and no non-streamed call
+        # repeats it. The recovery happens a level up, with the id cleared.
+        assert ("stream", "thread-1") in attempts
+        assert ("nonstream", "thread-1") not in attempts
+
+    async def test_unrelated_bad_request_is_not_replayed(self) -> None:
+        """Replaying on any 400 would answer without the context the caller asked for."""
+        calls: list[str | None] = []
+
+        class _FailingAgent:
+            name = "svc"
+            client = _ServiceStoringClient()
+            context_providers: list[Any] = []
+
+            def create_session(self, **kwargs: Any) -> Any:
+                from agent_framework import AgentSession
+
+                return AgentSession()
+
+            async def run(
+                self,
+                messages: Any = None,
+                *,
+                stream: bool = False,
+                session: Any = None,
+                **kwargs: Any,
+            ) -> Any:
+                if stream:
+                    raise TypeError("stream is not supported")
+                calls.append(getattr(session, "service_session_id", None))
+                raise _ContextLengthExceeded
+
+        entity = AgentEntity(_FailingAgent(), state_provider=_InMemoryStateProvider())  # type: ignore[arg-type]
+
+        response = await entity.run({"message": "first", "correlationId": "c0"})
+
+        assert len(calls) == 1  # attempted once, not retried
+        assert any(content.type == "error" for content in response.messages[0].contents)
+
+    async def test_replay_is_attempted_only_once(self) -> None:
+        """A retry loop against a service that keeps refusing would never terminate."""
+        calls: list[str | None] = []
+
+        class _AlwaysRejectingAgent:
+            name = "svc"
+            client = _ServiceStoringClient()
+            context_providers: list[Any] = []
+
+            def create_session(self, **kwargs: Any) -> Any:
+                from agent_framework import AgentSession
+
+                return AgentSession()
+
+            async def run(
+                self,
+                messages: Any = None,
+                *,
+                stream: bool = False,
+                session: Any = None,
+                **kwargs: Any,
+            ) -> Any:
+                if stream:
+                    raise TypeError("stream is not supported")
+                calls.append(getattr(session, "service_session_id", None))
+                raise _PreviousResponseNotFound
+
+        entity = AgentEntity(_AlwaysRejectingAgent(), state_provider=_InMemoryStateProvider())  # type: ignore[arg-type]
+
+        response = await entity.run({"message": "first", "correlationId": "c0"})
+
+        # The original attempt plus exactly one replay, then the failure is reported.
+        assert len(calls) == 2
+        assert any(content.type == "error" for content in response.messages[0].contents)
