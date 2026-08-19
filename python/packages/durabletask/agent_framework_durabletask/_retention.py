@@ -134,7 +134,12 @@ async def enforce_budget(state: DurableAgentState, *, max_state_bytes: int = DEF
 
 
 def _serialized_size(state: DurableAgentState) -> int:
-    """Measure the state exactly as it will be persisted."""
+    """Measure the state exactly as it will be persisted.
+
+    Counting characters is counting bytes here. ``json.dumps`` escapes non-ASCII by default, so
+    the result is pure ASCII, and the durable SDK serializes state with that same default. Text in
+    any language therefore costs the same against this budget as it does in storage.
+    """
     return len(json.dumps(state.to_dict()))
 
 
