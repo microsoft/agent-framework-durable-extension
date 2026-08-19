@@ -244,11 +244,16 @@ class DurableHistoryProvider(HistoryProvider):
         self.flush(state)
 
     def flush(self, state: dict[str, Any]) -> None:
-        """Persist compaction results back into durable entity state.
+        """Apply compaction results to durable entity state.
 
         Reconciliation is by ``message_id`` rather than position, so strategies that
         *insert* messages (for example ``ToolResultCompactionStrategy``, which replaces a
         tool-call group with a summary) are handled as well as ones that only annotate.
+
+        Nothing is written here. These edits land on the entity's cached state, and the entity
+        writes that state once at the end of every operation, on the success path and the failure
+        path alike. Writing here too would serialize the whole conversation a second time on every
+        turn, for a snapshot that cannot include the response yet and is replaced moments later.
 
         Args:
             state: The provider-scoped session state holding the working buffer.
@@ -291,8 +296,6 @@ class DurableHistoryProvider(HistoryProvider):
 
         if pruned:
             self._prune(binding, pruned)
-
-        binding.state_provider.persist_state()
 
     @staticmethod
     def _shift_positions(

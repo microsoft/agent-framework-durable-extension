@@ -82,6 +82,7 @@ class _InMemoryStateProvider(AgentEntityStateProviderMixin):
     def __init__(self, *, session_id: str = "durable-history-session") -> None:
         self._session_id = session_id
         self._state_dict: dict[str, Any] = {}
+        self.writes = 0
 
     def _get_state_dict(self) -> dict[str, Any]:
         return self._state_dict
@@ -90,6 +91,7 @@ class _InMemoryStateProvider(AgentEntityStateProviderMixin):
         # The durable SDK serializes entity state as it is set, so a value it cannot encode
         # surfaces here rather than later. Mirrored so tests see the same failure the host does.
         json.dumps(state)
+        self.writes += 1
         self._state_dict = state
 
     def _get_session_id_from_entity(self) -> str:
@@ -201,6 +203,48 @@ def _stored_messages(entity: AgentEntity) -> list[Any]:
 
 class TestDurableHistoryProvider:
     """Durable entity state is the single store behind core's HistoryProvider."""
+
+    async def test_state_is_written_once_per_turn(self) -> None:
+        """Each write serializes the whole conversation, so a spare one is not free.
+
+        The provider used to persist at the end of ``flush``, which meant every turn serialized
+        the entire transcript twice: once mid-turn, before the response even existed, and again
+        when the entity finished. The mid-turn copy was always superseded, and with no compaction
+        configured it wrote back state nothing had touched. Cost grows with the conversation, so
+        this is pinned rather than left to drift back.
+        """
+        for label, agent in (
+            ("no compaction", _build_agent(RecordingChatClient())),
+            ("compaction", _build_agent(RecordingChatClient(), with_compaction=True)),
+            (
+                "compaction and pruning",
+                _build_agent(RecordingChatClient(), with_compaction=True, prune_excluded=True),
+            ),
+        ):
+            provider = _InMemoryStateProvider()
+            entity = _make_entity(agent, provider)
+
+            await _run_turns(entity, ["first", "second", "third"])
+
+            assert provider.writes == 3, f"{label}: expected one write per turn, got {provider.writes}"
+
+    async def test_compaction_annotations_survive_the_turn(self) -> None:
+        """Removing the mid-turn write must not cost the annotations it used to persist."""
+        provider = _InMemoryStateProvider()
+        entity = _make_entity(_build_agent(RecordingChatClient(), with_compaction=True), provider)
+
+        await _run_turns(entity, ["first", "second", "third", "fourth"])
+
+        # Read from the serialized copy, not the in-memory objects, so this proves the
+        # annotations actually reached durable state.
+        persisted = provider._get_state_dict()["data"]["conversationHistory"]
+        annotated = [
+            message
+            for entry in persisted
+            for message in entry.get("messages", [])
+            if (message.get("extensionData") or {}).get("_excluded")
+        ]
+        assert annotated, "compaction marked messages excluded but none of it was persisted"
 
     async def test_history_is_stored_once(self) -> None:
         """Messages live only in conversation history, never duplicated into the session blob."""
