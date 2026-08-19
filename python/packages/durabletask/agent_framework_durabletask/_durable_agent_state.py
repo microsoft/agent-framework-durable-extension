@@ -890,7 +890,12 @@ class DurableAgentStateMessage:
             kwargs["message_id"] = self.message_id
 
         if self.extension_data is not None:
-            kwargs["additional_properties"] = self.extension_data
+            # Copied, not shared. Callers treat the result as detached and mutate it: retention
+            # pops compaction annotations off the copies it measures. Handing out the stored dict
+            # would make that erase those annotations from durable state. Core does copy this
+            # during validation today, but that is its internal business, and quietly depending on
+            # it would mean a change there costs us the user's compaction work.
+            kwargs["additional_properties"] = dict(self.extension_data)
 
         return Message(**kwargs)
 

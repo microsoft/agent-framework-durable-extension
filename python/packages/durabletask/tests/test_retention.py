@@ -197,6 +197,41 @@ class TestExclusionsAreNotConsentToDelete:
 
         assert removed > 0, "prior exclusions hid the real size and nothing was evicted"
 
+    async def test_every_surviving_exclusion_keeps_its_annotation(self) -> None:
+        """Measuring the budget must not strip annotations off the messages it measured.
+
+        To size the conversation, eviction clears ``_excluded`` on the message copies it hands to
+        the strategy. That is only safe while those really are copies. If the copy ever shared its
+        annotations with stored state, the clear would erase compaction's work from storage.
+
+        Asserting merely that *some* exclusion survives is too weak to catch that: the newest
+        exchange is never a candidate, so its annotations would survive either way. This checks
+        every message that outlived eviction, which includes ones that were candidates.
+        """
+        state = _state(turns=60, excluded_recent=40)
+        excluded_before_run = {
+            stored.message_id
+            for entry in state.data.conversation_history
+            for stored in entry.messages
+            if (stored.extension_data or {}).get("_excluded")
+        }
+
+        removed = await enforce_budget(state, max_state_bytes=BUDGET)
+        assert removed > 0, "nothing was evicted, so the measuring path never ran"
+
+        still_stored = {
+            stored.message_id: stored for entry in state.data.conversation_history for stored in entry.messages
+        }
+        survivors = excluded_before_run & still_stored.keys()
+        assert survivors, "every excluded message was evicted, so this proves nothing"
+
+        stripped = [
+            message_id
+            for message_id in survivors
+            if not (still_stored[message_id].extension_data or {}).get("_excluded")
+        ]
+        assert not stripped, f"eviction erased stored compaction annotations from {len(stripped)} message(s)"
+
 
 class TestSingleOversizedTurn:
     """Retention cannot save a conversation whose newest turn alone exceeds the budget."""
