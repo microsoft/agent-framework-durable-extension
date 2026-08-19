@@ -91,3 +91,12 @@ class RedisHistoryProvider(HistoryProvider):
         if not messages:
             return
         await self._client.rpush(self._key(session_id), *[message.to_json() for message in messages])
+
+    async def aclose(self) -> None:
+        """Close the Redis connection pool.
+
+        A provider that opens a connection should offer a way to give it back. Without this the
+        pool stays open until the process exits, which is survivable in a sample but shows up as
+        unclosed-connection warnings and is the wrong thing to copy into an application.
+        """
+        await self._client.aclose()
