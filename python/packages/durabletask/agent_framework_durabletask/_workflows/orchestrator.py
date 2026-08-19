@@ -269,6 +269,12 @@ def _build_context_messages(executor: AgentExecutor, message: Any) -> list[dict[
 
     Returns ``None`` when there is no upstream conversation to forward (for example the first
     node in a workflow, which receives the raw input instead).
+
+    The mode and filter are read off private attributes because core takes them as constructor
+    arguments and exposes no public accessor for either. Reading them is therefore the only way
+    to match in-process behavior. The coupling is deliberate rather than accidental, and it is
+    covered: the projection tests build a real ``AgentExecutor`` for each mode, so if core ever
+    renames these the fallback to ``full`` changes the projection and those tests fail.
     """
     if not isinstance(message, AgentExecutorResponse):
         return None
