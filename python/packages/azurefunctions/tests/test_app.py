@@ -1239,14 +1239,6 @@ class TestMCPToolEndpoint:
         app = AgentFunctionApp(agents=[mock_agent])
         client = AsyncMock()
 
-        # Mock the entity response
-        mock_state = Mock()
-        mock_state.entity_state = {
-            "schemaVersion": "1.0.0",
-            "data": {"conversationHistory": []},
-        }
-        client.get_entity.return_value = mock_state
-
         # Create JSON string context
         context = '{"arguments": {"query": "test query", "sessionId": "test-session"}}'
 
@@ -1265,14 +1257,6 @@ class TestMCPToolEndpoint:
 
         app = AgentFunctionApp(agents=[mock_agent])
         client = AsyncMock()
-
-        # Mock the entity response
-        mock_state = Mock()
-        mock_state.entity_state = {
-            "schemaVersion": "1.0.0",
-            "data": {"conversationHistory": []},
-        }
-        client.get_entity.return_value = mock_state
 
         # Create JSON string context
         context = json.dumps({"arguments": {"query": "test query", "sessionId": "test-session"}})
@@ -1321,14 +1305,6 @@ class TestMCPToolEndpoint:
         app = AgentFunctionApp(agents=[mock_agent])
         client = AsyncMock()
 
-        # Mock the entity response
-        mock_state = Mock()
-        mock_state.entity_state = {
-            "schemaVersion": "1.0.0",
-            "data": {"conversationHistory": []},
-        }
-        client.get_entity.return_value = mock_state
-
         context = '{"arguments": {"query": "test query"}}'
 
         with patch.object(app, "_get_response_from_entity") as get_response_mock:
@@ -1344,14 +1320,6 @@ class TestMCPToolEndpoint:
 
         app = AgentFunctionApp(agents=[mock_agent])
         client = AsyncMock()
-
-        # Mock the entity response
-        mock_state = Mock()
-        mock_state.entity_state = {
-            "schemaVersion": "1.0.0",
-            "data": {"conversationHistory": []},
-        }
-        client.get_entity.return_value = mock_state
 
         # Session ID contains a different agent name (@StockAdvisor@poc123)
         # but we're invoking PlantAdvisor - it should use PlantAdvisor's entity
@@ -1382,13 +1350,6 @@ class TestMCPToolEndpoint:
         app = AgentFunctionApp(agents=[mock_agent])
         client = AsyncMock()
 
-        mock_state = Mock()
-        mock_state.entity_state = {
-            "schemaVersion": "1.0.0",
-            "data": {"conversationHistory": []},
-        }
-        client.get_entity.return_value = mock_state
-
         # Plain session id without @name@key format
         context = json.dumps({"arguments": {"query": "test query", "sessionId": "simple-session-123"}})
 
@@ -1413,13 +1374,6 @@ class TestMCPToolEndpoint:
         app = AgentFunctionApp(agents=[mock_agent])
         client = AsyncMock()
 
-        mock_state = Mock()
-        mock_state.entity_state = {
-            "schemaVersion": "1.0.0",
-            "data": {"conversationHistory": []},
-        }
-        client.get_entity.return_value = mock_state
-
         context = json.dumps({"arguments": {"query": "test query", "threadId": "legacy-key-123"}})
 
         with patch.object(app, "_get_response_from_entity") as get_response_mock:
@@ -1437,13 +1391,6 @@ class TestMCPToolEndpoint:
 
         app = AgentFunctionApp(agents=[mock_agent])
         client = AsyncMock()
-
-        mock_state = Mock()
-        mock_state.entity_state = {
-            "schemaVersion": "1.0.0",
-            "data": {"conversationHistory": []},
-        }
-        client.get_entity.return_value = mock_state
 
         context = json.dumps({
             "arguments": {"query": "test query", "sessionId": "canonical-key", "threadId": "legacy-key"}
@@ -1594,10 +1541,6 @@ class TestAgentFunctionAppErrorPaths:
 
         app = AgentFunctionApp(agents=[mock_agent])
         client = AsyncMock()
-
-        mock_state = Mock()
-        mock_state.entity_state = {"schemaVersion": "1.0.0", "data": {"conversationHistory": []}}
-        client.get_entity.return_value = mock_state
 
         context = json.dumps({"arguments": {"query": "q", "sessionId": "   ", "threadId": "legacy-key"}})
 
