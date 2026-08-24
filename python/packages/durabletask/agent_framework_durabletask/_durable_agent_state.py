@@ -54,10 +54,21 @@ class DurableAgentStateEntryJsonType(str, Enum):
     """Enum for conversation history entry types.
 
     Discriminator values for the $type field in DurableAgentStateEntry objects.
+
+    The type is what decides who may read an entry, rather than a flag alongside it. A flag has to
+    survive serialization to mean anything, and one that did not was how a failed turn came back as
+    ordinary assistant context after a cold start.
+
+    ``errorResponse`` and ``compaction`` are opposites. A failed turn is worth returning to the
+    caller that is waiting for it but must never be replayed to the model. A compaction summary is
+    the reverse: it belongs in the model's transcript and must never be handed back as something
+    the agent said.
     """
 
     REQUEST = "request"
     RESPONSE = "response"
+    ERROR_RESPONSE = "errorResponse"
+    COMPACTION = "compaction"
 
 
 def _parse_created_at(value: Any) -> datetime:
@@ -118,6 +129,10 @@ def _parse_history_entries(data_dict: dict[str, Any]) -> list[DurableAgentStateE
             )
             if entry_type == DurableAgentStateEntryJsonType.RESPONSE:
                 deserialized_history.append(DurableAgentStateResponse.from_dict(entry_dict))
+            elif entry_type == DurableAgentStateEntryJsonType.ERROR_RESPONSE:
+                deserialized_history.append(DurableAgentStateErrorResponse.from_dict(entry_dict))
+            elif entry_type == DurableAgentStateEntryJsonType.COMPACTION:
+                deserialized_history.append(DurableAgentStateCompaction.from_dict(entry_dict))
             elif entry_type == DurableAgentStateEntryJsonType.REQUEST:
                 deserialized_history.append(DurableAgentStateRequest.from_dict(entry_dict))
             else:
@@ -509,8 +524,10 @@ class DurableAgentStateEntry:
     with their originating requests.
 
     Common Attributes:
-        json_type: Discriminator for entry type ("request" or "response")
-        correlationId: Unique identifier linking requests and responses
+        json_type: Discriminator for entry type ("request", "response", "errorResponse" or
+            "compaction")
+        correlationId: Unique identifier linking requests and responses. Absent on compaction
+            entries, which answer no request.
         created_at: Timestamp when the entry was created
         messages: List of messages in this entry
         extensionData: Optional additional metadata (not serialized per schema)
@@ -662,15 +679,15 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
 
     Attributes:
         usage: Token usage statistics for this response (input, output, and total tokens)
-        is_error: Flag indicating if this response represents an error (not persisted in schema)
         correlation_id: Unique identifier linking this response to its request
         created_at: Timestamp when the response was created
         messages: List of assistant messages in this response
-        json_type: Always "response" for this class
+        json_type: "response", or "errorResponse" for the failed-turn subclass
     """
 
+    JSON_TYPE: ClassVar[DurableAgentStateEntryJsonType] = DurableAgentStateEntryJsonType.RESPONSE
+
     usage: DurableAgentStateUsage | None = None
-    is_error: bool = False
 
     def __init__(
         self,
@@ -679,17 +696,15 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
         messages: list[DurableAgentStateMessage],
         extension_data: dict[str, Any] | None = None,
         usage: DurableAgentStateUsage | None = None,
-        is_error: bool = False,
     ) -> None:
         super().__init__(
-            json_type=DurableAgentStateEntryJsonType.RESPONSE,
+            json_type=type(self).JSON_TYPE,
             correlation_id=correlation_id,
             created_at=created_at,
             messages=messages,
             extension_data=extension_data,
         )
         self.usage = usage
-        self.is_error = is_error
 
     def to_dict(self) -> dict[str, Any]:
         data = super().to_dict()
@@ -715,10 +730,14 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
             usage=usage,
         )
 
-    @staticmethod
-    def from_run_response(correlation_id: str, response: AgentResponse) -> DurableAgentStateResponse:
-        """Creates a DurableAgentStateResponse from an AgentResponse."""
-        return DurableAgentStateResponse(
+    @classmethod
+    def from_run_response(cls, correlation_id: str, response: AgentResponse) -> DurableAgentStateResponse:
+        """Creates a response entry of this class from an AgentResponse.
+
+        A classmethod rather than a staticmethod so the error subclass produces an error entry
+        without the caller having to set anything afterwards.
+        """
+        return cls(
             correlation_id=correlation_id,
             created_at=_parse_created_at(response.created_at),
             messages=[DurableAgentStateMessage.from_chat_message(m) for m in response.messages],
@@ -738,6 +757,59 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
             created_at=response_entry.created_at.isoformat(),
             messages=messages,
             usage_details=usage_details,
+        )
+
+
+class DurableAgentStateErrorResponse(DurableAgentStateResponse):
+    """A turn that failed, recorded so the waiting caller can be told why.
+
+    Deliberately a response, because a caller polling its correlation id still needs an answer and
+    an error is the answer. Deliberately not replayable, because the reason a turn failed is for
+    the caller, not for the model, and feeding it back would present an exception as something the
+    assistant said.
+
+    That second part used to be a boolean on the response, which was never serialized. The failure
+    survived a reload looking like an ordinary reply. Being a distinct type means the distinction
+    cannot be lost in transit.
+
+    Not to be confused with ``DurableAgentStateErrorContent``, which is error content inside a
+    single message. This is the entry recording that a whole turn failed.
+    """
+
+    JSON_TYPE: ClassVar[DurableAgentStateEntryJsonType] = DurableAgentStateEntryJsonType.ERROR_RESPONSE
+
+
+class DurableAgentStateCompaction(DurableAgentStateEntry):
+    """A message compaction produced, such as a summary standing in for turns it replaced.
+
+    The exact opposite of an error entry. It belongs to the model's transcript and takes its place
+    in conversation order, but it answers no request, so it is not a response and can never be
+    returned to a caller polling for one. Previously these were inserted into whichever entry they
+    followed, which meant a poll could hand back a summary alongside the real answer.
+    """
+
+    def __init__(
+        self,
+        created_at: datetime,
+        messages: list[DurableAgentStateMessage],
+        correlation_id: str | None = None,
+        extension_data: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            json_type=DurableAgentStateEntryJsonType.COMPACTION,
+            correlation_id=correlation_id,
+            created_at=created_at,
+            messages=messages,
+            extension_data=extension_data,
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DurableAgentStateCompaction:
+        return cls(
+            created_at=_parse_created_at(data.get(DurableStateFields.CREATED_AT)),
+            messages=_parse_messages(data),
+            correlation_id=data.get(DurableStateFields.CORRELATION_ID),
+            extension_data=data.get(DurableStateFields.EXTENSION_DATA),
         )
 
 

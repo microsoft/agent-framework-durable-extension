@@ -32,6 +32,7 @@ from agent_framework_durabletask import (
     AgentEntityStateProviderMixin,
     DurableHistoryProvider,
 )
+from agent_framework_durabletask._history_provider import replayable_entries
 
 KEEP_LAST_MESSAGES = 2
 
@@ -245,6 +246,61 @@ class TestDurableHistoryProvider:
             if (message.get("extensionData") or {}).get("_excluded")
         ]
         assert annotated, "compaction marked messages excluded but none of it was persisted"
+
+    async def test_a_failed_turn_never_becomes_model_context(self) -> None:
+        """A failure is for the caller, not for the model, and that has to survive a reload.
+
+        This used to be a boolean on the response entry that was never serialized. Every cold
+        start turned a failed turn back into an ordinary assistant reply, and the stored exception
+        text was replayed to the model as something it had said.
+        """
+        from agent_framework_durabletask import DurableAgentState
+
+        class _FailingClient(RecordingChatClient):
+            def get_response(self, messages: Any, **kwargs: Any) -> Any:
+                raise RuntimeError("kaboom")
+
+        provider = _InMemoryStateProvider()
+        entity = _make_entity(_build_agent(_FailingClient()), provider)  # type: ignore[arg-type]
+
+        await entity.run({"message": "please fail", "correlationId": "corr-fail"})
+
+        reloaded = DurableAgentState.from_dict(provider._get_state_dict())
+        replayed = [
+            entry.messages[index].to_chat_message().text
+            for entry, index in replayable_entries(reloaded.data.conversation_history)
+        ]
+
+        assert not any("kaboom" in text for text in replayed), (
+            f"the failure was replayed to the model after reload: {replayed}"
+        )
+        # It must still be readable by the caller that was waiting on it.
+        assert reloaded.try_get_agent_response("corr-fail") is not None
+
+    async def test_a_summary_is_never_returned_as_an_answer(self) -> None:
+        """Compaction output belongs to the transcript, not to any caller's response.
+
+        Summaries used to be inserted into whichever entry they followed. When that entry was a
+        response, polling its correlation returned the agent's answer plus a summary it never
+        produced.
+        """
+        entity = _make_entity(
+            _build_agent(RecordingChatClient(), with_compaction=True, strategy=_summarize_oldest),
+            _InMemoryStateProvider(),
+        )
+
+        await _run_turns(entity, ["t1", "t2", "t3", "t4", "t5", "t6"])
+
+        summaries = [m for m in _stored_messages(entity) if "[summary of" in (m.to_chat_message().text or "")]
+        assert summaries, "compaction produced no summary, so this proves nothing"
+
+        delivered = [
+            f"corr-{index}"
+            for index in range(6)
+            if (response := entity.state.try_get_agent_response(f"corr-{index}")) is not None
+            and any("[summary of" in (m.text or "") for m in response.messages)
+        ]
+        assert not delivered, f"a summary was returned as the agent's answer for {delivered}"
 
     async def test_history_is_stored_once(self) -> None:
         """Messages live only in conversation history, never duplicated into the session blob."""

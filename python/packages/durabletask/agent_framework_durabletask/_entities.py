@@ -28,6 +28,7 @@ from ._callbacks import AgentCallbackContext, AgentResponseCallbackProtocol
 from ._durable_agent_state import (
     DurableAgentState,
     DurableAgentStateEntry,
+    DurableAgentStateErrorResponse,
     DurableAgentStateMessage,
     DurableAgentStateRequest,
     DurableAgentStateResponse,
@@ -267,10 +268,8 @@ class AgentEntity:
         self._state_provider.reset()
 
     def _is_error_response(self, entry: DurableAgentStateEntry) -> bool:
-        """Check if a conversation history entry is an error response."""
-        if isinstance(entry, DurableAgentStateResponse):
-            return entry.is_error
-        return False
+        """Check if a conversation history entry records a failed turn."""
+        return isinstance(entry, DurableAgentStateErrorResponse)
 
     async def run(
         self,
@@ -397,8 +396,7 @@ class AgentEntity:
                 created_at=datetime.now(tz=timezone.utc).isoformat(),
             )
 
-            error_state_response = DurableAgentStateResponse.from_run_response(correlation_id, error_response)
-            error_state_response.is_error = True
+            error_state_response = DurableAgentStateErrorResponse.from_run_response(correlation_id, error_response)
             self.state.data.conversation_history.append(error_state_response)
             await self._enforce_retention()
             self.persist_state()

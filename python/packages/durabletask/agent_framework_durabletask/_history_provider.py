@@ -18,11 +18,17 @@ import logging
 from collections.abc import Iterator, Mapping, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
 
 from agent_framework import HistoryProvider, InMemoryHistoryProvider, Message, SupportsAgentRun
 
-from ._durable_agent_state import DurableAgentStateEntry, DurableAgentStateMessage, DurableAgentStateResponse
+from ._durable_agent_state import (
+    DurableAgentStateCompaction,
+    DurableAgentStateEntry,
+    DurableAgentStateErrorResponse,
+    DurableAgentStateMessage,
+)
 
 if TYPE_CHECKING:
     from ._entities import AgentEntityStateProviderMixin
@@ -281,9 +287,6 @@ class DurableHistoryProvider(HistoryProvider):
             if position is None:
                 inserted = self._insert_new_message(binding, message, after=last_known)
                 if inserted is not None:
-                    # The insertion pushed everything after it in that entry along by one, so the
-                    # recorded positions have to move too or later updates land on the wrong message.
-                    self._shift_positions(stored_by_id, inserted)
                     last_known = inserted
                 continue
 
@@ -298,41 +301,41 @@ class DurableHistoryProvider(HistoryProvider):
             self._prune(binding, pruned)
 
     @staticmethod
-    def _shift_positions(
-        stored_by_id: dict[str, tuple[DurableAgentStateEntry, int]],
-        inserted: tuple[DurableAgentStateEntry, int],
-    ) -> None:
-        """Move recorded positions that an insertion pushed further along their entry.
-
-        Args:
-            stored_by_id: Recorded ``message_id`` to position mapping, updated in place.
-            inserted: The entry and index the new message was inserted at.
-        """
-        entry, index = inserted
-        for message_id, (stored_entry, stored_index) in list(stored_by_id.items()):
-            if stored_entry is entry and stored_index >= index:
-                stored_by_id[message_id] = (stored_entry, stored_index + 1)
-
-    @staticmethod
     def _insert_new_message(
         binding: DurableHistoryBinding,
         message: Message,
         *,
         after: tuple[DurableAgentStateEntry, int] | None,
     ) -> tuple[DurableAgentStateEntry, int] | None:
-        """Persist a message that compaction produced (for example a summary)."""
-        stored = DurableAgentStateMessage.from_chat_message(message)
-        if after is not None:
-            entry, index = after
-            entry.messages.insert(index + 1, stored)
-            return entry, index + 1
+        """Persist a message compaction produced, such as a summary, as an entry of its own.
 
+        It takes its place in conversation order, but as a compaction entry rather than inside
+        whichever request or response it happened to follow. Folding it into a response made it
+        part of that response, so a caller polling that correlation was handed back a summary the
+        agent never produced.
+
+        Having its own entry also means nothing downstream has to be told to skip it. It is not a
+        response, so the lookup that serves waiting callers cannot match it.
+        """
         history = binding.state_provider.state.data.conversation_history
+        entry = DurableAgentStateCompaction(
+            created_at=datetime.now(tz=timezone.utc),
+            messages=[DurableAgentStateMessage.from_chat_message(message)],
+        )
+
+        if after is not None:
+            owner, _ = after
+            try:
+                position = history.index(owner) + 1
+            except ValueError:  # pragma: no cover - the owning entry was pruned mid-pass
+                position = len(history)
+            history.insert(position, entry)
+            return entry, 0
+
         if not history:
             return None
-        first = history[0]
-        first.messages.insert(0, stored)
-        return first, 0
+        history.insert(0, entry)
+        return entry, 0
 
     @staticmethod
     def _prune(
@@ -365,7 +368,9 @@ def replayable_entries(
         Each replayable message as its owning entry and its index within that entry.
     """
     for entry in history:
-        if isinstance(entry, DurableAgentStateResponse) and entry.is_error:
+        if isinstance(entry, DurableAgentStateErrorResponse):
+            # A failed turn is kept so the caller waiting on it can be told, but the reason a turn
+            # failed is not something the assistant said, so it never becomes model context.
             continue
         if correlation_id is not None and entry.correlation_id == correlation_id:
             continue
