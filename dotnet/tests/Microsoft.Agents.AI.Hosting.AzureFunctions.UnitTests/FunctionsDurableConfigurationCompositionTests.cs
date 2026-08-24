@@ -152,6 +152,57 @@ public sealed class FunctionsDurableConfigurationCompositionTests
     }
 
     /// <summary>
+    /// A promoted agent is reachable from both the workflow that references it and its own explicit registration,
+    /// so both metadata transformers have a reason to emit its entity trigger. The Functions host rejects duplicate
+    /// function names, so exactly one of them must win no matter which order the transformers run in.
+    /// </summary>
+    [Fact]
+    public void ConfigureDurableWorkflowsThenAgents_GeneratesPromotedAgentFunctionsExactlyOnce()
+    {
+        TestAgent agent = new("DedupeWorkflowsFirstAgent", "desc");
+
+        List<string> functions = GenerateFunctionNames(builder =>
+        {
+            builder.ConfigureDurableWorkflows(workflows =>
+                workflows.AddWorkflow(BuildAgentWorkflow("DedupeWorkflowsFirstWorkflow", agent)));
+            builder.ConfigureDurableAgents(agents => agents.AddAIAgent(agent));
+        });
+
+        Assert.Contains("dafx-DedupeWorkflowsFirstAgent", functions);
+        AssertNoDuplicates(functions);
+    }
+
+    /// <summary>
+    /// The mirror of <see cref="ConfigureDurableWorkflowsThenAgents_GeneratesPromotedAgentFunctionsExactlyOnce"/>,
+    /// covering the order in which the agent transformer is registered first.
+    /// </summary>
+    [Fact]
+    public void ConfigureDurableAgentsThenWorkflows_GeneratesSharedAgentFunctionsExactlyOnce()
+    {
+        TestAgent agent = new("DedupeAgentsFirstAgent", "desc");
+
+        List<string> functions = GenerateFunctionNames(builder =>
+        {
+            builder.ConfigureDurableAgents(agents => agents.AddAIAgent(agent));
+            builder.ConfigureDurableWorkflows(workflows =>
+                workflows.AddWorkflow(BuildAgentWorkflow("DedupeAgentsFirstWorkflow", agent)));
+        });
+
+        Assert.Contains("dafx-DedupeAgentsFirstAgent", functions);
+        AssertNoDuplicates(functions);
+    }
+
+    private static void AssertNoDuplicates(List<string> functionNames)
+    {
+        string[] duplicates = [.. functionNames
+            .GroupBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)];
+
+        Assert.Empty(duplicates);
+    }
+
+    /// <summary>
     /// Runs the registered metadata transformers the way the Functions host would, and returns the names of
     /// the functions they generate.
     /// </summary>
