@@ -29,47 +29,41 @@ public sealed class FunctionsDurableConfigurationCompositionTests
     /// workflows are configured. Without the built-in executor the generated functions have no
     /// implementation to run.
     /// </summary>
+    /// <remarks>
+    /// Discovered by reflection rather than listed by hand so that an entry point added to
+    /// <see cref="BuiltInFunctions"/> is covered automatically. A new entry point that is not added to the
+    /// middleware predicate fails these theories instead of silently going unrouted.
+    /// </remarks>
     public static TheoryData<string> BuiltInEntryPointNames() =>
     [
-        "AgentHttp",
-        "AgentEntity",
-        "WorkflowOrchestrationHttp",
-        "WorkflowOrchestration",
-        "WorkflowActivity",
-        "WorkflowStatusHttp",
+        .. typeof(BuiltInFunctions)
+            .GetFields(BindingFlags.NonPublic | BindingFlags.Static)
+            .Where(field => field.FieldType == typeof(string)
+                && field.Name.EndsWith("FunctionEntryPoint", StringComparison.Ordinal))
+            .Select(field => (string)field.GetValue(null)!)
+            .OrderBy(entryPoint => entryPoint, StringComparer.Ordinal)
     ];
-
-    private static string ResolveEntryPoint(string name) => name switch
-    {
-        "AgentHttp" => BuiltInFunctions.RunAgentHttpFunctionEntryPoint,
-        "AgentEntity" => BuiltInFunctions.RunAgentEntityFunctionEntryPoint,
-        "WorkflowOrchestrationHttp" => BuiltInFunctions.RunWorkflowOrchestrationHttpFunctionEntryPoint,
-        "WorkflowOrchestration" => BuiltInFunctions.RunWorkflowOrchestrationFunctionEntryPoint,
-        "WorkflowActivity" => BuiltInFunctions.InvokeWorkflowActivityFunctionEntryPoint,
-        "WorkflowStatusHttp" => BuiltInFunctions.GetWorkflowStatusHttpFunctionEntryPoint,
-        _ => throw new ArgumentOutOfRangeException(nameof(name), name, "Unknown built-in entry point."),
-    };
 
     [Theory]
     [MemberData(nameof(BuiltInEntryPointNames))]
-    public async Task ConfigureDurableAgentsThenWorkflows_RoutesAllBuiltInEntryPointsAsync(string entryPointName)
+    public async Task ConfigureDurableAgentsThenWorkflows_RoutesAllBuiltInEntryPointsAsync(string entryPoint)
     {
         FunctionsApplicationBuilder builder = FunctionsApplication.CreateBuilder([]);
         builder.ConfigureDurableAgents(agents => agents.AddAIAgent(new TestAgent("AgentsFirstAgent", "desc")));
         builder.ConfigureDurableWorkflows(workflows => workflows.AddWorkflow(BuildWorkflow("AgentsFirstWorkflow")));
 
-        await AssertRoutedToBuiltInExecutorAsync(builder, ResolveEntryPoint(entryPointName));
+        await AssertRoutedToBuiltInExecutorAsync(builder, entryPoint);
     }
 
     [Theory]
     [MemberData(nameof(BuiltInEntryPointNames))]
-    public async Task ConfigureDurableWorkflowsThenAgents_RoutesAllBuiltInEntryPointsAsync(string entryPointName)
+    public async Task ConfigureDurableWorkflowsThenAgents_RoutesAllBuiltInEntryPointsAsync(string entryPoint)
     {
         FunctionsApplicationBuilder builder = FunctionsApplication.CreateBuilder([]);
         builder.ConfigureDurableWorkflows(workflows => workflows.AddWorkflow(BuildWorkflow("WorkflowsFirstWorkflow")));
         builder.ConfigureDurableAgents(agents => agents.AddAIAgent(new TestAgent("WorkflowsFirstAgent", "desc")));
 
-        await AssertRoutedToBuiltInExecutorAsync(builder, ResolveEntryPoint(entryPointName));
+        await AssertRoutedToBuiltInExecutorAsync(builder, entryPoint);
     }
 
     [Fact]
