@@ -97,16 +97,18 @@ public static class FunctionsApplicationBuilderExtensions
         // Ensure FunctionsDurableOptions is registered BEFORE the core extension creates a plain DurableOptions
         FunctionsDurableOptions sharedOptions = GetOrCreateSharedOptions(builder.Services);
 
-        // Agent names are case-insensitive everywhere else, so this snapshot must match that comparer.
-        HashSet<string> agentsBeforeConfigure = new(
-            sharedOptions.Agents.GetAgentFactories().Keys,
+        // Agent names are case-insensitive everywhere else, so this snapshot must match that comparer. It holds
+        // only the explicitly registered agents: an agent that a workflow registered is not entitled to its own
+        // entry points yet, but promoting it with a later explicit registration must still generate them.
+        HashSet<string> explicitAgentsBeforeConfigure = new(
+            sharedOptions.Agents.GetAgentFactories().Keys.Where(name => !sharedOptions.Agents.IsWorkflowRegisteredAgent(name)),
             StringComparer.OrdinalIgnoreCase);
 
         builder.Services.ConfigureDurableOptions(configure);
 
         DurableAgentsOptionsExtensions.EnsureDefaultOptionsForAll(
             sharedOptions.Agents.GetAgentFactories().Keys
-                .Where(name => !agentsBeforeConfigure.Contains(name) && !sharedOptions.Agents.IsWorkflowRegisteredAgent(name)));
+                .Where(name => !explicitAgentsBeforeConfigure.Contains(name) && !sharedOptions.Agents.IsWorkflowRegisteredAgent(name)));
 
         if (DurableAgentsOptionsExtensions.GetAgentOptionsSnapshot().Count > 0)
         {

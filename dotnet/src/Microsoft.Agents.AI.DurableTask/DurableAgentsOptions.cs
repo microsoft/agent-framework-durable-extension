@@ -65,11 +65,12 @@ public sealed class DurableAgentsOptions
     /// <param name="timeToLive">Optional time-to-live for this agent's entities. If not specified, uses <see cref="DefaultTimeToLive"/>.</param>
     /// <returns>The options instance.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="name"/> or <paramref name="factory"/> is null.</exception>
+    /// <exception cref="ArgumentException">Thrown when an agent with the same name has already been registered explicitly.</exception>
     public DurableAgentsOptions AddAIAgentFactory(string name, Func<IServiceProvider, AIAgent> factory, TimeSpan? timeToLive = null)
     {
         ArgumentNullException.ThrowIfNull(name);
         ArgumentNullException.ThrowIfNull(factory);
-        this._agentFactories.Add(name, factory);
+        this.AddExplicitAgentFactory(name, factory, nameof(name));
         if (timeToLive.HasValue)
         {
             this._agentTimeToLive[name] = timeToLive;
@@ -86,8 +87,12 @@ public sealed class DurableAgentsOptions
     /// <returns>The options instance.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="agent"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// Thrown when <paramref name="agent.Name"/> is null or whitespace or when an agent with the same name has already been registered.
+    /// Thrown when <paramref name="agent.Name"/> is null or whitespace or when an agent with the same name has already been registered explicitly.
     /// </exception>
+    /// <remarks>
+    /// Registering an agent that a workflow already discovered is allowed: the explicit registration takes over,
+    /// so an agent can be promoted to a standalone agent regardless of whether the workflow was configured first.
+    /// </remarks>
     public DurableAgentsOptions AddAIAgent(AIAgent agent, TimeSpan? timeToLive = null)
     {
         ArgumentNullException.ThrowIfNull(agent);
@@ -97,18 +102,32 @@ public sealed class DurableAgentsOptions
             throw new ArgumentException($"{nameof(agent.Name)} must not be null or whitespace.", nameof(agent));
         }
 
-        if (this._agentFactories.ContainsKey(agent.Name))
-        {
-            throw new ArgumentException($"An agent with name '{agent.Name}' has already been registered.", nameof(agent));
-        }
-
-        this._agentFactories.Add(agent.Name, sp => agent);
+        this.AddExplicitAgentFactory(agent.Name, sp => agent, nameof(agent));
         if (timeToLive.HasValue)
         {
             this._agentTimeToLive[agent.Name] = timeToLive;
         }
 
         return this;
+    }
+
+    /// <summary>
+    /// Records an agent the caller registered directly.
+    /// </summary>
+    /// <remarks>
+    /// An agent that is only present because a workflow references it is an implicit registration made on that
+    /// workflow's behalf, so an explicit registration for the same name replaces it and clears the marker. Two
+    /// explicit registrations for one name remain an error.
+    /// </remarks>
+    private void AddExplicitAgentFactory(string name, Func<IServiceProvider, AIAgent> factory, string paramName)
+    {
+        if (this._agentFactories.ContainsKey(name) && !this._workflowRegisteredAgents.Contains(name))
+        {
+            throw new ArgumentException($"An agent with name '{name}' has already been registered.", paramName);
+        }
+
+        this._agentFactories[name] = factory;
+        this._workflowRegisteredAgents.Remove(name);
     }
 
     /// <summary>

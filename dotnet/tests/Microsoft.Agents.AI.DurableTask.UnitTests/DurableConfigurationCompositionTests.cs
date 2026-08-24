@@ -112,6 +112,47 @@ public sealed class DurableConfigurationCompositionTests
         Assert.Equal(["agents"], clientBuilderCalls);
     }
 
+    /// <summary>
+    /// A workflow auto-registers the agents it references, so configuring workflows first must not stop the
+    /// caller from registering the same agent explicitly afterwards. The explicit registration promotes the
+    /// agent to a standalone agent instead of throwing "already registered".
+    /// </summary>
+    [Fact]
+    public void ConfigureDurableWorkflowsThenAgents_PromotesWorkflowRegisteredAgentInsteadOfThrowing()
+    {
+        ServiceCollection services = new();
+        CompositionTestAgent agent = new("PromotedAssistant");
+
+        services.ConfigureDurableWorkflows(
+            workflows => workflows.AddWorkflow(BuildAgentWorkflow("PromotedWorkflow", agent)));
+
+        DurableOptions options = GetRegisteredOptions(services);
+        Assert.True(options.Agents.ContainsAgent("PromotedAssistant"));
+        Assert.True(options.Agents.IsWorkflowRegisteredAgent("PromotedAssistant"));
+
+        services.ConfigureDurableAgents(agents => agents.AddAIAgent(agent));
+
+        Assert.True(options.Agents.ContainsAgent("PromotedAssistant"));
+        Assert.False(options.Agents.IsWorkflowRegisteredAgent("PromotedAssistant"));
+    }
+
+    /// <summary>
+    /// Promotion only applies to agents a workflow registered. Registering the same name explicitly twice is
+    /// still a caller error.
+    /// </summary>
+    [Fact]
+    public void ConfigureDurableAgents_ThrowsWhenTheSameAgentIsRegisteredExplicitlyTwice()
+    {
+        ServiceCollection services = new();
+
+        services.ConfigureDurableAgents(agents => agents.AddAIAgent(new CompositionTestAgent("DuplicateAssistant")));
+
+        ArgumentException exception = Assert.Throws<ArgumentException>(
+            () => services.ConfigureDurableAgents(agents => agents.AddAIAgent(new CompositionTestAgent("DuplicateAssistant"))));
+
+        Assert.Contains("has already been registered", exception.Message, StringComparison.Ordinal);
+    }
+
     private static DurableOptions GetRegisteredOptions(IServiceCollection services)
     {
         ServiceDescriptor descriptor = Assert.Single(
@@ -124,6 +165,20 @@ public sealed class DurableConfigurationCompositionTests
         new WorkflowBuilder(new FunctionExecutor<string>("start", (_, _, _) => default))
             .WithName(name)
             .Build();
+
+    /// <summary>
+    /// Builds a workflow that references <paramref name="agent"/>, so the agent is registered as a side effect
+    /// of registering the workflow rather than by an explicit agent registration call.
+    /// </summary>
+    private static Workflow BuildAgentWorkflow(string workflowName, AIAgent agent)
+    {
+        FunctionExecutor<string> start = new("start", (_, _, _) => default);
+
+        return new WorkflowBuilder(start)
+            .WithName(workflowName)
+            .AddEdge(start, agent)
+            .Build();
+    }
 
     private sealed class CompositionTestAgent(string name) : AIAgent
     {

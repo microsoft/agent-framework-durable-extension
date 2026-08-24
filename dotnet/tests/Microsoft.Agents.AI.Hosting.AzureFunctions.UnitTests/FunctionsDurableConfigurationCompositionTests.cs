@@ -131,6 +131,27 @@ public sealed class FunctionsDurableConfigurationCompositionTests
     }
 
     /// <summary>
+    /// Promoting a workflow-registered agent with a later explicit registration must generate the agent's own
+    /// entry points. The defaults are applied per configuration call, so the call that promotes the agent has to
+    /// treat it as newly explicit even though the agent was already in the registry.
+    /// </summary>
+    [Fact]
+    public void ConfigureDurableWorkflowsThenAgents_GivesPromotedAgentItsOwnHttpEndpoint()
+    {
+        TestAgent agent = new("PromotedFunctionsAgent", "desc");
+
+        List<string> functions = GenerateFunctionNames(builder =>
+        {
+            builder.ConfigureDurableWorkflows(workflows =>
+                workflows.AddWorkflow(BuildAgentWorkflow("PromotedFunctionsWorkflow", agent)));
+            builder.ConfigureDurableAgents(agents => agents.AddAIAgent(agent));
+        });
+
+        Assert.Contains("dafx-PromotedFunctionsAgent", functions);
+        Assert.Contains("http-PromotedFunctionsAgent", functions);
+    }
+
+    /// <summary>
     /// Runs the registered metadata transformers the way the Functions host would, and returns the names of
     /// the functions they generate.
     /// </summary>
@@ -225,13 +246,20 @@ public sealed class FunctionsDurableConfigurationCompositionTests
     /// Builds a workflow that references an agent, so the agent is auto-registered as a side effect of
     /// registering the workflow rather than by an explicit agent registration call.
     /// </summary>
-    private static Workflow BuildAgentWorkflow(string workflowName, string agentName)
+    private static Workflow BuildAgentWorkflow(string workflowName, string agentName) =>
+        BuildAgentWorkflow(workflowName, new TestAgent(agentName, "desc"));
+
+    /// <summary>
+    /// Builds a workflow that references <paramref name="agent"/>, so the agent is auto-registered as a side
+    /// effect of registering the workflow rather than by an explicit agent registration call.
+    /// </summary>
+    private static Workflow BuildAgentWorkflow(string workflowName, AIAgent agent)
     {
         FunctionExecutor<string> start = new("start", (_, _, _) => default);
 
         return new WorkflowBuilder(start)
             .WithName(workflowName)
-            .AddEdge(start, new TestAgent(agentName, "desc"))
+            .AddEdge(start, agent)
             .Build();
     }
 
