@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Literal, cast
 
 from agent_framework import (
@@ -25,10 +26,25 @@ from ._durable_agent_state import (
     DurableAgentState,
     DurableAgentStateEntry,
     DurableAgentStateMessage,
+    DurableAgentStateResponse,
 )
 from ._history_provider import EXCLUDED_KEY, prune_messages, replayable_entries
 
 logger = logging.getLogger("agent_framework.durabletask")
+
+DELIVERY_WINDOW_SECONDS = 60
+"""How long a completed response stays safe from eviction.
+
+A caller reads its response by correlation id, from outside the entity, and has no way to say it
+has finished reading. So the entity cannot know a response was collected, only that enough time
+has passed that nobody plausibly still wants it. Until then the response is not evictable, or a
+run that succeeded would be reported to its caller as a timeout.
+
+The exposure this covers is smaller than a caller's total wait. Callers poll roughly once a
+second, so a response normally has to survive only until the next poll. The window is generous
+against that, which leaves room for a client that stalls or retries, while staying short enough
+that a busy session ages entries out rather than pinning them and defeating the budget.
+"""
 
 RetentionMode = Literal["keep_all", "auto", "follow_compaction"]
 """How much of the conversation durable state is allowed to discard.
@@ -110,6 +126,19 @@ async def enforce_budget(state: DurableAgentState, *, max_state_bytes: int = DEF
         if size < high:
             break
 
+    undelivered_sacrificed = 0
+    if size >= high:
+        # Holding a response back for its caller is a strong preference, not a promise that
+        # outranks staying storable. A conversation busy enough to fill the budget inside the
+        # delivery window would otherwise protect everything and evict nothing, and state that
+        # cannot be persisted ends the session for every caller. Losing one response costs the
+        # caller a retry, so that is the cheaper failure.
+        forced = await _evict_once(history, serialized_size=size, target_bytes=target, honor_delivery_window=False)
+        if forced:
+            undelivered_sacrificed = len(forced)
+            removed.extend(forced)
+            size = _serialized_size(state)
+
     if removed:
         logger.warning(
             "[Retention] Durable state passed %d bytes of a %d budget, so %d message(s) were "
@@ -122,11 +151,24 @@ async def enforce_budget(state: DurableAgentState, *, max_state_bytes: int = DEF
             removed[-1],
             size,
         )
-    elif size >= high:
+    if undelivered_sacrificed:
         logger.error(
-            "[Retention] Durable state is %d bytes against a %d budget and nothing could be "
-            "evicted. The newest exchange is never evicted, so a single turn larger than the "
-            "budget cannot be resolved by retention.",
+            "[Retention] Staying inside the %d byte budget required evicting %d message(s) from "
+            "responses completed in the last %d seconds, which their callers may not have read "
+            "yet. Those callers will see a missing response and need to retry. This means turns "
+            "are arriving faster than the budget can hold them, so raise max_state_bytes.",
+            max_state_bytes,
+            undelivered_sacrificed,
+            DELIVERY_WINDOW_SECONDS,
+        )
+    if size >= high:
+        # Reported whether or not anything was evicted. Retention did what it could and the state
+        # is still over budget, so the next write is the one that fails, and saying so here is the
+        # only warning anybody gets.
+        logger.error(
+            "[Retention] Durable state is still %d bytes against a %d budget after retention ran. "
+            "The exchange in flight is never evicted, so a single turn larger than the budget "
+            "cannot be resolved this way. Raise max_state_bytes or reduce what each turn stores.",
             size,
             max_state_bytes,
         )
@@ -148,20 +190,34 @@ async def _evict_once(
     *,
     serialized_size: int,
     target_bytes: int,
+    honor_delivery_window: bool = True,
 ) -> list[str]:
     """Run one eviction pass, returning the ids of the messages removed.
 
     Core already knows how to drop oldest groups to a budget while preserving system messages and
     keeping tool-call groups whole, so that judgement is borrowed rather than reimplemented.
+
+    Args:
+        history: The conversation history, modified in place.
+
+    Keyword Args:
+        serialized_size: Current size of the whole serialized state, used to relate bytes to text.
+        target_bytes: The size this pass is aiming to reach.
+        honor_delivery_window: When False, responses whose callers may still be reading them
+            become evictable. Reserved for the case where protecting them would leave state too
+            large to persist at all.
+
+    Returns:
+        The ids of the messages this pass removed.
     """
     candidates: list[Message] = []
     origins: list[tuple[DurableAgentStateEntry, DurableAgentStateMessage]] = []
-    protected = _newest_exchange(history)
+    protected = _protected_entries(history, honor_delivery_window=honor_delivery_window)
     for entry, index in replayable_entries(history):
         if entry in protected:
-            # Never evict the exchange that just happened. Core's budget fallback will drop
-            # everything if the budget demands it, and losing the current turn would break
-            # response polling and discard the result the caller is waiting for.
+            # Never evict the exchange that just happened, nor one whose caller could still be
+            # reading it. Core's budget fallback will drop everything if the budget demands it,
+            # and losing either would discard a result somebody is waiting for.
             continue
         stored = entry.messages[index]
         message = cast("Message", stored.to_chat_message())
@@ -200,13 +256,50 @@ def _newest_exchange(history: list[DurableAgentStateEntry]) -> list[DurableAgent
     """Return the entries belonging to the most recent exchange.
 
     Grouped by correlation id, so a request and the response it produced are protected together.
+
+    Compaction entries answer no request and carry no correlation, so they are skipped when
+    deciding which exchange is newest. Taking the last entry blindly would let a summary appended
+    at the end stand in for the turn that actually just happened, leaving that turn unprotected.
     """
-    if not history:
-        return []
-    newest = history[-1].correlation_id
-    if newest is None:
-        return [history[-1]]
-    return [entry for entry in history if entry.correlation_id == newest]
+    for entry in reversed(history):
+        if entry.correlation_id is not None:
+            newest = entry.correlation_id
+            return [candidate for candidate in history if candidate.correlation_id == newest]
+    return [history[-1]] if history else []
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Persisted timestamps can come back without a timezone, so read those as UTC."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _protected_entries(
+    history: list[DurableAgentStateEntry], *, honor_delivery_window: bool = True
+) -> list[DurableAgentStateEntry]:
+    """Return the entries retention is not allowed to evict.
+
+    Two reasons an entry is off limits. It belongs to the exchange that just happened, which is
+    absolute because its caller is waiting on this very operation. Or it is a response recent
+    enough that its caller could still be polling for it, which is a preference that yields when
+    honoring it would leave state too large to persist.
+
+    Protection is by correlation, so a reply is never kept without the request that produced it.
+    """
+    protected = list(_newest_exchange(history))
+    if not honor_delivery_window:
+        return protected
+
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(seconds=DELIVERY_WINDOW_SECONDS)
+    undelivered = {
+        entry.correlation_id
+        for entry in history
+        if isinstance(entry, DurableAgentStateResponse)
+        and entry.correlation_id is not None
+        and _as_utc(entry.created_at) > cutoff
+    }
+    if undelivered:
+        protected.extend(entry for entry in history if entry.correlation_id in undelivered and entry not in protected)
+    return protected
 
 
 def _token_budget(candidates: list[Message], *, serialized_size: int, target_bytes: int) -> int:

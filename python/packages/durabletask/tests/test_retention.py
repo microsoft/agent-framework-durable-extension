@@ -9,7 +9,7 @@ for token cost is not consent to delete the record.
 
 import json
 from collections.abc import AsyncIterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 from agent_framework import (
@@ -26,6 +26,7 @@ from agent_framework_durabletask import (
     AgentEntity,
     AgentEntityStateProviderMixin,
     DurableAgentState,
+    DurableAgentStateErrorResponse,
     DurableAgentStateMessage,
     DurableAgentStateRequest,
     DurableAgentStateResponse,
@@ -59,11 +60,16 @@ def _state(turns: int, *, chars: int = 400, excluded_before: int = 0, excluded_r
     """
     state = DurableAgentState()
     now = datetime.now(tz=timezone.utc)
+    # Turns are spaced a minute apart rather than all stamped "now". Retention refuses to evict a
+    # response recent enough that its caller could still be reading it, so a conversation where
+    # every turn happened this instant is entirely protected and nothing can be evicted at all.
+    # Real conversations are spread over time, and the tests need to look like one.
     marked = 0
     for index in range(turns):
+        occurred_at = now - timedelta(minutes=turns - index)
         request = DurableAgentStateRequest(
             correlation_id=f"c{index}",
-            created_at=now,
+            created_at=occurred_at,
             messages=[
                 DurableAgentStateMessage.from_chat_message(
                     Message(role="user", contents=["u" * chars], message_id=f"u{index}")
@@ -72,7 +78,7 @@ def _state(turns: int, *, chars: int = 400, excluded_before: int = 0, excluded_r
         )
         response = DurableAgentStateResponse(
             correlation_id=f"c{index}",
-            created_at=now,
+            created_at=occurred_at,
             messages=[
                 DurableAgentStateMessage.from_chat_message(
                     Message(role="assistant", contents=["a" * chars], message_id=f"a{index}")
@@ -252,6 +258,83 @@ class TestSingleOversizedTurn:
         await enforce_budget(state, max_state_bytes=BUDGET)
 
         assert _message_ids(state)[-2:] == ["u0", "a0"], "the newest exchange must survive"
+
+
+class TestAResponseIsNotEvictedBeforeItsCallerReadsIt:
+    """A caller reads its response by correlation id, from outside the entity.
+
+    Nothing tells the entity that a response was collected, so a turn completing is not permission
+    to delete the previous one. Evicting a response somebody is still polling for turns a run that
+    succeeded into a client timeout.
+    """
+
+    async def test_a_recent_response_is_not_evicted(self) -> None:
+        """The turn is early in the conversation, so oldest-first eviction reaches it.
+
+        That is the whole point. Picking a recent turn would prove nothing, because eviction would
+        never have got that far and the test would pass with no protection at all.
+        """
+        state = _state(turns=60)
+        # Second oldest turn, so it is squarely inside what eviction removes, but it completed
+        # seconds ago, so its caller may still be polling for it.
+        early = state.data.conversation_history[2:4]
+        for entry in early:
+            entry.created_at = datetime.now(tz=timezone.utc)
+        correlation = early[0].correlation_id
+        assert correlation is not None
+        assert state.try_get_agent_response(correlation) is not None
+
+        removed = await enforce_budget(state, max_state_bytes=BUDGET)
+
+        assert removed > 0, "nothing was evicted, so this proves nothing"
+        assert state.try_get_agent_response(correlation) is not None, (
+            "a response completed seconds ago was evicted before its caller could read it"
+        )
+
+    async def test_an_old_response_is_still_evictable(self) -> None:
+        """Protection has to expire, or a long conversation could never be trimmed at all."""
+        state = _state(turns=60)
+
+        removed = await enforce_budget(state, max_state_bytes=BUDGET)
+
+        assert removed > 0
+        assert state.try_get_agent_response("c0") is None, "an ancient response was kept forever"
+
+    async def test_the_budget_wins_when_protection_cannot_be_honored(self) -> None:
+        """Turns arriving faster than the window can age them out must not pin state.
+
+        Losing a response costs one caller a retry. State too large to persist ends the session
+        for every caller, so protection yields rather than letting that happen.
+        """
+        state = _state(turns=60)
+        # Every turn happened just now, which is what a busy session looks like.
+        for entry in state.data.conversation_history:
+            entry.created_at = datetime.now(tz=timezone.utc)
+
+        removed = await enforce_budget(state, max_state_bytes=BUDGET)
+
+        assert removed > 0, "protection was treated as absolute and state stayed over budget"
+        assert _size(state) <= BUDGET
+
+    async def test_a_failed_turn_is_protected_too(self) -> None:
+        """The caller waiting on a failed turn still needs to be told it failed."""
+        state = _state(turns=60)
+        failure = DurableAgentStateErrorResponse(
+            correlation_id="boom",
+            created_at=datetime.now(tz=timezone.utc),
+            messages=[
+                DurableAgentStateMessage.from_chat_message(
+                    Message(role="assistant", contents=["it broke"], message_id="err0")
+                )
+            ],
+        )
+        # Early in the conversation, where eviction would otherwise reach it.
+        state.data.conversation_history.insert(2, failure)
+
+        removed = await enforce_budget(state, max_state_bytes=BUDGET)
+
+        assert removed > 0
+        assert state.try_get_agent_response("boom") is not None
 
 
 class TestStateShape:
