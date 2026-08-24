@@ -98,6 +98,64 @@ public sealed class FunctionsDurableConfigurationCompositionTests
         Assert.Contains(typeof(DurableWorkflowsFunctionMetadataTransformer), transformers);
     }
 
+    /// <summary>
+    /// An agent registered through <c>ConfigureDurableOptions</c> must get the same entry points it would get
+    /// from <c>ConfigureDurableAgents</c>. Previously it got none at all, not even the entity trigger, which
+    /// left the agent unreachable with no error reported anywhere.
+    /// </summary>
+    [Fact]
+    public void ConfigureDurableOptions_GeneratesSameAgentFunctionsAsConfigureDurableAgents()
+    {
+        List<string> viaOptions = GenerateFunctionNames(builder =>
+            builder.ConfigureDurableOptions(options => options.Agents.AddAIAgent(new TestAgent("ParityOptionsAgent", "desc"))));
+
+        List<string> viaAgents = GenerateFunctionNames(builder =>
+            builder.ConfigureDurableAgents(agents => agents.AddAIAgent(new TestAgent("ParityAgentsAgent", "desc"))));
+
+        Assert.Equal(
+            viaAgents.Select(name => name.Replace("ParityAgentsAgent", "<agent>", StringComparison.Ordinal)),
+            viaOptions.Select(name => name.Replace("ParityOptionsAgent", "<agent>", StringComparison.Ordinal)));
+
+        Assert.Contains("dafx-ParityOptionsAgent", viaOptions);
+        Assert.Contains("http-ParityOptionsAgent", viaOptions);
+    }
+
+    /// <summary>
+    /// An agent that exists only because a workflow references it is an implementation detail of that
+    /// workflow, so it must not get its own HTTP endpoint even when the workflow is registered through
+    /// <c>ConfigureDurableOptions</c>, which now applies agent defaults.
+    /// </summary>
+    [Fact]
+    public void ConfigureDurableOptions_DoesNotGiveWorkflowRegisteredAgentsAnHttpEndpoint()
+    {
+        List<string> functions = GenerateFunctionNames(builder =>
+            builder.ConfigureDurableOptions(options =>
+                options.Workflows.AddWorkflow(BuildAgentWorkflow("ImplicitWorkflow", "ImplicitAgent"))));
+
+        Assert.Contains("dafx-ImplicitAgent", functions);
+        Assert.DoesNotContain("http-ImplicitAgent", functions);
+    }
+
+    /// <summary>
+    /// Runs the registered metadata transformers the way the Functions host would, and returns the names of
+    /// the functions they generate.
+    /// </summary>
+    private static List<string> GenerateFunctionNames(Action<FunctionsApplicationBuilder> configure)
+    {
+        FunctionsApplicationBuilder builder = FunctionsApplication.CreateBuilder([]);
+        configure(builder);
+
+        using ServiceProvider provider = builder.Services.BuildServiceProvider();
+        List<IFunctionMetadata> metadata = [];
+
+        foreach (IFunctionMetadataTransformer transformer in provider.GetServices<IFunctionMetadataTransformer>())
+        {
+            transformer.Transform(metadata);
+        }
+
+        return [.. metadata.Select(m => m.Name!)];
+    }
+
     private static async Task AssertRoutedToBuiltInExecutorAsync(FunctionsApplicationBuilder builder, string entryPoint)
     {
         using ServiceProvider provider = builder.Services.BuildServiceProvider();
@@ -168,6 +226,20 @@ public sealed class FunctionsDurableConfigurationCompositionTests
         new WorkflowBuilder(new FunctionExecutor<string>("start", (_, _, _) => default))
             .WithName(name)
             .Build();
+
+    /// <summary>
+    /// Builds a workflow that references an agent, so the agent is auto-registered as a side effect of
+    /// registering the workflow rather than by an explicit agent registration call.
+    /// </summary>
+    private static Workflow BuildAgentWorkflow(string workflowName, string agentName)
+    {
+        FunctionExecutor<string> start = new("start", (_, _, _) => default);
+
+        return new WorkflowBuilder(start)
+            .WithName(workflowName)
+            .AddEdge(start, new TestAgent(agentName, "desc"))
+            .Build();
+    }
 
     private sealed class TestInvocationFeatures : IInvocationFeatures
     {

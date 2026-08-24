@@ -11,6 +11,11 @@ public sealed class DurableAgentsOptions
     private readonly Dictionary<string, Func<IServiceProvider, AIAgent>> _agentFactories = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TimeSpan?> _agentTimeToLive = new(StringComparer.OrdinalIgnoreCase);
 
+    // Agents that were discovered on a workflow rather than registered explicitly by the caller. Hosts use
+    // this to decide whether an agent should get its own entry points: an agent that only exists because a
+    // workflow references it is an implementation detail of that workflow, not a separately addressable agent.
+    private readonly HashSet<string> _workflowRegisteredAgents = new(StringComparer.OrdinalIgnoreCase);
+
     internal DurableAgentsOptions()
     {
     }
@@ -104,6 +109,31 @@ public sealed class DurableAgentsOptions
         }
 
         return this;
+    }
+
+    /// <summary>
+    /// Adds an agent that was discovered on a workflow, and records that it was registered on the workflow's
+    /// behalf rather than explicitly by the caller.
+    /// </summary>
+    /// <remarks>
+    /// Only agents that are not already registered reach this method, so an agent the caller added explicitly is
+    /// never flagged, regardless of whether a workflow also references it.
+    /// </remarks>
+    internal DurableAgentsOptions AddWorkflowRegisteredAIAgent(AIAgent agent)
+    {
+        this.AddAIAgent(agent);
+        this._workflowRegisteredAgents.Add(agent.Name!);
+
+        return this;
+    }
+
+    /// <summary>
+    /// Determines whether the named agent is only present because a workflow references it.
+    /// </summary>
+    internal bool IsWorkflowRegisteredAgent(string agentName)
+    {
+        ArgumentNullException.ThrowIfNull(agentName);
+        return this._workflowRegisteredAgents.Contains(agentName);
     }
 
     /// <summary>

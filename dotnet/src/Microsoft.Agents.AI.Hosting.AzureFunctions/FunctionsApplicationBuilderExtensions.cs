@@ -32,7 +32,7 @@ public static class FunctionsApplicationBuilderExtensions
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(configure);
 
-        return ConfigureDurableCore(builder, options => configure(options.Agents), applyDefaultAgentOptions: true);
+        return ConfigureDurableCore(builder, options => configure(options.Agents));
     }
 
     /// <summary>
@@ -41,7 +41,8 @@ public static class FunctionsApplicationBuilderExtensions
     /// </summary>
     /// <remarks>This method ensures that a single shared <see cref="DurableOptions"/> instance is used across all
     /// configuration calls. If any workflows have been added, it configures the necessary orchestrations and registers
-    /// required middleware.</remarks>
+    /// required middleware. Agents added through this method get the same entry points they would get from
+    /// <see cref="ConfigureDurableAgents"/>.</remarks>
     /// <param name="builder">The functions application builder to configure. Cannot be null.</param>
     /// <param name="configure">An action that configures the <see cref="DurableOptions"/> instance. Cannot be null.</param>
     /// <returns>The updated <see cref="FunctionsApplicationBuilder"/> instance, enabling method chaining.</returns>
@@ -52,7 +53,7 @@ public static class FunctionsApplicationBuilderExtensions
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(configure);
 
-        return ConfigureDurableCore(builder, configure, applyDefaultAgentOptions: false);
+        return ConfigureDurableCore(builder, configure);
     }
 
     /// <summary>
@@ -66,13 +67,13 @@ public static class FunctionsApplicationBuilderExtensions
     /// <param name="configure">An action that configures the <see cref="DurableWorkflowOptions"/>, allowing customization of durable workflow behavior.</param>
     /// <returns>The updated <see cref="FunctionsApplicationBuilder"/> instance, enabling method chaining.</returns>
     public static FunctionsApplicationBuilder ConfigureDurableWorkflows(
-         this FunctionsApplicationBuilder builder,
-         Action<DurableWorkflowOptions> configure)
+        this FunctionsApplicationBuilder builder,
+        Action<DurableWorkflowOptions> configure)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(configure);
 
-        return ConfigureDurableCore(builder, options => configure(options.Workflows), applyDefaultAgentOptions: false);
+        return ConfigureDurableCore(builder, options => configure(options.Workflows));
     }
 
     /// <summary>
@@ -83,31 +84,29 @@ public static class FunctionsApplicationBuilderExtensions
     /// </summary>
     /// <param name="builder">The functions application builder.</param>
     /// <param name="configure">A delegate to apply to the shared durable options.</param>
-    /// <param name="applyDefaultAgentOptions">
-    /// When <see langword="true"/>, agents added by <paramref name="configure"/> that have no explicit
-    /// <see cref="FunctionsAgentOptions"/> receive the defaults for the agent-focused entry point. Agents already
-    /// present, such as those auto-registered by a previously configured workflow, are left untouched.
-    /// </param>
+    /// <remarks>
+    /// Agents added by <paramref name="configure"/> that have no explicit <see cref="FunctionsAgentOptions"/>
+    /// receive the defaults for the agent-focused entry point. Agents that exist only because a workflow
+    /// references them are skipped: they are an implementation detail of that workflow rather than separately
+    /// addressable agents, so they must not get their own HTTP endpoint.
+    /// </remarks>
     private static FunctionsApplicationBuilder ConfigureDurableCore(
         FunctionsApplicationBuilder builder,
-        Action<DurableOptions> configure,
-        bool applyDefaultAgentOptions)
+        Action<DurableOptions> configure)
     {
         // Ensure FunctionsDurableOptions is registered BEFORE the core extension creates a plain DurableOptions
         FunctionsDurableOptions sharedOptions = GetOrCreateSharedOptions(builder.Services);
 
         // Agent names are case-insensitive everywhere else, so this snapshot must match that comparer.
-        HashSet<string> agentsBeforeConfigure = applyDefaultAgentOptions
-            ? new HashSet<string>(sharedOptions.Agents.GetAgentFactories().Keys, StringComparer.OrdinalIgnoreCase)
-            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> agentsBeforeConfigure = new(
+            sharedOptions.Agents.GetAgentFactories().Keys,
+            StringComparer.OrdinalIgnoreCase);
 
         builder.Services.ConfigureDurableOptions(configure);
 
-        if (applyDefaultAgentOptions)
-        {
-            DurableAgentsOptionsExtensions.EnsureDefaultOptionsForAll(
-                sharedOptions.Agents.GetAgentFactories().Keys.Where(name => !agentsBeforeConfigure.Contains(name)));
-        }
+        DurableAgentsOptionsExtensions.EnsureDefaultOptionsForAll(
+            sharedOptions.Agents.GetAgentFactories().Keys
+                .Where(name => !agentsBeforeConfigure.Contains(name) && !sharedOptions.Agents.IsWorkflowRegisteredAgent(name)));
 
         if (DurableAgentsOptionsExtensions.GetAgentOptionsSnapshot().Count > 0)
         {

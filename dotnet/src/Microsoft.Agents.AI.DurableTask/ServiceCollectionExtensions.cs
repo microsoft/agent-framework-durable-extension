@@ -44,8 +44,8 @@ public static class ServiceCollectionExtensions
     /// </remarks>
     /// <param name="services">The service collection.</param>
     /// <param name="configure">A delegate to configure the durable agents.</param>
-    /// <param name="workerBuilder">Optional delegate to configure the Durable Task worker.</param>
-    /// <param name="clientBuilder">Optional delegate to configure the Durable Task client.</param>
+    /// <param name="workerBuilder">Optional delegate to configure the Durable Task worker. The first non-null delegate supplied across all <c>Configure*</c> calls is used; later ones are ignored.</param>
+    /// <param name="clientBuilder">Optional delegate to configure the Durable Task client. The first non-null delegate supplied across all <c>Configure*</c> calls is used; later ones are ignored.</param>
     /// <returns>The service collection for chaining.</returns>
     public static IServiceCollection ConfigureDurableAgents(
         this IServiceCollection services,
@@ -74,8 +74,8 @@ public static class ServiceCollectionExtensions
     /// </remarks>
     /// <param name="services">The service collection to configure.</param>
     /// <param name="configure">A delegate to configure the workflow options.</param>
-    /// <param name="workerBuilder">Optional delegate to configure the durable task worker.</param>
-    /// <param name="clientBuilder">Optional delegate to configure the durable task client.</param>
+    /// <param name="workerBuilder">Optional delegate to configure the durable task worker. The first non-null delegate supplied across all <c>Configure*</c> calls is used; later ones are ignored.</param>
+    /// <param name="clientBuilder">Optional delegate to configure the durable task client. The first non-null delegate supplied across all <c>Configure*</c> calls is used; later ones are ignored.</param>
     /// <returns>The service collection for chaining.</returns>
     public static IServiceCollection ConfigureDurableWorkflows(
         this IServiceCollection services,
@@ -105,8 +105,8 @@ public static class ServiceCollectionExtensions
     /// </remarks>
     /// <param name="services">The service collection to configure.</param>
     /// <param name="configure">A delegate to configure the durable options for both agents and workflows.</param>
-    /// <param name="workerBuilder">Optional delegate to configure the durable task worker.</param>
-    /// <param name="clientBuilder">Optional delegate to configure the durable task client.</param>
+    /// <param name="workerBuilder">Optional delegate to configure the durable task worker. The first non-null delegate supplied across all <c>Configure*</c> calls is used; later ones are ignored.</param>
+    /// <param name="clientBuilder">Optional delegate to configure the durable task client. The first non-null delegate supplied across all <c>Configure*</c> calls is used; later ones are ignored.</param>
     /// <returns>The service collection for chaining.</returns>
     /// <example>
     /// <code>

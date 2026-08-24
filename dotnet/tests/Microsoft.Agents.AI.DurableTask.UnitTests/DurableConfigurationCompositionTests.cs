@@ -87,6 +87,31 @@ public sealed class DurableConfigurationCompositionTests
         Assert.Equal(1, services.Count(d => d.ServiceType == typeof(DurableOptions)));
     }
 
+    /// <summary>
+    /// When more than one call supplies a builder, the first non-null delegate wins and the rest are ignored.
+    /// Passing the same builder to every call is the common case, so applying each one would configure the
+    /// worker and client repeatedly.
+    /// </summary>
+    [Fact]
+    public void ConfigureDurableAgentsThenWorkflows_AppliesOnlyTheFirstSuppliedBuilders()
+    {
+        ServiceCollection services = new();
+        List<string> workerBuilderCalls = [];
+        List<string> clientBuilderCalls = [];
+
+        services.ConfigureDurableAgents(
+            agents => agents.AddAIAgent(new CompositionTestAgent("FirstWinsAssistant")),
+            workerBuilder: _ => workerBuilderCalls.Add("agents"),
+            clientBuilder: _ => clientBuilderCalls.Add("agents"));
+        services.ConfigureDurableWorkflows(
+            workflows => workflows.AddWorkflow(BuildWorkflow("FirstWinsTranslate")),
+            workerBuilder: _ => workerBuilderCalls.Add("workflows"),
+            clientBuilder: _ => clientBuilderCalls.Add("workflows"));
+
+        Assert.Equal(["agents"], workerBuilderCalls);
+        Assert.Equal(["agents"], clientBuilderCalls);
+    }
+
     private static DurableOptions GetRegisteredOptions(IServiceCollection services)
     {
         ServiceDescriptor descriptor = Assert.Single(
