@@ -78,8 +78,9 @@ public sealed class DurableWorkflowOptions
             return this;
         }
 
-        this._workflows[workflow.Name] = workflow;
+        // Register executors first so a failure part-way through leaves no entry behind and a retry re-runs registration.
         this.RegisterWorkflowExecutors(workflow);
+        this._workflows[workflow.Name] = workflow;
 
         return this;
     }
