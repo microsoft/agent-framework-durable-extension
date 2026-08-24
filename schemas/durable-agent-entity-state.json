@@ -200,6 +200,27 @@
         }
       }
     },
+    "agentErrorResponse": {
+      "allOf": [
+        { "$ref": "#/$defs/conversationEntry" }
+      ],
+      "description": "A turn that failed. Returned to the caller waiting on its correlation ID, because an error is still an answer, but never replayed to the model as conversation. The distinction is carried by $type rather than a flag so that it survives serialization.",
+      "properties": {
+        "$type": { "type": "string", "const": "errorResponse" },
+        "usage": {
+          "$ref": "#/$defs/usage"
+        }
+      }
+    },
+    "compaction": {
+      "allOf": [
+        { "$ref": "#/$defs/conversationEntry" }
+      ],
+      "description": "A message produced by context compaction, such as a summary replacing the turns it stands in for. Part of the model's transcript and positioned in conversation order, but it answers no request, so it carries no correlation ID and is never returned to a caller polling for a response.",
+      "properties": {
+        "$type": { "type": "string", "const": "compaction" }
+      }
+    },
     "data": {
       "type": "object",
       "description": "The durable agent's state data.",
