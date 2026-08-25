@@ -114,7 +114,7 @@ public sealed class DurableWorkflowOptions
         if (binding.RawValue is AIAgent { Name: not null } agent
             && !agentOptions.ContainsAgent(agent.Name))
         {
-            agentOptions.AddAIAgent(agent);
+            agentOptions.AddWorkflowRegisteredAIAgent(agent);
         }
     }
 }

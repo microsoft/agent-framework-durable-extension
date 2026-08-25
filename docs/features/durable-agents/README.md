@@ -93,6 +93,20 @@ using IHost app = FunctionsApplication
 app.Run();
 ```
 
+To host durable workflows alongside agents, add a `ConfigureDurableWorkflows` call. The two methods compose, in any order and any number of times:
+
+```csharp
+using IHost app = FunctionsApplication
+    .CreateBuilder(args)
+    .ConfigureFunctionsWebApplication()
+    .ConfigureDurableAgents(agents => agents.AddAIAgent(agent))
+    .ConfigureDurableWorkflows(workflows => workflows.AddWorkflow(workflow))
+    .Build();
+app.Run();
+```
+
+Alternatively, `ConfigureDurableOptions` configures both from a single delegate and can be freely mixed with the methods above.
+
 **Python example:**
 
 ```python

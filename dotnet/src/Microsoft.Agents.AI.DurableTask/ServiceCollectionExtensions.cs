@@ -44,8 +44,8 @@ public static class ServiceCollectionExtensions
     /// </remarks>
     /// <param name="services">The service collection.</param>
     /// <param name="configure">A delegate to configure the durable agents.</param>
-    /// <param name="workerBuilder">Optional delegate to configure the Durable Task worker.</param>
-    /// <param name="clientBuilder">Optional delegate to configure the Durable Task client.</param>
+    /// <param name="workerBuilder">Optional delegate to configure the Durable Task worker. The first non-null delegate supplied across all <c>Configure*</c> calls is used; later ones are ignored.</param>
+    /// <param name="clientBuilder">Optional delegate to configure the Durable Task client. The first non-null delegate supplied across all <c>Configure*</c> calls is used; later ones are ignored.</param>
     /// <returns>The service collection for chaining.</returns>
     public static IServiceCollection ConfigureDurableAgents(
         this IServiceCollection services,
@@ -74,8 +74,8 @@ public static class ServiceCollectionExtensions
     /// </remarks>
     /// <param name="services">The service collection to configure.</param>
     /// <param name="configure">A delegate to configure the workflow options.</param>
-    /// <param name="workerBuilder">Optional delegate to configure the durable task worker.</param>
-    /// <param name="clientBuilder">Optional delegate to configure the durable task client.</param>
+    /// <param name="workerBuilder">Optional delegate to configure the durable task worker. The first non-null delegate supplied across all <c>Configure*</c> calls is used; later ones are ignored.</param>
+    /// <param name="clientBuilder">Optional delegate to configure the durable task client. The first non-null delegate supplied across all <c>Configure*</c> calls is used; later ones are ignored.</param>
     /// <returns>The service collection for chaining.</returns>
     public static IServiceCollection ConfigureDurableWorkflows(
         this IServiceCollection services,
@@ -105,8 +105,8 @@ public static class ServiceCollectionExtensions
     /// </remarks>
     /// <param name="services">The service collection to configure.</param>
     /// <param name="configure">A delegate to configure the durable options for both agents and workflows.</param>
-    /// <param name="workerBuilder">Optional delegate to configure the durable task worker.</param>
-    /// <param name="clientBuilder">Optional delegate to configure the durable task client.</param>
+    /// <param name="workerBuilder">Optional delegate to configure the durable task worker. The first non-null delegate supplied across all <c>Configure*</c> calls is used; later ones are ignored.</param>
+    /// <param name="clientBuilder">Optional delegate to configure the durable task client. The first non-null delegate supplied across all <c>Configure*</c> calls is used; later ones are ignored.</param>
     /// <returns>The service collection for chaining.</returns>
     /// <example>
     /// <code>
@@ -185,6 +185,13 @@ public static class ServiceCollectionExtensions
         Action<IDurableTaskWorkerBuilder>? workerBuilder,
         Action<IDurableTaskClientBuilder>? clientBuilder)
     {
+        EnsureSharedServicesRegistered(services);
+        EnsureWorkerRegistered(services, sharedOptions, workerBuilder);
+        EnsureClientRegistered(services, clientBuilder);
+    }
+
+    private static void EnsureSharedServicesRegistered(IServiceCollection services)
+    {
         // Use a marker to ensure we only register core services once
         if (services.Any(d => d.ServiceType == typeof(DurableServicesMarker)))
         {
@@ -195,27 +202,6 @@ public static class ServiceCollectionExtensions
 
         services.TryAddSingleton<DurableWorkflowRunner>();
 
-        // Configure Durable Task Worker - capture sharedOptions reference in closure.
-        // The options object is populated by all Configure* calls before the worker starts.
-
-        if (workerBuilder is not null)
-        {
-            services.AddDurableTaskWorker(builder =>
-            {
-                workerBuilder?.Invoke(builder);
-
-                builder.AddTasks(registry => RegisterTasksFromOptions(registry, sharedOptions));
-            });
-        }
-
-        // Configure Durable Task Client
-        if (clientBuilder is not null)
-        {
-            services.AddDurableTaskClient(clientBuilder);
-            services.TryAddSingleton<IWorkflowClient, DurableWorkflowClient>();
-            services.TryAddSingleton<IDurableAgentClient, DefaultDurableAgentClient>();
-        }
-
         // Register workflow and agent services
         services.TryAddSingleton<DataConverter, DurableDataConverter>();
 
@@ -225,6 +211,54 @@ public static class ServiceCollectionExtensions
 
         // Register DurableAgentsOptions resolver
         services.TryAddSingleton(sp => sp.GetRequiredService<DurableOptions>().Agents);
+    }
+
+    /// <summary>
+    /// Configures the Durable Task worker the first time a <c>Configure*</c> call supplies a worker
+    /// builder. The builder is tracked separately from the other core services so that a builder
+    /// supplied to a later call is still honored.
+    /// </summary>
+    private static void EnsureWorkerRegistered(
+        IServiceCollection services,
+        DurableOptions sharedOptions,
+        Action<IDurableTaskWorkerBuilder>? workerBuilder)
+    {
+        if (workerBuilder is null || services.Any(d => d.ServiceType == typeof(DurableTaskWorkerMarker)))
+        {
+            return;
+        }
+
+        services.AddSingleton<DurableTaskWorkerMarker>();
+
+        // Capture the sharedOptions reference in the closure.
+        // The options object is populated by all Configure* calls before the worker starts.
+        services.AddDurableTaskWorker(builder =>
+        {
+            workerBuilder(builder);
+
+            builder.AddTasks(registry => RegisterTasksFromOptions(registry, sharedOptions));
+        });
+    }
+
+    /// <summary>
+    /// Configures the Durable Task client the first time a <c>Configure*</c> call supplies a client
+    /// builder. The builder is tracked separately from the other core services so that a builder
+    /// supplied to a later call is still honored.
+    /// </summary>
+    private static void EnsureClientRegistered(
+        IServiceCollection services,
+        Action<IDurableTaskClientBuilder>? clientBuilder)
+    {
+        if (clientBuilder is null || services.Any(d => d.ServiceType == typeof(DurableTaskClientMarker)))
+        {
+            return;
+        }
+
+        services.AddSingleton<DurableTaskClientMarker>();
+
+        services.AddDurableTaskClient(clientBuilder);
+        services.TryAddSingleton<IWorkflowClient, DurableWorkflowClient>();
+        services.TryAddSingleton<IDurableAgentClient, DefaultDurableAgentClient>();
     }
 
     private static void RegisterTasksFromOptions(DurableTaskRegistry registry, DurableOptions durableOptions)
