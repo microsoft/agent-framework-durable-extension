@@ -69,8 +69,6 @@ namespace Microsoft.Agents.AI.DurableTask.Workflows;
 /// </summary>
 internal sealed class DurableWorkflowRunner
 {
-    private const int MaxSupersteps = 100;
-
     // The Durable Task SDK caps orchestration custom status at 16 KB (UTF-16), i.e. 8192 .NET chars.
     // We target a value comfortably below that so the JSON envelope, the eventsStartIndex field, and
     // small estimation differences (e.g. the real serializer vs. our per-element estimate) cannot push
@@ -108,6 +106,7 @@ internal sealed class DurableWorkflowRunner
     /// <param name="logger">The replay-safe logger for orchestration logging.</param>
     /// <returns>The result of the workflow execution.</returns>
     /// <exception cref="InvalidOperationException">Thrown when the specified workflow is not found.</exception>
+    /// <exception cref="MaxSuperstepsExceededException">Thrown when the workflow reaches its configured superstep limit with work still queued.</exception>
     internal async Task<DurableWorkflowResult> RunWorkflowOrchestrationAsync(
         TaskOrchestrationContext context,
         DurableWorkflowInput<object> workflowInput,
@@ -128,7 +127,13 @@ internal sealed class DurableWorkflowRunner
         // Extract input - the start executor determines the expected input type from its own InputTypes
         object input = workflowInput.Input;
 
-        return await RunSuperstepLoopAsync(context, workflow, edgeMap, input, logger).ConfigureAwait(true);
+        return await RunSuperstepLoopAsync(
+            context,
+            workflow,
+            edgeMap,
+            input,
+            this.Options.MaxSupersteps,
+            logger).ConfigureAwait(true);
     }
 
     private Workflow GetWorkflowOrThrow(string orchestrationName)
@@ -153,6 +158,7 @@ internal sealed class DurableWorkflowRunner
         Workflow workflow,
         DurableEdgeMap edgeMap,
         object initialInput,
+        int maxSupersteps,
         ILogger logger)
     {
         SuperstepState state = new(workflow, edgeMap);
@@ -172,7 +178,7 @@ internal sealed class DurableWorkflowRunner
 
         bool haltRequested = false;
 
-        for (int superstep = 1; superstep <= MaxSupersteps; superstep++)
+        for (int superstep = 1; superstep <= maxSupersteps; superstep++)
         {
             List<ExecutorInput> executorInputs = CollectExecutorInputs(state, logger);
             if (executorInputs.Count == 0)
@@ -197,9 +203,11 @@ internal sealed class DurableWorkflowRunner
 
             // Check if we've reached the limit and still have work remaining
             int remainingExecutors = CountRemainingExecutors(state.MessageQueues);
-            if (superstep == MaxSupersteps && remainingExecutors > 0)
+            if (superstep == maxSupersteps && remainingExecutors > 0)
             {
-                logger.LogWorkflowMaxSuperstepsExceeded(context.InstanceId, MaxSupersteps, remainingExecutors);
+                logger.LogWorkflowMaxSuperstepsExceeded(context.InstanceId, maxSupersteps, remainingExecutors);
+                throw new MaxSuperstepsExceededException(
+                    $"Workflow instance '{context.InstanceId}' reached the maximum of {maxSupersteps} supersteps with {remainingExecutors} executor(s) still queued.");
             }
         }
 
