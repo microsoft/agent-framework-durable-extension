@@ -19,10 +19,11 @@ from typing import Any, cast
 import azure.functions as func
 from agent_framework import Agent, AgentResponse
 from agent_framework.foundry import FoundryChatClient
-from agent_framework_azurefunctions import AgentFunctionApp
-from azure.durable_functions import DurableOrchestrationClient, DurableOrchestrationContext
+from agent_framework_azurefunctions import AgentFunctionApp, runtime_status_name
+from azure.durable_functions import DurableFunctionsClient
 from azure.identity.aio import AzureCliCredential
 from dotenv import load_dotenv
+from durabletask.task import OrchestrationContext, when_all
 
 # Load environment variables from .env file
 load_dotenv()
@@ -67,10 +68,13 @@ app.add_agent(agents[1])
 
 
 # 4. Durable Functions orchestration that runs both agents in parallel.
+# Orchestrators take (context, input) since azure-functions-durable 2.x, so the prompt
+# arrives as the second argument instead of via a context lookup.
 @app.orchestration_trigger(context_name="context")
-def multi_agent_concurrent_orchestration(context: DurableOrchestrationContext) -> Generator[Any, Any, dict[str, str]]:
+def multi_agent_concurrent_orchestration(
+    context: OrchestrationContext, prompt: Any
+) -> Generator[Any, Any, dict[str, str]]:
     """Fan out to two domain-specific agents and aggregate their responses."""
-    prompt = context.get_input()
     if not prompt or not str(prompt).strip():
         raise ValueError("Prompt is required")
 
@@ -84,8 +88,8 @@ def multi_agent_concurrent_orchestration(context: DurableOrchestrationContext) -
     physicist_task = physicist.run(messages=str(prompt), session=physicist_session)
     chemist_task = chemist.run(messages=str(prompt), session=chemist_session)
 
-    # Execute both tasks concurrently using task_all
-    task_results = yield context.task_all([physicist_task, chemist_task])
+    # Execute both tasks concurrently using when_all
+    task_results = yield when_all([physicist_task, chemist_task])
 
     physicist_result = cast(AgentResponse, task_results[0])
     chemist_result = cast(AgentResponse, task_results[1])
@@ -101,7 +105,7 @@ def multi_agent_concurrent_orchestration(context: DurableOrchestrationContext) -
 @app.durable_client_input(client_name="client")
 async def start_multi_agent_concurrent_orchestration(
     req: func.HttpRequest,
-    client: DurableOrchestrationClient,
+    client: DurableFunctionsClient,
 ) -> func.HttpResponse:
     """Kick off the orchestration with a plain text prompt."""
 
@@ -114,9 +118,9 @@ async def start_multi_agent_concurrent_orchestration(
             mimetype="application/json",
         )
 
-    instance_id = await client.start_new(
-        orchestration_function_name="multi_agent_concurrent_orchestration",
-        client_input=prompt,
+    instance_id = await client.schedule_new_orchestration(
+        "multi_agent_concurrent_orchestration",
+        input=prompt,
     )
 
     logger.info("[HTTP] Started orchestration with instance_id: %s", instance_id)
@@ -142,7 +146,7 @@ async def start_multi_agent_concurrent_orchestration(
 @app.durable_client_input(client_name="client")
 async def get_orchestration_status(
     req: func.HttpRequest,
-    client: DurableOrchestrationClient,
+    client: DurableFunctionsClient,
 ) -> func.HttpResponse:
     instance_id = req.route_params.get("instanceId")
     if not instance_id:
@@ -152,20 +156,28 @@ async def get_orchestration_status(
             mimetype="application/json",
         )
 
-    status = await client.get_status(instance_id)
+    status = await client.get_orchestration_state(instance_id)
+    if status is None:
+        return func.HttpResponse(
+            body=json.dumps({"error": f"No orchestration found for instance '{instance_id}'"}),
+            status_code=404,
+            mimetype="application/json",
+        )
 
     response_data: dict[str, Any] = {
         "instanceId": status.instance_id,
-        "runtimeStatus": status.runtime_status.name if status.runtime_status else None,
-        "createdTime": status.created_time.isoformat() if status.created_time else None,
-        "lastUpdatedTime": status.last_updated_time.isoformat() if status.last_updated_time else None,
+        "runtimeStatus": runtime_status_name(status.runtime_status),
+        "createdTime": status.created_at.isoformat() if status.created_at else None,
+        "lastUpdatedTime": status.last_updated_at.isoformat() if status.last_updated_at else None,
     }
 
-    if status.input_ is not None:
-        response_data["input"] = status.input_
+    orchestration_input = status.get_input()
+    if orchestration_input is not None:
+        response_data["input"] = orchestration_input
 
-    if status.output is not None:
-        response_data["output"] = status.output
+    output = status.get_output()
+    if output is not None:
+        response_data["output"] = output
 
     return func.HttpResponse(
         body=json.dumps(response_data),

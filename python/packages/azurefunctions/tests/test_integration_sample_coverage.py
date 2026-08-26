@@ -97,14 +97,18 @@ def test_integration_pipelines_run_azure_functions_suite() -> None:
         repo_root / ".github" / "workflows" / "python-integration-tests.yml",
         repo_root / "eng" / "templates" / "jobs" / "python-integration-tests.yml",
     ]
-    expected_command = "pytest packages/azurefunctions/tests/integration_tests"
+    # This package is a standalone uv project with its own environment, so the suite
+    # runs from the package directory and the pytest target is relative to it.
+    required_fragments = ("python/packages/azurefunctions", "pytest tests/integration_tests")
 
-    missing_invocations = [
-        str(path.relative_to(repo_root))
+    missing_fragments = {
+        str(path.relative_to(repo_root)): missing
         for path in pipeline_paths
-        if expected_command not in path.read_text(encoding="utf-8")
-    ]
-    assert not missing_invocations, f"Azure Functions integration suite is not invoked by: {missing_invocations}"
+        if (
+            missing := [fragment for fragment in required_fragments if fragment not in path.read_text(encoding="utf-8")]
+        )
+    }
+    assert not missing_fragments, f"Azure Functions integration suite is not invoked by: {missing_fragments}"
 
 
 def test_skip_guard_detects_decorators_and_module_markers(tmp_path: Path) -> None:

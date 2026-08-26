@@ -20,9 +20,10 @@ from typing import Any
 import azure.functions as func
 from agent_framework import Agent
 from agent_framework.foundry import FoundryChatClient
-from agent_framework_azurefunctions import AgentFunctionApp
-from azure.durable_functions import DurableOrchestrationClient, DurableOrchestrationContext
+from agent_framework_azurefunctions import AgentFunctionApp, runtime_status_name
+from azure.durable_functions import DurableFunctionsClient
 from azure.identity.aio import AzureCliCredential
+from durabletask.task import OrchestrationContext, when_any
 from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -91,9 +92,12 @@ def publish_content(content: dict) -> None:
 
 
 # 4. Orchestration loops until the human approves, times out, or attempts are exhausted.
+# Orchestrators take (context, input) since azure-functions-durable 2.x, so the request
+# payload arrives as the second argument instead of via a context lookup.
 @app.orchestration_trigger(context_name="context")
-def content_generation_hitl_orchestration(context: DurableOrchestrationContext) -> Generator[Any, Any, dict[str, str]]:
-    payload_raw = context.get_input()
+def content_generation_hitl_orchestration(
+    context: OrchestrationContext, payload_raw: Any
+) -> Generator[Any, Any, dict[str, str]]:
     if not isinstance(payload_raw, Mapping):
         raise ValueError("Content generation input is required")
 
@@ -125,14 +129,14 @@ def content_generation_hitl_orchestration(context: DurableOrchestrationContext) 
             f"Requesting human feedback. Iteration #{attempt}. Timeout: {payload.approval_timeout_hours} hour(s)."
         )
 
-        yield context.call_activity("notify_user_for_approval", content.model_dump())  # type: ignore[misc]
+        yield context.call_activity("notify_user_for_approval", input=content.model_dump())  # type: ignore[misc]
 
         approval_task = context.wait_for_external_event(HUMAN_APPROVAL_EVENT)
         timeout_task = context.create_timer(
             context.current_utc_datetime + timedelta(hours=payload.approval_timeout_hours)
         )
 
-        winner = yield context.task_any([approval_task, timeout_task])
+        winner = yield when_any([approval_task, timeout_task])
 
         if winner == approval_task:
             timeout_task.cancel()  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
@@ -140,7 +144,7 @@ def content_generation_hitl_orchestration(context: DurableOrchestrationContext) 
 
             if approval_payload.approved:
                 context.set_custom_status("Content approved by human reviewer. Publishing content...")
-                yield context.call_activity("publish_content", content.model_dump())  # type: ignore[misc]
+                yield context.call_activity("publish_content", input=content.model_dump())  # type: ignore[misc]
                 context.set_custom_status(
                     f"Content published successfully at {context.current_utc_datetime:%Y-%m-%dT%H:%M:%S}"
                 )
@@ -185,7 +189,7 @@ def content_generation_hitl_orchestration(context: DurableOrchestrationContext) 
 @app.durable_client_input(client_name="client")
 async def start_content_generation(
     req: func.HttpRequest,
-    client: DurableOrchestrationClient,
+    client: DurableFunctionsClient,
 ) -> func.HttpResponse:
     try:
         body = req.get_json()
@@ -208,9 +212,9 @@ async def start_content_generation(
             mimetype="application/json",
         )
 
-    instance_id = await client.start_new(
-        orchestration_function_name="content_generation_hitl_orchestration",
-        client_input=payload.model_dump(),
+    instance_id = await client.schedule_new_orchestration(
+        "content_generation_hitl_orchestration",
+        input=payload.model_dump(),
     )
 
     status_url = _build_status_url(req.url, instance_id, route="hitl")
@@ -234,7 +238,7 @@ async def start_content_generation(
 @app.durable_client_input(client_name="client")
 async def send_human_approval(
     req: func.HttpRequest,
-    client: DurableOrchestrationClient,
+    client: DurableFunctionsClient,
 ) -> func.HttpResponse:
     instance_id = req.route_params.get("instanceId")
     if not instance_id:
@@ -265,7 +269,7 @@ async def send_human_approval(
             mimetype="application/json",
         )
 
-    await client.raise_event(instance_id, HUMAN_APPROVAL_EVENT, approval.model_dump())
+    await client.raise_orchestration_event(instance_id, HUMAN_APPROVAL_EVENT, data=approval.model_dump())
 
     payload_json = {
         "message": "Human approval sent to orchestration.",
@@ -285,7 +289,7 @@ async def send_human_approval(
 @app.durable_client_input(client_name="client")
 async def get_orchestration_status(
     req: func.HttpRequest,
-    client: DurableOrchestrationClient,
+    client: DurableFunctionsClient,
 ) -> func.HttpResponse:
     instance_id = req.route_params.get("instanceId")
     if not instance_id:
@@ -295,15 +299,9 @@ async def get_orchestration_status(
             mimetype="application/json",
         )
 
-    status = await client.get_status(
-        instance_id,
-        show_history=False,
-        show_history_output=False,
-        show_input=True,
-    )
+    status = await client.get_orchestration_state(instance_id)
 
-    # Check if status is None or if the instance doesn't exist (runtime_status is None)
-    if getattr(status, "runtime_status", None) is None:
+    if status is None or status.runtime_status is None:
         return func.HttpResponse(
             body=json.dumps({"error": "Instance not found."}),
             status_code=404,
@@ -311,22 +309,21 @@ async def get_orchestration_status(
         )
 
     response_data: dict[str, Any] = {
-        "instanceId": getattr(status, "instance_id", None),
-        "runtimeStatus": getattr(status.runtime_status, "name", None)
-        if getattr(status, "runtime_status", None)
-        else None,
-        "workflowStatus": getattr(status, "custom_status", None),
+        "instanceId": status.instance_id,
+        "runtimeStatus": runtime_status_name(status.runtime_status),
+        "workflowStatus": status.get_custom_status(),
     }
 
-    if getattr(status, "input_", None) is not None:
-        response_data["input"] = status.input_
+    orchestration_input = status.get_input()
+    if orchestration_input is not None:
+        response_data["input"] = orchestration_input
 
-    if getattr(status, "output", None) is not None:
-        response_data["output"] = status.output
+    output = status.get_output()
+    if output is not None:
+        response_data["output"] = output
 
-    failure_details = getattr(status, "failure_details", None)
-    if failure_details is not None:
-        response_data["failureDetails"] = failure_details
+    if status.failure_details is not None:
+        response_data["failureDetails"] = str(status.failure_details)
 
     return func.HttpResponse(
         body=json.dumps(response_data),

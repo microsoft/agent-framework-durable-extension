@@ -48,8 +48,8 @@ from ._durable_agent_state import (
     DurableAgentStateUsage,
     DurableAgentStateUsageContent,
 )
-from ._entities import AgentEntity, AgentEntityStateProviderMixin
-from ._executors import DurableAgentExecutor
+from ._entities import AgentEntity, AgentEntityStateProviderMixin, create_agent_entity_class
+from ._executors import DurableAgentExecutor, DurableAgentTask, OrchestrationAgentExecutor
 from ._models import AgentSessionId, DurableAgentSession, RunRequest
 from ._orchestration_context import DurableAIAgentOrchestrationContext
 from ._response_utils import ensure_response_format, load_agent_response
@@ -159,14 +159,17 @@ __all__ = [
     "DurableAgentStateUriContent",
     "DurableAgentStateUsage",
     "DurableAgentStateUsageContent",
+    "DurableAgentTask",
     "DurableStateFields",
     "DurableTaskWorkflowContext",
     "DurableWorkflowClient",
+    "OrchestrationAgentExecutor",
     "RunRequest",
     "WorkflowOrchestrationContext",
     "WorkflowRegistrationPlan",
     "__version__",
     "collect_hosted_workflows",
+    "create_agent_entity_class",
     "deserialize_workflow_output",
     "ensure_response_format",
     "execute_workflow_activity",

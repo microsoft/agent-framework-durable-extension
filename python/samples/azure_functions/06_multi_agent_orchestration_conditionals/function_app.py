@@ -19,9 +19,10 @@ from typing import Any
 import azure.functions as func
 from agent_framework import Agent
 from agent_framework.foundry import FoundryChatClient
-from agent_framework_azurefunctions import AgentFunctionApp
-from azure.durable_functions import DurableOrchestrationClient, DurableOrchestrationContext
+from agent_framework_azurefunctions import AgentFunctionApp, runtime_status_name
+from azure.durable_functions import DurableFunctionsClient
 from azure.identity.aio import AzureCliCredential
+from durabletask.task import OrchestrationContext
 from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -83,9 +84,10 @@ def send_email(message: str) -> str:
 
 
 # 4. Orchestration validates input, runs agents, and branches on spam results.
+# Orchestrators take (context, input) since azure-functions-durable 2.x, so the email
+# payload arrives as the second argument instead of via a context lookup.
 @app.orchestration_trigger(context_name="context")
-def spam_detection_orchestration(context: DurableOrchestrationContext) -> Generator[Any, Any, str]:
-    payload_raw = context.get_input()
+def spam_detection_orchestration(context: OrchestrationContext, payload_raw: Any) -> Generator[Any, Any, str]:
     if not isinstance(payload_raw, Mapping):
         raise ValueError("Email data is required")
 
@@ -118,7 +120,7 @@ def spam_detection_orchestration(context: DurableOrchestrationContext) -> Genera
         raise ValueError("Failed to parse spam detection result") from ex
 
     if spam_result.is_spam:
-        result = yield context.call_activity("handle_spam_email", spam_result.reason)  # type: ignore[misc]
+        result = yield context.call_activity("handle_spam_email", input=spam_result.reason)  # type: ignore[misc]
         return result  # noqa: B901 - Durable orchestrators return their final output.
 
     email_session = email_agent.create_session()
@@ -141,7 +143,7 @@ def spam_detection_orchestration(context: DurableOrchestrationContext) -> Genera
     except Exception as ex:
         raise ValueError("Failed to parse email response") from ex
 
-    result = yield context.call_activity("send_email", email_result.response)  # type: ignore[misc]
+    result = yield context.call_activity("send_email", input=email_result.response)  # type: ignore[misc]
     return result  # noqa: B901 - Durable orchestrators return their final output.
 
 
@@ -150,7 +152,7 @@ def spam_detection_orchestration(context: DurableOrchestrationContext) -> Genera
 @app.durable_client_input(client_name="client")
 async def start_spam_detection_orchestration(
     req: func.HttpRequest,
-    client: DurableOrchestrationClient,
+    client: DurableFunctionsClient,
 ) -> func.HttpResponse:
     try:
         body = req.get_json()
@@ -173,9 +175,9 @@ async def start_spam_detection_orchestration(
             mimetype="application/json",
         )
 
-    instance_id = await client.start_new(
-        orchestration_function_name="spam_detection_orchestration",
-        client_input=payload.model_dump(),
+    instance_id = await client.schedule_new_orchestration(
+        "spam_detection_orchestration",
+        input=payload.model_dump(),
     )
 
     logger.info("[HTTP] Started spam detection orchestration with instance_id: %s", instance_id)
@@ -201,7 +203,7 @@ async def start_spam_detection_orchestration(
 @app.durable_client_input(client_name="client")
 async def get_orchestration_status(
     req: func.HttpRequest,
-    client: DurableOrchestrationClient,
+    client: DurableFunctionsClient,
 ) -> func.HttpResponse:
     instance_id = req.route_params.get("instanceId")
     if not instance_id:
@@ -211,20 +213,28 @@ async def get_orchestration_status(
             mimetype="application/json",
         )
 
-    status = await client.get_status(instance_id)
+    status = await client.get_orchestration_state(instance_id)
+    if status is None:
+        return func.HttpResponse(
+            body=json.dumps({"error": f"No orchestration found for instance '{instance_id}'"}),
+            status_code=404,
+            mimetype="application/json",
+        )
 
     response_data: dict[str, Any] = {
         "instanceId": status.instance_id,
-        "runtimeStatus": status.runtime_status.name if status.runtime_status else None,
-        "createdTime": status.created_time.isoformat() if status.created_time else None,
-        "lastUpdatedTime": status.last_updated_time.isoformat() if status.last_updated_time else None,
+        "runtimeStatus": runtime_status_name(status.runtime_status),
+        "createdTime": status.created_at.isoformat() if status.created_at else None,
+        "lastUpdatedTime": status.last_updated_at.isoformat() if status.last_updated_at else None,
     }
 
-    if status.input_ is not None:
-        response_data["input"] = status.input_
+    orchestration_input = status.get_input()
+    if orchestration_input is not None:
+        response_data["input"] = orchestration_input
 
-    if status.output is not None:
-        response_data["output"] = status.output
+    output = status.get_output()
+    if output is not None:
+        response_data["output"] = output
 
     return func.HttpResponse(
         body=json.dumps(response_data),

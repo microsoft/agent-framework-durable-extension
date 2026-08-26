@@ -20,7 +20,11 @@ steps:
         docker rm -f azurite
       fi
 
-      docker run -d --name azurite -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite
+      # The preview extension bundle's DurableTask.AzureStorage speaks Storage API
+      # 2026-02-06, which Azurite rejects until it ships support for it. Repeat the
+      # image's default arguments because they are replaced, not appended to.
+      docker run -d --name azurite -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite \
+        azurite -l /data --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --skipApiVersionCheck
       timeout 60 bash -c 'until curl --silent --show-error http://localhost:10000/devstoreaccount1 >/dev/null; do sleep 2; done'
     displayName: 'Start Azurite'
 

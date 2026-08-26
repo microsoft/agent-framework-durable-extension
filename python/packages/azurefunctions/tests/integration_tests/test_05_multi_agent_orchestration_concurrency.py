@@ -12,7 +12,7 @@ Prerequisites:
 
 Usage:
     # Start Azurite (if not already running)
-    azurite &
+    azurite --skipApiVersionCheck &
 
     # Run tests
     uv run pytest packages/azurefunctions/tests/integration_tests/test_05_multi_agent_orchestration_concurrency.py -v

@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from typing import Any, Protocol, TypeVar, cast
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -38,8 +38,11 @@ from agent_framework_durabletask import (
     AgentSessionId,
     ApiResponseFields,
     DurableAgentState,
+    DurableAgentTask,
     DurableAIAgent,
+    OrchestrationAgentExecutor,
     RunRequest,
+    create_agent_entity_class,
     deserialize_workflow_output,
     execute_workflow_activity,
     plan_workflow_registration,
@@ -55,10 +58,11 @@ from agent_framework_durabletask._workflows.naming import (
 )
 from agent_framework_durabletask._workflows.registration import collect_hosted_workflows
 from agent_framework_durabletask._workflows.serialization import strip_pickle_markers, strip_subworkflow_markers
+from durabletask.client import OrchestrationStatus
+from durabletask.entities import EntityInstanceId
+from durabletask.task import OrchestrationContext
 
-from ._entities import create_agent_entity
 from ._errors import IncomingRequestError
-from ._orchestration import AgentOrchestrationContextType, AgentTask, AzureFunctionsAgentExecutor
 from ._routes import build_workflow_respond_url, build_workflow_status_url, split_request_url
 from ._workflow import run_workflow_orchestrator
 
@@ -75,7 +79,6 @@ _WORKFLOW_WAIT_TIMEOUT_SECONDS_QUERY_PARAMETER = "timeoutSeconds"
 
 logger = logging.getLogger("agent_framework.azurefunctions")
 
-EntityHandler = Callable[[df.DurableEntityContext], None]
 HandlerT = TypeVar("HandlerT", bound=Callable[..., Any])
 
 
@@ -87,6 +90,33 @@ class _WorkflowCompletionClient(Protocol):
         timeout_in_milliseconds: int = 10_000,
         retry_interval_in_milliseconds: int = 1_000,
     ) -> func.HttpResponse: ...
+
+
+# The workflow HTTP endpoints have always emitted PascalCase runtime status names
+# ("Completed", "ContinuedAsNew"). durabletask's OrchestrationStatus renders as
+# SCREAMING_CASE, so map it back here rather than silently changing the wire format
+# for existing callers.
+_RUNTIME_STATUS_WIRE_NAMES: Mapping[OrchestrationStatus, str] = {
+    OrchestrationStatus.RUNNING: "Running",
+    OrchestrationStatus.COMPLETED: "Completed",
+    OrchestrationStatus.FAILED: "Failed",
+    OrchestrationStatus.TERMINATED: "Terminated",
+    OrchestrationStatus.CONTINUED_AS_NEW: "ContinuedAsNew",
+    OrchestrationStatus.PENDING: "Pending",
+    OrchestrationStatus.SUSPENDED: "Suspended",
+}
+
+
+def runtime_status_name(status: OrchestrationStatus | None) -> str | None:
+    """Render a runtime status using the name the HTTP endpoints have always emitted.
+
+    ``durabletask``'s :class:`OrchestrationStatus` renders as SCREAMING_CASE, so apps that
+    expose their own orchestration status endpoints should use this to stay consistent with
+    the endpoints :class:`AgentFunctionApp` registers.
+    """
+    if status is None:
+        return None
+    return _RUNTIME_STATUS_WIRE_NAMES.get(status, status.name)
 
 
 def _json_default(obj: Any) -> Any:
@@ -130,37 +160,10 @@ class AgentMetadata:
     mcp_tool_enabled: bool
 
 
-if TYPE_CHECKING:
-
-    class DFAppBase:
-        def __init__(self, http_auth_level: func.AuthLevel = func.AuthLevel.FUNCTION) -> None: ...
-
-        def function_name(self, name: str) -> Callable[[HandlerT], HandlerT]: ...
-
-        def route(self, route: str, methods: list[str]) -> Callable[[HandlerT], HandlerT]: ...
-
-        def durable_client_input(self, client_name: str) -> Callable[[HandlerT], HandlerT]: ...
-
-        def entity_trigger(self, context_name: str, entity_name: str) -> Callable[[EntityHandler], EntityHandler]: ...
-
-        def orchestration_trigger(self, context_name: str) -> Callable[[HandlerT], HandlerT]: ...
-
-        def activity_trigger(self, input_name: str) -> Callable[[HandlerT], HandlerT]: ...
-
-        def mcp_tool_trigger(
-            self,
-            arg_name: str,
-            tool_name: str,
-            description: str,
-            tool_properties: str,
-            data_type: func.DataType,
-        ) -> Callable[[HandlerT], HandlerT]: ...
-
-else:
-    DFAppBase = df.DFApp  # type: ignore[assignment]
-
-
-class AgentFunctionApp(DFAppBase):
+# azure-functions-durable 2.x ships PEP 561 type information, so ``df.DFApp`` can be
+# subclassed directly. 1.x shipped no types, which is why this used to need a
+# hand-written TYPE_CHECKING stub.
+class AgentFunctionApp(df.DFApp):
     """Main application class for creating durable agent function apps using Durable Entities.
 
     This class uses Durable Entities pattern for agent execution, providing:
@@ -477,10 +480,13 @@ class AgentFunctionApp(DFAppBase):
 
         @self.function_name(orchestrator_name)
         @self.orchestration_trigger(context_name="context")
-        def workflow_orchestrator(context: df.DurableOrchestrationContext) -> Any:
-            """Generic orchestrator for running the configured workflow."""
-            input_data = context.get_input()
+        def workflow_orchestrator(context: OrchestrationContext, input_data: Any) -> Any:
+            """Generic orchestrator for running the configured workflow.
 
+            This is a durabletask-native two-argument orchestrator, so ``context`` is a
+            real :class:`durabletask.task.OrchestrationContext` and the client input is
+            delivered as the second argument rather than via ``context.get_input()``.
+            """
             # Pass the deserialized client input straight to the shared engine, which
             # reconstructs the start executor's declared type (see _coerce_initial_input).
             initial_message = input_data
@@ -509,7 +515,7 @@ class AgentFunctionApp(DFAppBase):
         @self.route(route=f"workflow/{workflow_name}/run", methods=["POST"])
         @self.durable_client_input(client_name="client")
         async def start_workflow_orchestration(
-            req: func.HttpRequest, client: df.DurableOrchestrationClient
+            req: func.HttpRequest, client: df.DurableFunctionsClient
         ) -> func.HttpResponse:
             """HTTP endpoint to start the workflow."""
             try:
@@ -542,10 +548,10 @@ class AgentFunctionApp(DFAppBase):
             client_input = strip_subworkflow_markers(client_input)
             client_input = strip_pickle_markers(client_input)
 
-            instance_id = await client.start_new(
+            instance_id = await client.schedule_new_orchestration(
                 orchestrator_name,
+                input=client_input,
                 instance_id=requested_instance_id,
-                client_input=client_input,
             )
 
             if wait_for_response:
@@ -560,7 +566,7 @@ class AgentFunctionApp(DFAppBase):
                     retry_interval_in_milliseconds=1000,
                 )
                 if completion_response.status_code != 202:
-                    status = await client.get_status(instance_id)
+                    status = await client.get_orchestration_state(instance_id)
                     return self._build_workflow_terminal_response(status, instance_id)
 
             return self._build_workflow_accepted_response(req, workflow_name, instance_id)
@@ -568,38 +574,37 @@ class AgentFunctionApp(DFAppBase):
         @self.function_name(f"{orchestrator_name}-status")
         @self.route(route=f"workflow/{workflow_name}/status/{{instanceId}}", methods=["GET"])
         @self.durable_client_input(client_name="client")
-        async def get_workflow_status(
-            req: func.HttpRequest, client: df.DurableOrchestrationClient
-        ) -> func.HttpResponse:
+        async def get_workflow_status(req: func.HttpRequest, client: df.DurableFunctionsClient) -> func.HttpResponse:
             """HTTP endpoint to get workflow status."""
             instance_id = req.route_params.get("instanceId")
             if not instance_id:
                 return self._build_error_response("Instance ID is required", status_code=400)
 
-            status = await client.get_status(instance_id)
+            status = await client.get_orchestration_state(instance_id)
 
             # Scope the endpoint to this workflow's orchestrator. The durable client
             # resolves instance IDs across every orchestration in the task hub, so an ID
             # belonging to a different orchestration (or a different workflow) must be
             # treated as "not found" rather than leaking its status / HITL details.
-            if not self._is_owned_orchestration(status, workflow_name):
+            if status is None or not self._is_owned_orchestration(status, workflow_name):
                 return self._build_error_response("Instance not found", status_code=404)
 
             # The workflow's yielded outputs are checkpoint-encoded by the shared
             # activity (typed objects become pickle/type-marker dicts). Reconstruct
             # the originals so the HTTP response carries clean domain JSON, matching
             # what DurableWorkflowClient.await_workflow_output returns in-process.
-            # status.output is the workflow's own (trusted) orchestration result.
-            decoded_output = deserialize_workflow_output(status.output) if status.output is not None else None
+            # The output is the workflow's own (trusted) orchestration result.
+            raw_output = status.get_output()
+            decoded_output = deserialize_workflow_output(raw_output) if raw_output is not None else None
 
             response = {
                 "instanceId": status.instance_id,
-                "runtimeStatus": status.runtime_status.name if status.runtime_status else None,
-                "customStatus": status.custom_status,
+                "runtimeStatus": runtime_status_name(status.runtime_status),
+                "customStatus": status.get_custom_status(),
                 "output": decoded_output,
-                "error": decoded_output if status.runtime_status == df.OrchestrationRuntimeStatus.Failed else None,
-                "createdTime": status.created_time.isoformat() if status.created_time else None,
-                "lastUpdatedTime": status.last_updated_time.isoformat() if status.last_updated_time else None,
+                "error": decoded_output if status.runtime_status == OrchestrationStatus.FAILED else None,
+                "createdTime": status.created_at.isoformat() if status.created_at else None,
+                "lastUpdatedTime": status.last_updated_at.isoformat() if status.last_updated_at else None,
             }
 
             # Add pending HITL requests info if available. Requests originating in a
@@ -607,7 +612,7 @@ class AgentFunctionApp(DFAppBase):
             # ({executorId}~{ordinal}~{requestId}, nested deeper for deeper levels); the
             # respondUrl always targets this top-level instance, so the caller has a
             # single addressing surface.
-            custom_status = status.custom_status
+            custom_status = status.get_custom_status()
             if isinstance(custom_status, dict):
                 gathered = await self._gather_pending_hitl_requests(client, cast("dict[str, Any]", custom_status))
                 if gathered:
@@ -636,7 +641,7 @@ class AgentFunctionApp(DFAppBase):
         @self.function_name(f"{orchestrator_name}-respond")
         @self.route(route=f"workflow/{workflow_name}/respond/{{instanceId}}/{{requestId}}", methods=["POST"])
         @self.durable_client_input(client_name="client")
-        async def send_hitl_response(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
+        async def send_hitl_response(req: func.HttpRequest, client: df.DurableFunctionsClient) -> func.HttpResponse:
             """HTTP endpoint to send a response to a pending HITL request.
 
             The requestId in the URL corresponds to the request_id from the RequestInfoEvent.
@@ -651,7 +656,7 @@ class AgentFunctionApp(DFAppBase):
             # Scope the endpoint to this workflow's orchestrator before raising an
             # external event, so a leaked instance ID cannot be used to inject events into
             # a different orchestration (or a different workflow) in the task hub.
-            status = await client.get_status(instance_id)
+            status = await client.get_orchestration_state(instance_id)
             if not self._is_owned_orchestration(status, workflow_name):
                 return self._build_error_response("Instance not found", status_code=404)
 
@@ -674,10 +679,10 @@ class AgentFunctionApp(DFAppBase):
 
             # Send the response as an external event. The (bare) request_id is used as the
             # event name for correlation on the owning orchestration instance.
-            await client.raise_event(
-                instance_id=target_instance_id,
-                event_name=bare_request_id,
-                event_data=response_data,
+            await client.raise_orchestration_event(
+                target_instance_id,
+                bare_request_id,
+                data=response_data,
             )
 
             return func.HttpResponse(
@@ -697,7 +702,7 @@ class AgentFunctionApp(DFAppBase):
 
     async def _gather_pending_hitl_requests(
         self,
-        client: df.DurableOrchestrationClient,
+        client: df.DurableFunctionsClient,
         custom_status: dict[str, Any],
         *,
         prefix: str = "",
@@ -734,8 +739,8 @@ class AgentFunctionApp(DFAppBase):
                 for ordinal, child_instance_id in enumerate(children):
                     if not isinstance(child_instance_id, str):
                         continue
-                    child_status = await client.get_status(child_instance_id)
-                    child_custom = child_status.custom_status if child_status else None
+                    child_status = await client.get_orchestration_state(child_instance_id)
+                    child_custom = child_status.get_custom_status() if child_status else None
                     if isinstance(child_custom, dict):
                         gathered.extend(
                             await self._gather_pending_hitl_requests(
@@ -749,7 +754,7 @@ class AgentFunctionApp(DFAppBase):
 
     async def _resolve_hitl_target(
         self,
-        client: df.DurableOrchestrationClient,
+        client: df.DurableFunctionsClient,
         instance_id: str,
         request_id: str,
     ) -> tuple[str, str] | None:
@@ -767,8 +772,8 @@ class AgentFunctionApp(DFAppBase):
             return instance_id, request_id
 
         executor_id, ordinal, remainder = hop
-        status = await client.get_status(instance_id)
-        custom_status = status.custom_status if status else None
+        status = await client.get_orchestration_state(instance_id)
+        custom_status = status.get_custom_status() if status else None
         if not isinstance(custom_status, dict):
             return None
         subworkflows = cast("dict[str, Any]", custom_status).get("subworkflows")
@@ -899,14 +904,16 @@ class AgentFunctionApp(DFAppBase):
 
     def get_agent(
         self,
-        context: AgentOrchestrationContextType,
+        context: OrchestrationContext,
         agent_name: str,
         workflow_name: str | None = None,
-    ) -> DurableAIAgent[AgentTask]:
+    ) -> DurableAIAgent[DurableAgentTask]:
         """Return a DurableAIAgent proxy for a registered agent.
 
         Args:
-            context: Durable Functions orchestration context invoking the agent.
+            context: Durable Functions orchestration context invoking the agent. Since
+                azure-functions-durable 2.x this is a durabletask
+                :class:`~durabletask.task.OrchestrationContext`.
             agent_name: Name of the agent registered on this app. For an agent that
                 belongs to a hosted workflow, pass ``workflow_name`` to resolve it
                 under its workflow-scoped identity; for an agent registered standalone
@@ -915,7 +922,7 @@ class AgentFunctionApp(DFAppBase):
                 resolved under the scoped id ``{workflow_name}-{agent_name}``.
 
         Returns:
-            DurableAIAgent[AgentTask] wrapper bound to the orchestration context.
+            DurableAIAgent[DurableAgentTask] wrapper bound to the orchestration context.
 
         Raises:
             ValueError: If the requested agent has not been registered.
@@ -927,7 +934,7 @@ class AgentFunctionApp(DFAppBase):
         if normalized_name not in self._agent_metadata:
             raise ValueError(f"Agent '{normalized_name}' is not registered with this app.")
 
-        executor = AzureFunctionsAgentExecutor(context)
+        executor = OrchestrationAgentExecutor(context)
         return DurableAIAgent(executor, normalized_name)
 
     def _setup_agent_functions(
@@ -979,7 +986,7 @@ class AgentFunctionApp(DFAppBase):
         @function_name_decorator
         @route_decorator
         @durable_client_decorator
-        async def http_start(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
+        async def http_start(req: func.HttpRequest, client: df.DurableFunctionsClient) -> func.HttpResponse:
             """HTTP trigger that calls a durable entity to execute the agent and returns the result.
 
             Expected request body (RunRequest format):
@@ -1021,8 +1028,8 @@ class AgentFunctionApp(DFAppBase):
                     f"and correlation ID: {correlation_id}"
                 )
 
-                entity_instance_id = df.EntityId(
-                    name=agent_session_id.entity_name,
+                entity_instance_id = EntityInstanceId(
+                    entity=agent_session_id.entity_name,
                     key=agent_session_id.key,
                 )
                 run_request = self._build_request_data(
@@ -1109,21 +1116,11 @@ class AgentFunctionApp(DFAppBase):
         # Use the prefixed entity name for both registration and function naming
         entity_name_with_prefix = AgentSessionId.to_entity_name(agent_name)
 
-        def entity_function(context: df.DurableEntityContext) -> None:
-            """Durable entity that manages agent execution and conversation state.
-
-            Operations:
-            - run: Execute the agent with a message
-            - run_agent: (Deprecated) Execute the agent with a message
-            - reset: Clear conversation history
-            """
-            entity_handler = create_agent_entity(agent, callback)
-            entity_handler(context)
-
-        # Set function name for Azure Functions (used in function.json generation)
-        # Use the prefixed entity name as the function name too.
-        entity_function.__name__ = entity_name_with_prefix
-        self.entity_trigger(context_name="context", entity_name=entity_name_with_prefix)(entity_function)
+        # azure-functions-durable 2.x accepts a class-based ``DurableEntity`` here, so
+        # the Functions host registers the same entity implementation the standalone
+        # DurableTask worker uses instead of a bespoke function-style entity.
+        entity_class = create_agent_entity_class(agent, callback, entity_id=agent_name)
+        self.entity_trigger(context_name="context", entity_name=entity_name_with_prefix)(entity_class)
 
     def _setup_mcp_tool_trigger(self, agent_name: str, agent_description: str | None) -> None:
         """Register an MCP tool trigger for an agent using Azure Functions native MCP support.
@@ -1156,7 +1153,7 @@ class AgentFunctionApp(DFAppBase):
         ])
 
         function_name_decorator = self.function_name(mcp_function_name)
-        mcp_tool_decorator = self.mcp_tool_trigger(
+        mcp_tool_decorator = self.mcp_tool_trigger(  # pyright: ignore[reportUnknownMemberType]  # SDK leaves **kwargs untyped
             arg_name="context",
             tool_name=agent_name,
             description=agent_description or f"Interact with {agent_name} agent",
@@ -1168,7 +1165,7 @@ class AgentFunctionApp(DFAppBase):
         @function_name_decorator
         @mcp_tool_decorator
         @durable_client_decorator
-        async def mcp_tool_handler(context: str, client: df.DurableOrchestrationClient) -> str:
+        async def mcp_tool_handler(context: str, client: df.DurableFunctionsClient) -> str:
             """Handle MCP tool invocation for the agent.
 
             Args:
@@ -1185,7 +1182,7 @@ class AgentFunctionApp(DFAppBase):
         logger.debug("[AgentFunctionApp] Registered MCP tool trigger for agent: %s", agent_name)
 
     async def _handle_mcp_tool_invocation(
-        self, agent_name: str, context: str, client: df.DurableOrchestrationClient
+        self, agent_name: str, context: str, client: df.DurableFunctionsClient
     ) -> str:
         """Handle an MCP tool invocation.
 
@@ -1247,8 +1244,8 @@ class AgentFunctionApp(DFAppBase):
             session_id = AgentSessionId.with_random_key(agent_name)
 
         # Build entity instance ID
-        entity_instance_id = df.EntityId(
-            name=session_id.entity_name,
+        entity_instance_id = EntityInstanceId(
+            entity=session_id.entity_name,
             key=session_id.key,
         )
 
@@ -1332,25 +1329,24 @@ class AgentFunctionApp(DFAppBase):
 
     async def _read_cached_state(
         self,
-        client: df.DurableOrchestrationClient,
-        entity_instance_id: df.EntityId,
+        client: df.DurableFunctionsClient,
+        entity_instance_id: EntityInstanceId,
     ) -> DurableAgentState | None:
-        state_response = await client.read_entity_state(entity_instance_id)
-        if not state_response or not state_response.entity_exists:
+        entity = await client.get_entity(entity_instance_id)
+        if entity is None:
             return None
 
-        state_payload = state_response.entity_state
-        if not isinstance(state_payload, dict):
+        # get_state() returns the raw serialized JSON payload, not a mapping.
+        state_json = entity.get_state()
+        if not state_json:
             return None
 
-        typed_state_payload = cast(dict[str, Any], state_payload)
-
-        return DurableAgentState.from_dict(typed_state_payload)
+        return DurableAgentState.from_json(state_json)
 
     async def _get_response_from_entity(
         self,
-        client: df.DurableOrchestrationClient,
-        entity_instance_id: df.EntityId,
+        client: df.DurableFunctionsClient,
+        entity_instance_id: EntityInstanceId,
         correlation_id: str,
         message: str,
         session_id: str,
@@ -1390,8 +1386,8 @@ class AgentFunctionApp(DFAppBase):
 
     async def _poll_entity_for_response(
         self,
-        client: df.DurableOrchestrationClient,
-        entity_instance_id: df.EntityId,
+        client: df.DurableFunctionsClient,
+        entity_instance_id: EntityInstanceId,
         correlation_id: str,
         message: str,
         session_id: str,
@@ -1526,21 +1522,22 @@ class AgentFunctionApp(DFAppBase):
 
         runtime_status = status.runtime_status
         if runtime_status not in {
-            df.OrchestrationRuntimeStatus.Completed,
-            df.OrchestrationRuntimeStatus.Failed,
+            OrchestrationStatus.COMPLETED,
+            OrchestrationStatus.FAILED,
         }:
             return self._build_error_response(
-                f"Workflow orchestration '{instance_id}' ended with unexpected status '{runtime_status.name}'.",
+                f"Workflow orchestration '{instance_id}' ended with unexpected status "
+                f"'{runtime_status_name(runtime_status)}'.",
                 status_code=500,
             )
 
-        decoded_output = deserialize_workflow_output(status.output) if status.output is not None else None
+        decoded_output = deserialize_workflow_output(status.get_output()) if status.get_output() is not None else None
         response: dict[str, Any] = {
             "instanceId": status.instance_id or instance_id,
-            "runtimeStatus": runtime_status.name,
-            "output": decoded_output if runtime_status == df.OrchestrationRuntimeStatus.Completed else None,
+            "runtimeStatus": runtime_status_name(runtime_status),
+            "output": decoded_output if runtime_status == OrchestrationStatus.COMPLETED else None,
         }
-        if runtime_status == df.OrchestrationRuntimeStatus.Failed:
+        if runtime_status == OrchestrationStatus.FAILED:
             response["error"] = decoded_output
 
         return func.HttpResponse(

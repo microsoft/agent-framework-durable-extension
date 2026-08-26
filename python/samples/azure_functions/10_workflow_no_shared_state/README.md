@@ -60,7 +60,7 @@ SpamDetectionAgent → [branch based on is_spam]:
 
 4. Start Azurite:
    ```bash
-   azurite --silent
+   azurite --silent --skipApiVersionCheck
    ```
 
 5. Run the function app:

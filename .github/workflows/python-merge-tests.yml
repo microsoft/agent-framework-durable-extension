@@ -13,13 +13,16 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-test-package:
-    name: Python ${{ matrix.python-version }}
+  durabletask:
+    name: durabletask (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+    defaults:
+      run:
+        working-directory: python
 
     steps:
       - name: Checkout
@@ -34,38 +37,74 @@ jobs:
         uses: astral-sh/setup-uv@v6
 
       - name: Sync workspace
-        working-directory: python
         run: uv sync --all-packages --group dev --group test
 
       - name: Ruff
-        working-directory: python
-        run: uv run ruff check packages/durabletask packages/azurefunctions
+        run: uv run ruff check packages/durabletask
 
       - name: Pyright (source)
-        working-directory: python
-        run: |
-          uv run pyright -p packages/durabletask/pyproject.toml
-          uv run pyright -p packages/azurefunctions/pyproject.toml
+        run: uv run pyright -p packages/durabletask/pyproject.toml
 
       - name: MyPy (tests)
-        working-directory: python
-        run: |
-          uv run mypy --config-file pyproject.toml packages/durabletask/tests
-          uv run mypy --config-file pyproject.toml packages/azurefunctions/tests
+        run: uv run mypy --config-file pyproject.toml packages/durabletask/tests
 
       - name: Unit tests
-        working-directory: python
-        run: uv run pytest -m "not integration" packages/durabletask/tests packages/azurefunctions/tests --cov=agent_framework_durabletask --cov=agent_framework_azurefunctions --cov-report=term-missing:skip-covered
+        run: uv run pytest -m "not integration" packages/durabletask/tests --cov=agent_framework_durabletask --cov-report=term-missing:skip-covered
 
       - name: Build package
-        working-directory: python
-        run: |
-          uv build packages/durabletask --out-dir dist
-          uv build packages/azurefunctions --out-dir dist
+        run: uv build packages/durabletask --out-dir dist
 
       - name: Upload package
         if: matrix.python-version == '3.13'
         uses: actions/upload-artifact@v4
         with:
-          name: python-package
+          name: python-package-durabletask
           path: python/dist/*
+
+  azurefunctions:
+    # agent-framework-azurefunctions depends on azure-functions-durable 2.x, which
+    # requires Python 3.13. uv resolves a workspace to one lock over the intersection
+    # of its members' requires-python, so this package is a standalone uv project
+    # with its own lockfile rather than a member of the workspace above. That keeps
+    # agent-framework-durabletask on 3.10+ and its full matrix.
+    name: azurefunctions (Python 3.13)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python/packages/azurefunctions
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Sync project
+        run: uv sync --group dev --group test
+
+      - name: Ruff
+        run: uv run ruff check agent_framework_azurefunctions tests
+
+      - name: Pyright (source)
+        run: uv run pyright -p pyproject.toml
+
+      - name: MyPy (tests)
+        run: uv run mypy --config-file ../../pyproject.toml tests
+
+      - name: Unit tests
+        run: uv run pytest -m "not integration" tests --cov=agent_framework_azurefunctions --cov-report=term-missing:skip-covered
+
+      - name: Build package
+        run: uv build . --out-dir dist
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-azurefunctions
+          path: python/packages/azurefunctions/dist/*
