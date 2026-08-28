@@ -50,6 +50,17 @@ class DurableHistoryBinding:
     correlation_id: str | None = None
     """Correlation id of the in-flight request, whose entry is excluded from loaded history."""
 
+    service_owns_history: bool = False
+    """Whether the model service is holding the conversation for *this* run.
+
+    The provider stays attached in every configuration, so that core never injects a history
+    provider of its own whose state would land in entity state beyond retention's reach. But a
+    service-backed run continues the conversation by id rather than by resending it, so loading
+    history here as well would hand the model the whole transcript on top of the copy the service
+    already has. Whoever owns a given run is only known once its options are resolved, which is
+    why this rides on the binding rather than on the provider.
+    """
+
 
 _current_binding: ContextVar[DurableHistoryBinding | None] = ContextVar(
     "durable_history_binding",
@@ -102,15 +113,18 @@ class DurableHistoryProvider(HistoryProvider):
         source_id: str | None = None,
         *,
         skip_excluded: bool = True,
-        prune_excluded: bool = False,
+        prune_excluded: bool | None = None,
     ) -> None:
         """Initialize the durable history provider.
 
         Args:
             source_id: Unique identifier for this provider instance.
             skip_excluded: Omit compaction-excluded messages from loaded context.
-            prune_excluded: Physically delete excluded messages from durable storage
-                on flush. Lossy, so it is disabled by default.
+            prune_excluded: Physically delete excluded messages from durable storage on flush.
+                Lossy, so it is off unless asked for. Left unset, the entity's ``retention`` mode
+                decides. Passing it explicitly pins the behaviour and retention will not override
+                it, which is what lets a caller who wires this provider by hand opt in or out
+                independently of the mode.
         """
         super().__init__(
             source_id=source_id or self.DEFAULT_SOURCE_ID,
@@ -179,6 +193,12 @@ class DurableHistoryProvider(HistoryProvider):
         """Load conversation history from durable entity state."""
         binding = self._binding()
         if binding is None:
+            return []
+
+        if binding.service_owns_history:
+            # The service is holding this conversation and core will continue it by id. Returning
+            # history as well would send the model everything twice. The provider is still
+            # attached, which is what keeps core from injecting one whose state nothing bounds.
             return []
 
         loaded: list[Message] = []
@@ -402,14 +422,30 @@ def prune_messages(
         history[:] = remaining
 
 
-def _service_stores_history(agent: Any) -> bool:
-    """Return whether the service keeps conversation history for this agent.
+def service_stores_history(agent: Any, options: Mapping[str, Any] | None = None) -> bool:
+    """Return whether the service keeps conversation history for this run.
 
-    Mirrors core's precedence: an explicit ``store`` in the agent's default options wins, and only
-    when it is unset does the client's ``STORES_BY_DEFAULT`` apply. Clients that store by default
-    (such as the Responses API) can therefore be put back in client-side mode with ``store=False``,
-    in which case durable history is what makes the conversation survive.
+    Mirrors core's precedence, most specific first: the option passed on the run itself, then an
+    explicit ``store`` in the agent's default options, and only when both are unset does the
+    client's ``STORES_BY_DEFAULT`` apply. Clients that store by default (such as the Responses
+    API) can therefore be put back in client-side mode either permanently or for a single run, and
+    in that case durable history is what makes the conversation survive.
+
+    Resolved per run rather than once at registration because ``store`` is an ordinary run option.
+    An agent registered against a storing client can still be asked to keep one turn client-side,
+    and whoever answers that turn's history has to be decided at that point.
+
+    Args:
+        agent: The agent being run.
+        options: The effective options for this run, when there is a run in progress.
+
+    Returns:
+        True when the model service is holding this conversation.
     """
+    if options is not None:
+        run_store = options.get("store")
+        if run_store is not None:
+            return bool(run_store)
     default_options = getattr(agent, "default_options", None)
     if isinstance(default_options, Mapping):
         explicit_store = cast("Mapping[str, Any]", default_options).get("store")
@@ -433,9 +469,19 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = Fa
       its defaults still finds it.
     * **In-memory history** - replaced by a :class:`DurableHistoryProvider` carrying the *same*
       ``source_id`` and ``skip_excluded``, so any compaction wired to it keeps working untouched.
+    * **A durable provider the caller wired themselves** - kept as-is when they pinned
+      ``prune_excluded``, since that is an explicit choice. Rebuilt with the retention mode's
+      value when they left it unset, because otherwise ``follow_compaction`` would silently do
+      nothing for anyone who constructs the provider by hand.
     * **Any other history provider** (Cosmos, Redis, file, custom) - left alone. The user chose
-      where their conversation lives, and durable still provides execution durability.
-    * **Service-managed history** - left alone. The model service owns the conversation.
+      where their conversation lives, and durable still provides execution durability. Core does
+      not inject anything when one of these is present, so there is nothing to pre-empt.
+    * **Service-managed history** - a provider is still added. The service owning the conversation
+      is a per-*run* fact, not a per-registration one: a run may pass ``store=False``, and core
+      then injects a history provider of its own whose state is persisted with the entity but is
+      invisible to retention. Claiming the slot up front means those turns land in durable state
+      where retention can reach them. The provider yields no history on runs the service does own,
+      so the model is never sent the transcript twice.
     * **Agents without the core context pipeline** - left alone, and the entity falls back to
       replaying its own persisted history.
 
@@ -445,20 +491,13 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = Fa
     Keyword Args:
         prune_excluded: When True, the injected provider physically deletes messages that
             compaction excluded, bounding durable storage. This is a **lossy retention policy**
-            and is off by default. It only affects providers this function creates.
+            and is off by default.
 
     Returns:
         The agent to run, either unchanged or a shallow copy with durable-backed history.
     """
     providers = getattr(agent, "context_providers", None)
     if not isinstance(providers, (list, tuple)):
-        return agent
-
-    if _service_stores_history(agent):
-        logger.debug(
-            "[DurableHistoryProvider] Agent %s stores history service-side, leaving providers unchanged.",
-            getattr(agent, "name", type(agent).__name__),
-        )
         return agent
 
     provider_list = list(cast("Sequence[Any]", providers))
@@ -477,6 +516,18 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = Fa
             ),
             *provider_list,
         ]
+    elif isinstance(existing, DurableHistoryProvider):
+        # Already durable. If the caller pinned ``prune_excluded`` themselves that decision
+        # stands, but an unset one means they never expressed a preference, and leaving it unset
+        # would make the entity's retention mode silently do nothing.
+        if existing.prune_excluded is not None:
+            return agent
+        replacement = DurableHistoryProvider(
+            source_id=existing.source_id,
+            skip_excluded=existing.skip_excluded,
+            prune_excluded=prune_excluded,
+        )
+        updated = [replacement if p is existing else p for p in provider_list]
     elif isinstance(existing, InMemoryHistoryProvider):
         replacement = DurableHistoryProvider(
             source_id=existing.source_id,

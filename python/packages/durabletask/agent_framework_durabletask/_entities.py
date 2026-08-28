@@ -38,6 +38,7 @@ from ._history_provider import (
     DurableHistoryProvider,
     bind_durable_history,
     ensure_durable_history,
+    service_stores_history,
     unbind_durable_history,
 )
 from ._models import RunRequest
@@ -304,7 +305,14 @@ class AgentEntity:
         uses_context_pipeline = self._has_context_pipeline()
         binding_token = (
             bind_durable_history(
-                DurableHistoryBinding(state_provider=self._state_provider, correlation_id=correlation_id)
+                DurableHistoryBinding(
+                    state_provider=self._state_provider,
+                    correlation_id=correlation_id,
+                    # Resolved here because it is a property of the run, not the registration. The
+                    # provider stays attached either way so core never injects one of its own, but
+                    # it must not load history on a turn the service is already carrying.
+                    service_owns_history=service_stores_history(self.agent, options),
+                )
             )
             if durable_history is not None
             else None

@@ -7,13 +7,19 @@ durable runtime, and get durable conversation history with no configuration chan
 These tests cover the substitution rules and confirm the user's agent is never mutated.
 """
 
+import json
+from collections.abc import AsyncIterable, Awaitable, Sequence
 from typing import Any
 
 from agent_framework import (
     Agent,
+    ChatResponse,
+    ChatResponseUpdate,
+    Content,
     HistoryProvider,
     InMemoryHistoryProvider,
     Message,
+    ResponseStream,
 )
 
 from agent_framework_durabletask import AgentEntity, AgentEntityStateProviderMixin, DurableHistoryProvider
@@ -33,6 +39,50 @@ class _ServiceStoringClient(_StubClient):
     """Chat client whose service keeps the conversation server-side."""
 
     STORES_BY_DEFAULT = True
+
+
+class _RecordingServiceClient(_ServiceStoringClient):
+    """Service-storing client that records the message list handed to it on each call.
+
+    Needed to tell "the provider is attached" apart from "the provider is answering", which is the
+    distinction that keeps a service-backed agent from being sent its own transcript.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.received: list[list[Message]] = []
+        self._counter = 0
+
+    def get_response(
+        self,
+        messages: str | Message | list[str] | list[Message],
+        *,
+        stream: bool = False,
+        options: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Awaitable[ChatResponse] | ResponseStream[ChatResponseUpdate, ChatResponse]:
+        options = options or {}
+        normalized = [m for m in messages if isinstance(m, Message)] if isinstance(messages, list) else []
+        self.received.append(normalized)
+
+        if stream:
+            return self._stream(options)
+
+        async def _get() -> ChatResponse:
+            self._counter += 1
+            return ChatResponse(messages=Message(role="assistant", contents=[f"reply-{self._counter}"]))
+
+        return _get()
+
+    def _stream(self, options: dict[str, Any]) -> ResponseStream[ChatResponseUpdate, ChatResponse]:
+        async def _updates() -> AsyncIterable[ChatResponseUpdate]:
+            self._counter += 1
+            yield ChatResponseUpdate(contents=[Content.from_text(f"reply-{self._counter}")], role="assistant")
+
+        def _finalize(updates: Sequence[ChatResponseUpdate]) -> ChatResponse:
+            return ChatResponse.from_updates(updates, output_format_type=options.get("response_format"))
+
+        return ResponseStream(_updates(), finalizer=_finalize)
 
 
 class _ExternalHistoryProvider(HistoryProvider):
@@ -148,13 +198,22 @@ class TestAutomaticDurableHistory:
         assert prepared is agent
         assert _history_providers(prepared) == [external]
 
-    def test_service_managed_history_is_left_alone(self) -> None:
+    def test_service_managed_history_still_gets_a_provider(self) -> None:
+        """The service owning the conversation is a per-run fact, not a per-registration one.
+
+        Leaving a service-backed agent with no provider used to look right, because the service
+        holds the transcript. But ``store`` is an ordinary run option, so a single run can put the
+        conversation back in the client's hands, and core then injects a history provider of its
+        own. Its state is persisted along with the entity and retention cannot see it, so it grows
+        without bound. Claiming the slot up front is what keeps those turns reachable.
+        """
         agent = _agent(_ServiceStoringClient())
 
         prepared = ensure_durable_history(agent)
 
-        assert prepared is agent
-        assert not _history_providers(prepared)
+        providers = _history_providers(prepared)
+        assert len(providers) == 1
+        assert isinstance(providers[0], DurableHistoryProvider)
 
     def test_store_false_overrides_a_service_storing_client(self) -> None:
         """``store=False`` puts history back in the client's hands, so durable must back it.
@@ -171,13 +230,20 @@ class TestAutomaticDurableHistory:
         assert len(providers) == 1
         assert isinstance(providers[0], DurableHistoryProvider)
 
-    def test_store_true_keeps_history_with_the_service(self) -> None:
+    def test_store_true_still_gets_a_provider(self) -> None:
+        """Attached, but it yields nothing while the service owns the run.
+
+        Attaching is about occupying the slot, not about taking over storage. What stops the model
+        being handed the transcript twice is the provider returning no history on a service-owned
+        run, which :class:`TestServiceManagedSessions` covers.
+        """
         agent = _agent(default_options={"store": True})
 
         prepared = ensure_durable_history(agent)
 
-        assert prepared is agent
-        assert not _history_providers(prepared)
+        providers = _history_providers(prepared)
+        assert len(providers) == 1
+        assert isinstance(providers[0], DurableHistoryProvider)
 
     def test_existing_durable_provider_is_untouched(self) -> None:
         """Explicit configuration (for example to enable pruning) wins."""
@@ -266,9 +332,87 @@ class TestFollowCompactionRetention:
         assert _history_providers(prepared)[0] is explicit
         assert explicit.prune_excluded is False
 
+    def test_an_unset_provider_inherits_the_retention_mode(self) -> None:
+        """Constructing the provider by hand must not silently disable ``follow_compaction``.
+
+        A caller who writes ``DurableHistoryProvider()`` has expressed no opinion about pruning,
+        so the entity's retention mode is the only instruction available. Treating the unset
+        default as a deliberate "no" made ``retention='follow_compaction'`` do nothing at all for
+        anyone who wired the provider themselves.
+        """
+        unset = DurableHistoryProvider()
+        assert unset.prune_excluded is None
+        agent = _agent(context_providers=[unset])
+
+        prepared = ensure_durable_history(agent, prune_excluded=True)
+
+        providers = _history_providers(prepared)
+        assert providers[0] is not unset
+        assert isinstance(providers[0], DurableHistoryProvider)
+        assert providers[0].prune_excluded is True
+        # The caller's own object is never mutated.
+        assert unset.prune_excluded is None
+
+    def test_an_unset_provider_stays_unpruned_under_auto(self) -> None:
+        unset = DurableHistoryProvider()
+        agent = _agent(context_providers=[unset])
+
+        prepared = ensure_durable_history(agent, prune_excluded=False)
+
+        providers = _history_providers(prepared)
+        assert providers[0].prune_excluded is False
+
 
 class TestServiceManagedSessions:
     """Service-backed agents let the service own the conversation."""
+
+    async def test_a_service_owned_run_is_not_sent_its_own_history(self) -> None:
+        """The provider is attached, so it must stay quiet while the service holds the thread.
+
+        Attaching a provider to a service-backed agent is what stops core injecting one whose
+        state nothing bounds. But core continues a stored conversation by id rather than by
+        resending it, so a provider that also loaded history would hand the model the whole
+        transcript on top of the copy the service already has. Measured before this was fixed, the
+        prompt went from one message a turn to the entire conversation every turn.
+        """
+        client = _RecordingServiceClient()
+        agent = _agent(client)
+        entity = AgentEntity(agent, state_provider=_InMemoryStateProvider())
+
+        for index in range(4):
+            await entity.run({"message": f"m{index}", "correlationId": f"c{index}"})
+
+        assert [len(batch) for batch in client.received] == [1, 1, 1, 1]
+
+    async def test_a_client_side_run_does_get_its_history(self) -> None:
+        """The same provider, on runs the service is not holding, supplies the conversation."""
+        client = _RecordingServiceClient()
+        agent = _agent(client)
+        entity = AgentEntity(agent, state_provider=_InMemoryStateProvider())
+
+        for index in range(4):
+            await entity.run({"message": f"m{index}", "correlationId": f"c{index}", "options": {"store": False}})
+
+        assert [len(batch) for batch in client.received] == [1, 3, 5, 7]
+
+    async def test_a_client_side_run_does_not_grow_opaque_session_state(self) -> None:
+        """The point of attaching: those turns land where retention can reach them.
+
+        Without a provider of ours, core injects its own and the transcript is persisted inside
+        the session bag, which retention never evicts from. It grew about 321 bytes a turn and
+        nothing would ever have reclaimed it.
+        """
+        provider = _InMemoryStateProvider()
+        entity = AgentEntity(_agent(_RecordingServiceClient()), state_provider=provider)
+
+        sizes: list[int] = []
+        for index in range(6):
+            await entity.run({"message": f"m{index}", "correlationId": f"c{index}", "options": {"store": False}})
+            session_slice = provider._get_state_dict().get("data", {}).get("session", {})
+            sizes.append(len(json.dumps(session_slice)))
+
+        assert sizes[0] == sizes[-1], f"session state grew: {sizes}"
+        assert len(entity.state.data.conversation_history) == 12
 
     async def test_only_new_messages_are_sent(self) -> None:
         """History must not be replayed locally when the service already holds it."""
