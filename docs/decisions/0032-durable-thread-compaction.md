@@ -153,9 +153,10 @@ This gives agent-level **configuration parity**, not byte-for-byte parity in eve
 Durable workflow nodes intentionally deduplicate repeated upstream context before persisting it. The
 L3 section explains the measured difference.
 
-Capacity is handled in this order: raise the ceiling non-lossily where blob offload is available,
-honor an explicit `follow_compaction` choice, then evict under pressure. An exclusion normally means
-only "do not send this to the model". It means "delete this" only under `follow_compaction`.
+Capacity is handled in this order: choose a workflow context mode that does not carry the whole
+conversation, raise the ceiling non-lossily where blob offload is available, honor an explicit
+`follow_compaction` choice, then evict under pressure. An exclusion normally means only "do not send
+this to the model". It means "delete this" only under `follow_compaction`.
 
 ### Who bounds what
 
@@ -428,6 +429,27 @@ each visit. The orchestrator stamps each forwarded message as `wf_{executor}_{po
 stores the highest ingested position per executor and drops older positions, keeping the newest
 message as input when everything repeats. Per-executor watermarks are required because fan-out
 branches can share a position.
+
+### Context mode is the first answer to workflow capacity
+
+The projection is what grows with the conversation, and it is already a choice the workflow author
+makes. Measured, serialized, as the conversation lengthens:
+
+| Turns | `full` (default) | `last_agent` | `custom`, last 4 messages |
+| ---: | ---: | ---: | ---: |
+| 10 | 8,370 | 837 | 1,674 |
+| 50 | 42,010 | 841 | 1,682 |
+| 200 | 168,560 | 845 | 1,690 |
+| 800 | 675,560 | 845 | 1,690 |
+
+At 800 turns `full` is 64.4% of the 1 MB limit while `last_agent` is 0.1%. The difference is not a
+smaller payload, it is a payload that stops growing: `last_agent` and a fixed-window `custom` filter
+are both constant regardless of conversation length.
+
+So a workflow that approaches the limit through its own projection should change mode before
+reaching for offload or retention, because those manage a cost this removes. `full` remains the
+default to match core, and it is the right choice when downstream nodes genuinely need the whole
+history, but it is a deliberate choice with a measurable price rather than a free default.
 
 Stored-id comparison is insufficient: retention removes old ids, after which a cycle would re-ingest
 exactly what was evicted and oscillate instead of converging. The small position map survives
