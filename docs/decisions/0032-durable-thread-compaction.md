@@ -132,10 +132,18 @@ agent configuration bounds model input and the persisted store can be bounded se
   agent pipeline (L1), and a user-configured reducer or strategy can bound the durable store (L2,
   opt-in). External history providers also rejoin the context pipeline, and the entity stops
   keeping their content, so each store bounds only what it owns.
-- **Option 7, offload large payloads to blob storage (chosen where available).** Raise the ceiling
-  instead of reducing content, using the Durable Task Scheduler [large payload
-  extension](https://learn.microsoft.com/azure/durable-task/scheduler/durable-task-scheduler-large-payloads).
+- **Option 7, offload large payloads to blob storage (backend-specific, not part of the portable
+  design).** Raise the ceiling instead of reducing content, using the Durable Task Scheduler [large
+  payload extension](https://learn.microsoft.com/azure/durable-task/scheduler/durable-task-scheduler-large-payloads).
   Non-lossy, and the same technique the Azure Storage backend has always used internally.
+
+  Deliberately **not** counted as part of the chosen design, because it is not available everywhere.
+  It adds an Azure Blob payload-store dependency, the Azure Storage backend already does the
+  equivalent internally so configuring it there is redundant, and Durable Functions Python cannot
+  opt in at all today (gap 6). Treat it as an optimization a specific deployment may enable, detected
+  rather than assumed: nothing in this design may depend on it being present, and `max_state_bytes`
+  stays at the unoffloaded limit unless a deployment raises it deliberately. Retention is what has to
+  be correct on every host, and is specified without reference to offload.
 
 ## Decision Outcome
 
@@ -362,6 +370,28 @@ the provider abstraction, which is what makes it a prerequisite rather than a ti
    a compacted conversation**, not an upstream cleanup note. Until they are closed, a customer's own
    store can bound what the model reads but cannot be rewritten by the compaction they configured,
    and the durable runtime can only offer that capability for conversations it holds itself.
+
+   **The workaround against the contract it should become.** Today the durable provider publishes a
+   working buffer under the session-state key `after_strategy` reads, then reconciles the result back
+   by `message_id`. That works, but it only works because the provider is willing to impersonate
+   session-state storage. It is invisible to any provider that does not know the trick, it silently
+   does nothing for the ones core itself ships for Redis and Cosmos, and it couples us to a key whose
+   shape core is free to change. An additive contract on the provider, `replace_messages()` plus
+   `flush()` alongside the existing append, would let core drive store rewrite through the
+   abstraction instead, make the capability discoverable, and remove the impersonation.
+
+   **What must land upstream before cross-language parity is complete**, stated so it can be checked
+   rather than argued:
+
+   1. Store rewrite expressed on the provider abstraction, so `after_strategy` reaches any store.
+   2. A replace/flush operation alongside append, so summaries and annotations have a path back.
+   3. Core exposing its **resolved** service-versus-client history ownership. Durable currently
+      re-derives it from `store` and `STORES_BY_DEFAULT`, which duplicates a decision core has
+      already made and will drift the moment core's precedence changes.
+   4. .NET reaching the same point, which additionally needs `MessageId` and
+      `AdditionalProperties` to survive `FromChatMessage`/`ToChatMessage` (gap 3).
+
+   Items 1 to 3 are the same contract work and should be designed together.
 
 3. **Message-level metadata was not persisted (durable schema).** Python wrote
   `extension_data` asymmetrically, so annotations disappeared on round-trip. This is fixed. The
