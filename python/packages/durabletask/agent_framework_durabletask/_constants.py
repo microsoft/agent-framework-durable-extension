@@ -141,6 +141,13 @@ class DurableStateFields:
     # retention, which identity-based duplicate detection cannot.
     INGESTED_POSITIONS: Final[str] = "ingestedPositions"
 
+    # What retention has removed from this conversation. Present only once something has been
+    # evicted, so its absence means the record is complete.
+    TRUNCATION: Final[str] = "truncation"
+    EVICTED_MESSAGE_COUNT: Final[str] = "evictedMessageCount"
+    FIRST_EVICTED_AT: Final[str] = "firstEvictedAt"
+    LAST_EVICTED_AT: Final[str] = "lastEvictedAt"
+
 
 class ContentTypes:
     """Content type discriminator values for the $type field.

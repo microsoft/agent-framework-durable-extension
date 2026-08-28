@@ -22,6 +22,7 @@ from agent_framework import (
     TokenBudgetComposedStrategy,
 )
 
+from ._constants import DurableStateFields
 from ._durable_agent_state import (
     DurableAgentState,
     DurableAgentStateEntry,
@@ -143,6 +144,7 @@ async def enforce_budget(state: DurableAgentState, *, max_state_bytes: int = DEF
             size = _serialized_size(state)
 
     if removed:
+        _record_truncation(state, len(removed))
         logger.warning(
             "[Retention] Durable state passed %d bytes of a %d budget, so %d message(s) were "
             "evicted oldest-first (%s .. %s), leaving %d bytes. Set retention='keep_all' to "
@@ -176,6 +178,33 @@ async def enforce_budget(state: DurableAgentState, *, max_state_bytes: int = DEF
             max_state_bytes,
         )
     return len(removed)
+
+
+def _record_truncation(state: DurableAgentState, removed: int) -> None:
+    """Record in the state itself that this conversation is no longer complete.
+
+    Eviction is a lossy act performed by the runtime rather than by the user, and a log line is
+    only evidence to whoever happened to be watching at the time. Anyone reading this state later,
+    including the user asking why an answer lost context, needs to be able to tell that content
+    was removed. So the fact is persisted alongside the conversation.
+
+    Deliberately a counter and two timestamps rather than a list of what went. A list would grow
+    without bound in exactly the situation where state is already too large, which is the problem
+    this is part of solving. The absence of the record is itself meaningful: it says nothing has
+    ever been dropped.
+
+    Args:
+        state: The entity state, modified in place.
+        removed: How many messages this pass evicted.
+    """
+    now = datetime.now(tz=timezone.utc).isoformat()
+    existing = state.data.truncation or {}
+    state.data.truncation = {
+        DurableStateFields.EVICTED_MESSAGE_COUNT: int(existing.get(DurableStateFields.EVICTED_MESSAGE_COUNT, 0))
+        + removed,
+        DurableStateFields.FIRST_EVICTED_AT: existing.get(DurableStateFields.FIRST_EVICTED_AT, now),
+        DurableStateFields.LAST_EVICTED_AT: now,
+    }
 
 
 def _serialized_size(state: DurableAgentState) -> int:

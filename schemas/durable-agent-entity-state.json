@@ -140,6 +140,7 @@
         "role": { "type": "string", "enum": ["user", "assistant", "system", "tool"] },
         "contents": {
           "type": "array",
+          "description": "The message content. An empty array is meaningful rather than malformed: it records that the exchange happened while the content itself lives somewhere else. That is what a request looks like when the caller configured their own history provider, since keeping a second copy would put the same content under two different retention, residency and deletion policies. Responses keep their content regardless, because a caller collects its answer by polling this entity for a correlation id and nothing else can produce it.",
           "items": { "$ref": "#/$defs/chatContentItem" }
         },
         "createdAt": { "type": "string", "format": "date-time", "description": "When this message was created (RFC 3339)." },
@@ -238,6 +239,28 @@
           "type": "object",
           "description": "Highest chained-conversation position this entity has taken from each workflow executor, keyed by executor id. A workflow re-sends the whole conversation on every visit, so this is what lets a repeated node recognize context it already recorded. Kept separately from the messages because retention may delete them.",
           "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "truncation": {
+          "type": "object",
+          "description": "What retention has removed from this conversation. Absent until something has been evicted, so its absence means the record is complete. Present because eviction is a lossy act performed by the runtime rather than by the user, and a log line is only evidence to whoever was watching at the time. Deliberately a counter and two timestamps rather than a list of what went, since such a list would grow without bound in exactly the situation retention exists to resolve.",
+          "properties": {
+            "evictedMessageCount": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Total messages retention has evicted over the life of this conversation."
+            },
+            "firstEvictedAt": {
+              "type": "string",
+              "format": "date-time",
+              "description": "When this conversation first became incomplete."
+            },
+            "lastEvictedAt": {
+              "type": "string",
+              "format": "date-time",
+              "description": "When retention last removed anything."
+            }
+          },
+          "required": ["evictedMessageCount", "firstEvictedAt", "lastEvictedAt"]
         }
       }
     }

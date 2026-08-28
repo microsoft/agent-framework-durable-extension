@@ -493,6 +493,64 @@ class TestTheAgentsInstructionsSurviveTheBudget:
         assert "system-0" in surviving
 
 
+class TestEvictionLeavesEvidence:
+    """A conversation that has lost content must say so in the state, not only in a log.
+
+    Eviction is lossy and performed by the runtime rather than by the user. A warning is only
+    evidence to whoever happened to be watching at the time, which is nobody by the point someone
+    asks why an answer lost context.
+    """
+
+    async def test_nothing_is_recorded_when_nothing_is_evicted(self) -> None:
+        state = _state(turns=2)
+
+        await enforce_budget(state, max_state_bytes=BUDGET)
+
+        assert state.data.truncation is None
+
+    async def test_eviction_is_recorded(self) -> None:
+        state = _state(turns=60)
+
+        removed = await enforce_budget(state, max_state_bytes=BUDGET)
+
+        assert removed > 0
+        assert state.data.truncation is not None
+        assert state.data.truncation["evictedMessageCount"] == removed
+        assert state.data.truncation["firstEvictedAt"]
+        assert state.data.truncation["lastEvictedAt"]
+
+    async def test_the_count_accumulates_across_evictions(self) -> None:
+        state = _state(turns=60)
+
+        first = await enforce_budget(state, max_state_bytes=BUDGET)
+        for index in range(60, 120):
+            occurred_at = datetime.now(tz=timezone.utc) - timedelta(minutes=200 - index)
+            state.data.conversation_history.append(
+                DurableAgentStateRequest(
+                    correlation_id=f"c{index}",
+                    created_at=occurred_at,
+                    messages=[
+                        DurableAgentStateMessage.from_chat_message(
+                            Message(role="user", contents=["u" * 400], message_id=f"u{index}")
+                        )
+                    ],
+                )
+            )
+        second = await enforce_budget(state, max_state_bytes=BUDGET)
+
+        assert second > 0
+        assert state.data.truncation is not None
+        assert state.data.truncation["evictedMessageCount"] == first + second
+
+    async def test_the_record_survives_a_round_trip(self) -> None:
+        state = _state(turns=60)
+
+        await enforce_budget(state, max_state_bytes=BUDGET)
+        restored = DurableAgentState.from_dict(json.loads(json.dumps(state.to_dict())))
+
+        assert restored.data.truncation == state.data.truncation
+
+
 class TestStateShape:
     """Eviction must leave durable state usable."""
 

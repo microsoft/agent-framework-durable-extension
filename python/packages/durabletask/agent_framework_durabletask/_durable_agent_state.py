@@ -349,12 +349,17 @@ class DurableAgentStateData:
             executor. A workflow re-sends the whole conversation on every visit, and comparing
             against stored ids stops working once retention deletes any of them, so the mark is
             kept separately.
+        truncation: What retention has removed, if anything. A log line is only visible to whoever
+            was watching at the time, so the fact that this conversation is no longer complete is
+            recorded in the state itself. Absent until the first eviction, so its absence is a
+            positive statement that nothing has been dropped.
         extension_data: Optional dictionary for custom metadata (not part of core schema)
     """
 
     conversation_history: list[DurableAgentStateEntry]
     session: dict[str, Any] | None
     ingested_positions: dict[str, int] | None
+    truncation: dict[str, Any] | None
     extension_data: dict[str, Any] | None
 
     def __init__(
@@ -363,6 +368,7 @@ class DurableAgentStateData:
         extension_data: dict[str, Any] | None = None,
         session: dict[str, Any] | None = None,
         ingested_positions: dict[str, int] | None = None,
+        truncation: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the data container.
 
@@ -372,11 +378,13 @@ class DurableAgentStateData:
             session: Optional serialized ``AgentSession`` from the previous turn
             ingested_positions: Highest chained-conversation position taken from each workflow
                 executor, used to recognize context this entity has already recorded
+            truncation: Record of what retention has removed, absent until something is
         """
         self.conversation_history = conversation_history or []
         self.extension_data = extension_data
         self.session = session
         self.ingested_positions = ingested_positions
+        self.truncation = truncation
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -388,6 +396,8 @@ class DurableAgentStateData:
             result[DurableStateFields.SESSION] = self.session
         if self.ingested_positions:
             result[DurableStateFields.INGESTED_POSITIONS] = self.ingested_positions
+        if self.truncation:
+            result[DurableStateFields.TRUNCATION] = self.truncation
         return result
 
     @classmethod
@@ -397,6 +407,7 @@ class DurableAgentStateData:
             extension_data=data_dict.get(DurableStateFields.EXTENSION_DATA),
             session=data_dict.get(DurableStateFields.SESSION),
             ingested_positions=data_dict.get(DurableStateFields.INGESTED_POSITIONS),
+            truncation=data_dict.get(DurableStateFields.TRUNCATION),
         )
 
 
