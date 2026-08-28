@@ -52,6 +52,19 @@ Core MAF already has a compaction system ([ADR-0019](https://github.com/microsof
    stores incremental group state in the `AgentSession.StateBag`, leaving the underlying store
    untouched. This hook works with **any** history provider, since it acts on the messages already
    loaded into the invocation context.
+
+   Non-lossy has a storage consequence worth stating, because durable is where it is first felt. A
+   strategy that marks messages excluded and appends a summary standing in for them **grows** the
+   stored conversation: the originals remain and the summary is added. Measured over six turns, a
+   durable conversation went from 3,422 bytes to 10,177 with such a strategy enabled. This is not
+   something the durable layer introduces. The identical strategy against core's own
+   `InMemoryHistoryProvider` grew 809 bytes to 1,087. Durable only changes the consequence, because
+   it persists the result against a hard backend limit rather than holding it in process memory.
+   `retention="follow_compaction"` is the answer for anyone who wants compaction without paying for
+   it in storage: the same six turns end at 2,296 bytes, below the 3,422 they would have reached
+   with no compaction at all. Note that `auto`, the default, does **not** bound this growth. It
+   reacts to pressure rather than to compaction, so it behaves identically to `keep_all` until the
+   budget is approached.
 2. **Store reducer.** **Lossily** rewrites the stored conversation, applying the same strategies at
    the store instead of at the model call. Unlike the in-run filter, this hook is tied to a specific
    storage mechanism in both languages. .NET exposes an `IChatReducer` on `InMemoryChatHistoryProvider`
@@ -117,8 +130,8 @@ agent configuration bounds model input and the persisted store can be bounded se
   persisted conversation with a core `ChatHistoryProvider` implementation, so both core hooks apply
   on the durable runtime from the user's unchanged configuration. The in-run filter runs in the
   agent pipeline (L1), and a user-configured reducer or strategy can bound the durable store (L2,
-  opt-in). External history providers also rejoin the context pipeline, but the entity still keeps
-  its own conversation record, so they do not currently remove the need for retention.
+  opt-in). External history providers also rejoin the context pipeline, and the entity stops
+  keeping their content, so each store bounds only what it owns.
 - **Option 7, offload large payloads to blob storage (chosen where available).** Raise the ceiling
   instead of reducing content, using the Durable Task Scheduler [large payload
   extension](https://learn.microsoft.com/azure/durable-task/scheduler/durable-task-scheduler-large-payloads).
@@ -144,6 +157,36 @@ Capacity is handled in this order: raise the ceiling non-lossily where blob offl
 honor an explicit `follow_compaction` choice, then evict under pressure. An exclusion normally means
 only "do not send this to the model". It means "delete this" only under `follow_compaction`.
 
+### Who bounds what
+
+Every store bounds what it owns. This is the rule the rest of this section follows, and it is worth
+stating plainly because it decides which copy of a conversation is authoritative.
+
+| Where the conversation lives | What bounds it | What the entity keeps |
+| --- | --- | --- |
+| The customer's own store (Redis, Cosmos, file) | Their store's own policy, for example Redis `max_messages` or a Cosmos container TTL | The exchange, not the content |
+| Durable entity state | Durable retention, described below | Everything, since nothing else holds it |
+| The model service | The service's own retention | The exchange, plus content for recovery |
+| No context pipeline at all | Durable retention | Everything, since nothing else holds it |
+
+The entity records every exchange in every configuration, because correlation ids and response
+delivery are its job and nothing else can do them. It does not have to be a second copy of the
+conversation, and being one would put the customer's content under two different retention,
+residency and deletion policies when they deliberately chose one store for it. So when another
+provider owns the conversation, the entity keeps the envelope, the correlation id, the timestamps
+and the message ids, and forgets the content.
+
+**Responses are the exception, deliberately.** A caller collects its answer by polling this entity
+for a correlation id, so the entity is the only thing that can produce it. Response content is
+therefore retained regardless of who owns the conversation.
+
+**Ownership is resolved per run, not per registration.** `store` is an ordinary run option, so an
+agent registered against a service-storing client can still be asked to keep a single turn
+client-side. A durable history provider is therefore attached in that case too, claiming the slot
+before core can inject one of its own whose state would be persisted with the entity and invisible
+to retention. The provider yields no history on runs the service does own, so the model is never
+sent a transcript the service is already carrying.
+
 ### Retention
 
 | Mode | Behavior |
@@ -152,14 +195,45 @@ only "do not send this to the model". It means "delete this" only under `follow_
 | `auto` **(default)** | Delete only under storage pressure, targeting the low watermark. |
 | `follow_compaction` | Delete whatever compaction excluded every turn, then use the same pressure eviction as `auto` if the remaining state is still too large. |
 
+**Why a deleting default.** `auto` means the runtime may remove customer conversation content
+without being asked, which deserves an argument rather than an assumption. The alternative is
+`keep_all`, and its failure mode is worse: the entity reaches the backend limit and then cannot be
+written to at all, so the agent stops answering and the conversation is unrecoverable rather than
+merely shortened. Since eviction is oldest-first and stops at the low watermark, `auto` trades the
+oldest part of a conversation for the session continuing to work. That is the right default for a
+runtime whose purpose is durability, but only because it is bounded, ordered, and recorded: the
+newest exchange and any response a caller may still be reading are never evicted, and the
+`truncation` record means the loss is discoverable afterwards. `keep_all` remains available for
+callers who would rather fail than forget.
+
 **How pressure eviction works.** After the turn is recorded and before the state is persisted, the
 entity measures its serialized state. `auto` uses only this path. `follow_compaction` uses it after
 eager pruning. Below the high watermark, nothing happens. Above it, the entity targets the low
 watermark using detached message copies with existing exclusions cleared and
 `TokenBudgetComposedStrategy(strategies=[])`. Clearing exclusions makes the budget reflect what is
 stored, while the empty strategy list bypasses the user's context policy and uses core's
-deterministic oldest-group fallback. System messages, atomic tool groups, and the newest exchange
-are protected. The entity remeasures after each pass and logs what it removes.
+deterministic oldest-group fallback. Atomic tool groups and the newest exchange are protected, as
+are responses recent enough that their caller may still be polling for them. The entity remeasures
+after each pass.
+
+**The budget is derived from bytes, not from text.** The constraint is a byte limit but the strategy
+counts tokens, so the conversion is measured from the messages in hand: the persisted size of the
+evictable messages against their token count, with everything unevictable treated as a floor the
+budget cannot reach below. Deriving it from `message.text` instead would make it depend on the
+*kind* of content rather than its size, and a function call has no text at all, so a tool-only
+conversation would produce a budget of one token and evict everything it was allowed to touch.
+
+**System messages are held out of the candidate set** rather than left to core's protection. Core
+skips system groups in its first fallback, but it has a second, strict fallback whose purpose is to
+evict them once anchors alone exceed the budget. Relying on the first therefore holds only until the
+budget is small enough to matter. Excluded from the candidates, the agent's instructions are simply
+not evictable, and their bytes count toward the floor.
+
+**Eviction leaves durable evidence.** A `truncation` record beside the conversation holds a count and
+the first and last eviction times. A log line is evidence to whoever was watching at the time and to
+nobody afterwards, which is no use to a user asking later why an answer lost context. It is a counter
+rather than a list of what was removed, because such a list would grow without bound in exactly the
+situation retention exists to resolve. Its absence is meaningful: it says nothing has been dropped.
 
 `max_state_bytes` defaults to `1_048_576`. High and low watermarks of `0.85` and `0.70` provide
 hysteresis and room for estimation error. Measuring a 1 MB prototype state took about 8 ms.
@@ -235,6 +309,13 @@ Prototyping the Python `DurableHistoryProvider` surfaced places where the curren
 whose store is not session state (Cosmos, Valkey, durable), not just this one. The prototype works
 around them, but the cleaner fix is upstream.
 
+These are scoping decisions rather than oversights, and worth reading that way. Store-rewrite
+compaction reaches the one store whose lifetime core controls, and the providers core ships for
+other stores bound themselves instead: `RedisHistoryProvider` takes `max_messages` and trims with
+`ltrim`, and a Cosmos container has its own TTL. That is the same layering this ADR follows, each
+store bounding what it owns. What is missing is not the capability but a way to *express* it through
+the provider abstraction, which is what makes it a prerequisite rather than a tidy-up.
+
 1. **Store-side compaction is bound to session state rather than to the provider.** `CompactionProvider`
    has two hooks, but only `before_strategy` works with any provider because it acts on invocation
    context. `after_strategy` mutates `session.state[history_source_id]["messages"]` and assumes that
@@ -242,13 +323,27 @@ around them, but the cleaner fix is upstream.
    core to rewrite their stores. .NET similarly exposes `IChatReducer` only on
    `InMemoryChatHistoryProvider`.
 
+   The cost today is silence rather than failure: a user who wires `after_strategy` to Redis or
+   Cosmos gets no annotations, no summaries, no error and no warning. Verified against core's own
+   `FileHistoryProvider`, whose `save_messages` begins `del state, kwargs`: the identical strategy
+   that produced 11 exclusions and 4 summaries under `InMemoryHistoryProvider` produced none.
+
    *Workaround:* the durable provider publishes a working buffer under the session-state key core
-   expects. *Upstream fix:* put store-rewrite compaction on the provider abstraction.
+   expects. *Upstream fix:* put store-rewrite compaction on the provider abstraction, and in the
+   meantime say something when the hook cannot reach the configured store.
 
 2. **`save_messages()` is append-only.** The other half of the same open question. It receives only
    new messages, so changes to existing messages and inserted summaries have no path back to storage.
+   Confirmed against shipping code rather than argued in the abstract: `RedisHistoryProvider`
+   persists with `rpush`, which can express "add" and nothing else, so even a provider-level
+   compaction hook would have no way to say "replace this" or "drop these".
    *Workaround:* the durable provider reconciles its working buffer **by `message_id`** during
    `after_run`. *Upstream fix:* add an explicit replace/flush operation alongside append.
+
+   Gaps 1 and 2 together are a **prerequisite for treating an external provider as the sole store of
+   a compacted conversation**, not an upstream cleanup note. Until they are closed, a customer's own
+   store can bound what the model reads but cannot be rewritten by the compaction they configured,
+   and the durable runtime can only offer that capability for conversations it holds itself.
 
 3. **Message-level metadata was not persisted (durable schema).** Python wrote
   `extension_data` asymmetrically, so annotations disappeared on round-trip. This is fixed. The
@@ -337,13 +432,28 @@ so the caller's instance remains unchanged.
 | --- | --- |
 | Nothing | Inject a durable history provider, using the `source_id` core's auto-injected provider would have, so default-wired compaction still resolves. No compaction by default (same as core). |
 | `InMemoryHistoryProvider` (± compaction) | Replace with the durable provider, **preserving `source_id` and `skip_excluded`** so any attached `CompactionProvider` keeps working untouched. |
-| Cosmos / Redis / file / custom provider | **Leave alone.** The user chose where their conversation lives, and durable still supplies execution durability. |
-| Service-managed history | **Leave alone.** The model service owns the conversation. Decided by core's precedence, explicit `store` first and then the client's `STORES_BY_DEFAULT`. |
+| `DurableHistoryProvider` wired by hand | Keep it. Rebuild it with the retention mode's pruning only when `prune_excluded` was left unset, since an unset value is the absence of an opinion rather than a decision. A pinned value wins over the mode. |
+| Cosmos / Redis / file / custom provider | **Leave alone.** The user chose where their conversation lives, and durable still supplies execution durability. Core injects nothing when one of these is present, so there is no slot to claim. |
+| Service-managed history | **Inject a provider anyway.** The service owning the conversation is a property of each run, not of the registration, and a run passing `store=False` would otherwise be answered by a provider core injects and retention cannot see. The provider yields no history on runs the service does own. |
 | Agent without the core context pipeline | **Leave alone.** Falls back to replaying persisted history. |
 
 Preserving `source_id` is the load-bearing detail. `CompactionProvider` locates history through
 `history_source_id` (default `"in_memory"`), so a provider swapped in under the same id is invisible
-to the rest of the configuration. An explicit `DurableHistoryProvider` takes precedence.
+to the rest of the configuration.
+
+Only the first load-enabled provider is considered. Core permits several, for example a primary store
+plus a store-only audit provider, and the others are left exactly as configured. That is deliberate,
+since substituting more than one would give two providers the same `source_id`, but it does mean an
+audit or evaluation provider keeps whatever storage the user gave it and is not made durable.
+
+**Substitution changes where history is kept, and does not move what is already there.** Replacing an
+`InMemoryHistoryProvider` hands ownership of the conversation to durable entity state from that point
+on. Anything the caller had already accumulated in that provider stays where it is and is not copied
+across, so the durable conversation begins empty. In practice this is invisible, because an in-memory
+provider's contents do not survive the process that registered the agent, and registration happens
+before any turn is taken. It would be visible to a caller who populated a provider in-process and then
+registered the same instance with a worker, which is worth knowing but is not a supported pattern. No
+migration path is offered for it.
 
 ### Entity Context Ownership
 
@@ -351,18 +461,42 @@ to the rest of the configuration. An explicit `DurableHistoryProvider` takes pre
    the providers do, so the entity passes a session and delivers **only the new messages**. This
    holds whether history lives in durable state, an external store, or the model service.
 2. **Who bounds entity state?** Retention does, for every configuration, because the entity records
-  the conversation even when another provider owns model context.
+  the exchange even when another provider owns model context. What it records is not always the
+  content: when another provider owns the conversation, the entity keeps the envelope and forgets
+  the request content, since that provider's own policy is what bounds the conversation itself.
 
 The entity therefore replays its own persisted history in exactly one case, an agent that does not
 expose the context pipeline. Passing a session re-engages external providers and core's in-run
 filter. It does not let core rewrite an external store (gap 1). The session id is derived from the
 full entity identity, name plus key, so workflow nodes cannot share an external-provider key.
 
+### What survives a worker failure, and what does not
+
+Durability here is **per operation**, not per step within one. An entity operation records the
+request, invokes the agent, records the response and persists once. State is written at operation
+boundaries, so a worker lost mid-turn loses that turn's work and the operation is retried from its
+start. Provider state and the conversation are consistent afterwards because neither was written.
+
+What that does not give is exactly-once execution of the side effects inside a turn. A tool call
+that has already run, or a model call already billed, will run again on retry. This is the same
+guarantee an activity gives in Durable Task and it is not weakened here, but it is worth stating
+because a reader could reasonably assume that "durable" means checkpointing between tool calls. It
+does not, and an agent whose tools are not idempotent should say so through the usual mechanisms
+rather than expecting the entity to protect it.
+
+The one asymmetry is a service that stores conversations. If the model service accepted the turn
+before the worker died, the service has a turn the entity did not record, and the retry adds another
+one. The entity cannot see that, which is a further reason a conversation id refused by the service
+is retried in place before the transcript is resent.
+
 ### The session is persisted, not just its conversation id
 
 Providers use session state for data that must survive turns, including pending approvals. Because
-the entity creates a session per operation, it persists the **whole serialized session** rather than
-selecting fields. Two details prevent duplication and type loss:
+the entity creates a session per operation, it persists the serialized session rather than selecting
+fields from it. "Serialized session" here means what `AgentSession.to_dict()` produces, which is a
+lightweight container: identifiers plus a per-provider state bag. It is not the conversation, and
+the exact shape belongs to the hosting runtime rather than to this contract. Two details prevent
+duplication and type loss:
 
 - The service-issued conversation id needs no bespoke field of its own - it is already part of
   `AgentSession.to_dict()`.
