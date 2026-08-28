@@ -593,9 +593,10 @@ class TestRejectedConversationIdRecovery:
     is genuinely valid. Roughly half of streamed turns were affected at the time it was measured,
     against none of the non-streamed ones.
 
-    The entity therefore re-sends the identical request a few times first, which is cheap and
-    leaves the conversation continuing from the same point. Only when the id is still refused does
-    it drop the id and resend the transcript, which also covers an id that has actually expired.
+    The entity re-sends the identical request a few times, which recovers that and needs nothing
+    stored. An id that has actually expired looks the same and cannot be recovered this way, so
+    those turns fail, as they do in core. Rescuing them would mean keeping a full second copy of
+    a conversation the service already holds, on every turn, against the chance of needing it.
     """
 
     @pytest.fixture(autouse=True)
@@ -653,7 +654,7 @@ class TestRejectedConversationIdRecovery:
         # The conversation continued on the same thread rather than starting a new one.
         assert provider._get_state_dict()["data"]["session"]["service_session_id"] == "thread-1"
 
-    async def test_rejected_id_replays_the_full_transcript(self) -> None:
+    async def test_an_id_that_never_resolves_fails_the_turn(self) -> None:
         calls: list[dict[str, Any]] = []
 
         class _ForgetfulAgent:
@@ -692,22 +693,17 @@ class TestRejectedConversationIdRecovery:
         await entity.run({"message": "first", "correlationId": "c0"})
         response = await entity.run({"message": "second", "correlationId": "c1"})
 
-        # Six calls: the first turn, the refused attempt, three retries of the identical request,
-        # and finally the replay. The retries come first because the refusal is usually the
-        # service not having caught up with an id it just issued, which resends nothing.
-        assert len(calls) == 6
-        # The refused attempt chained on the stored id and sent only the new message.
-        assert calls[1]["previous"] == "thread-1"
-        assert calls[1]["texts"] == ["second"]
-        # Every retry was the identical request, unchanged.
-        assert all(call["texts"] == ["second"] and call["previous"] == "thread-1" for call in calls[1:5])
-        # The replay dropped the id and carried the whole conversation instead.
-        assert calls[5]["previous"] is None
-        assert calls[5]["texts"] == ["first", "ok", "second"]
-        # The turn succeeded rather than surfacing an empty reply.
-        assert response.text == "ok"
-        # The fresh id is persisted, so the session recovers instead of failing every turn.
-        assert provider._get_state_dict()["data"]["session"]["service_session_id"] == "thread-6"
+        # Five calls: the first turn, the refused attempt, and three retries of the identical
+        # request. Nothing else is tried, because the only remaining recovery would be resending
+        # our own transcript, and that is only possible if the entity keeps a full second copy of
+        # a conversation the service is already holding.
+        assert len(calls) == 5
+        # Every attempt after the first was the same request, unchanged, still chained on the id.
+        assert all(call["texts"] == ["second"] and call["previous"] == "thread-1" for call in calls[1:])
+        # The turn is reported as failed rather than silently answered without its context.
+        assert any(content.type == "error" for content in response.messages[0].contents)
+        # The stored id is left alone, so a service that recovers later still works.
+        assert provider._get_state_dict()["data"]["session"]["service_session_id"] == "thread-1"
 
     async def test_streaming_rejection_does_not_retry_with_the_same_id(self) -> None:
         """Falling back to a non-streamed call with the refused id only wastes a round trip."""
@@ -786,7 +782,7 @@ class TestRejectedConversationIdRecovery:
         assert len(calls) == 1  # attempted once, not retried
         assert any(content.type == "error" for content in response.messages[0].contents)
 
-    async def test_replay_is_attempted_only_once(self) -> None:
+    async def test_retries_are_bounded(self) -> None:
         """A retry loop against a service that keeps refusing would never terminate."""
         calls: list[str | None] = []
 
@@ -817,7 +813,7 @@ class TestRejectedConversationIdRecovery:
 
         response = await entity.run({"message": "first", "correlationId": "c0"})
 
-        # The original attempt, three retries, then exactly one replay, and the failure is
-        # reported rather than retried forever.
-        assert len(calls) == 5
+        # The original attempt plus a fixed number of retries, then the failure is reported rather
+        # than retried forever.
+        assert len(calls) == 4
         assert any(content.type == "error" for content in response.messages[0].contents)

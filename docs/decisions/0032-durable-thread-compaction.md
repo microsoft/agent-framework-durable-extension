@@ -166,7 +166,7 @@ stating plainly because it decides which copy of a conversation is authoritative
 | --- | --- | --- |
 | The customer's own store (Redis, Cosmos, file) | Their store's own policy, for example Redis `max_messages` or a Cosmos container TTL | The exchange, not the content |
 | Durable entity state | Durable retention, described below | Everything, since nothing else holds it |
-| The model service | The service's own retention | The exchange, plus content for recovery |
+| The model service | The service's own retention | The exchange, not the content |
 | No context pipeline at all | Durable retention | Everything, since nothing else holds it |
 
 The entity records every exchange in every configuration, because correlation ids and response
@@ -487,7 +487,27 @@ rather than expecting the entity to protect it.
 The one asymmetry is a service that stores conversations. If the model service accepted the turn
 before the worker died, the service has a turn the entity did not record, and the retry adds another
 one. The entity cannot see that, which is a further reason a conversation id refused by the service
-is retried in place before the transcript is resent.
+is retried in place rather than worked around.
+
+### A conversation id the service refuses
+
+A service that stores conversations can hand back an id it will not accept on the next turn.
+Measured against Azure OpenAI, a streamed response reports its id in the completion event before
+that response is readable: around half of streamed turns were refused this way when measured,
+against none of the non-streamed ones. The id is genuine and was captured correctly, it simply
+resolves a moment later. Azure has since treated this as a service defect, and re-measuring found
+the chaining path fixed while `responses.retrieve` still lags.
+
+The entity therefore re-sends the identical request a few times. That recovers the case above,
+costs about a second, and requires nothing to be stored.
+
+An id that has **genuinely expired** produces the same error and cannot be recovered that way, so
+those turns fail, as they do in core. The alternative would be to resend our own transcript, which
+only works if the entity keeps a full second copy of every conversation the service is already
+holding, on every turn, against the chance of needing it. Measured over eight turns that roughly
+doubled what a service-backed agent stored. Paying that continuously to insure a rare case is the
+wrong trade, so it is not made. If the case proves to matter, it returns as an explicit opt-in
+rather than a silent cost.
 
 ### The session is persisted, not just its conversation id
 

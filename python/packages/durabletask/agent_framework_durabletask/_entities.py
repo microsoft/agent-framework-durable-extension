@@ -330,27 +330,30 @@ class AgentEntity:
 
         durable_history = self._find_durable_history_provider()
         uses_context_pipeline = self._has_context_pipeline()
+        # A property of the run rather than of the registration, since ``store`` is an ordinary
+        # run option. The provider stays attached either way so core never injects one of its own.
+        service_owns_history = service_stores_history(self.agent, options)
 
         state_request = DurableAgentStateRequest.from_run_request(run_request)
         if run_request.context_messages:
             state_request.messages = self._drop_already_stored(state_request.messages)
         self.state.data.conversation_history.append(state_request)
 
-        # Somebody else's store holds this conversation, so our copy of what the user said is
-        # redundant, and keeping it would put the same content under two retention, residency and
-        # deletion policies while only one of them is the store they chose. Forgotten *after* the
-        # run rather than before it, because the run input is built from these same messages.
-        forget_request_content = uses_context_pipeline and durable_history is None
+        # Some other store holds this conversation, either one the caller configured or the model
+        # service itself, so our copy of what the user said is redundant. Keeping it would put the
+        # same content under two retention, residency and deletion policies while only one of them
+        # is the store actually being used. Forgotten *after* the run rather than before it,
+        # because the run input is built from these same messages.
+        forget_request_content = uses_context_pipeline and (durable_history is None or service_owns_history)
 
         binding_token = (
             bind_durable_history(
                 DurableHistoryBinding(
                     state_provider=self._state_provider,
                     correlation_id=correlation_id,
-                    # Resolved here because it is a property of the run, not the registration. The
-                    # provider stays attached either way so core never injects one of its own, but
-                    # it must not load history on a turn the service is already carrying.
-                    service_owns_history=service_stores_history(self.agent, options),
+                    # The provider stays attached either way so core never injects one of its own,
+                    # but it must not load history on a turn the service is already carrying.
+                    service_owns_history=service_owns_history,
                 )
             )
             if durable_history is not None
@@ -394,10 +397,16 @@ class AgentEntity:
                 # The service is holding this conversation but will not accept the id it issued
                 # for the previous turn. Measured against Azure OpenAI, a streamed response
                 # reports its id before that response is readable, so the id is genuine and was
-                # captured correctly, it just resolves a moment later. Retrying the identical
-                # request is therefore worth trying before anything more expensive: it costs a
-                # second rather than a whole transcript, and the same failure is handled the same
-                # way in Microsoft.Extensions.AI.
+                # captured correctly, it just resolves a moment later. Re-sending the identical
+                # request is enough to recover that, costs about a second, and needs nothing
+                # stored. The same failure is handled the same way in Microsoft.Extensions.AI.
+                #
+                # An id that has genuinely expired cannot be recovered this way, and the error
+                # looks identical, so those turns fail. Resending our own transcript would rescue
+                # them, but only if the entity kept a full second copy of a conversation the
+                # service is already holding, on every turn, against the chance of needing it.
+                # Core does not make that trade and neither do we. If the case turns out to
+                # matter, it comes back as an explicit opt-in rather than a silent cost.
                 retried = await self._retry_rejected_conversation_id(
                     run_kwargs=run_kwargs,
                     correlation_id=correlation_id,
@@ -405,32 +414,9 @@ class AgentEntity:
                     request_message=message,
                     cause=exc,
                 )
-                if retried is not None:
-                    agent_run_response = retried
-                else:
-                    # Either the id is genuinely gone rather than merely late, or the service is
-                    # not recovering. Drop the id and resend the transcript, which is what the
-                    # entity does for agents whose history it owns anyway. A successful retry
-                    # mints a fresh id that gets persisted below, so the session recovers rather
-                    # than failing again.
-                    logger.warning(
-                        "[AgentEntity.run] Service rejected the stored conversation id for session %s "
-                        "and did not accept it on retry; replaying the transcript instead. %s",
-                        session_id,
-                        exc,
-                    )
-                    session.service_session_id = None
-                    run_kwargs = {
-                        "messages": self._replay_all_messages(),
-                        "session": session,
-                        "options": options,
-                    }
-                    agent_run_response = await self._invoke_agent(
-                        run_kwargs=run_kwargs,
-                        correlation_id=correlation_id,
-                        session_id=session_id,
-                        request_message=message,
-                    )
+                if retried is None:
+                    raise
+                agent_run_response = retried
 
             state_response = DurableAgentStateResponse.from_run_response(correlation_id, agent_run_response)
             self.state.data.conversation_history.append(state_response)
