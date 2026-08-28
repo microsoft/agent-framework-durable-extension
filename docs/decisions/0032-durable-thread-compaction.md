@@ -190,8 +190,12 @@ instead of running the agent a second time. Before that check existed, a duplica
 model call and produced a second, different answer that nothing could collect, since pollers take
 the first match for a correlation id.
 
-Orchestrations reach the entity through `call_entity` instead, which returns the value directly, so
-for that path the recorded response is genuinely a second copy alongside the orchestrator's own.
+Orchestrations reach the entity through `call_entity` instead, which returns the value directly. The
+same bytes then exist in two places, but they are not two copies of one thing: the orchestrator
+records a **task result**, which is what makes its replay deterministic, while the entity records
+**what the assistant said**, which is what the next turn's model context is built from. Neither is
+removable, and the overlap is two systems recording the same event for different reasons rather than
+a defect in either.
 
 **Ownership is resolved per run, not per registration.** `store` is an ordinary run option, so an
 agent registered against a service-storing client can still be asked to keep a single turn
