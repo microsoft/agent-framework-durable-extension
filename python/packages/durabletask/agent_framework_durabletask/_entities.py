@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -70,6 +71,17 @@ _registered_state_types: set[type] = set()
 
 # Provider error code for a conversation id the service will not accept as a parent turn.
 _MISSING_PREVIOUS_RESPONSE_CODE = "previous_response_not_found"
+
+_REJECTED_ID_RETRIES = 3
+"""How many times to re-send a request whose conversation id the service would not accept.
+
+Few, because a retry only helps when the id is late rather than gone, and the two are
+indistinguishable from the error alone. Enough to cover the gap that was measured, which was
+under a second on the chaining path.
+"""
+
+_REJECTED_ID_BACKOFF_SECONDS = 0.5
+"""Multiplied by the attempt number, so the waits are 0.5s, 1s, 1.5s."""
 
 
 def _forget_message_content(messages: list[DurableAgentStateMessage]) -> None:
@@ -379,28 +391,46 @@ class AgentEntity:
             except Exception as exc:
                 if session is None or not _is_missing_previous_response(exc):
                     raise
-                # The service is holding this conversation but will not accept the id we stored
-                # for it. Drop the id and resend the transcript, which is what the entity does
-                # for agents whose history it owns. A successful retry mints a fresh id that
-                # gets persisted below, so the session recovers rather than failing again.
-                logger.warning(
-                    "[AgentEntity.run] Service rejected the stored conversation id for session %s; "
-                    "replaying the transcript instead. %s",
-                    session_id,
-                    exc,
-                )
-                session.service_session_id = None
-                run_kwargs = {
-                    "messages": self._replay_all_messages(),
-                    "session": session,
-                    "options": options,
-                }
-                agent_run_response = await self._invoke_agent(
+                # The service is holding this conversation but will not accept the id it issued
+                # for the previous turn. Measured against Azure OpenAI, a streamed response
+                # reports its id before that response is readable, so the id is genuine and was
+                # captured correctly, it just resolves a moment later. Retrying the identical
+                # request is therefore worth trying before anything more expensive: it costs a
+                # second rather than a whole transcript, and the same failure is handled the same
+                # way in Microsoft.Extensions.AI.
+                retried = await self._retry_rejected_conversation_id(
                     run_kwargs=run_kwargs,
                     correlation_id=correlation_id,
                     session_id=session_id,
                     request_message=message,
+                    cause=exc,
                 )
+                if retried is not None:
+                    agent_run_response = retried
+                else:
+                    # Either the id is genuinely gone rather than merely late, or the service is
+                    # not recovering. Drop the id and resend the transcript, which is what the
+                    # entity does for agents whose history it owns anyway. A successful retry
+                    # mints a fresh id that gets persisted below, so the session recovers rather
+                    # than failing again.
+                    logger.warning(
+                        "[AgentEntity.run] Service rejected the stored conversation id for session %s "
+                        "and did not accept it on retry; replaying the transcript instead. %s",
+                        session_id,
+                        exc,
+                    )
+                    session.service_session_id = None
+                    run_kwargs = {
+                        "messages": self._replay_all_messages(),
+                        "session": session,
+                        "options": options,
+                    }
+                    agent_run_response = await self._invoke_agent(
+                        run_kwargs=run_kwargs,
+                        correlation_id=correlation_id,
+                        session_id=session_id,
+                        request_message=message,
+                    )
 
             state_response = DurableAgentStateResponse.from_run_response(correlation_id, agent_run_response)
             self.state.data.conversation_history.append(state_response)
@@ -445,6 +475,72 @@ class AgentEntity:
         finally:
             if binding_token is not None:
                 unbind_durable_history(binding_token)
+
+    async def _retry_rejected_conversation_id(
+        self,
+        *,
+        run_kwargs: dict[str, Any],
+        correlation_id: str,
+        session_id: str,
+        request_message: Any,
+        cause: BaseException,
+    ) -> AgentResponse | None:
+        """Re-send an identical request whose conversation id the service refused.
+
+        The refusal we are recovering from is a read-after-write gap rather than a lost
+        conversation. Measured against Azure OpenAI, a streamed response reports its id in the
+        completion event before that response is retrievable, so the very next turn can be
+        rejected for naming an id that is perfectly valid and simply not readable yet. Waiting
+        briefly and asking again is the cheapest thing that works, and it leaves the conversation
+        continuing from the same point rather than restarting it from a resent transcript.
+
+        A retry cannot rescue an id that has genuinely expired, and the error is identical either
+        way, so the attempts are few and short. Exhausting them is not a failure, it is the signal
+        to fall back to something that does not depend on the service still holding the thread.
+
+        Args:
+            run_kwargs: The unchanged arguments of the request that was refused.
+            correlation_id: Correlation id of the in-flight request.
+            session_id: Session the request belongs to.
+            request_message: The originating message, for logging.
+            cause: The refusal that triggered this, so a give-up is reported with its reason.
+
+        Returns:
+            The response, or None when every attempt was refused the same way.
+        """
+        for attempt in range(1, _REJECTED_ID_RETRIES + 1):
+            await asyncio.sleep(_REJECTED_ID_BACKOFF_SECONDS * attempt)
+            try:
+                response: AgentResponse = await self._invoke_agent(
+                    run_kwargs=run_kwargs,
+                    correlation_id=correlation_id,
+                    session_id=session_id,
+                    request_message=request_message,
+                )
+            except Exception as retry_exc:
+                if not _is_missing_previous_response(retry_exc):
+                    raise
+                logger.debug(
+                    "[AgentEntity.run] Conversation id still not accepted for session %s (attempt %d of %d).",
+                    session_id,
+                    attempt,
+                    _REJECTED_ID_RETRIES,
+                )
+                continue
+            logger.info(
+                "[AgentEntity.run] Conversation id for session %s was accepted on attempt %d, "
+                "so the turn continued without resending the transcript.",
+                session_id,
+                attempt,
+            )
+            return response
+
+        logger.debug(
+            "[AgentEntity.run] Conversation id for session %s was refused on every attempt. %s",
+            session_id,
+            cause,
+        )
+        return None
 
     async def _enforce_retention(self) -> None:
         """Bound durable state before it is persisted, unless the caller asked to keep everything.
