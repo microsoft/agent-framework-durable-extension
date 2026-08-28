@@ -34,6 +34,7 @@ from agent_framework_durabletask import (
 from agent_framework_durabletask._retention import (
     HIGH_WATERMARK,
     LOW_WATERMARK,
+    _token_budget,
     enforce_budget,
     prunes_excluded,
 )
@@ -335,6 +336,161 @@ class TestAResponseIsNotEvictedBeforeItsCallerReadsIt:
 
         assert removed > 0
         assert state.try_get_agent_response("boom") is not None
+
+
+def _tool_state(turns: int, *, chars: int = 400) -> DurableAgentState:
+    """Build a history of tool calls, which carry real bytes but no ``message.text``.
+
+    This is the shape that broke the budget. A function call serializes to as much storage as
+    prose of the same length, but reading ``.text`` off it returns an empty string.
+    """
+    state = DurableAgentState()
+    now = datetime.now(tz=timezone.utc)
+    for index in range(turns):
+        occurred_at = now - timedelta(minutes=turns - index)
+        call: dict[str, Any] = {
+            "type": "function_call",
+            "call_id": f"call{index}",
+            "name": "lookup",
+            "arguments": json.dumps({"query": "q" * chars}),
+        }
+        result: dict[str, Any] = {
+            "type": "function_call",
+            "call_id": f"call{index}",
+            "name": "lookup",
+            "arguments": json.dumps({"result": "r" * chars}),
+        }
+        state.data.conversation_history.extend([
+            DurableAgentStateRequest(
+                correlation_id=f"c{index}",
+                created_at=occurred_at,
+                messages=[
+                    DurableAgentStateMessage.from_chat_message(
+                        Message(role="user", contents=[call], message_id=f"u{index}")
+                    )
+                ],
+            ),
+            DurableAgentStateResponse(
+                correlation_id=f"c{index}",
+                created_at=occurred_at,
+                messages=[
+                    DurableAgentStateMessage.from_chat_message(
+                        Message(role="assistant", contents=[result], message_id=f"a{index}")
+                    )
+                ],
+            ),
+        ])
+    return state
+
+
+class TestTheBudgetDoesNotAssumeProse:
+    """A conversation of tool calls must be budgeted like any other.
+
+    The budget converts bytes into tokens. Deriving that conversion from ``message.text`` made it
+    depend on the *kind* of content rather than its size, and a function call has no text at all.
+    A tool-only history therefore produced a budget of one token and evicted everything it was
+    permitted to touch, rather than evicting down to the watermark like any other conversation.
+    """
+
+    async def test_a_tool_only_history_keeps_roughly_what_prose_keeps(self) -> None:
+        prose = _state(turns=40)
+        tools = _tool_state(turns=40)
+
+        await enforce_budget(prose, max_state_bytes=BUDGET)
+        await enforce_budget(tools, max_state_bytes=BUDGET)
+
+        prose_left = len(_message_ids(prose))
+        tools_left = len(_message_ids(tools))
+        # Not identical, since the two shapes do not serialize to the same size per message, but
+        # the same order of magnitude. Before the fix this was 8 against 1.
+        assert tools_left > 1
+        assert abs(prose_left - tools_left) <= max(2, prose_left // 2)
+
+    async def test_a_tool_only_history_is_evicted_down_to_the_watermark(self) -> None:
+        state = _tool_state(turns=40)
+
+        removed = await enforce_budget(state, max_state_bytes=BUDGET)
+
+        assert removed > 0
+        assert _size(state) < BUDGET
+
+    async def test_the_budget_scales_with_bytes_not_text(self) -> None:
+        """Two histories of similar serialized size get similar budgets."""
+        prose = _state(turns=10)
+        tools = _tool_state(turns=10)
+
+        def budget_for(state: DurableAgentState) -> int:
+            origins = [(entry, m) for entry in state.data.conversation_history for m in entry.messages]
+            size = _size(state)
+            evictable = sum(len(json.dumps(m.to_dict())) for _, m in origins)
+            return _token_budget(origins, serialized_size=size, evictable_bytes=evictable, target_bytes=size // 2)
+
+        prose_budget = budget_for(prose)
+        tools_budget = budget_for(tools)
+
+        assert prose_budget > 1
+        # The old formula gave exactly 1 here, whatever the tool payload weighed.
+        assert tools_budget > 1
+        assert 0.4 < (tools_budget / prose_budget) < 2.5
+
+
+class TestTheAgentsInstructionsSurviveTheBudget:
+    """A system message is never evicted, however tight the budget gets.
+
+    Core protects system groups in its first fallback but then has a *strict* fallback whose whole
+    job is to evict them when anchors alone exceed the budget. Relying on core's protection
+    therefore holds only until the budget is small enough to matter. Keeping system messages out
+    of the candidate set entirely makes them unevictable, and their bytes count as a floor.
+    """
+
+    def _with_system(self, turns: int, *, chars: int = 400) -> DurableAgentState:
+        state = _state(turns=turns, chars=chars)
+        anchor = DurableAgentStateRequest(
+            correlation_id="system-anchor",
+            created_at=datetime.now(tz=timezone.utc) - timedelta(minutes=turns + 5),
+            messages=[
+                DurableAgentStateMessage.from_chat_message(
+                    Message(role="system", contents=["S" * chars], message_id="system-0")
+                )
+            ],
+        )
+        state.data.conversation_history.insert(0, anchor)
+        return state
+
+    def _system_count(self, state: DurableAgentState) -> int:
+        return sum(1 for entry in state.data.conversation_history for m in entry.messages if m.role == "system")
+
+    async def test_the_system_message_survives_a_comfortable_budget(self) -> None:
+        state = self._with_system(turns=30)
+
+        await enforce_budget(state, max_state_bytes=40_000)
+
+        assert self._system_count(state) == 1
+
+    async def test_the_system_message_survives_a_tight_budget(self) -> None:
+        state = self._with_system(turns=30)
+
+        removed = await enforce_budget(state, max_state_bytes=6_000)
+
+        assert removed > 0
+        assert self._system_count(state) == 1
+
+    async def test_the_system_message_survives_a_budget_it_cannot_fit(self) -> None:
+        """Even when retention cannot reach the target, the instructions stay."""
+        state = self._with_system(turns=30)
+
+        await enforce_budget(state, max_state_bytes=1_500)
+
+        assert self._system_count(state) == 1
+
+    async def test_ordinary_messages_are_still_evicted_around_it(self) -> None:
+        state = self._with_system(turns=30)
+
+        removed = await enforce_budget(state, max_state_bytes=6_000)
+
+        surviving = _message_ids(state)
+        assert removed > 0
+        assert "system-0" in surviving
 
 
 class TestStateShape:

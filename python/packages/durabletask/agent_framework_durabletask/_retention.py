@@ -81,6 +81,9 @@ on every subsequent turn.
 _BYTES_PER_TOKEN = 4
 """Matches ``CharacterEstimatorTokenizer``, which is a flat 4 characters per token."""
 
+_SYSTEM_ROLE = "system"
+"""Role of the messages retention refuses to evict, whatever the budget says."""
+
 _MAX_PASSES = 3
 """Eviction re-measures rather than trusting the estimate, but must not loop indefinitely."""
 
@@ -212,6 +215,7 @@ async def _evict_once(
     """
     candidates: list[Message] = []
     origins: list[tuple[DurableAgentStateEntry, DurableAgentStateMessage]] = []
+    evictable_bytes = 0
     protected = _protected_entries(history, honor_delivery_window=honor_delivery_window)
     for entry, index in replayable_entries(history):
         if entry in protected:
@@ -220,6 +224,13 @@ async def _evict_once(
             # and losing either would discard a result somebody is waiting for.
             continue
         stored = entry.messages[index]
+        if stored.role == _SYSTEM_ROLE:
+            # Kept out of the candidate set rather than trusted to core's protection. Core skips
+            # system groups in its first fallback but its *strict* fallback exists precisely to
+            # evict them, so a budget small enough to reach that stage would delete the agent's
+            # instructions. Excluded here, they are simply not evictable, and their bytes count
+            # toward the floor instead.
+            continue
         message = cast("Message", stored.to_chat_message())
         # The budget is computed over *included* messages, so a user's own compaction exclusions
         # would make an over-budget conversation look empty. Clearing them here makes the budget
@@ -227,12 +238,18 @@ async def _evict_once(
         message.additional_properties.pop(EXCLUDED_KEY, None)
         candidates.append(message)
         origins.append((entry, stored))
+        evictable_bytes += _message_size(stored)
 
     if not candidates:
         return []
 
     strategy = TokenBudgetComposedStrategy(
-        token_budget=_token_budget(candidates, serialized_size=serialized_size, target_bytes=target_bytes),
+        token_budget=_token_budget(
+            origins,
+            serialized_size=serialized_size,
+            evictable_bytes=evictable_bytes,
+            target_bytes=target_bytes,
+        ),
         tokenizer=CharacterEstimatorTokenizer(),
         # No strategies, so this goes straight to core's deterministic oldest-group eviction.
         # Passing the user's strategy would satisfy the budget immediately under early stop, and
@@ -302,13 +319,51 @@ def _protected_entries(
     return protected
 
 
-def _token_budget(candidates: list[Message], *, serialized_size: int, target_bytes: int) -> int:
+def _message_size(stored: DurableAgentStateMessage) -> int:
+    """Bytes this message contributes to persisted state.
+
+    Measured the same way the whole state is measured, so the two are directly comparable.
+    """
+    return len(json.dumps(stored.to_dict()))
+
+
+def _token_budget(
+    origins: list[tuple[DurableAgentStateEntry, DurableAgentStateMessage]],
+    *,
+    serialized_size: int,
+    evictable_bytes: int,
+    target_bytes: int,
+) -> int:
     """Convert a byte budget into the token budget the strategy expects.
 
-    Serialized state is larger than the text it contains, because of keys, escaping, ids and
-    annotations. Rather than assume an overhead constant, the ratio is measured from the state in
-    hand, so a conversation of long prose and one full of tool-call metadata are both handled.
+    The budget has to be expressed in tokens because that is what the strategy counts, but the
+    constraint being enforced is a byte limit. So the conversion is measured from the messages in
+    hand rather than assumed.
+
+    Only part of the state is evictable. Envelopes, the exchange in flight, responses inside the
+    delivery window and system messages all stay no matter what, so their bytes are a floor the
+    budget cannot reach below. What is left is what the evictable messages are allowed to occupy.
+
+    Tokens are related to bytes by the same shape core uses, ``max(1, size // 4)`` per message,
+    applied to the persisted form. Taking the ratio from these specific messages is what makes a
+    conversation of tool calls behave like one of prose. An earlier version used ``message.text``
+    as the numerator, which is empty for tool calls, so a tool-only history produced a budget of
+    one token and evicted everything it was allowed to touch.
+
+    Args:
+        origins: The evictable messages, each with the entry that owns it.
+
+    Keyword Args:
+        serialized_size: Current size of the whole serialized state.
+        evictable_bytes: How much of that size the evictable messages account for.
+        target_bytes: The size this pass is aiming to reach.
+
+    Returns:
+        A token budget of at least one.
     """
-    content_chars = sum(len(message.text or "") for message in candidates)
-    ratio = (content_chars / serialized_size) if serialized_size else 1.0
-    return max(int(target_bytes * ratio) // _BYTES_PER_TOKEN, 1)
+    if evictable_bytes <= 0:
+        return 1
+    floor_bytes = max(serialized_size - evictable_bytes, 0)
+    allowed_bytes = max(target_bytes - floor_bytes, 0)
+    evictable_tokens = sum(max(1, _message_size(stored) // _BYTES_PER_TOKEN) for _, stored in origins)
+    return max(int(allowed_bytes * evictable_tokens / evictable_bytes), 1)
