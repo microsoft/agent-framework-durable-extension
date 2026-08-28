@@ -762,3 +762,77 @@ class TestSessionStatePersistence:
         # The turn still completed and the conversation was recorded.
         assert len(entity.state.data.conversation_history) == 2
         json.dumps(stored)
+
+
+class TestARequestIsAnsweredOnce:
+    """A repeated correlation id returns the recorded answer instead of running again.
+
+    Entity signals are delivered at least once, and every path mints a fresh correlation id per
+    request, so a repeat is a duplicate delivery rather than a caller deliberately asking again.
+    Running the agent a second time spends another model call, re-runs its tools, and produces a
+    different answer that nothing can collect, because pollers read by correlation id and take the
+    first match. Returning the recorded answer is what turns at-least-once delivery into a single
+    effect.
+    """
+
+    async def test_the_agent_does_not_run_twice(self) -> None:
+        client = RecordingChatClient()
+        entity = _make_entity(_build_agent(client), _InMemoryStateProvider())
+
+        await entity.run({"message": "what is the capital of Norway?", "correlationId": "dup"})
+        await entity.run({"message": "what is the capital of Norway?", "correlationId": "dup"})
+
+        assert len(client.received_messages) == 1
+
+    async def test_the_same_answer_comes_back(self) -> None:
+        entity = _make_entity(_build_agent(RecordingChatClient()), _InMemoryStateProvider())
+
+        first = await entity.run({"message": "hello", "correlationId": "dup"})
+        second = await entity.run({"message": "hello", "correlationId": "dup"})
+
+        assert first.text == second.text
+
+    async def test_the_conversation_is_not_recorded_twice(self) -> None:
+        provider = _InMemoryStateProvider()
+        entity = _make_entity(_build_agent(RecordingChatClient()), provider)
+
+        await entity.run({"message": "hello", "correlationId": "dup"})
+        await entity.run({"message": "hello", "correlationId": "dup"})
+
+        entries = [e for e in entity.state.data.conversation_history if e.correlation_id == "dup"]
+        assert len(entries) == 2, "expected one request and one response, not a second pair"
+
+    async def test_a_failed_turn_is_also_answered_once(self) -> None:
+        """The recorded failure comes back rather than the agent being run again.
+
+        A caller retrying after a failure mints a new correlation id, so a repeat of this one is
+        still a duplicate delivery of the same request.
+        """
+
+        class _FailingClient(RecordingChatClient):
+            def get_response(self, messages: Any, **kwargs: Any) -> Any:
+                super().get_response(messages, **kwargs)
+                raise RuntimeError("kaboom")
+
+        client = _FailingClient()
+        entity = _make_entity(_build_agent(client), _InMemoryStateProvider())
+
+        first = await entity.run({"message": "hello", "correlationId": "dup"})
+        # A failing client makes the entity try streaming and then fall back, so one turn is more
+        # than one client call. What matters is that the count does not grow on the repeat.
+        after_first = len(client.received_messages)
+        second = await entity.run({"message": "hello", "correlationId": "dup"})
+
+        assert len(client.received_messages) == after_first
+        assert any(content.type == "error" for content in first.messages[0].contents)
+        assert any(content.type == "error" for content in second.messages[0].contents)
+
+    async def test_a_different_request_still_runs(self) -> None:
+        """Only an exact repeat is short-circuited."""
+        client = RecordingChatClient()
+        entity = _make_entity(_build_agent(client), _InMemoryStateProvider())
+
+        await entity.run({"message": "first", "correlationId": "c0"})
+        await entity.run({"message": "second", "correlationId": "c1"})
+
+        assert len(client.received_messages) == 2

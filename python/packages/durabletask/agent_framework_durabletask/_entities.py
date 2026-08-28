@@ -328,6 +328,23 @@ class AgentEntity:
 
         logger.debug("[AgentEntity.run] Received SessionId %s Message: %s", session_id, run_request)
 
+        already_answered = self.state.try_get_agent_response(correlation_id)
+        if already_answered is not None:
+            # This exact request has already been answered. Entity signals are delivered at least
+            # once, and every path mints a fresh correlation id per request, so a repeat is a
+            # duplicate delivery rather than a caller deliberately asking again. Running the agent
+            # a second time would spend another model call, re-run the tools, and produce a
+            # different answer that nothing could collect: pollers read by correlation id and take
+            # the first match, so the second response was already unreachable. Returning the
+            # recorded answer is what turns at-least-once delivery into a single effect.
+            logger.info(
+                "[AgentEntity.run] Correlation id %s on session %s has already been answered, "
+                "returning the recorded response rather than running the agent again.",
+                correlation_id,
+                session_id,
+            )
+            return already_answered
+
         durable_history = self._find_durable_history_provider()
         uses_context_pipeline = self._has_context_pipeline()
         # A property of the run rather than of the registration, since ``store`` is an ordinary

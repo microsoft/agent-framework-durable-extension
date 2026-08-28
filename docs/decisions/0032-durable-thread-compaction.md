@@ -180,6 +180,19 @@ and the message ids, and forgets the content.
 for a correlation id, so the entity is the only thing that can produce it. Response content is
 therefore retained regardless of who owns the conversation.
 
+That retention is not merely a cost. An entity signal is one-way, so for the client and HTTP paths
+the recorded response *is* the return value, and persisting it is what lets a caller that crashed
+between the agent finishing and the poll landing still collect a result whose model tokens and tool
+side effects have already been paid for. It also makes the request answered **once**: signals are
+delivered at least once and every path mints a fresh correlation id per request, so a repeated id is
+a duplicate delivery rather than a caller asking again. The entity returns the recorded answer
+instead of running the agent a second time. Before that check existed, a duplicate spent another
+model call and produced a second, different answer that nothing could collect, since pollers take
+the first match for a correlation id.
+
+Orchestrations reach the entity through `call_entity` instead, which returns the value directly, so
+for that path the recorded response is genuinely a second copy alongside the orchestrator's own.
+
 **Ownership is resolved per run, not per registration.** `store` is an ordinary run option, so an
 agent registered against a service-storing client can still be asked to keep a single turn
 client-side. A durable history provider is therefore attached in that case too, claiming the slot
