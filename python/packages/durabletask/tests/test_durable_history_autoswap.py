@@ -41,8 +41,8 @@ class _ServiceStoringClient(_StubClient):
     STORES_BY_DEFAULT = True
 
 
-class _RecordingServiceClient(_ServiceStoringClient):
-    """Service-storing client that records the message list handed to it on each call.
+class _RecordingClient(_StubClient):
+    """Client that records the message list handed to it on each call.
 
     Needed to tell "the provider is attached" apart from "the provider is answering", which is the
     distinction that keeps a service-backed agent from being sent its own transcript.
@@ -83,6 +83,12 @@ class _RecordingServiceClient(_ServiceStoringClient):
             return ChatResponse.from_updates(updates, output_format_type=options.get("response_format"))
 
         return ResponseStream(_updates(), finalizer=_finalize)
+
+
+class _RecordingServiceClient(_RecordingClient):
+    """The same, but its service keeps the conversation server-side."""
+
+    STORES_BY_DEFAULT = True
 
 
 class _ExternalHistoryProvider(HistoryProvider):
@@ -361,6 +367,97 @@ class TestFollowCompactionRetention:
 
         providers = _history_providers(prepared)
         assert providers[0].prune_excluded is False
+
+
+class _StoringExternalProvider(HistoryProvider):
+    """External store that actually keeps what it is given, so both copies can be compared."""
+
+    def __init__(self) -> None:
+        super().__init__(source_id="external-store")
+        self.saved: list[Message] = []
+
+    async def get_messages(self, session_id: str | None, **kwargs: Any) -> list[Message]:
+        return list(self.saved)
+
+    async def save_messages(self, session_id: str | None, messages: Any, **kwargs: Any) -> None:
+        self.saved.extend(messages)
+
+
+class TestWeDoNotKeepASecondCopyOfSomeoneElsesConversation:
+    """When the caller brought their own store, the entity records the exchange, not the content.
+
+    The entity has to record every exchange in every configuration, because correlation ids and
+    delivery are its job and nothing else can do them. It does not have to be a second copy of the
+    conversation. Being one puts the customer's content under two different retention, residency
+    and deletion policies when they deliberately chose one store for it.
+
+    Responses are the exception, and not an arbitrary one. A caller collects its answer by polling
+    the entity for a correlation id, so the entity is the only thing that can produce it.
+    """
+
+    def _content_items(self, entity: AgentEntity, kind: str) -> int:
+        return sum(
+            len(m.contents)
+            for entry in entity.state.data.conversation_history
+            for m in entry.messages
+            if entry.json_type.value == kind
+        )
+
+    async def _run(self, providers: list[Any], turns: int = 4) -> AgentEntity:
+        agent = _agent(_RecordingClient(), context_providers=providers)
+        entity = AgentEntity(agent, state_provider=_InMemoryStateProvider())
+        for index in range(turns):
+            await entity.run({"message": f"a reasonably long question number {index}", "correlationId": f"c{index}"})
+        return entity
+
+    async def test_requests_are_not_kept_twice(self) -> None:
+        external = _StoringExternalProvider()
+
+        entity = await self._run([external])
+
+        assert len(external.saved) > 0
+        assert self._content_items(entity, "request") == 0
+
+    async def test_responses_are_kept_so_callers_can_collect_them(self) -> None:
+        external = _StoringExternalProvider()
+
+        entity = await self._run([external])
+
+        assert self._content_items(entity, "response") > 0
+        assert entity.state.try_get_agent_response("c0") is not None
+
+    async def test_the_exchange_is_still_recorded(self) -> None:
+        """Envelopes survive, because delivery and correlation depend on them."""
+        external = _StoringExternalProvider()
+
+        entity = await self._run([external])
+
+        history = entity.state.data.conversation_history
+        assert len(history) == 8
+        assert [e.correlation_id for e in history] == [f"c{i // 2}" for i in range(8)]
+        assert all(e.created_at is not None for e in history)
+
+    async def test_request_message_ids_survive_for_deduplication(self) -> None:
+        """Workflow fan-out is deduplicated by id, so forgetting ids would double-ingest."""
+        external = _StoringExternalProvider()
+
+        entity = await self._run([external])
+
+        request_messages = [
+            m
+            for entry in entity.state.data.conversation_history
+            if entry.json_type.value == "request"
+            for m in entry.messages
+        ]
+        assert request_messages
+        assert all(m.role for m in request_messages)
+
+    async def test_our_own_history_is_kept_in_full(self) -> None:
+        """Nothing else is holding it, so forgetting it would lose the conversation."""
+        entity = await self._run([])
+
+        assert self._content_items(entity, "request") > 0
+        assert self._content_items(entity, "response") > 0
 
 
 class TestServiceManagedSessions:

@@ -72,6 +72,26 @@ _registered_state_types: set[type] = set()
 _MISSING_PREVIOUS_RESPONSE_CODE = "previous_response_not_found"
 
 
+def _forget_message_content(messages: list[DurableAgentStateMessage]) -> None:
+    """Drop the content of these messages, keeping the record that they happened.
+
+    Used when a history provider the caller configured owns the conversation. The entity always
+    records the exchange, in every configuration, because correlation ids and delivery are its
+    job. It does not need to be a second copy of the conversation itself, and being one would put
+    the customer's content under two different retention, residency and deletion policies while
+    only one of them is the store they chose.
+
+    What survives is the envelope and the message id. Ids matter because deduplicating repeated
+    upstream context in a workflow is done by id, so forgetting them would let the same message be
+    ingested twice.
+
+    Args:
+        messages: The stored messages, emptied in place.
+    """
+    for stored in messages:
+        stored.contents = []
+
+
 def _is_missing_previous_response(exc: BaseException) -> bool:
     """Return whether the service refused the conversation id from the previous turn.
 
@@ -296,13 +316,20 @@ class AgentEntity:
 
         logger.debug("[AgentEntity.run] Received SessionId %s Message: %s", session_id, run_request)
 
+        durable_history = self._find_durable_history_provider()
+        uses_context_pipeline = self._has_context_pipeline()
+
         state_request = DurableAgentStateRequest.from_run_request(run_request)
         if run_request.context_messages:
             state_request.messages = self._drop_already_stored(state_request.messages)
         self.state.data.conversation_history.append(state_request)
 
-        durable_history = self._find_durable_history_provider()
-        uses_context_pipeline = self._has_context_pipeline()
+        # Somebody else's store holds this conversation, so our copy of what the user said is
+        # redundant, and keeping it would put the same content under two retention, residency and
+        # deletion policies while only one of them is the store they chose. Forgotten *after* the
+        # run rather than before it, because the run input is built from these same messages.
+        forget_request_content = uses_context_pipeline and durable_history is None
+
         binding_token = (
             bind_durable_history(
                 DurableHistoryBinding(
@@ -377,6 +404,8 @@ class AgentEntity:
 
             state_response = DurableAgentStateResponse.from_run_response(correlation_id, agent_run_response)
             self.state.data.conversation_history.append(state_response)
+            if forget_request_content:
+                _forget_message_content(state_request.messages)
             self._capture_session(session)
             await self._enforce_retention()
             self.persist_state()
@@ -406,6 +435,8 @@ class AgentEntity:
 
             error_state_response = DurableAgentStateErrorResponse.from_run_response(correlation_id, error_response)
             self.state.data.conversation_history.append(error_state_response)
+            if forget_request_content:
+                _forget_message_content(state_request.messages)
             await self._enforce_retention()
             self.persist_state()
 
