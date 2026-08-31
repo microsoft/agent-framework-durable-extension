@@ -611,6 +611,64 @@ class TestSessionStatePersistence:
     extraction state).
     """
 
+    async def test_a_failed_turn_still_carries_the_session_forward(self) -> None:
+        """The entity absorbs the failure, so the session has to survive it too.
+
+        Providers run before the model call, so a turn that fails afterwards can still have queued
+        a tool approval or been handed a conversation id by the service. Capturing the session only
+        on success dropped both, and the next turn started from scratch while the service-side
+        conversation was left orphaned.
+        """
+
+        class _QueueingProvider(ContextProvider):
+            def __init__(self) -> None:
+                super().__init__("approvals")
+
+            async def before_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+                state["pending_approval"] = "delete-the-archive"
+
+        class _FailingClient(RecordingChatClient):
+            def get_response(self, messages: Any, **kwargs: Any) -> Any:
+                raise RuntimeError("kaboom")
+
+        provider = _InMemoryStateProvider()
+        agent = _agent([InMemoryHistoryProvider(), _QueueingProvider()], _FailingClient())
+        entity = AgentEntity(agent, state_provider=provider)
+
+        response = await entity.run({"message": "please fail", "correlationId": "boom"})
+
+        assert any(content.type == "error" for content in response.messages[0].contents)
+        stored_session = provider._get_state_dict()["data"].get("session")
+        assert stored_session, "a failed turn discarded the session"
+        assert stored_session["state"]["approvals"]["pending_approval"] == "delete-the-archive"
+
+    async def test_a_failure_before_the_session_exists_reports_its_own_error(self) -> None:
+        """``session`` is referenced while handling the error, so it must always be bound.
+
+        It used to be assigned only inside the ``try``. A ``create_session`` that raised would then
+        leave the name unbound, and the failure path would replace the agent's error with a
+        ``NameError`` while trying to persist the session.
+        """
+
+        class _NoSessionAgent:
+            name = "broken"
+            client = RecordingChatClient()
+            context_providers: list[Any] = []
+
+            def create_session(self, **kwargs: Any) -> Any:
+                raise TypeError("this agent cannot make a session")
+
+            async def run(self, *args: Any, **kwargs: Any) -> Any:
+                raise AssertionError("should never be reached")
+
+        entity = AgentEntity(_NoSessionAgent(), state_provider=_InMemoryStateProvider())  # type: ignore[arg-type]
+
+        response = await entity.run({"message": "x", "correlationId": "c0"})
+
+        text = " ".join(content.text or "" for content in response.messages[0].contents)
+        assert "cannot make a session" in text
+        assert "NameError" not in text
+
     async def test_provider_state_survives_across_turns(self) -> None:
         seen: list[dict[str, Any]] = []
 

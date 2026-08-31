@@ -377,6 +377,11 @@ class AgentEntity:
             else None
         )
 
+        # Bound before the try so the failure path can always reach it. ``_create_session`` can
+        # raise, and referencing an unbound name while handling that would replace the agent's
+        # error with a NameError.
+        session: Any = None
+
         try:
             if uses_context_pipeline:
                 # The agent's own context providers supply prior turns - durable-backed history,
@@ -470,6 +475,12 @@ class AgentEntity:
             self.state.data.conversation_history.append(error_state_response)
             if forget_request_content:
                 _forget_message_content(state_request.messages)
+            # Captured here too, not only on success. The entity absorbs the failure so the caller
+            # can take another turn, and that is only true if what the providers and the service
+            # left on the session survives with it. Dropping it would lose a queued tool approval,
+            # or a conversation id the service had already issued, and the next turn would start a
+            # fresh thread while the old one was left orphaned.
+            self._capture_session(session)
             await self._enforce_retention()
             self.persist_state()
 
