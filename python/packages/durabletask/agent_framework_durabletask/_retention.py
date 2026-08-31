@@ -226,14 +226,17 @@ async def _evict_once(
 ) -> list[str]:
     """Run one eviction pass, returning the ids of the messages removed.
 
-    Core already knows how to drop oldest groups to a budget while preserving system messages and
-    keeping tool-call groups whole, so that judgement is borrowed rather than reimplemented.
+    Core already knows how to drop oldest groups to a budget while keeping tool-call groups whole,
+    so that judgement is borrowed rather than reimplemented. Its handling of system messages is
+    not borrowed: they are held out of the candidate set here instead, because core's strict
+    fallback evicts them once anchors alone exceed the budget.
 
     Args:
         history: The conversation history, modified in place.
 
     Keyword Args:
-        serialized_size: Current size of the whole serialized state, used to relate bytes to text.
+        serialized_size: Current size of the whole serialized state, used to work out how much of
+            it the evictable messages account for.
         target_bytes: The size this pass is aiming to reach.
         honor_delivery_window: When False, responses whose callers may still be reading them
             become evictable. Reserved for the case where protecting them would leave state too

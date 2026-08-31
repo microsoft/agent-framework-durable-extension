@@ -102,8 +102,9 @@ class DurableHistoryProvider(HistoryProvider):
         skip_excluded: When True, messages marked ``_excluded`` by compaction are omitted
             from the context loaded for the model. The messages remain in durable storage.
         prune_excluded: When True, excluded messages are physically removed from durable
-            storage on flush. This is **lossy** and opt-in - it is what actually bounds the
-            size of persisted state.
+            storage on flush. This is **lossy** and opt-in, and it is the only thing that bounds
+            storage as compaction happens rather than waiting for pressure. Retention still
+            bounds the state independently, whatever this is set to.
     """
 
     DEFAULT_SOURCE_ID = "durable_history"
@@ -121,10 +122,12 @@ class DurableHistoryProvider(HistoryProvider):
             source_id: Unique identifier for this provider instance.
             skip_excluded: Omit compaction-excluded messages from loaded context.
             prune_excluded: Physically delete excluded messages from durable storage on flush.
-                Lossy, so it is off unless asked for. Left unset, the entity's ``retention`` mode
-                decides. Passing it explicitly pins the behaviour and retention will not override
-                it, which is what lets a caller who wires this provider by hand opt in or out
-                independently of the mode.
+                Lossy, so it is off unless asked for. Leaving it unset defers to the entity's
+                ``retention`` mode, which resolves it when the provider is prepared for a run.
+                Passing it explicitly pins the behaviour and retention will not override it, which
+                is what lets a caller who wires this provider by hand opt in or out independently
+                of the mode. Unset and unresolved, as when this provider is not the one the entity
+                prepared, it does not prune.
         """
         super().__init__(
             source_id=source_id or self.DEFAULT_SOURCE_ID,
