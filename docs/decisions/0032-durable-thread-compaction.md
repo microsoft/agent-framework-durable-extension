@@ -489,7 +489,8 @@ trade. Applying it in the orchestrator keeps only the projection on the wire, wh
 of replayed territory but put the whole conversation back on the wire. Applying it inside an
 activity would achieve both at the cost of a scheduling round trip per handoff. The current design
 takes the first, and the contract above is the price. Revisiting that, along with replacing the
-private `_context_mode` / `_context_filter` reads with a public accessor, is tracked separately.
+private `_context_mode` / `_context_filter` reads with a public accessor, is tracked in
+[#79](https://github.com/microsoft/agent-framework-durable-extension/issues/79).
 
 Cycles need deduplication because a node receives the accumulated upstream conversation again on
 each visit. The orchestrator stamps each forwarded message as `wf_{executor}_{position}`. The entity
