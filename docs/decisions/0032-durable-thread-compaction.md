@@ -454,6 +454,43 @@ compaction hook. Durable instead honors the existing `context_mode` and invokes 
 `custom` mode, then sends the projection as `RunRequest.context_messages`. Those messages become part
 of the request entry and are visible to agent-level compaction.
 
+### `context_filter` must be pure under durable
+
+Core types the filter as `Callable[[list[Message]], list[Message]]` and requires nothing more,
+because an in-process executor runs it exactly once. A durable orchestrator does not resume, it
+**re-executes from the top** on every episode, returning recorded results for work already done. The
+projection is computed in that re-executed code, so the filter runs again on every replay: roughly
+once per node in a sequential workflow, and again each time a workflow parked on a human decision
+wakes up.
+
+**The durable contract is therefore stricter than core's.** A `context_filter` must be synchronous,
+deterministic, free of side effects, and independent of wall-clock time, randomness, and any
+external state. `full` and `last_agent` satisfy this by construction, since they are list slicing.
+Only `custom` can violate it.
+
+Violating it fails **softly**, which is worth stating precisely so the risk is neither overstated
+nor dismissed. The Durable Task worker detects non-determinism by checking that an action exists at
+the expected id and is of the expected kind; it never compares the action's input. The projection is
+only ever an input, and nothing branches on it. So a filter that returns something different on
+replay does not raise `NonDeterminismError` and does not deliver altered context to an agent. The
+recomputed value is discarded and the recorded result stands.
+
+What does bite:
+
+- A filter with side effects performs them again on every replay, so one logical handoff can write
+  many audit entries.
+- A filter that performs I/O can raise on a later replay, failing an orchestration whose original
+  run succeeded and whose result is already recorded.
+- A slow filter is paid for on every episode rather than once.
+
+**Why the filter runs there at all.** Someone has to apply the projection, and the placement is a
+trade. Applying it in the orchestrator keeps only the projection on the wire, which is what makes
+`context_mode` an effective capacity lever. Applying it at the destination would keep user code out
+of replayed territory but put the whole conversation back on the wire. Applying it inside an
+activity would achieve both at the cost of a scheduling round trip per handoff. The current design
+takes the first, and the contract above is the price. Revisiting that, along with replacing the
+private `_context_mode` / `_context_filter` reads with a public accessor, is tracked separately.
+
 Cycles need deduplication because a node receives the accumulated upstream conversation again on
 each visit. The orchestrator stamps each forwarded message as `wf_{executor}_{position}`. The entity
 stores the highest ingested position per executor and drops older positions, keeping the newest
