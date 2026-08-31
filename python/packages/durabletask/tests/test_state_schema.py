@@ -18,6 +18,8 @@ from agent_framework import Message
 
 from agent_framework_durabletask import (
     DurableAgentState,
+    DurableAgentStateCompaction,
+    DurableAgentStateErrorResponse,
     DurableAgentStateMessage,
     DurableAgentStateRequest,
     DurableAgentStateResponse,
@@ -121,3 +123,84 @@ def test_state_survives_a_round_trip_through_the_schema(schema: dict[str, Any]) 
     assert stored.message_id == "wf_writer_1"
     assert (stored.extension_data or {}).get("_excluded") is True
     assert restored.data.ingested_positions == {"input": 0, "writer": 1}
+
+
+def _entry_of_each_kind() -> DurableAgentState:
+    """State containing all four entry kinds, including the two without a correlation."""
+    now = datetime.now(tz=timezone.utc)
+    state = _populated_state()
+    state.data.conversation_history.append(
+        DurableAgentStateErrorResponse(
+            correlation_id="c1",
+            created_at=now,
+            messages=[
+                DurableAgentStateMessage.from_chat_message(
+                    Message(role="assistant", contents=["it broke"], message_id="err0")
+                )
+            ],
+        )
+    )
+    state.data.conversation_history.append(
+        DurableAgentStateCompaction(
+            created_at=now,
+            messages=[
+                DurableAgentStateMessage.from_chat_message(
+                    Message(role="assistant", contents=["summary"], message_id="sum0")
+                )
+            ],
+        )
+    )
+    return state
+
+
+def test_every_entry_kind_validates(schema: dict[str, Any]) -> None:
+    payload = _entry_of_each_kind().to_dict()
+
+    _validate(payload, schema)
+
+    kinds = {entry["$type"] for entry in payload["data"]["conversationHistory"]}
+    assert kinds == {"request", "response", "errorResponse", "compaction"}
+
+
+def test_an_entry_without_a_correlation_omits_the_field(schema: dict[str, Any]) -> None:
+    """A compaction entry answers no request, so it has no correlation to record.
+
+    Written as an absent field rather than an explicit null. `null` would type the field as
+    something other than a string wherever a reader looks at it, which the schema rejects and
+    which a stricter cross-language reader would too.
+    """
+    payload = _entry_of_each_kind().to_dict()
+
+    compaction = next(e for e in payload["data"]["conversationHistory"] if e["$type"] == "compaction")
+
+    assert "correlationId" not in compaction
+    _validate(payload, schema)
+
+
+def test_the_discriminator_is_required(schema: dict[str, Any]) -> None:
+    """An entry that does not say what it is must not validate.
+
+    The four entry schemas existed before but nothing referenced them, so `conversationHistory`
+    accepted any loosely entry-shaped object and `$type` was documentation rather than contract.
+    """
+    payload = {
+        "schemaVersion": "1.2.0",
+        "data": {"conversationHistory": [{"createdAt": datetime.now(tz=timezone.utc).isoformat(), "messages": []}]},
+    }
+
+    with pytest.raises(jsonschema.ValidationError):
+        _validate(payload, schema)
+
+
+def test_an_unknown_entry_kind_is_rejected(schema: dict[str, Any]) -> None:
+    payload = {
+        "schemaVersion": "1.2.0",
+        "data": {
+            "conversationHistory": [
+                {"$type": "nonsense", "createdAt": datetime.now(tz=timezone.utc).isoformat(), "messages": []}
+            ]
+        },
+    }
+
+    with pytest.raises(jsonschema.ValidationError):
+        _validate(payload, schema)

@@ -162,6 +162,7 @@
     },
     "conversationEntry": {
       "type": "object",
+      "description": "Fields shared by every kind of conversation entry. Not used directly: an entry is always one of the four concrete kinds below, discriminated by $type.",
       "properties": {
         "createdAt": { "type": "string", "format": "date-time", "description": "When this exchange was created (RFC 3339)." },
         "correlationId": { "type": "string", "description": "An optional correlation ID to group related exchanges." },
@@ -173,6 +174,7 @@
         { "$ref": "#/$defs/conversationEntry" }
       ],
       "description": "The request (i.e. prompt) sent to the agent.",
+      "required": ["$type"],
       "properties": {
         "$type": { "type": "string", "const": "request" },
         "orchestrationId": {
@@ -194,6 +196,7 @@
         { "$ref": "#/$defs/conversationEntry" }
       ],
       "description": "The response received from the agent.",
+      "required": ["$type"],
       "properties": {
         "$type": { "type": "string", "const": "response" },
         "usage": {
@@ -206,6 +209,7 @@
         { "$ref": "#/$defs/conversationEntry" }
       ],
       "description": "A turn that failed. Returned to the caller waiting on its correlation ID, because an error is still an answer, but never replayed to the model as conversation. The distinction is carried by $type rather than a flag so that it survives serialization.",
+      "required": ["$type"],
       "properties": {
         "$type": { "type": "string", "const": "errorResponse" },
         "usage": {
@@ -218,6 +222,7 @@
         { "$ref": "#/$defs/conversationEntry" }
       ],
       "description": "A message produced by context compaction, such as a summary replacing the turns it stands in for. Part of the model's transcript and positioned in conversation order, but it answers no request, so it carries no correlation ID and is never returned to a caller polling for a response.",
+      "required": ["$type"],
       "properties": {
         "$type": { "type": "string", "const": "compaction" }
       }
@@ -228,8 +233,15 @@
       "properties": {
         "conversationHistory": {
           "type": "array",
-          "description": "Ordered list of conversation entries.",
-          "items": { "$ref": "#/$defs/conversationEntry" }
+          "description": "Ordered list of conversation entries. Every entry declares its kind through $type, so an implementation can dispatch on it rather than inferring the kind from which fields happen to be present.",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/agentRequest" },
+              { "$ref": "#/$defs/agentResponse" },
+              { "$ref": "#/$defs/agentErrorResponse" },
+              { "$ref": "#/$defs/compaction" }
+            ]
+          }
         },
         "session": {
           "type": "object",

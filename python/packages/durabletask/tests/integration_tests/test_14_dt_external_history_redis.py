@@ -111,15 +111,38 @@ class TestExternalHistoryProvider:
         assert any("12" in entry for entry in entries)
         assert any("teal" in entry for entry in entries)
 
-    def test_durable_state_still_records_the_conversation(self) -> None:
-        """Durable state remains the audit record even when history lives elsewhere."""
+    def test_durable_state_records_the_exchange_but_not_a_second_copy(self) -> None:
+        """The entity records that the turn happened, not the content Redis is already holding.
+
+        Correlation and delivery are the entity's job and nothing else can do them, so the
+        exchange is always recorded. Being a second copy of the conversation is a different thing,
+        and it would put the same content under two retention, residency and deletion policies
+        when the caller deliberately chose one store for it.
+
+        Responses are the deliberate exception. A caller collects its answer by polling the entity
+        for a correlation id, so the entity is the only thing that can produce it.
+        """
         agent = self.agent_client.get_agent("Archivist")
         session = agent.create_session()
 
         assert agent.run("Note that the archive opens at nine.", session=session) is not None
 
         state = self._read_state(session.durable_session_id)
-        assert state.data.conversation_history, "expected the entity to record the conversation"
+        history = state.data.conversation_history
+        assert history, "expected the entity to record the exchange"
+
+        requests = [e for e in history if e.json_type.value == "request"]
+        responses = [e for e in history if e.json_type.value == "response"]
+        assert requests and responses, f"expected both sides recorded, found {[e.json_type.value for e in history]}"
+
+        # The envelope survives, because delivery and deduplication depend on it.
+        assert all(entry.correlation_id for entry in requests + responses)
+
+        # The question itself lives in Redis, so the entity does not keep it too.
+        assert all(not message.contents for entry in requests for message in entry.messages)
+
+        # The answer stays, because polling by correlation id is how the caller collects it.
+        assert any(message.contents for entry in responses for message in entry.messages)
 
     def _read_state(self, session_id: Any) -> DurableAgentState:
         """Load the agent entity's persisted state straight from the scheduler.

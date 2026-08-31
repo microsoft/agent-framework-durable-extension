@@ -572,12 +572,18 @@ class DurableAgentStateEntry:
         self.extension_data = extension_data
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             DurableStateFields.TYPE_DISCRIMINATOR: self.json_type,
-            DurableStateFields.CORRELATION_ID: self.correlation_id,
             DurableStateFields.CREATED_AT: self.created_at.isoformat(),
             DurableStateFields.MESSAGES: [m.to_dict() for m in self.messages],
         }
+        if self.correlation_id is not None:
+            # Omitted rather than written as null. A compaction entry answers no request and so has
+            # no correlation, and "absent" says that where an explicit null only says the field
+            # exists and is empty. It also keeps the persisted shape a string wherever it appears,
+            # which is what the schema and the .NET reader both expect.
+            result[DurableStateFields.CORRELATION_ID] = self.correlation_id
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DurableAgentStateEntry:
