@@ -3,9 +3,8 @@
 ## [Unreleased]
 
 - Prepared package metadata for the 1.16.0-rc1 release ([#58](https://github.com/microsoft/agent-framework-durable-extension/pull/58))
-
-## v1.16.0-rc1
-
+- Fixed the durable configuration methods not composing on the same application: calling `ConfigureDurableAgents` first left the workflow functions without an executor, calling `ConfigureDurableWorkflows` first registered the built-in function execution middleware twice, agents registered through `ConfigureDurableOptions` generated no functions at all, leaving the agent silently unreachable, and registering an agent that a workflow already referenced threw instead of promoting it. Agents now get the same entry points regardless of which method registers them and in which order, with each function generated exactly once even when a workflow and an explicit registration both contribute the same agent, while agents that exist only because a workflow references them continue to get no HTTP endpoint of their own ([#67](https://github.com/microsoft/agent-framework-durable-extension/pull/67))
+- [BREAKING] Always return JSON from the workflow status and respond endpoints, including on errors and when the request sends no `Accept` header, and fix malformed request bodies surfacing as an unhandled error instead of `400 Bad Request` ([#60](https://github.com/microsoft/agent-framework-durable-extension/pull/60))
 - [BREAKING] Support bounded synchronous workflow HTTP invocation through query parameters and default workflow run responses to JSON, with `Accept: text/plain` available for the legacy text format and the same negotiated asynchronous response returned on timeout ([#52](https://github.com/microsoft/agent-framework-durable-extension/pull/52))
 - Added `DurableTaskClient.AsWorkflowClient` so functions can invoke durable workflows without constructing an `HttpClient` ([#48](https://github.com/microsoft/agent-framework-durable-extension/pull/48))
 - [BREAKING] Consolidated the `AddWorkflow` extension overloads into a single method with optional `enableStatusEndpoint` and `enableMcpToolTrigger` parameters, and changed it to return `DurableWorkflowOptions` instead of `void` so multiple workflows can be registered fluently ([#39](https://github.com/microsoft/agent-framework-durable-extension/pull/39))

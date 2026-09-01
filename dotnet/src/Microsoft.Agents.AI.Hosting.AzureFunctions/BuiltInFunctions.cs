@@ -156,6 +156,10 @@ internal static class BuiltInFunctions
     /// Returns the workflow status including any pending HITL requests.
     /// The run ID is extracted from the route parameter <c>{runId}</c>.
     /// </summary>
+    /// <remarks>
+    /// This endpoint has no plain-text representation, so it always responds with JSON on both
+    /// success and failure regardless of the request's <c>Accept</c> header.
+    /// </remarks>
     public static async Task<HttpResponseData> GetWorkflowStatusAsync(
         [HttpTrigger] HttpRequestData req,
         [DurableClient] DurableTaskClient client,
@@ -164,13 +168,13 @@ internal static class BuiltInFunctions
         string? runId = context.BindingContext.BindingData.TryGetValue("runId", out object? value) ? value?.ToString() : null;
         if (string.IsNullOrEmpty(runId))
         {
-            return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, "Run ID is required.");
+            return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, "Run ID is required.", acceptsJson: true);
         }
 
         OrchestrationMetadata? metadata = await client.GetInstanceAsync(runId, getInputsAndOutputs: true);
         if (metadata is null || !IsOrchestrationOwnedByWorkflow(metadata.Name, context.FunctionDefinition.Name, StatusFunctionSuffix))
         {
-            return await CreateErrorResponseAsync(req, context, HttpStatusCode.NotFound, $"Workflow run '{runId}' not found.");
+            return await CreateErrorResponseAsync(req, context, HttpStatusCode.NotFound, $"Workflow run '{runId}' not found.", acceptsJson: true);
         }
 
         // Parse HITL inputs the workflow is waiting for from the durable workflow status
@@ -195,6 +199,10 @@ internal static class BuiltInFunctions
     /// Sends a response to a pending RequestPort, resuming the workflow.
     /// Expects a JSON body: <c>{ "eventName": "...", "response": { ... } }</c>.
     /// </summary>
+    /// <remarks>
+    /// This endpoint has no plain-text representation, so it always responds with JSON on both
+    /// success and failure regardless of the request's <c>Accept</c> header.
+    /// </remarks>
     public static async Task<HttpResponseData> RespondToWorkflowAsync(
         [HttpTrigger] HttpRequestData req,
         [DurableClient] DurableTaskClient client,
@@ -203,7 +211,7 @@ internal static class BuiltInFunctions
         string? runId = context.BindingContext.BindingData.TryGetValue("runId", out object? value) ? value?.ToString() : null;
         if (string.IsNullOrEmpty(runId))
         {
-            return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, "Run ID is required.");
+            return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, "Run ID is required.", acceptsJson: true);
         }
 
         WorkflowRespondRequest? request;
@@ -211,22 +219,24 @@ internal static class BuiltInFunctions
         {
             request = await req.ReadFromJsonAsync<WorkflowRespondRequest>(context.CancellationToken);
         }
-        catch (JsonException)
+        catch (Exception ex) when (ex is JsonException or AggregateException { InnerException: JsonException })
         {
-            return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, "Request body is not valid JSON.");
+            // ReadFromJsonAsync surfaces deserialization failures through a ContinueWith that reads
+            // Task.Result, so a malformed body arrives wrapped in an AggregateException.
+            return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, "Request body is not valid JSON.", acceptsJson: true);
         }
 
         if (request is null || string.IsNullOrEmpty(request.EventName)
             || request.Response.ValueKind == JsonValueKind.Undefined)
         {
-            return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, "Body must contain a non-empty 'eventName' and a 'response' property.");
+            return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, "Body must contain a non-empty 'eventName' and a 'response' property.", acceptsJson: true);
         }
 
         // Verify the orchestration exists and is in a valid state
         OrchestrationMetadata? metadata = await client.GetInstanceAsync(runId, getInputsAndOutputs: true);
         if (metadata is null || !IsOrchestrationOwnedByWorkflow(metadata.Name, context.FunctionDefinition.Name, RespondFunctionSuffix))
         {
-            return await CreateErrorResponseAsync(req, context, HttpStatusCode.NotFound, $"Workflow run '{runId}' not found.");
+            return await CreateErrorResponseAsync(req, context, HttpStatusCode.NotFound, $"Workflow run '{runId}' not found.", acceptsJson: true);
         }
 
         if (metadata.RuntimeStatus is OrchestrationRuntimeStatus.Completed
@@ -234,7 +244,7 @@ internal static class BuiltInFunctions
             or OrchestrationRuntimeStatus.Terminated)
         {
             return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest,
-                $"Workflow run '{runId}' is in terminal state '{metadata.RuntimeStatus}'.");
+                $"Workflow run '{runId}' is in terminal state '{metadata.RuntimeStatus}'.", acceptsJson: true);
         }
 
         // Verify the workflow is waiting for the specified event.
@@ -246,7 +256,7 @@ internal static class BuiltInFunctions
             if (!liveStatus.PendingEvents.Exists(p => string.Equals(p.EventName, request.EventName, StringComparison.Ordinal)))
             {
                 return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest,
-                    $"Workflow is not waiting for event '{request.EventName}'.");
+                    $"Workflow is not waiting for event '{request.EventName}'.", acceptsJson: true);
             }
 
             eventValidated = true;
