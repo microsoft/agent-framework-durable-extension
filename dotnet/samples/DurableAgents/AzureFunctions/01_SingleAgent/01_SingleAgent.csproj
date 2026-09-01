@@ -17,6 +17,12 @@
   <!-- Azure Functions packages -->
   <ItemGroup>
     <PackageReference Include="Microsoft.Azure.Functions.Worker" />
+    <!--
+      Microsoft.Azure.Functions.Worker.Extensions.DurableTask is not referenced here: this sample doesn't use the
+      Durable Functions APIs directly, and Microsoft.Agents.AI.Hosting.AzureFunctions already registers the
+      Durable Task extension with the Functions host. The package below registers the Durable Task Scheduler
+      backend selected by the "AzureManaged" storage provider in host.json.
+    -->
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.DurableTask.AzureManaged" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.Http.AspNetCore" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Sdk" />
