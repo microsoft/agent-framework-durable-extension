@@ -45,7 +45,7 @@ overrides = [
 
 [[package]]
 name = "agent-framework-azurefunctions"
-version = "1.0.0b260709"
+version = "1.0.0rc1"
 source = { editable = "packages/azurefunctions" }
 dependencies = [
     { name = "agent-framework-core", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -79,7 +79,7 @@ wheels = [
 
 [[package]]
 name = "agent-framework-durable-extension"
-version = "1.0.0b260709"
+version = "1.0.0rc1"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -146,7 +146,7 @@ test = [
 
 [[package]]
 name = "agent-framework-durabletask"
-version = "1.0.0b260709"
+version = "1.0.0rc1"
 source = { editable = "packages/durabletask" }
 dependencies = [
     { name = "agent-framework-core", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },

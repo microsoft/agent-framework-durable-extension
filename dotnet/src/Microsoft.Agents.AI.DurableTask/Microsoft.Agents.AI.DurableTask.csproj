@@ -3,6 +3,7 @@
   <PropertyGroup>
     <TargetFrameworks>$(TargetFrameworksCore)</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
+    <IsReleaseCandidate>true</IsReleaseCandidate>
     <!-- CA2007: This rule should generally be suppressed in Durable Task libraries -->
     <NoWarn>$(NoWarn);CA2007</NoWarn>
   </PropertyGroup>
