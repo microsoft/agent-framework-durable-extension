@@ -54,6 +54,7 @@ class TestExecuteWorkflowActivityStateDiff:
             config = state.get("Local.config")
             config["code"] = "SOMECODEXXX"
             config["enabled"] = True
+            state.set("Local.config", config)
             state.commit()
 
         executor = _make_executor("test-exec", mutate)
@@ -68,7 +69,9 @@ class TestExecuteWorkflowActivityStateDiff:
         """Adding a key to a nested dict is reported as an update."""
 
         async def mutate(message: Any, source_executor_ids: Any, state: Any, runner_context: Any) -> None:
-            state.get("Local.data")["code"] = "NEW_CODE"
+            data = state.get("Local.data")
+            data["code"] = "NEW_CODE"
+            state.set("Local.data", data)
             state.commit()
 
         executor = _make_executor("test-exec", mutate)
@@ -80,7 +83,9 @@ class TestExecuteWorkflowActivityStateDiff:
         """Appending to a nested list is reported as an update."""
 
         async def mutate(message: Any, source_executor_ids: Any, state: Any, runner_context: Any) -> None:
-            state.get("Local.items").append(4)
+            items = state.get("Local.items")
+            items.append(4)
+            state.set("Local.items", items)
             state.commit()
 
         executor = _make_executor("test-exec", mutate)
