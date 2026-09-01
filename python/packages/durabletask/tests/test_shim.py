@@ -7,7 +7,7 @@ Run with: pytest tests/test_shim.py -v
 """
 
 from typing import Any, cast
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from agent_framework import Message, SupportsAgentRun
@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from agent_framework_durabletask import DurableAgentSession
 from agent_framework_durabletask._executors import DurableAgentExecutor
+from agent_framework_durabletask._feature_usage import FeatureIndex
 from agent_framework_durabletask._models import RunRequest
 from agent_framework_durabletask._shim import DurableAgentProvider, DurableAIAgent
 
@@ -67,8 +68,10 @@ class TestDurableAIAgentMessageNormalization:
 
     def test_run_accepts_string_message(self, test_agent: DurableAIAgent[Any], mock_executor: Mock) -> None:
         """Verify run accepts and normalizes string messages."""
-        test_agent.run("Hello, world!")
+        with patch("agent_framework_durabletask._shim.mark_feature_used") as mark_feature_used:
+            test_agent.run("Hello, world!")
 
+        mark_feature_used.assert_called_once_with(FeatureIndex.DURABLETASK)
         mock_executor.run_durable_agent.assert_called_once()
         # Verify agent_name and run_request were passed correctly as kwargs
         _, kwargs = mock_executor.run_durable_agent.call_args

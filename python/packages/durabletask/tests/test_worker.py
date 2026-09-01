@@ -5,11 +5,12 @@
 Focuses on critical worker flows: agent registration, validation, callbacks, and lifecycle.
 """
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
 from agent_framework_durabletask import DurableAIAgentWorker
+from agent_framework_durabletask._feature_usage import FeatureIndex
 
 
 @pytest.fixture
@@ -131,8 +132,11 @@ class TestDurableAIAgentWorkerLifecycle:
         self, agent_worker: DurableAIAgentWorker, mock_grpc_worker: Mock
     ) -> None:
         """Verify start() delegates to wrapped worker."""
-        agent_worker.start()
+        with patch("agent_framework_durabletask._worker.mark_feature_used") as mark_feature_used:
+            agent_worker.start()
 
+        mark_feature_used.assert_called_once_with(FeatureIndex.DURABLETASK)
+        assert FeatureIndex.DURABLETASK == 77
         mock_grpc_worker.start.assert_called_once()
 
     def test_stop_delegates_to_underlying_worker(
