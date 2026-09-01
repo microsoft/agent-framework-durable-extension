@@ -7,6 +7,7 @@
   <Folder Name="/src/">
     <Project Path="src/Microsoft.Agents.AI.DurableTask/Microsoft.Agents.AI.DurableTask.csproj" />
     <Project Path="src/Microsoft.Agents.AI.Hosting.AzureFunctions/Microsoft.Agents.AI.Hosting.AzureFunctions.csproj" />
+    <Project Path="src/Microsoft.Agents.AI.Hosting.AzureFunctions.DurableTaskExtension/Microsoft.Agents.AI.Hosting.AzureFunctions.DurableTaskExtension.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Microsoft.Agents.AI.DurableTask.UnitTests/Microsoft.Agents.AI.DurableTask.UnitTests.csproj" />

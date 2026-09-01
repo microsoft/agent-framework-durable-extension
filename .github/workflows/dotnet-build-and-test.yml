@@ -46,6 +46,10 @@ jobs:
         working-directory: dotnet
         run: dotnet pack src/Microsoft.Agents.AI.DurableTask/Microsoft.Agents.AI.DurableTask.csproj --configuration Release --no-build --output ../artifacts/packages
 
+      - name: Pack Azure Functions Durable Task extension registration
+        working-directory: dotnet
+        run: dotnet pack src/Microsoft.Agents.AI.Hosting.AzureFunctions.DurableTaskExtension/Microsoft.Agents.AI.Hosting.AzureFunctions.DurableTaskExtension.csproj --configuration Release --no-build --output ../artifacts/packages
+
       - name: Pack Azure Functions hosting
         working-directory: dotnet
         run: dotnet pack src/Microsoft.Agents.AI.Hosting.AzureFunctions/Microsoft.Agents.AI.Hosting.AzureFunctions.csproj --configuration Release --no-build --output ../artifacts/packages
