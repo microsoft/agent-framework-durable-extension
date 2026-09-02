@@ -16,12 +16,14 @@ from typing import Any, cast
 import azure.durable_functions as df
 from agent_framework import SupportsAgentRun
 from agent_framework_durabletask import (
+    DEFAULT_MAX_STATE_BYTES,
+    DEFAULT_RETENTION,
     AgentEntity,
     AgentEntityStateProviderMixin,
     AgentResponseCallbackProtocol,
+    RetentionMode,
     run_agent_coroutine,
 )
-from agent_framework_durabletask._retention import DEFAULT_MAX_STATE_BYTES, DEFAULT_RETENTION, RetentionMode
 
 logger = logging.getLogger("agent_framework.azurefunctions")
 

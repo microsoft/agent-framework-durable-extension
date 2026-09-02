@@ -14,6 +14,7 @@ import azure.functions as func
 import pytest
 from agent_framework import AgentResponse, Message
 from agent_framework_durabletask import (
+    DEFAULT_MAX_STATE_BYTES,
     MIMETYPE_APPLICATION_JSON,
     MIMETYPE_TEXT_PLAIN,
     SESSION_ID_HEADER,
@@ -24,7 +25,6 @@ from agent_framework_durabletask import (
     DurableAgentState,
     workflow_orchestrator_name,
 )
-from agent_framework_durabletask._retention import DEFAULT_MAX_STATE_BYTES
 
 from agent_framework_azurefunctions import AgentFunctionApp
 from agent_framework_azurefunctions._app import (

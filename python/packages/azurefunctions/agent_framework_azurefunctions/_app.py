@@ -25,7 +25,9 @@ from agent_framework import SupportsAgentRun, Workflow
 from agent_framework._telemetry import mark_feature_used
 from agent_framework_durabletask import (
     DEFAULT_MAX_POLL_RETRIES,
+    DEFAULT_MAX_STATE_BYTES,
     DEFAULT_POLL_INTERVAL_SECONDS,
+    DEFAULT_RETENTION,
     LEGACY_THREAD_ID_FIELD,
     MIMETYPE_APPLICATION_JSON,
     MIMETYPE_TEXT_PLAIN,
@@ -40,15 +42,11 @@ from agent_framework_durabletask import (
     ApiResponseFields,
     DurableAgentState,
     DurableAIAgent,
+    RetentionMode,
     RunRequest,
     deserialize_workflow_output,
     execute_workflow_activity,
     plan_workflow_registration,
-)
-from agent_framework_durabletask._retention import (
-    DEFAULT_MAX_STATE_BYTES,
-    DEFAULT_RETENTION,
-    RetentionMode,
 )
 from agent_framework_durabletask._workflows.naming import (
     SUBWORKFLOW_REQUEST_SEPARATOR,

@@ -56,6 +56,7 @@ from ._history_provider import DurableHistoryBinding, DurableHistoryProvider
 from ._models import AgentSessionId, DurableAgentSession, RunRequest
 from ._orchestration_context import DurableAIAgentOrchestrationContext
 from ._response_utils import ensure_response_format, load_agent_response
+from ._retention import DEFAULT_MAX_STATE_BYTES, DEFAULT_RETENTION, RetentionMode
 from ._shim import DurableAIAgent, build_agent_task
 from ._worker import DurableAIAgentWorker
 from ._workflows.activity import execute_workflow_activity
@@ -115,7 +116,9 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "DEFAULT_MAX_POLL_RETRIES",
+    "DEFAULT_MAX_STATE_BYTES",
     "DEFAULT_POLL_INTERVAL_SECONDS",
+    "DEFAULT_RETENTION",
     "DURABLE_NAME_PREFIX",
     "LEGACY_THREAD_ID_FIELD",
     "MIMETYPE_APPLICATION_JSON",
@@ -169,6 +172,7 @@ __all__ = [
     "DurableStateFields",
     "DurableTaskWorkflowContext",
     "DurableWorkflowClient",
+    "RetentionMode",
     "RunRequest",
     "WorkflowOrchestrationContext",
     "WorkflowRegistrationPlan",
