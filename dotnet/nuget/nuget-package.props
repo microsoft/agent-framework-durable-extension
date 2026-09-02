@@ -1,7 +1,7 @@
 <Project>
   <PropertyGroup>
     <!-- Central version prefix - applies to all nuget packages. -->
-    <VersionPrefix Condition="'$(VersionPrefix)' == ''">1.13.0</VersionPrefix>
+    <VersionPrefix>1.13.0</VersionPrefix>
     <RCNumber>1</RCNumber>
     <DateSuffix>260703</DateSuffix>
     <PackageVersion Condition="'$(IsReleaseCandidate)' == 'true'">$(VersionPrefix)-rc$(RCNumber)</PackageVersion>

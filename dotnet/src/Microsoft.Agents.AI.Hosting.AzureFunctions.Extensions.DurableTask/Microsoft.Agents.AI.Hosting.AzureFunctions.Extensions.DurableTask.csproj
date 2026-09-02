@@ -2,7 +2,6 @@
 
   <PropertyGroup>
     <TargetFrameworks>$(TargetFrameworksCore)</TargetFrameworks>
-    <VersionPrefix>0.1.0</VersionPrefix>
     <!-- This assembly only carries an assembly-level attribute, so there is nothing to document. -->
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <!-- The Durable Task worker extension is referenced for its build assets, not for its API surface. -->
