@@ -206,8 +206,7 @@ internal sealed class DurableWorkflowRunner
             if (superstep == maxSupersteps && remainingExecutors > 0)
             {
                 logger.LogWorkflowMaxSuperstepsExceeded(context.InstanceId, maxSupersteps, remainingExecutors);
-                throw new MaxSuperstepsExceededException(
-                    $"Workflow instance '{context.InstanceId}' reached the maximum of {maxSupersteps} supersteps with {remainingExecutors} executor(s) still queued.");
+                throw new MaxSuperstepsExceededException(context.InstanceId, maxSupersteps, remainingExecutors);
             }
         }
 

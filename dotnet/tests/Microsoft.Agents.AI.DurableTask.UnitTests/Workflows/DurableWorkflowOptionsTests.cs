@@ -35,7 +35,8 @@ public sealed class DurableWorkflowOptionsTests
     {
         DurableWorkflowOptions options = new DurableOptions().Workflows;
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => options.MaxSupersteps = value);
+        ArgumentOutOfRangeException exception = Assert.Throws<ArgumentOutOfRangeException>(() => options.MaxSupersteps = value);
+        Assert.Equal(nameof(DurableWorkflowOptions.MaxSupersteps), exception.ParamName);
     }
 
     [Fact]

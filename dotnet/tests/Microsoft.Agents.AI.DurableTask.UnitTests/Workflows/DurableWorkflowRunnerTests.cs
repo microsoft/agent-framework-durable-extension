@@ -45,6 +45,9 @@ public sealed class DurableWorkflowRunnerTests
                 logger));
 
         // Assert
+        Assert.Equal(InstanceId, exception.InstanceId);
+        Assert.Equal(3, exception.MaxSupersteps);
+        Assert.Equal(1, exception.RemainingExecutors);
         Assert.Contains(InstanceId, exception.Message, StringComparison.Ordinal);
         Assert.Contains("maximum of 3 supersteps", exception.Message, StringComparison.Ordinal);
         Assert.Contains("1 executor(s) still queued", exception.Message, StringComparison.Ordinal);

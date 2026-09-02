@@ -41,7 +41,7 @@ public sealed class DurableWorkflowOptions
         get;
         set
         {
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value, nameof(this.MaxSupersteps));
             field = value;
         }
     } = 100;
