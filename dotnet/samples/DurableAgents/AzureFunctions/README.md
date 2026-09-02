@@ -85,7 +85,11 @@ azurite
 
 ### Environment Configuration
 
-Each sample has its own `local.settings.json` file that contains the environment variables for the sample. You'll need to update the `local.settings.json` file with the correct values for your Foundry project.
+Each sample includes a `local.settings.json.template` containing the settings it requires. Copy it to `local.settings.json`, then update the Foundry settings:
+
+```bash
+cp local.settings.json.template local.settings.json
+```
 
 ```json
 {
