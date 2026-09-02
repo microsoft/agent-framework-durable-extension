@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <TargetFrameworks>$(TargetFrameworksCore)</TargetFrameworks>
+    <VersionPrefix>0.1.0</VersionPrefix>
     <!-- This assembly only carries an assembly-level attribute, so there is nothing to document. -->
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <!-- The Durable Task worker extension is referenced for its build assets, not for its API surface. -->
@@ -19,6 +20,9 @@
   <PropertyGroup>
     <Title>Durable Task Azure Functions extension for Microsoft Agent Framework</Title>
     <Description>Registers the Durable Task Azure Functions extension so that applications hosting durable agents do not need to declare a Durable Functions trigger of their own.</Description>
+    <!-- Enable package validation after the first stable version is published. -->
+    <PackageValidationBaselineVersion />
+    <EnablePackageValidation>false</EnablePackageValidation>
   </PropertyGroup>
 
   <ItemGroup>
