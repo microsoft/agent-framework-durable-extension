@@ -54,7 +54,7 @@ See the [README.md](../../README.md) file in the parent directory for complete s
 - Durable Task Scheduler setup
 - Storage emulator configuration
 
-This sample also requires Foundry project configuration. Set the following in `local.settings.json`:
+This sample also requires Foundry project configuration. Copy `local.settings.json.template` to `local.settings.json`, then set the following values:
 
 - `FOUNDRY_PROJECT_ENDPOINT`: Your Foundry project endpoint URL
 - `FOUNDRY_MODEL`: Your Foundry model deployment name
