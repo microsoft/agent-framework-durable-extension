@@ -140,9 +140,18 @@
         "role": { "type": "string", "enum": ["user", "assistant", "system", "tool"] },
         "contents": {
           "type": "array",
+          "description": "The message content. An empty array is meaningful rather than malformed: it records that the exchange happened while the content itself lives somewhere else. That is what a request looks like when the caller configured their own history provider, since keeping a second copy would put the same content under two different retention, residency and deletion policies. Responses keep their content regardless, because a caller collects its answer by polling this entity for a correlation id and nothing else can produce it.",
           "items": { "$ref": "#/$defs/chatContentItem" }
         },
-        "createdAt": { "type": "string", "format": "date-time", "description": "When this message was created (RFC 3339)." }
+        "createdAt": { "type": "string", "format": "date-time", "description": "When this message was created (RFC 3339)." },
+        "messageId": {
+          "type": "string",
+          "description": "Stable identity for this message. Context management reconciles its results back onto stored messages by this value, so an implementation that drops it on round-trip silently loses compaction state. Assigned by the runtime when the producer left it unset."
+        },
+        "extensionData": {
+          "type": "object",
+          "description": "Message-level metadata, carrying the annotations context management writes (for example exclusion markers and summary markers). Must round-trip: discarding it loses compaction state rather than failing loudly."
+        }
       },
       "required": ["role"]
     },
@@ -153,6 +162,7 @@
     },
     "conversationEntry": {
       "type": "object",
+      "description": "Fields shared by every kind of conversation entry. Not used directly: an entry is always one of the four concrete kinds below, discriminated by $type.",
       "properties": {
         "createdAt": { "type": "string", "format": "date-time", "description": "When this exchange was created (RFC 3339)." },
         "correlationId": { "type": "string", "description": "An optional correlation ID to group related exchanges." },
@@ -164,6 +174,7 @@
         { "$ref": "#/$defs/conversationEntry" }
       ],
       "description": "The request (i.e. prompt) sent to the agent.",
+      "required": ["$type"],
       "properties": {
         "$type": { "type": "string", "const": "request" },
         "orchestrationId": {
@@ -185,11 +196,35 @@
         { "$ref": "#/$defs/conversationEntry" }
       ],
       "description": "The response received from the agent.",
+      "required": ["$type"],
       "properties": {
         "$type": { "type": "string", "const": "response" },
         "usage": {
           "$ref": "#/$defs/usage"
         }
+      }
+    },
+    "agentErrorResponse": {
+      "allOf": [
+        { "$ref": "#/$defs/conversationEntry" }
+      ],
+      "description": "A turn that failed. Returned to the caller waiting on its correlation ID, because an error is still an answer, but never replayed to the model as conversation. The distinction is carried by $type rather than a flag so that it survives serialization.",
+      "required": ["$type"],
+      "properties": {
+        "$type": { "type": "string", "const": "errorResponse" },
+        "usage": {
+          "$ref": "#/$defs/usage"
+        }
+      }
+    },
+    "compaction": {
+      "allOf": [
+        { "$ref": "#/$defs/conversationEntry" }
+      ],
+      "description": "A message produced by context compaction, such as a summary replacing the turns it stands in for. Part of the model's transcript and positioned in conversation order, but it answers no request, so it carries no correlation ID and is never returned to a caller polling for a response.",
+      "required": ["$type"],
+      "properties": {
+        "$type": { "type": "string", "const": "compaction" }
       }
     },
     "data": {
@@ -198,8 +233,46 @@
       "properties": {
         "conversationHistory": {
           "type": "array",
-          "description": "Ordered list of conversation entries.",
-          "items": { "$ref": "#/$defs/conversationEntry" }
+          "description": "Ordered list of conversation entries. Every entry declares its kind through $type, so an implementation can dispatch on it rather than inferring the kind from which fields happen to be present.",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/agentRequest" },
+              { "$ref": "#/$defs/agentResponse" },
+              { "$ref": "#/$defs/agentErrorResponse" },
+              { "$ref": "#/$defs/compaction" }
+            ]
+          }
+        },
+        "session": {
+          "type": "object",
+          "description": "Serialized agent session carried between turns, holding the per-provider state bag and any service-issued conversation id. The shape is the hosting runtime's own and is deliberately not fixed here: .NET serializes conversationId plus stateBag, Python serializes session_id, service_session_id and state. Treat it as opaque and discriminate on the properties present. The agent's own history provider slice is excluded, since conversationHistory is the record of truth."
+        },
+        "ingestedPositions": {
+          "type": "object",
+          "description": "Highest chained-conversation position this entity has taken from each workflow executor, keyed by executor id. A workflow re-sends the whole conversation on every visit, so this is what lets a repeated node recognize context it already recorded. Kept separately from the messages because retention may delete them.",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "truncation": {
+          "type": "object",
+          "description": "What retention has removed from this conversation. Absent until something has been evicted, so its absence means the record is complete. Present because eviction is a lossy act performed by the runtime rather than by the user, and a log line is only evidence to whoever was watching at the time. Deliberately a counter and two timestamps rather than a list of what went, since such a list would grow without bound in exactly the situation retention exists to resolve.",
+          "properties": {
+            "evictedMessageCount": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Total messages retention has evicted over the life of this conversation."
+            },
+            "firstEvictedAt": {
+              "type": "string",
+              "format": "date-time",
+              "description": "When this conversation first became incomplete."
+            },
+            "lastEvictedAt": {
+              "type": "string",
+              "format": "date-time",
+              "description": "When retention last removed anything."
+            }
+          },
+          "required": ["evictedMessageCount", "firstEvictedAt", "lastEvictedAt"]
         }
       }
     }

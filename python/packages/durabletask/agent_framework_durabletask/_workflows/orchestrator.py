@@ -51,8 +51,10 @@ from agent_framework._workflows._state import State
 
 from .context import WorkflowOrchestrationContext
 from .naming import (
+    WORKFLOW_INPUT_EXECUTOR_ID,
     qualify_subworkflow_request_id,
     workflow_executor_activity_name,
+    workflow_message_id,
     workflow_orchestrator_name,
     workflow_scoped_executor_id,
 )
@@ -231,7 +233,19 @@ def build_agent_executor_response(
     if isinstance(previous_message, AgentExecutorResponse) and previous_message.full_conversation:
         full_conversation.extend(previous_message.full_conversation)
     elif isinstance(previous_message, str):
-        full_conversation.append(Message(role="user", contents=[previous_message]))
+        full_conversation.append(
+            Message(
+                role="user",
+                contents=[previous_message],
+                message_id=workflow_message_id(WORKFLOW_INPUT_EXECUTOR_ID, 0),
+            )
+        )
+    # Core leaves message_id unset, and a node that runs more than once receives this
+    # conversation again every time. Without an id the entity cannot tell the repeat from new
+    # input, so it re-records the whole conversation on each visit and state grows without bound.
+    # The position is fixed once a message joins the conversation and the orchestrator rebuilds
+    # the same sequence on replay, so deriving the id from it is both unique and replay-safe.
+    assistant_message.message_id = workflow_message_id(executor_id, len(full_conversation))
     full_conversation.append(assistant_message)
 
     return AgentExecutorResponse(
@@ -246,8 +260,44 @@ def build_agent_executor_response(
 # ============================================================================
 
 
+def _build_context_messages(executor: AgentExecutor, message: Any) -> list[dict[str, Any]] | None:
+    """Project the upstream conversation into messages for a downstream agent.
+
+    Mirrors the in-process :class:`AgentExecutor` context behavior so a workflow behaves the
+    same way durably: ``full`` forwards the whole upstream conversation, ``last_agent`` only the
+    previous agent's messages, and ``custom`` applies the executor's ``context_filter``.
+
+    Returns ``None`` when there is no upstream conversation to forward (for example the first
+    node in a workflow, which receives the raw input instead).
+
+    The mode and filter are read off private attributes because core takes them as constructor
+    arguments and exposes no public accessor for either. Reading them is therefore the only way
+    to match in-process behavior. The coupling is deliberate rather than accidental, and it is
+    covered: the projection tests build a real ``AgentExecutor`` for each mode, so if core ever
+    renames these the fallback to ``full`` changes the projection and those tests fail.
+    """
+    if not isinstance(message, AgentExecutorResponse):
+        return None
+
+    mode = getattr(executor, "_context_mode", "full")
+    if mode == "last_agent":
+        selected = list(message.agent_response.messages) if message.agent_response else []
+    elif mode == "custom":
+        context_filter = getattr(executor, "_context_filter", None)
+        if context_filter is None:
+            return None
+        selected = list(context_filter(list(message.full_conversation)))
+    else:
+        selected = list(message.full_conversation)
+
+    if not selected:
+        return None
+    return [m.to_dict() for m in selected]
+
+
 def _prepare_agent_task(
     ctx: WorkflowOrchestrationContext,
+    executor: AgentExecutor,
     executor_id: str,
     message: Any,
     workflow_name: str,
@@ -259,10 +309,14 @@ def _prepare_agent_task(
     executor id dispatch to distinct entities (the entity layer prefixes this with
     ``dafx-``). The session *key* stays the orchestration instance id, so
     conversation state remains isolated per run.
+
+    Any upstream conversation is forwarded as context messages so a downstream agent sees
+    what earlier nodes produced, matching in-process workflow behavior.
     """
     message_content = _extract_message_content(message)
+    context_messages = _build_context_messages(executor, message)
     scoped_id = workflow_scoped_executor_id(workflow_name, executor_id)
-    return ctx.prepare_agent_task(scoped_id, message_content, ctx.instance_id)
+    return ctx.prepare_agent_task(scoped_id, message_content, ctx.instance_id, context_messages)
 
 
 def _prepare_activity_task(
@@ -945,7 +999,13 @@ def _prepare_all_tasks(
         remaining = messages_list[1:]
 
         logger.debug("Preparing agent task: %s", executor_id)
-        task = _prepare_agent_task(ctx, first_msg[0], first_msg[1], workflow.name)
+        task = _prepare_agent_task(
+            ctx,
+            cast(AgentExecutor, workflow.executors[first_msg[0]]),
+            first_msg[0],
+            first_msg[1],
+            workflow.name,
+        )
         all_tasks.append(task)
         task_metadata_list.append(
             TaskMetadata(
@@ -1159,7 +1219,13 @@ def run_workflow_orchestrator(
         # Phase 3: Process sequential agent messages
         for executor_id, message, _source_executor_id in remaining_agent_messages:
             logger.debug("Processing sequential message for agent: %s", executor_id)
-            task = _prepare_agent_task(ctx, executor_id, message, workflow.name)
+            task = _prepare_agent_task(
+                ctx,
+                cast(AgentExecutor, workflow.executors[executor_id]),
+                executor_id,
+                message,
+                workflow.name,
+            )
             agent_response: AgentResponse = yield task
             logger.debug("Agent %s sequential response completed", executor_id)
 

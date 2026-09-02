@@ -1,0 +1,557 @@
+# Copyright (c) Microsoft. All rights reserved.
+
+"""A core ``HistoryProvider`` backed by durable entity state.
+
+This lets the durable runtime plug into the Agent Framework context-provider pipeline
+instead of managing conversation history itself. Because the agent's own history
+provider supplies context, core compaction (``CompactionProvider``) works unchanged and
+its annotations are persisted alongside the messages in durable entity state - a single
+stored copy, no side-car session blob.
+
+See ADR-0032 (durable thread compaction).
+"""
+
+from __future__ import annotations
+
+import copy
+import logging
+from collections.abc import Iterator, Mapping, Sequence
+from contextvars import ContextVar, Token
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, cast
+
+from agent_framework import HistoryProvider, InMemoryHistoryProvider, Message, SupportsAgentRun
+
+from ._durable_agent_state import (
+    DurableAgentStateCompaction,
+    DurableAgentStateEntry,
+    DurableAgentStateErrorResponse,
+    DurableAgentStateMessage,
+)
+
+if TYPE_CHECKING:
+    from ._entities import AgentEntityStateProviderMixin
+
+logger = logging.getLogger("agent_framework.durabletask")
+
+WORKING_BUFFER_KEY = "messages"
+POSITIONS_KEY = "_positions"
+EXCLUDED_KEY = "_excluded"
+
+
+@dataclass
+class DurableHistoryBinding:
+    """Per-operation binding between a durable entity and the history provider."""
+
+    state_provider: AgentEntityStateProviderMixin
+    """The entity state provider whose conversation history backs the agent."""
+
+    correlation_id: str | None = None
+    """Correlation id of the in-flight request, whose entry is excluded from loaded history."""
+
+    service_owns_history: bool = False
+    """Whether the model service is holding the conversation for *this* run.
+
+    The provider stays attached in every configuration, so that core never injects a history
+    provider of its own whose state would land in entity state beyond retention's reach. But a
+    service-backed run continues the conversation by id rather than by resending it, so loading
+    history here as well would hand the model the whole transcript on top of the copy the service
+    already has. Whoever owns a given run is only known once its options are resolved, which is
+    why this rides on the binding rather than on the provider.
+    """
+
+
+_current_binding: ContextVar[DurableHistoryBinding | None] = ContextVar(
+    "durable_history_binding",
+    default=None,
+)
+
+
+def bind_durable_history(binding: DurableHistoryBinding) -> Token[DurableHistoryBinding | None]:
+    """Bind the durable entity state for the current operation.
+
+    Returns a token that must be passed to :func:`unbind_durable_history`.
+    """
+    return _current_binding.set(binding)
+
+
+def unbind_durable_history(token: Token[DurableHistoryBinding | None]) -> None:
+    """Release a binding created by :func:`bind_durable_history`."""
+    _current_binding.reset(token)
+
+
+def current_durable_history_binding() -> DurableHistoryBinding | None:
+    """Return the binding for the current durable operation, if any."""
+    return _current_binding.get()
+
+
+class DurableHistoryProvider(HistoryProvider):
+    """History provider whose store is the durable entity's conversation history.
+
+    The durable entity remains the writer of record for requests and responses, so this
+    provider does not append messages itself (``store_inputs``/``store_outputs`` are off).
+    What it does provide is:
+
+    * **load** - flattens persisted conversation history into ``Message`` objects, restoring
+      any compaction annotations that were stored with them.
+    * **flush** - writes annotations that compaction applied during the run back into the
+      persisted messages, so compaction state survives across entity operations.
+
+    Attributes:
+        skip_excluded: When True, messages marked ``_excluded`` by compaction are omitted
+            from the context loaded for the model. The messages remain in durable storage.
+        prune_excluded: When True, excluded messages are physically removed from durable
+            storage on flush. This is **lossy** and opt-in, and it is the only thing that bounds
+            storage as compaction happens rather than waiting for pressure. Retention still
+            bounds the state independently, whatever this is set to.
+    """
+
+    DEFAULT_SOURCE_ID = "durable_history"
+
+    def __init__(
+        self,
+        source_id: str | None = None,
+        *,
+        skip_excluded: bool = True,
+        prune_excluded: bool | None = None,
+    ) -> None:
+        """Initialize the durable history provider.
+
+        Args:
+            source_id: Unique identifier for this provider instance.
+            skip_excluded: Omit compaction-excluded messages from loaded context.
+            prune_excluded: Physically delete excluded messages from durable storage on flush.
+                Lossy, so it is off unless asked for. Leaving it unset defers to the entity's
+                ``retention`` mode, which resolves it when the provider is prepared for a run.
+                Passing it explicitly pins the behaviour and retention will not override it, which
+                is what lets a caller who wires this provider by hand opt in or out independently
+                of the mode. Unset and unresolved, as when this provider is not the one the entity
+                prepared, it does not prune.
+        """
+        super().__init__(
+            source_id=source_id or self.DEFAULT_SOURCE_ID,
+            load_messages=True,
+            # The durable entity owns appends to conversation history.
+            store_inputs=False,
+            store_outputs=False,
+        )
+        self.skip_excluded = skip_excluded
+        self.prune_excluded = prune_excluded
+
+    def _binding(self) -> DurableHistoryBinding | None:
+        binding = current_durable_history_binding()
+        if binding is None:
+            logger.warning(
+                "[DurableHistoryProvider] No durable binding is active, so the provider yields no history. "
+                "This provider only works inside a durable agent entity operation."
+            )
+        return binding
+
+    def _replayable_entries(self, binding: DurableHistoryBinding) -> Iterator[tuple[DurableAgentStateEntry, int]]:
+        """Yield (entry, message_index) pairs that participate in model context."""
+        yield from replayable_entries(
+            binding.state_provider.state.data.conversation_history,
+            correlation_id=binding.correlation_id,
+        )
+
+    @staticmethod
+    def _synthetic_message_id(entry: DurableAgentStateEntry, index: int) -> str:
+        """Build an id for a stored message that arrived without one.
+
+        The id comes from persisted fields, so a cold start or a retried flush regenerates the
+        same value. An id derived from object identity would not, and a recycled address could
+        collide with an id an earlier run already persisted.
+
+        Args:
+            entry: History entry holding the message.
+            index: Position of the message within that entry.
+
+        Returns:
+            An id unique within the conversation history.
+        """
+        # A request and its response share a correlation id, so the entry type is what tells the
+        # two sides of an exchange apart.
+        scope = entry.correlation_id or entry.created_at.isoformat()
+        return f"durable_{entry.json_type.value}_{scope}_{index}"
+
+    @staticmethod
+    def _to_message(stored: DurableAgentStateMessage) -> Message | None:
+        """Convert a persisted message into one that is safe to replay to a chat client."""
+        chat_message: Message = stored.to_chat_message()
+        replayable = [content for content in chat_message.contents if content.type != "reasoning"]
+        if not replayable:
+            return None
+        return Message(
+            role=chat_message.role,
+            contents=replayable,
+            author_name=chat_message.author_name,
+            message_id=stored.message_id,
+            additional_properties=chat_message.additional_properties,
+        )
+
+    async def get_messages(
+        self, session_id: str | None, *, state: dict[str, Any] | None = None, **kwargs: Any
+    ) -> list[Message]:
+        """Load conversation history from durable entity state."""
+        binding = self._binding()
+        if binding is None:
+            return []
+
+        if binding.service_owns_history:
+            # The service is holding this conversation and core will continue it by id. Returning
+            # history as well would send the model everything twice. The provider is still
+            # attached, which is what keeps core from injecting one whose state nothing bounds.
+            return []
+
+        loaded: list[Message] = []
+        id_map: dict[str, tuple[DurableAgentStateEntry, int]] = {}
+        for entry, index in self._replayable_entries(binding):
+            stored = entry.messages[index]
+            message = self._to_message(stored)
+            if message is None:
+                continue
+            if not message.message_id:
+                # Give every loaded message a stable identity so compaction results can be
+                # reconciled back onto durable state on flush.
+                message.message_id = self._synthetic_message_id(entry, index)
+                stored.message_id = message.message_id
+            loaded.append(message)
+            id_map[message.message_id] = (entry, index)
+
+        if state is not None:
+            # Expose the loaded messages as the working buffer so CompactionProvider's
+            # after_strategy can annotate them (core reads session.state[source_id]["messages"]).
+            state[WORKING_BUFFER_KEY] = loaded
+            state[POSITIONS_KEY] = id_map
+
+        if self.skip_excluded:
+            return [m for m in loaded if not m.additional_properties.get(EXCLUDED_KEY)]
+        return list(loaded)
+
+    async def save_messages(
+        self,
+        session_id: str | None,
+        messages: Sequence[Message],
+        *,
+        state: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """No-op: the durable entity appends requests and responses to its own state."""
+        return
+
+    @staticmethod
+    def _is_service_managed(session: Any) -> bool:
+        """Return whether the conversation is stored by the model service, not by us."""
+        return bool(getattr(session, "service_session_id", None))
+
+    async def before_run(
+        self,
+        *,
+        agent: Any,
+        session: Any,
+        context: Any,
+        state: dict[str, Any],
+    ) -> None:
+        """Load durable history into context, unless the service owns the conversation."""
+        if self._is_service_managed(session):
+            logger.debug("[DurableHistoryProvider] Session is service-managed, skipping durable history load.")
+            return
+        await super().before_run(agent=agent, session=session, context=context, state=state)
+
+    async def after_run(
+        self,
+        *,
+        agent: Any,
+        session: Any,
+        context: Any,
+        state: dict[str, Any],
+    ) -> None:
+        """Flush compaction annotations from the working buffer into durable state."""
+        if self._is_service_managed(session):
+            return
+        self.flush(state)
+
+    def flush(self, state: dict[str, Any]) -> None:
+        """Apply compaction results to durable entity state.
+
+        Reconciliation is by ``message_id`` rather than position, so strategies that
+        *insert* messages (for example ``ToolResultCompactionStrategy``, which replaces a
+        tool-call group with a summary) are handled as well as ones that only annotate.
+
+        Nothing is written here. These edits land on the entity's cached state, and the entity
+        writes that state once at the end of every operation, on the success path and the failure
+        path alike. Writing here too would serialize the whole conversation a second time on every
+        turn, for a snapshot that cannot include the response yet and is replaced moments later.
+
+        Args:
+            state: The provider-scoped session state holding the working buffer.
+        """
+        binding = current_durable_history_binding()
+        if binding is None:
+            return
+
+        raw_buffer = state.get(WORKING_BUFFER_KEY)
+        raw_positions = state.get(POSITIONS_KEY)
+        if not isinstance(raw_buffer, list) or not isinstance(raw_positions, dict):
+            return
+        buffer = cast("list[Message]", raw_buffer)
+        stored_by_id = cast("dict[str, tuple[DurableAgentStateEntry, int]]", raw_positions)
+
+        pruned: list[tuple[DurableAgentStateEntry, DurableAgentStateMessage]] = []
+        # Messages that compaction added (summaries) are inserted right after the last
+        # known message so ordering in durable state matches the compacted conversation.
+        last_known: tuple[DurableAgentStateEntry, int] | None = None
+
+        for message in buffer:
+            annotations = dict(message.additional_properties) if message.additional_properties else None
+            position = stored_by_id.get(message.message_id) if message.message_id else None
+
+            if position is None:
+                inserted = self._insert_new_message(binding, message, after=last_known)
+                if inserted is not None:
+                    last_known = inserted
+                continue
+
+            entry, index = position
+            stored = entry.messages[index]
+            stored.extension_data = annotations
+            last_known = position
+            if self.prune_excluded and annotations and annotations.get(EXCLUDED_KEY):
+                pruned.append((entry, stored))
+
+        if pruned:
+            self._prune(binding, pruned)
+
+    @staticmethod
+    def _insert_new_message(
+        binding: DurableHistoryBinding,
+        message: Message,
+        *,
+        after: tuple[DurableAgentStateEntry, int] | None,
+    ) -> tuple[DurableAgentStateEntry, int] | None:
+        """Persist a message compaction produced, such as a summary, as an entry of its own.
+
+        It takes its place in conversation order, but as a compaction entry rather than inside
+        whichever request or response it happened to follow. Folding it into a response made it
+        part of that response, so a caller polling that correlation was handed back a summary the
+        agent never produced.
+
+        Having its own entry also means nothing downstream has to be told to skip it. It is not a
+        response, so the lookup that serves waiting callers cannot match it.
+        """
+        history = binding.state_provider.state.data.conversation_history
+        entry = DurableAgentStateCompaction(
+            created_at=datetime.now(tz=timezone.utc),
+            messages=[DurableAgentStateMessage.from_chat_message(message)],
+        )
+
+        if after is not None:
+            owner, _ = after
+            try:
+                position = history.index(owner) + 1
+            except ValueError:  # pragma: no cover - the owning entry was pruned mid-pass
+                position = len(history)
+            history.insert(position, entry)
+            return entry, 0
+
+        if not history:
+            return None
+        history.insert(0, entry)
+        return entry, 0
+
+    @staticmethod
+    def _prune(
+        binding: DurableHistoryBinding,
+        pruned: list[tuple[DurableAgentStateEntry, DurableAgentStateMessage]],
+    ) -> None:
+        """Physically remove excluded messages (and any entries left empty).
+
+        Removal is by identity rather than index, since insertions earlier in this flush may have
+        moved messages within their entry.
+        """
+        prune_messages(binding.state_provider.state.data.conversation_history, pruned)
+
+
+def replayable_entries(
+    history: list[DurableAgentStateEntry],
+    *,
+    correlation_id: str | None = None,
+) -> Iterator[tuple[DurableAgentStateEntry, int]]:
+    """Yield (entry, message_index) pairs that participate in model context.
+
+    Shared by the history provider and by retention, so both agree on which stored messages are
+    real conversation rather than bookkeeping.
+
+    Args:
+        history: The entity's conversation history.
+        correlation_id: The in-flight request, which is delivered as run input rather than history.
+
+    Yields:
+        Each replayable message as its owning entry and its index within that entry.
+    """
+    for entry in history:
+        if isinstance(entry, DurableAgentStateErrorResponse):
+            # A failed turn is kept so the caller waiting on it can be told, but the reason a turn
+            # failed is not something the assistant said, so it never becomes model context.
+            continue
+        if correlation_id is not None and entry.correlation_id == correlation_id:
+            continue
+        for index in range(len(entry.messages)):
+            yield entry, index
+
+
+def prune_messages(
+    history: list[DurableAgentStateEntry],
+    pruned: list[tuple[DurableAgentStateEntry, DurableAgentStateMessage]],
+) -> None:
+    """Physically remove the given messages, and any entries left empty.
+
+    Removal is by identity rather than index, since an insertion elsewhere in the same pass may
+    have moved messages within their entry.
+
+    Args:
+        history: The entity's conversation history, modified in place.
+        pruned: The messages to remove, each with the entry that owns it.
+    """
+    for entry, stored in pruned:
+        for index, candidate in enumerate(entry.messages):
+            if candidate is stored:
+                del entry.messages[index]
+                break
+
+    remaining = [entry for entry in history if entry.messages]
+    if len(remaining) != len(history):
+        history[:] = remaining
+
+
+def service_stores_history(agent: Any, options: Mapping[str, Any] | None = None) -> bool:
+    """Return whether the service keeps conversation history for this run.
+
+    Mirrors core's precedence, most specific first: the option passed on the run itself, then an
+    explicit ``store`` in the agent's default options, and only when both are unset does the
+    client's ``STORES_BY_DEFAULT`` apply. Clients that store by default (such as the Responses
+    API) can therefore be put back in client-side mode either permanently or for a single run, and
+    in that case durable history is what makes the conversation survive.
+
+    Resolved per run rather than once at registration because ``store`` is an ordinary run option.
+    An agent registered against a storing client can still be asked to keep one turn client-side,
+    and whoever answers that turn's history has to be decided at that point.
+
+    Args:
+        agent: The agent being run.
+        options: The effective options for this run, when there is a run in progress.
+
+    Returns:
+        True when the model service is holding this conversation.
+    """
+    if options is not None:
+        run_store = options.get("store")
+        if run_store is not None:
+            return bool(run_store)
+    default_options = getattr(agent, "default_options", None)
+    if isinstance(default_options, Mapping):
+        explicit_store = cast("Mapping[str, Any]", default_options).get("store")
+        if explicit_store is not None:
+            return bool(explicit_store)
+    client = getattr(agent, "client", None)
+    return bool(getattr(client, "STORES_BY_DEFAULT", False))
+
+
+def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = False) -> SupportsAgentRun:
+    """Back an agent's conversation history with durable entity state.
+
+    Lets a user register an agent that already works in core and get durable behavior with no
+    configuration change. The agent is never mutated: when a substitution is needed a shallow
+    copy is returned with its own provider list.
+
+    The rules mirror what core would do, so behavior stays predictable:
+
+    * **No history provider** - a :class:`DurableHistoryProvider` is added. It uses the same
+      ``source_id`` core's auto-injected provider would have, so a ``CompactionProvider`` left on
+      its defaults still finds it.
+    * **In-memory history** - replaced by a :class:`DurableHistoryProvider` carrying the *same*
+      ``source_id`` and ``skip_excluded``, so any compaction wired to it keeps working untouched.
+    * **A durable provider the caller wired themselves** - kept as-is when they pinned
+      ``prune_excluded``, since that is an explicit choice. Rebuilt with the retention mode's
+      value when they left it unset, because otherwise ``follow_compaction`` would silently do
+      nothing for anyone who constructs the provider by hand.
+    * **Any other history provider** (Cosmos, Redis, file, custom) - left alone. The user chose
+      where their conversation lives, and durable still provides execution durability. Core does
+      not inject anything when one of these is present, so there is nothing to pre-empt.
+    * **Service-managed history** - a provider is still added. The service owning the conversation
+      is a per-*run* fact, not a per-registration one: a run may pass ``store=False``, and core
+      then injects a history provider of its own whose state is persisted with the entity but is
+      invisible to retention. Claiming the slot up front means those turns land in durable state
+      where retention can reach them. The provider yields no history on runs the service does own,
+      so the model is never sent the transcript twice.
+    * **Agents without the core context pipeline** - left alone, and the entity falls back to
+      replaying its own persisted history.
+
+    Args:
+        agent: The agent being registered with the durable runtime.
+
+    Keyword Args:
+        prune_excluded: When True, the injected provider physically deletes messages that
+            compaction excluded, bounding durable storage. This is a **lossy retention policy**
+            and is off by default.
+
+    Returns:
+        The agent to run, either unchanged or a shallow copy with durable-backed history.
+    """
+    providers = getattr(agent, "context_providers", None)
+    if not isinstance(providers, (list, tuple)):
+        return agent
+
+    provider_list = list(cast("Sequence[Any]", providers))
+    existing = next(
+        (p for p in provider_list if isinstance(p, HistoryProvider) and p.load_messages),
+        None,
+    )
+
+    if existing is None:
+        # Match the source_id core's auto-injected provider would use so default-wired
+        # compaction keeps resolving.
+        updated = [
+            DurableHistoryProvider(
+                source_id=InMemoryHistoryProvider.DEFAULT_SOURCE_ID,
+                prune_excluded=prune_excluded,
+            ),
+            *provider_list,
+        ]
+    elif isinstance(existing, DurableHistoryProvider):
+        # Already durable. If the caller pinned ``prune_excluded`` themselves that decision
+        # stands, but an unset one means they never expressed a preference, and leaving it unset
+        # would make the entity's retention mode silently do nothing.
+        if existing.prune_excluded is not None:
+            return agent
+        replacement = DurableHistoryProvider(
+            source_id=existing.source_id,
+            skip_excluded=existing.skip_excluded,
+            prune_excluded=prune_excluded,
+        )
+        updated = [replacement if p is existing else p for p in provider_list]
+    elif isinstance(existing, InMemoryHistoryProvider):
+        replacement = DurableHistoryProvider(
+            source_id=existing.source_id,
+            skip_excluded=existing.skip_excluded,
+            prune_excluded=prune_excluded,
+        )
+        updated = [replacement if p is existing else p for p in provider_list]
+    else:
+        # A deliberate storage choice (external or custom), so do not override it.
+        return agent
+
+    try:
+        clone = copy.copy(agent)
+        clone.context_providers = updated  # type: ignore[attr-defined]
+    except Exception:
+        logger.warning(
+            "[DurableHistoryProvider] Could not attach durable history to agent %s, "
+            "falling back to replaying persisted history.",
+            getattr(agent, "name", type(agent).__name__),
+            exc_info=True,
+        )
+        return agent
+
+    return clone

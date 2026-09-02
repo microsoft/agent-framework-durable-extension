@@ -21,6 +21,7 @@ from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentResponseCallbackProtocol
 from ._entities import AgentEntity, DurableTaskEntityStateProvider
 from ._feature_usage import FeatureIndex
+from ._retention import DEFAULT_MAX_STATE_BYTES, DEFAULT_RETENTION, RetentionMode
 from ._workflows.activity import execute_workflow_activity
 from ._workflows.dt_context import DurableTaskWorkflowContext
 from ._workflows.naming import (
@@ -80,15 +81,26 @@ class DurableAIAgentWorker:
         self,
         worker: TaskHubGrpcWorker,
         callback: AgentResponseCallbackProtocol | None = None,
+        *,
+        retention: RetentionMode = DEFAULT_RETENTION,
+        max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
     ):
         """Initialize the worker wrapper.
 
         Args:
             worker: The durabletask worker instance to wrap
             callback: Optional callback for agent response notifications
+            retention: Default conversation retention for registered agents. ``auto`` deletes only
+                under storage pressure, ``keep_all`` never deletes and lets the entity fail at the
+                backend limit, and ``follow_compaction`` first deletes what compaction excluded,
+                then uses the same pressure eviction as ``auto`` if that is not enough.
+            max_state_bytes: Budget for serialized entity state. Raise it when large payload
+                offload is configured on the worker and client.
         """
         self._worker = worker
         self._callback = callback
+        self._retention: RetentionMode = retention
+        self._max_state_bytes = max_state_bytes
         self._registered_agents: dict[str, SupportsAgentRun] = {}
         self._workflows: dict[str, Workflow] = {}
         # Every workflow whose orchestration has been registered (top-level plus nested
@@ -104,6 +116,7 @@ class DurableAIAgentWorker:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         entity_id: str | None = None,
+        retention: RetentionMode | None = None,
     ) -> None:
         """Register an agent with the worker.
 
@@ -117,6 +130,7 @@ class DurableAIAgentWorker:
             entity_id: Optional identity to register the entity under instead of
                 ``agent.name``. Workflow hosting passes the executor's ``id`` so the
                 entity matches the identity the orchestrator dispatches to.
+            retention: Per-agent retention override. When None, the worker-level setting is used.
 
         Raises:
             ValueError: If the agent doesn't have a name or is already registered
@@ -139,7 +153,14 @@ class DurableAIAgentWorker:
         effective_callback = callback or self._callback
 
         # Create a configured entity class using the factory
-        entity_class = self.__create_agent_entity(agent, effective_callback, entity_id=registration_name)
+        effective_retention: RetentionMode = self._retention if retention is None else retention
+        entity_class = self.__create_agent_entity(
+            agent,
+            effective_callback,
+            entity_id=registration_name,
+            retention=effective_retention,
+            max_state_bytes=self._max_state_bytes,
+        )
 
         # Register the entity class with the worker
         # The worker.add_entity method takes a class
@@ -198,6 +219,8 @@ class DurableAIAgentWorker:
         self,
         workflow: Workflow,
         callback: AgentResponseCallbackProtocol | None = None,
+        *,
+        retention: RetentionMode | None = None,
     ) -> None:
         """Register a :class:`Workflow` for automatic orchestration.
 
@@ -223,6 +246,9 @@ class DurableAIAgentWorker:
                 across restarts and would break durable resume). Every nested
                 sub-workflow must likewise be named.
             callback: Optional callback for agent response notifications.
+            retention: Retention for this workflow's agent nodes. When None, the worker-level
+                setting is used. Worth setting separately, since a workflow node's entity lives
+                for one orchestration while a standalone agent's can live indefinitely.
 
         Raises:
             ValueError: If the workflow (or a nested sub-workflow) name is missing,
@@ -269,12 +295,13 @@ class DurableAIAgentWorker:
         for hosted in hosted_workflows:
             if hosted.name.casefold() in self._registered_orchestrations:
                 continue
-            self._register_single_workflow(hosted, callback)
+            self._register_single_workflow(hosted, callback, retention)
 
     def _register_single_workflow(
         self,
         workflow: Workflow,
         callback: AgentResponseCallbackProtocol | None,
+        retention: RetentionMode | None = None,
     ) -> None:
         """Register one workflow's durable primitives (no recursion into sub-workflows).
 
@@ -294,7 +321,7 @@ class DurableAIAgentWorker:
         for agent_executor in plan.agent_executors:
             scoped_id = workflow_scoped_executor_id(workflow.name, agent_executor.id)
             if scoped_id not in self._registered_agents:
-                self.add_agent(agent_executor.agent, callback=callback, entity_id=scoped_id)
+                self.add_agent(agent_executor.agent, callback=callback, entity_id=scoped_id, retention=retention)
 
         # Register non-agent executors as durable activities, scoped by workflow name.
         # WorkflowExecutor nodes are intentionally not registered as activities: their
@@ -359,6 +386,8 @@ class DurableAIAgentWorker:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         entity_id: str | None = None,
+        retention: RetentionMode = DEFAULT_RETENTION,
+        max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
     ) -> type[DurableTaskEntityStateProvider]:
         """Factory function to create a DurableEntity class configured with an agent.
 
@@ -371,6 +400,8 @@ class DurableAIAgentWorker:
             entity_id: Optional identity to register the entity under instead of
                 ``agent.name`` (used by workflow hosting to key entities by
                 executor id).
+            retention: How much of the conversation durable state may discard.
+            max_state_bytes: Budget for serialized entity state.
 
         Returns:
             A new DurableEntity subclass configured for this agent
@@ -388,6 +419,8 @@ class DurableAIAgentWorker:
                     agent=agent,
                     callback=callback,
                     state_provider=self,
+                    retention=retention,
+                    max_state_bytes=max_state_bytes,
                 )
                 logger.debug(
                     "[ConfiguredAgentEntity] Initialized entity for agent: %s (entity name: %s)",

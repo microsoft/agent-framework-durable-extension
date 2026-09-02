@@ -54,10 +54,21 @@ class DurableAgentStateEntryJsonType(str, Enum):
     """Enum for conversation history entry types.
 
     Discriminator values for the $type field in DurableAgentStateEntry objects.
+
+    The type is what decides who may read an entry, rather than a flag alongside it. A flag has to
+    survive serialization to mean anything, and one that did not was how a failed turn came back as
+    ordinary assistant context after a cold start.
+
+    ``errorResponse`` and ``compaction`` are opposites. A failed turn is worth returning to the
+    caller that is waiting for it but must never be replayed to the model. A compaction summary is
+    the reverse: it belongs in the model's transcript and must never be handed back as something
+    the agent said.
     """
 
     REQUEST = "request"
     RESPONSE = "response"
+    ERROR_RESPONSE = "errorResponse"
+    COMPACTION = "compaction"
 
 
 def _parse_created_at(value: Any) -> datetime:
@@ -118,6 +129,10 @@ def _parse_history_entries(data_dict: dict[str, Any]) -> list[DurableAgentStateE
             )
             if entry_type == DurableAgentStateEntryJsonType.RESPONSE:
                 deserialized_history.append(DurableAgentStateResponse.from_dict(entry_dict))
+            elif entry_type == DurableAgentStateEntryJsonType.ERROR_RESPONSE:
+                deserialized_history.append(DurableAgentStateErrorResponse.from_dict(entry_dict))
+            elif entry_type == DurableAgentStateEntryJsonType.COMPACTION:
+                deserialized_history.append(DurableAgentStateCompaction.from_dict(entry_dict))
             elif entry_type == DurableAgentStateEntryJsonType.REQUEST:
                 deserialized_history.append(DurableAgentStateRequest.from_dict(entry_dict))
             else:
@@ -326,25 +341,50 @@ class DurableAgentStateData:
 
     Attributes:
         conversation_history: Ordered list of conversation entries (requests and responses)
+        session: Serialized ``AgentSession`` from the previous turn - the context provider state
+            bag plus any service-issued conversation id. Core treats session state as durable
+            across turns, so it is persisted here rather than discarded with the per-operation
+            session.
+        ingested_positions: Highest chained-conversation position taken from each workflow
+            executor. A workflow re-sends the whole conversation on every visit, and comparing
+            against stored ids stops working once retention deletes any of them, so the mark is
+            kept separately.
+        truncation: What retention has removed, if anything. A log line is only visible to whoever
+            was watching at the time, so the fact that this conversation is no longer complete is
+            recorded in the state itself. Absent until the first eviction, so its absence is a
+            positive statement that nothing has been dropped.
         extension_data: Optional dictionary for custom metadata (not part of core schema)
     """
 
     conversation_history: list[DurableAgentStateEntry]
+    session: dict[str, Any] | None
+    ingested_positions: dict[str, int] | None
+    truncation: dict[str, Any] | None
     extension_data: dict[str, Any] | None
 
     def __init__(
         self,
         conversation_history: list[DurableAgentStateEntry] | None = None,
         extension_data: dict[str, Any] | None = None,
+        session: dict[str, Any] | None = None,
+        ingested_positions: dict[str, int] | None = None,
+        truncation: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the data container.
 
         Args:
             conversation_history: Initial conversation history (defaults to empty list)
             extension_data: Optional custom metadata
+            session: Optional serialized ``AgentSession`` from the previous turn
+            ingested_positions: Highest chained-conversation position taken from each workflow
+                executor, used to recognize context this entity has already recorded
+            truncation: Record of what retention has removed, absent until something is
         """
         self.conversation_history = conversation_history or []
         self.extension_data = extension_data
+        self.session = session
+        self.ingested_positions = ingested_positions
+        self.truncation = truncation
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -352,6 +392,12 @@ class DurableAgentStateData:
         }
         if self.extension_data is not None:
             result[DurableStateFields.EXTENSION_DATA] = self.extension_data
+        if self.session is not None:
+            result[DurableStateFields.SESSION] = self.session
+        if self.ingested_positions:
+            result[DurableStateFields.INGESTED_POSITIONS] = self.ingested_positions
+        if self.truncation:
+            result[DurableStateFields.TRUNCATION] = self.truncation
         return result
 
     @classmethod
@@ -359,6 +405,9 @@ class DurableAgentStateData:
         return cls(
             conversation_history=_parse_history_entries(data_dict),
             extension_data=data_dict.get(DurableStateFields.EXTENSION_DATA),
+            session=data_dict.get(DurableStateFields.SESSION),
+            ingested_positions=data_dict.get(DurableStateFields.INGESTED_POSITIONS),
+            truncation=data_dict.get(DurableStateFields.TRUNCATION),
         )
 
 
@@ -392,7 +441,7 @@ class DurableAgentState:
     """
 
     # Durable Agent Schema version
-    SCHEMA_VERSION: str = "1.1.0"
+    SCHEMA_VERSION: str = "1.2.0"
 
     data: DurableAgentStateData
     schema_version: str = SCHEMA_VERSION
@@ -486,8 +535,10 @@ class DurableAgentStateEntry:
     with their originating requests.
 
     Common Attributes:
-        json_type: Discriminator for entry type ("request" or "response")
-        correlationId: Unique identifier linking requests and responses
+        json_type: Discriminator for entry type ("request", "response", "errorResponse" or
+            "compaction")
+        correlationId: Unique identifier linking requests and responses. Absent on compaction
+            entries, which answer no request.
         created_at: Timestamp when the entry was created
         messages: List of messages in this entry
         extensionData: Optional additional metadata (not serialized per schema)
@@ -521,12 +572,18 @@ class DurableAgentStateEntry:
         self.extension_data = extension_data
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             DurableStateFields.TYPE_DISCRIMINATOR: self.json_type,
-            DurableStateFields.CORRELATION_ID: self.correlation_id,
             DurableStateFields.CREATED_AT: self.created_at.isoformat(),
             DurableStateFields.MESSAGES: [m.to_dict() for m in self.messages],
         }
+        if self.correlation_id is not None:
+            # Omitted rather than written as null. A compaction entry answers no request and so has
+            # no correlation, and "absent" says that where an explicit null only says the field
+            # exists and is empty. It also keeps the persisted shape a string wherever it appears,
+            # which is what the schema and the .NET reader both expect.
+            result[DurableStateFields.CORRELATION_ID] = self.correlation_id
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DurableAgentStateEntry:
@@ -611,10 +668,18 @@ class DurableAgentStateRequest(DurableAgentStateEntry):
 
     @staticmethod
     def from_run_request(request: RunRequest) -> DurableAgentStateRequest:
+        # A workflow may deliver the upstream conversation instead of a single message.
+        if request.context_messages:
+            messages = [
+                DurableAgentStateMessage.from_chat_message(Message.from_dict(raw)) for raw in request.context_messages
+            ]
+        else:
+            messages = [DurableAgentStateMessage.from_run_request(request)]
+
         # Determine response_type based on response_format
         return DurableAgentStateRequest(
             correlation_id=request.correlation_id,
-            messages=[DurableAgentStateMessage.from_run_request(request)],
+            messages=messages,
             created_at=_parse_created_at(request.created_at),
             response_type=request.request_response_format,
             response_schema=serialize_response_format(request.response_format),
@@ -631,15 +696,15 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
 
     Attributes:
         usage: Token usage statistics for this response (input, output, and total tokens)
-        is_error: Flag indicating if this response represents an error (not persisted in schema)
         correlation_id: Unique identifier linking this response to its request
         created_at: Timestamp when the response was created
         messages: List of assistant messages in this response
-        json_type: Always "response" for this class
+        json_type: "response", or "errorResponse" for the failed-turn subclass
     """
 
+    JSON_TYPE: ClassVar[DurableAgentStateEntryJsonType] = DurableAgentStateEntryJsonType.RESPONSE
+
     usage: DurableAgentStateUsage | None = None
-    is_error: bool = False
 
     def __init__(
         self,
@@ -648,17 +713,15 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
         messages: list[DurableAgentStateMessage],
         extension_data: dict[str, Any] | None = None,
         usage: DurableAgentStateUsage | None = None,
-        is_error: bool = False,
     ) -> None:
         super().__init__(
-            json_type=DurableAgentStateEntryJsonType.RESPONSE,
+            json_type=type(self).JSON_TYPE,
             correlation_id=correlation_id,
             created_at=created_at,
             messages=messages,
             extension_data=extension_data,
         )
         self.usage = usage
-        self.is_error = is_error
 
     def to_dict(self) -> dict[str, Any]:
         data = super().to_dict()
@@ -684,10 +747,14 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
             usage=usage,
         )
 
-    @staticmethod
-    def from_run_response(correlation_id: str, response: AgentResponse) -> DurableAgentStateResponse:
-        """Creates a DurableAgentStateResponse from an AgentResponse."""
-        return DurableAgentStateResponse(
+    @classmethod
+    def from_run_response(cls, correlation_id: str, response: AgentResponse) -> DurableAgentStateResponse:
+        """Creates a response entry of this class from an AgentResponse.
+
+        A classmethod rather than a staticmethod so the error subclass produces an error entry
+        without the caller having to set anything afterwards.
+        """
+        return cls(
             correlation_id=correlation_id,
             created_at=_parse_created_at(response.created_at),
             messages=[DurableAgentStateMessage.from_chat_message(m) for m in response.messages],
@@ -710,6 +777,59 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
         )
 
 
+class DurableAgentStateErrorResponse(DurableAgentStateResponse):
+    """A turn that failed, recorded so the waiting caller can be told why.
+
+    Deliberately a response, because a caller polling its correlation id still needs an answer and
+    an error is the answer. Deliberately not replayable, because the reason a turn failed is for
+    the caller, not for the model, and feeding it back would present an exception as something the
+    assistant said.
+
+    That second part used to be a boolean on the response, which was never serialized. The failure
+    survived a reload looking like an ordinary reply. Being a distinct type means the distinction
+    cannot be lost in transit.
+
+    Not to be confused with ``DurableAgentStateErrorContent``, which is error content inside a
+    single message. This is the entry recording that a whole turn failed.
+    """
+
+    JSON_TYPE: ClassVar[DurableAgentStateEntryJsonType] = DurableAgentStateEntryJsonType.ERROR_RESPONSE
+
+
+class DurableAgentStateCompaction(DurableAgentStateEntry):
+    """A message compaction produced, such as a summary standing in for turns it replaced.
+
+    The exact opposite of an error entry. It belongs to the model's transcript and takes its place
+    in conversation order, but it answers no request, so it is not a response and can never be
+    returned to a caller polling for one. Previously these were inserted into whichever entry they
+    followed, which meant a poll could hand back a summary alongside the real answer.
+    """
+
+    def __init__(
+        self,
+        created_at: datetime,
+        messages: list[DurableAgentStateMessage],
+        correlation_id: str | None = None,
+        extension_data: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            json_type=DurableAgentStateEntryJsonType.COMPACTION,
+            correlation_id=correlation_id,
+            created_at=created_at,
+            messages=messages,
+            extension_data=extension_data,
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DurableAgentStateCompaction:
+        return cls(
+            created_at=_parse_created_at(data.get(DurableStateFields.CREATED_AT)),
+            messages=_parse_messages(data),
+            correlation_id=data.get(DurableStateFields.CORRELATION_ID),
+            extension_data=data.get(DurableStateFields.EXTENSION_DATA),
+        )
+
+
 class DurableAgentStateMessage:
     """Represents a message within a conversation history entry.
 
@@ -722,13 +842,19 @@ class DurableAgentStateMessage:
         contents: List of content items (text, function calls, errors, etc.)
         author_name: Optional name of the message author (typically set for assistant messages)
         created_at: Optional timestamp when the message was created
-        extension_data: Optional additional metadata (not serialized per schema)
+        message_id: Optional stable identifier for the message. Persisted so context-management
+            state (for example compaction summaries that reference the messages they replace)
+            can be reconciled across entity operations.
+        extension_data: Optional additional metadata. Carries a message's
+            ``additional_properties``, including compaction annotations, so that context
+            management state survives across entity operations.
     """
 
     role: str
     contents: list[DurableAgentStateContent]
     author_name: str | None = None
     created_at: datetime | None = None
+    message_id: str | None = None
     extension_data: dict[str, Any] | None = None
 
     def __init__(
@@ -738,11 +864,13 @@ class DurableAgentStateMessage:
         author_name: str | None = None,
         created_at: datetime | None = None,
         extension_data: dict[str, Any] | None = None,
+        message_id: str | None = None,
     ) -> None:
         self.role = role
         self.contents = contents
         self.author_name = author_name
         self.created_at = created_at
+        self.message_id = message_id
         self.extension_data = extension_data
 
     def to_dict(self) -> dict[str, Any]:
@@ -763,6 +891,10 @@ class DurableAgentStateMessage:
             result[DurableStateFields.CREATED_AT] = self.created_at.isoformat()
         if self.author_name is not None:
             result[DurableStateFields.AUTHOR_NAME] = self.author_name
+        if self.message_id is not None:
+            result[DurableStateFields.MESSAGE_ID] = self.message_id
+        if self.extension_data:
+            result[DurableStateFields.EXTENSION_DATA] = self.extension_data
         return result
 
     @classmethod
@@ -775,6 +907,7 @@ class DurableAgentStateMessage:
             contents=_parse_contents(data),
             author_name=data.get(DurableStateFields.AUTHOR_NAME),
             created_at=created_at,
+            message_id=data.get(DurableStateFields.MESSAGE_ID),
             extension_data=data.get(DurableStateFields.EXTENSION_DATA),
         )
 
@@ -820,6 +953,7 @@ class DurableAgentStateMessage:
             role=chat_message.role if hasattr(chat_message.role, "value") else str(chat_message.role),
             contents=contents_list,
             author_name=chat_message.author_name,
+            message_id=getattr(chat_message, "message_id", None),
             extension_data=dict(chat_message.additional_properties) if chat_message.additional_properties else None,
         )
 
@@ -841,8 +975,16 @@ class DurableAgentStateMessage:
         if self.author_name is not None:
             kwargs["author_name"] = self.author_name
 
+        if self.message_id is not None:
+            kwargs["message_id"] = self.message_id
+
         if self.extension_data is not None:
-            kwargs["additional_properties"] = self.extension_data
+            # Copied, not shared. Callers treat the result as detached and mutate it: retention
+            # pops compaction annotations off the copies it measures. Handing out the stored dict
+            # would make that erase those annotations from durable state. Core does copy this
+            # during validation today, but that is its internal business, and quietly depending on
+            # it would mean a change there costs us the user's compaction work.
+            kwargs["additional_properties"] = dict(self.extension_data)
 
         return Message(**kwargs)
 

@@ -12,7 +12,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from agent_framework_durabletask import AgentSessionId, DurableAgentSession, DurableAIAgent
+from agent_framework_durabletask import WorkflowOrchestrationContext, build_agent_task
 from azure.durable_functions import DurableOrchestrationContext
 
 from ._orchestration import AzureFunctionsAgentExecutor
@@ -56,12 +56,20 @@ class AzureFunctionsWorkflowContext:
 
     # -- Agent / Activity dispatch --------------------------------------------
 
-    def prepare_agent_task(self, executor_id: str, message: str, orchestration_instance_id: str) -> Any:
-        session_id = AgentSessionId(name=executor_id, key=orchestration_instance_id)
-        session = DurableAgentSession(durable_session_id=session_id)
-        az_executor = AzureFunctionsAgentExecutor(self._context)
-        agent = DurableAIAgent(az_executor, executor_id)
-        return agent.run(message, session=session)
+    def prepare_agent_task(
+        self,
+        executor_id: str,
+        message: str,
+        orchestration_instance_id: str,
+        context_messages: list[dict[str, Any]] | None = None,
+    ) -> Any:
+        return build_agent_task(
+            AzureFunctionsAgentExecutor(self._context),
+            executor_id,
+            message,
+            orchestration_instance_id,
+            context_messages,
+        )
 
     def prepare_activity_task(self, activity_name: str, input_json: str) -> Any:
         orchestration_context: Any = self._context
@@ -103,3 +111,8 @@ class AzureFunctionsWorkflowContext:
 
     def get_task_result(self, task: Any) -> Any:
         return getattr(task, "result", None)
+
+
+# Ensure the adapter satisfies the protocol. Validated statically by the type checker,
+# so a signature change on the protocol is caught here rather than at a distant call site.
+_protocol_check: type[WorkflowOrchestrationContext] = AzureFunctionsWorkflowContext

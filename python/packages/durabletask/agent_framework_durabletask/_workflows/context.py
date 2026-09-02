@@ -73,13 +73,21 @@ class WorkflowOrchestrationContext(Protocol):
         """The current replay-safe UTC datetime."""
         ...
 
-    def prepare_agent_task(self, executor_id: str, message: str, orchestration_instance_id: str) -> Any:
+    def prepare_agent_task(
+        self,
+        executor_id: str,
+        message: str,
+        orchestration_instance_id: str,
+        context_messages: list[dict[str, Any]] | None = None,
+    ) -> Any:
         """Create a yieldable task that runs an agent executor.
 
         Args:
             executor_id: Agent name / executor ID.
             message: The text message to send to the agent.
             orchestration_instance_id: Instance ID used as the entity session key.
+            context_messages: Optional upstream conversation (serialized ``Message`` dicts)
+                delivered to the agent as prior context.
 
         Returns:
             A yieldable task whose result is an ``AgentResponse``.

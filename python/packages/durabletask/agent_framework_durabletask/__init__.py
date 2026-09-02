@@ -28,12 +28,14 @@ from ._constants import (
 )
 from ._durable_agent_state import (
     DurableAgentState,
+    DurableAgentStateCompaction,
     DurableAgentStateContent,
     DurableAgentStateData,
     DurableAgentStateDataContent,
     DurableAgentStateEntry,
     DurableAgentStateEntryJsonType,
     DurableAgentStateErrorContent,
+    DurableAgentStateErrorResponse,
     DurableAgentStateFunctionCallContent,
     DurableAgentStateFunctionResultContent,
     DurableAgentStateHostedFileContent,
@@ -50,10 +52,12 @@ from ._durable_agent_state import (
 )
 from ._entities import AgentEntity, AgentEntityStateProviderMixin
 from ._executors import DurableAgentExecutor
+from ._history_provider import DurableHistoryBinding, DurableHistoryProvider
 from ._models import AgentSessionId, DurableAgentSession, RunRequest
 from ._orchestration_context import DurableAIAgentOrchestrationContext
 from ._response_utils import ensure_response_format, load_agent_response
-from ._shim import DurableAIAgent
+from ._retention import DEFAULT_MAX_STATE_BYTES, DEFAULT_RETENTION, RetentionMode
+from ._shim import DurableAIAgent, build_agent_task
 from ._worker import DurableAIAgentWorker
 from ._workflows.activity import execute_workflow_activity
 from ._workflows.client import DurableWorkflowClient
@@ -112,7 +116,9 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "DEFAULT_MAX_POLL_RETRIES",
+    "DEFAULT_MAX_STATE_BYTES",
     "DEFAULT_POLL_INTERVAL_SECONDS",
+    "DEFAULT_RETENTION",
     "DURABLE_NAME_PREFIX",
     "LEGACY_THREAD_ID_FIELD",
     "MIMETYPE_APPLICATION_JSON",
@@ -140,12 +146,14 @@ __all__ = [
     "DurableAgentExecutor",
     "DurableAgentSession",
     "DurableAgentState",
+    "DurableAgentStateCompaction",
     "DurableAgentStateContent",
     "DurableAgentStateData",
     "DurableAgentStateDataContent",
     "DurableAgentStateEntry",
     "DurableAgentStateEntryJsonType",
     "DurableAgentStateErrorContent",
+    "DurableAgentStateErrorResponse",
     "DurableAgentStateFunctionCallContent",
     "DurableAgentStateFunctionResultContent",
     "DurableAgentStateHostedFileContent",
@@ -159,13 +167,17 @@ __all__ = [
     "DurableAgentStateUriContent",
     "DurableAgentStateUsage",
     "DurableAgentStateUsageContent",
+    "DurableHistoryBinding",
+    "DurableHistoryProvider",
     "DurableStateFields",
     "DurableTaskWorkflowContext",
     "DurableWorkflowClient",
+    "RetentionMode",
     "RunRequest",
     "WorkflowOrchestrationContext",
     "WorkflowRegistrationPlan",
     "__version__",
+    "build_agent_task",
     "collect_hosted_workflows",
     "deserialize_workflow_output",
     "ensure_response_format",

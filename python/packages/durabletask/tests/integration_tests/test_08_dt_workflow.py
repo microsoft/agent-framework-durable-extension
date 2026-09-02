@@ -69,6 +69,31 @@ class TestStandaloneWorkflow:
         assert output is not None
         assert "Email sent" in str(output)
 
+    def test_downstream_agent_receives_upstream_conversation(self) -> None:
+        """The email agent can only reference the original email if upstream context reached it.
+
+        The edge into the email agent carries the spam agent's structured verdict, not the email.
+        A purchase order number is used as the marker because a spam verdict explains *why* a
+        message is legitimate and would not repeat an arbitrary code, whereas a drafted reply to
+        the email naturally does.
+        """
+        instance_id = self.dts_client.schedule_new_orchestration(
+            orchestrator=workflow_orchestrator_name(WORKFLOW_NAME),
+            input=(
+                "Hi team, please confirm receipt of purchase order PRJ-4417 for the new lab "
+                "hardware, and let me know the expected delivery date."
+            ),
+        )
+
+        metadata, output = self.orch_helper.wait_for_orchestration_with_output(
+            instance_id=instance_id,
+            timeout=180.0,
+        )
+
+        assert metadata.runtime_status == OrchestrationStatus.COMPLETED
+        assert output is not None
+        assert "PRJ-4417" in str(output), f"drafted reply did not reference the original email: {output}"
+
     def test_spam_email_handled(self) -> None:
         """A spam email routes to the non-agent spam handler."""
         instance_id = self.dts_client.schedule_new_orchestration(

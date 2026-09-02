@@ -18,11 +18,41 @@ from agent_framework._types import AgentRunInputs
 
 from ._executors import DurableAgentExecutor
 from ._feature_usage import FeatureIndex
-from ._models import DurableAgentSession
+from ._models import AgentSessionId, DurableAgentSession
 
 # TypeVar for the task type returned by executors
 # Covariant because TaskT only appears in return positions (output)
 TaskT = TypeVar("TaskT", covariant=True)
+
+
+def build_agent_task(
+    executor: DurableAgentExecutor[Any],
+    executor_id: str,
+    message: str,
+    orchestration_instance_id: str,
+    context_messages: list[dict[str, Any]] | None = None,
+) -> Any:
+    """Create the yieldable task that runs a workflow's agent node.
+
+    Shared by every host adapter: the only host-specific part of dispatching an agent is
+    which :class:`DurableAgentExecutor` drives it, so the surrounding session/agent wiring
+    lives here rather than being repeated per host.
+
+    Args:
+        executor: The host's executor, which knows how to reach the agent entity.
+        executor_id: The workflow-scoped agent identity to dispatch to.
+        message: The text message for this turn.
+        orchestration_instance_id: Used as the entity session key, keeping conversation
+            state isolated per workflow run.
+        context_messages: Optional upstream conversation delivered as prior context.
+
+    Returns:
+        A yieldable task whose result is an ``AgentResponse``.
+    """
+    session_id = AgentSessionId(name=executor_id, key=orchestration_instance_id)
+    session = DurableAgentSession(durable_session_id=session_id)
+    agent = DurableAIAgent(executor, executor_id)
+    return agent.run(message, session=session, context_messages=context_messages)
 
 
 class DurableAgentProvider(ABC, Generic[TaskT]):
@@ -94,6 +124,7 @@ class DurableAIAgent(SupportsAgentRun, Generic[TaskT]):
         stream: Literal[False] = False,
         session: AgentSession | None = None,
         options: dict[str, Any] | None = None,
+        context_messages: list[dict[str, Any]] | None = None,
     ) -> TaskT:
         """Execute the agent via the injected provider.
 
@@ -105,6 +136,9 @@ class DurableAIAgent(SupportsAgentRun, Generic[TaskT]):
             options: Optional options dictionary. Supported keys include
                 ``response_format``, ``enable_tool_calls``, and ``wait_for_response``.
                 Additional keys are forwarded to the agent execution.
+            context_messages: Optional upstream conversation (serialized ``Message`` dicts)
+                delivered to the agent as prior context. Workflows use this to give a
+                downstream agent the conversation produced by upstream nodes.
 
         Note:
             This method overrides SupportsAgentRun.run() with a different return type:
@@ -124,9 +158,13 @@ class DurableAIAgent(SupportsAgentRun, Generic[TaskT]):
             raise ValueError("DurableAIAgent does not support streaming mode (stream must be False)")
         message_str = self._normalize_messages(messages)
 
+        # Only forward context messages when a workflow supplied them, so executors that do
+        # not implement the parameter keep working unchanged.
+        extra: dict[str, Any] = {"context_messages": context_messages} if context_messages else {}
         run_request = self._executor.get_run_request(
             message=message_str,
             options=options,
+            **extra,
         )
 
         mark_feature_used(FeatureIndex.DURABLETASK)

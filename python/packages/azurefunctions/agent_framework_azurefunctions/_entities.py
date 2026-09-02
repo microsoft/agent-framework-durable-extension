@@ -16,9 +16,12 @@ from typing import Any, cast
 import azure.durable_functions as df
 from agent_framework import SupportsAgentRun
 from agent_framework_durabletask import (
+    DEFAULT_MAX_STATE_BYTES,
+    DEFAULT_RETENTION,
     AgentEntity,
     AgentEntityStateProviderMixin,
     AgentResponseCallbackProtocol,
+    RetentionMode,
     run_agent_coroutine,
 )
 
@@ -47,16 +50,28 @@ class AzureFunctionEntityStateProvider(AgentEntityStateProviderMixin):
     def _get_session_id_from_entity(self) -> str:
         return str(self._context.entity_key)
 
+    def _get_entity_name_from_entity(self) -> str:
+        return str(self._context.entity_name)
+
 
 def create_agent_entity(
     agent: SupportsAgentRun,
     callback: AgentResponseCallbackProtocol | None = None,
+    *,
+    retention: RetentionMode = DEFAULT_RETENTION,
+    max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
 ) -> Callable[[df.DurableEntityContext], None]:
     """Factory function to create an agent entity class.
 
     Args:
         agent: The Microsoft Agent Framework agent instance (must implement SupportsAgentRun)
         callback: Optional callback invoked during streaming and final responses
+
+    Keyword Args:
+        retention: How much of the conversation durable state may discard. ``auto`` deletes only
+            under storage pressure, ``keep_all`` never deletes, and ``follow_compaction`` first
+            deletes what compaction excluded, then uses pressure eviction if needed.
+        max_state_bytes: Budget for serialized entity state.
 
     Returns:
         Entity function configured with the agent
@@ -69,7 +84,13 @@ def create_agent_entity(
             logger.debug("[entity_function] Operation: %s", context.operation_name)
 
             state_provider = AzureFunctionEntityStateProvider(context)
-            entity = AgentEntity(agent, callback, state_provider=state_provider)
+            entity = AgentEntity(
+                agent,
+                callback,
+                state_provider=state_provider,
+                retention=retention,
+                max_state_bytes=max_state_bytes,
+            )
 
             operation = context.operation_name
 

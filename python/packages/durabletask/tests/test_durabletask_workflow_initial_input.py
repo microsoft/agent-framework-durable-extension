@@ -35,7 +35,13 @@ class _InlineWorkflowHost:
     def current_utc_datetime(self) -> datetime:
         return datetime.now(timezone.utc)
 
-    def prepare_agent_task(self, executor_id: str, message: str, orchestration_instance_id: str) -> Any:
+    def prepare_agent_task(
+        self,
+        executor_id: str,
+        message: str,
+        orchestration_instance_id: str,
+        context_messages: list[dict[str, Any]] | None = None,
+    ) -> Any:
         raise AssertionError("This test workflow has no agent executors")
 
     def prepare_activity_task(self, activity_name: str, input_json: str) -> str:
