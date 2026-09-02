@@ -32,7 +32,7 @@ For this sample, you'll also need to install [node.js](https://nodejs.org/en/dow
 
 ## Configuration
 
-Update your `local.settings.json` with your Foundry project configuration:
+Copy `local.settings.json.template` to `local.settings.json`, then update it with your Foundry project configuration:
 
 ```json
 {

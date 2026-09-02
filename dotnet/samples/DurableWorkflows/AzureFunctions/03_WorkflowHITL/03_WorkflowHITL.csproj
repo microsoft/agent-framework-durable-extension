@@ -14,10 +14,6 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
-  <ItemGroup>
-    <None Include="local.settings.json" />
-  </ItemGroup>
-
   <!-- Azure Functions packages -->
   <ItemGroup>
     <PackageReference Include="Microsoft.Azure.Functions.Worker" />

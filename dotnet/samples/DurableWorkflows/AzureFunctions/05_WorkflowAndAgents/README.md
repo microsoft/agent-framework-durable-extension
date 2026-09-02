@@ -1,10 +1,32 @@
 # Workflow and Agents Sample
 
-This sample demonstrates how to use `ConfigureDurableOptions` to register **both** AI agents **and** workflows in a single Azure Functions app. This is the recommended approach when your application needs both standalone agents and orchestrated workflows.
+This sample demonstrates how to register **both** AI agents **and** workflows in a single Azure Functions app, using separate `ConfigureDurableAgents` and `ConfigureDurableWorkflows` calls.
+
+These methods compose: call them in any order, as many times as you like, and the configurations are additive.
+
+```csharp
+using IHost app = FunctionsApplication
+    .CreateBuilder(args)
+    .ConfigureFunctionsWebApplication()
+    .ConfigureDurableAgents(agents => agents.AddAIAgent(assistant, enableHttpTrigger: true, enableMcpToolTrigger: true))
+    .ConfigureDurableWorkflows(workflows => workflows.AddWorkflow(translateWorkflow, enableMcpToolTrigger: true))
+    .Build();
+app.Run();
+```
+
+If you prefer to configure everything from a single delegate, `ConfigureDurableOptions` is an equivalent alternative and can be freely mixed with the two methods above:
+
+```csharp
+    .ConfigureDurableOptions(options =>
+    {
+        options.Agents.AddAIAgent(assistant, enableHttpTrigger: true, enableMcpToolTrigger: true);
+        options.Workflows.AddWorkflow(translateWorkflow, enableMcpToolTrigger: true);
+    })
+```
 
 ## Key Concepts Demonstrated
 
-- **Unified Configuration**: Use `ConfigureDurableOptions` to register agents and workflows together
+- **Composable Configuration**: `ConfigureDurableAgents` and `ConfigureDurableWorkflows` combine in the same app
 - **Standalone Agent**: An AI agent accessible via HTTP and MCP tool triggers
 - **Workflow**: A simple text translation workflow also exposed as an MCP tool
 - **Mixed Triggers**: Both agents and workflows coexist in the same Functions host
@@ -32,7 +54,7 @@ See the [README.md](../../README.md) file in the parent directory for complete s
 - Durable Task Scheduler setup
 - Storage emulator configuration
 
-This sample also requires Foundry project configuration. Set the following in `local.settings.json`:
+This sample also requires Foundry project configuration. Copy `local.settings.json.template` to `local.settings.json`, then set the following values:
 
 - `FOUNDRY_PROJECT_ENDPOINT`: Your Foundry project endpoint URL
 - `FOUNDRY_MODEL`: Your Foundry model deployment name

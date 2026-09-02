@@ -2,11 +2,12 @@
 
 // This sample demonstrates the THREE ways to configure durable agents and workflows:
 //
-// 1. ConfigureDurableAgents()   - For standalone agents only
-// 2. ConfigureDurableWorkflows() - For workflows only
-// 3. ConfigureDurableOptions()   - For both agents AND workflows
+// 1. ConfigureDurableAgents()   - Configures agents
+// 2. ConfigureDurableWorkflows() - Configures workflows
+// 3. ConfigureDurableOptions()   - Configures agents and workflows from a single delegate
 //
-// KEY: All methods can be called MULTIPLE times - configurations are ADDITIVE.
+// KEY: All three methods compose. Call them in any order, as many times as you like - the
+// configurations are ADDITIVE and share a single underlying options instance.
 
 using Azure.AI.OpenAI;
 using Azure.Identity;
@@ -67,16 +68,16 @@ IHost host = Host.CreateDefaultBuilder(args)
     .ConfigureLogging(logging => logging.SetMinimumLevel(LogLevel.Warning))
     .ConfigureServices(services =>
     {
-        // METHOD 1: ConfigureDurableAgents - for standalone agents only
+        // METHOD 1: ConfigureDurableAgents - configures agents
         services.ConfigureDurableAgents(
             options => options.AddAIAgent(biologist),
             workerBuilder: builder => builder.UseDurableTaskScheduler(dtsConnectionString),
             clientBuilder: builder => builder.UseDurableTaskScheduler(dtsConnectionString));
 
-        // METHOD 2: ConfigureDurableWorkflows - for workflows only
+        // METHOD 2: ConfigureDurableWorkflows - configures workflows
         services.ConfigureDurableWorkflows(options => options.AddWorkflow(physicsWorkflow));
 
-        // METHOD 3: ConfigureDurableOptions - for both agents AND workflows
+        // METHOD 3: ConfigureDurableOptions - configures both from a single delegate
         services.ConfigureDurableOptions(options =>
         {
             options.Agents.AddAIAgent(chemist);

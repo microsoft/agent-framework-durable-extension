@@ -32,3 +32,26 @@ namespace Microsoft.Agents.AI.DurableTask;
 /// </para>
 /// </remarks>
 internal sealed class DurableServicesMarker;
+
+/// <summary>
+/// Marker class used to track whether the Durable Task worker has been configured.
+/// </summary>
+/// <remarks>
+/// The worker is tracked separately from <see cref="DurableServicesMarker"/> because a worker builder
+/// may be supplied by any <c>Configure*</c> call, not just the first one:
+/// <code>
+/// services.ConfigureDurableAgents(...);                            // 1st call - no worker builder
+/// services.ConfigureDurableWorkflows(..., workerBuilder: b => ...); // 2nd call - worker builder
+/// </code>
+/// A single shared marker would cause the second call's builder to be silently dropped.
+/// </remarks>
+internal sealed class DurableTaskWorkerMarker;
+
+/// <summary>
+/// Marker class used to track whether the Durable Task client has been configured.
+/// </summary>
+/// <remarks>
+/// See <see cref="DurableTaskWorkerMarker"/> for why the client is tracked separately from
+/// <see cref="DurableServicesMarker"/>.
+/// </remarks>
+internal sealed class DurableTaskClientMarker;

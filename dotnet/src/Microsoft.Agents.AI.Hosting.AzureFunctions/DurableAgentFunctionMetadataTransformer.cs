@@ -38,6 +38,13 @@ internal sealed class DurableAgentFunctionMetadataTransformer : IFunctionMetadat
     {
         this._logger.LogTransformingFunctionMetadata(original.Count);
 
+        // Seed with existing function names to avoid duplicates across transformers. An agent that a workflow
+        // references and that is also registered explicitly (a promoted agent) is emitted by both transformers,
+        // and whichever runs second must not re-add a trigger the other already contributed.
+        HashSet<string> registeredFunctions = new(
+            original.Select(f => f.Name!),
+            StringComparer.OrdinalIgnoreCase);
+
         foreach (KeyValuePair<string, Func<IServiceProvider, AIAgent>> kvp in this._agents)
         {
             string agentName = kvp.Key;
@@ -49,22 +56,38 @@ internal sealed class DurableAgentFunctionMetadataTransformer : IFunctionMetadat
                 continue;
             }
 
-            this._logger.LogRegisteringTriggerForAgent(agentName, "entity");
-            original.Add(FunctionMetadataFactory.CreateEntityTrigger(agentName));
+            AddIfNew(original, registeredFunctions, FunctionMetadataFactory.CreateEntityTrigger(agentName), () => this._logger.LogRegisteringTriggerForAgent(agentName, "entity"));
 
             if (agentTriggerOptions.HttpTrigger.IsEnabled)
             {
-                this._logger.LogRegisteringTriggerForAgent(agentName, "http");
-                original.Add(FunctionMetadataFactory.CreateHttpTrigger(agentName, $"agents/{agentName}/run", BuiltInFunctions.RunAgentHttpFunctionEntryPoint));
+                AddIfNew(
+                    original,
+                    registeredFunctions,
+                    FunctionMetadataFactory.CreateHttpTrigger(agentName, $"agents/{agentName}/run", BuiltInFunctions.RunAgentHttpFunctionEntryPoint),
+                    () => this._logger.LogRegisteringTriggerForAgent(agentName, "http"));
             }
 
             if (agentTriggerOptions.McpToolTrigger.IsEnabled)
             {
                 AIAgent agent = kvp.Value(this._serviceProvider);
-                this._logger.LogRegisteringTriggerForAgent(agentName, "mcpTool");
-                original.Add(CreateMcpToolTrigger(agentName, agent.Description));
+                AddIfNew(original, registeredFunctions, CreateMcpToolTrigger(agentName, agent.Description), () => this._logger.LogRegisteringTriggerForAgent(agentName, "mcpTool"));
             }
         }
+    }
+
+    private static void AddIfNew(
+        IList<IFunctionMetadata> original,
+        HashSet<string> registeredFunctions,
+        DefaultFunctionMetadata metadata,
+        Action logRegistration)
+    {
+        if (!registeredFunctions.Add(metadata.Name!))
+        {
+            return;
+        }
+
+        logRegistration();
+        original.Add(metadata);
     }
 
     private static DefaultFunctionMetadata CreateMcpToolTrigger(string agentName, string? description)

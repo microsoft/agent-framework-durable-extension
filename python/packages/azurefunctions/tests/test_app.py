@@ -33,6 +33,7 @@ from agent_framework_azurefunctions._app import (
 )
 from agent_framework_azurefunctions._entities import create_agent_entity
 from agent_framework_azurefunctions._errors import IncomingRequestError
+from agent_framework_azurefunctions._feature_usage import FeatureIndex
 
 FuncT = TypeVar("FuncT", bound=Callable[..., Any])
 
@@ -64,8 +65,11 @@ class TestAgentFunctionAppInit:
         mock_agent = Mock()
         mock_agent.name = "TestAgent"
 
-        app = AgentFunctionApp(agents=[mock_agent])
+        with patch("agent_framework_azurefunctions._app.mark_feature_used") as mark_feature_used:
+            app = AgentFunctionApp(agents=[mock_agent])
 
+        mark_feature_used.assert_called_once_with(FeatureIndex.AZUREFUNCTIONS)
+        assert FeatureIndex.AZUREFUNCTIONS == 78
         assert len(app.agents) == 1
         assert "TestAgent" in app.agents
         assert app.enable_health_check is True
