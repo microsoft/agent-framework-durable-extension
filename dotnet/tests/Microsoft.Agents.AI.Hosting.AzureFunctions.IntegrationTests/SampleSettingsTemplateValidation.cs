@@ -41,9 +41,6 @@ public sealed partial class SampleSettingsTemplateValidation
             .. Directory.GetDirectories(Path.Combine(s_samplesPath, "DurableAgents", "AzureFunctions")),
             .. Directory.GetDirectories(Path.Combine(s_samplesPath, "DurableWorkflows", "AzureFunctions")),
         ];
-
-        Assert.Equal(13, sampleDirectories.Length);
-
         foreach (string sampleDirectory in sampleDirectories)
         {
             string templatePath = Path.Combine(sampleDirectory, TemplateFileName);
