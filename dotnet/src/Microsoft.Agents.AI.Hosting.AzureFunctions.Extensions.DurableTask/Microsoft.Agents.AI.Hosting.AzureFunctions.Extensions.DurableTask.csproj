@@ -17,7 +17,7 @@
 
   <!-- NuGet package metadata -->
   <PropertyGroup>
-    <Title>Durable Task Azure Functions extension registration for Microsoft Agent Framework</Title>
+    <Title>Durable Task Azure Functions extension for Microsoft Agent Framework</Title>
     <Description>Registers the Durable Task Azure Functions extension so that applications hosting durable agents do not need to declare a Durable Functions trigger of their own.</Description>
   </PropertyGroup>
 
