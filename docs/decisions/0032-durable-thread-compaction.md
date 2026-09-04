@@ -210,6 +210,30 @@ stating plainly because it decides which copy of a conversation is authoritative
 | The model service | The service's own retention | The exchange, not the content |
 | No context pipeline at all | Durable retention | Everything, since nothing else holds it |
 
+The same four cases as a path. The branch decides where the conversation lives, and that in turn
+decides what the entity keeps.
+
+```mermaid
+flowchart TB
+    AGENT["Inner agent with core's context pipeline"]
+    NOPIPE["Agent without the context pipeline"]
+    SLOT{"which provider holds<br/>the conversation?"}
+
+    AGENT --> SLOT
+    SLOT -->|"durable, injected or swapped in"| ES["durable entity state<br/>bounded by retention"]
+    SLOT -->|"Redis, Cosmos, file, custom,<br/>left exactly as configured"| EXT["the customer's store<br/>bounded by their own policy"]
+    SLOT -->|"durable attached but silent,<br/>the service owns this run"| SVC["the model service<br/>bounded by the service"]
+    NOPIPE -->|"entity replays its own history"| ES
+
+    ES --> KEEPALL["entity keeps the content,<br/>because nothing else holds it"]
+    EXT --> KEEPENV["entity keeps the envelope,<br/>correlation id, timestamps and message ids,<br/>and forgets the request content"]
+    SVC --> KEEPENV
+```
+
+Only the leftmost branch makes the entity the owner of the conversation. In the other two the
+entity is a record of the exchange rather than a second copy of the content. Responses sit outside
+this entirely and are kept in every branch, for the reason below.
+
 The entity records every exchange in every configuration, because correlation ids and response
 delivery are its job and nothing else can do them. It does not have to be a second copy of the
 conversation, and being one would put the customer's content under two different retention,
@@ -497,6 +521,35 @@ service-managed conversations.
 
 ## L3 Realization: Workflow Context Parity
 
+A workflow adds one hop in front of the agent path and changes nothing behind it.
+
+```mermaid
+flowchart TB
+    subgraph ORCH["Durable workflow orchestrator, re-executed every episode"]
+        FC["full_conversation"]
+        PROJ["L3: context_mode / context_filter<br/>full, last_agent, custom"]
+        FC --> PROJ
+    end
+
+    DEDUP["drop positions this node already ingested,<br/>always keep the newest message as input"]
+
+    subgraph NODE["Agent node, the ordinary durable agent path"]
+        ENTITY["AgentEntity, one per node<br/>its own conversationHistory and ingestedPositions"]
+        INNER["inner agent<br/>L1, L2 and retention all inherited"]
+        ENTITY --> INNER
+    end
+
+    PROJ -->|"context_messages, stamped wf executor position"| DEDUP
+    DEDUP --> ENTITY
+    INNER -->|"response"| FC
+```
+
+Because a node runs the same `DurableAIAgent` to `AgentEntity` to inner agent path as a standalone
+durable agent, everything in the first diagram still applies inside it. Only the projection and the
+deduplication are workflow-specific. Each node keeps its own history, keyed by workflow instance and
+executor, so nodes do not share a conversation and their memory survives restarts independently of
+the workflow envelope.
+
 In-process workflows give a downstream `AgentExecutor` the upstream conversation through
 `AgentExecutorResponse.full_conversation`, governed by `context_mode` (`full` | `last_agent` |
 `custom` + `context_filter`). The durable orchestrator previously flattened that to the **last
@@ -597,6 +650,25 @@ so the caller's instance remains unchanged.
 | Cosmos / Redis / file / custom provider | **Leave alone.** The user chose where their conversation lives, and durable still supplies execution durability. Core injects nothing when one of these is present, so there is no slot to claim. |
 | Service-managed history | **Inject a provider anyway.** The service owning the conversation is a property of each run, not of the registration, and a run passing `store=False` would otherwise be answered by a provider core injects and retention cannot see. The provider yields no history on runs the service does own. |
 | Agent without the core context pipeline | **Leave alone.** Falls back to replaying persisted history. |
+
+What that looks like as a single decision, taken once at registration.
+
+```mermaid
+flowchart TB
+    Q{"what did the agent<br/>already have?"}
+    Q -->|"nothing"| INJ["inject the durable provider, under the<br/>source_id core's own injection would have used"]
+    Q -->|"InMemoryHistoryProvider"| REP["replace it, preserving<br/>source_id and skip_excluded"]
+    Q -->|"DurableHistoryProvider, wired by hand"| KEEP["keep it, rebuilding with the mode's pruning<br/>only when prune_excluded was left unset"]
+    Q -->|"Redis, Cosmos, file, custom"| LEAVE["leave it alone, core injects nothing<br/>when one is present, so there is no slot to claim"]
+    Q -->|"no context pipeline at all"| NONE["leave the agent alone,<br/>the entity replays its own history instead"]
+
+    INJ --> SRC["an attached CompactionProvider keeps working,<br/>because it resolves history by source_id"]
+    REP --> SRC
+```
+
+Substitution is a registration-time decision, but **who serves history is a per-run one**. A
+service-managed agent still gets a provider attached here, and the previous diagram shows why that
+provider then stays silent on the runs the service actually owns.
 
 Preserving `source_id` is the load-bearing detail. `CompactionProvider` locates history through
 `history_source_id` (default `"in_memory"`), so a provider swapped in under the same id is invisible
