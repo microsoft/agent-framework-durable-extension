@@ -157,6 +157,43 @@ combined with workflow context projection (Option 4). The two solve different su
 | **L3, workflow context** | Existing `AgentExecutor.context_mode` / `context_filter` projection | Controls `full_conversation` passed between executors. This is not a core compaction hook. |
 | **Capacity fallback** | Durable retention | Bounds entity state independently of whether compaction is configured. |
 
+The surfaces act at different points in a single turn.
+
+```mermaid
+flowchart TB
+    subgraph WF["Durable workflow orchestrator, re-executed every episode"]
+        CM["L3: context_mode / context_filter<br/>full, last_agent, custom"]
+    end
+
+    subgraph ENT["AgentEntity, one operation and one state write"]
+        DUP{"correlation id<br/>already answered?"}
+        RECORDED["return the recorded response"]
+        REQ["record the request<br/>content dropped when another store owns it"]
+        OWN["resolve ownership for this run<br/>store option, else STORES_BY_DEFAULT"]
+        SESS["create the session,<br/>restore last turn's provider state"]
+        RESP["record the response"]
+        RET["L2: prune what compaction excluded<br/>Capacity: evict under pressure"]
+    end
+
+    subgraph CORE["Inner agent, core pipeline unchanged"]
+        HP["DurableHistoryProvider<br/>yields nothing when the service owns the run"]
+        CP["L1: CompactionProvider<br/>projects what the model reads"]
+        MODEL(["model call"])
+    end
+
+    STATE[("durable entity state")]
+
+    CM -->|"RunRequest.context_messages"| DUP
+    DUP -->|"yes"| RECORDED
+    DUP -->|"no"| REQ --> OWN --> SESS
+    SESS -->|"only the new messages"| HP
+    HP --> CP --> MODEL --> RESP --> RET --> STATE
+    STATE -.->|"next turn"| HP
+```
+
+L3 decides what crosses between workflow nodes, L1 decides what the model reads, and retention
+decides what survives in storage. Of the three, only retention deletes.
+
 This gives agent-level **configuration parity**, not byte-for-byte parity in every workflow cycle.
 Durable workflow nodes intentionally deduplicate repeated upstream context before persisting it. The
 L3 section explains the measured difference.
@@ -212,6 +249,28 @@ client-side. A durable history provider is therefore attached in that case too, 
 before core can inject one of its own whose state would be persisted with the entity and invisible
 to retention. The provider yields no history on runs the service does own, so the model is never
 sent a transcript the service is already carrying.
+
+### What the entity persists
+
+Retention, workflow deduplication and session continuity all read and write the same entity state,
+so it is worth seeing its shape before the sections that manipulate it.
+
+```mermaid
+flowchart LR
+    D["DurableAgentState.data"]
+    D --> CH["conversationHistory<br/>agentRequest, agentResponse,<br/>agentErrorResponse, compaction"]
+    D --> SE["session<br/>provider state bag,<br/>service conversation id"]
+    D --> IP["ingestedPositions<br/>highest position taken<br/>from each workflow executor"]
+    D --> TR["truncation<br/>evictedMessageCount,<br/>firstEvictedAt, lastEvictedAt"]
+```
+
+The conversation is the only part retention deletes from, and the other three fields sit outside it
+for that reason. `ingestedPositions` survives eviction deliberately, because a watermark stored
+among the messages would be removed with them, and a repeating workflow node would then re-ingest
+exactly what retention had just deleted. `session` excludes the durable provider's own history
+slice, since `conversationHistory` is the record of truth and carrying both would store the
+conversation twice. `truncation` exists because deletion has to be discoverable afterwards, and its
+absence is itself meaningful, since it says nothing has been dropped.
 
 ### Retention
 
