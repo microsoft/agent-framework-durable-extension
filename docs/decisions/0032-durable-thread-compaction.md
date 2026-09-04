@@ -161,33 +161,28 @@ The surfaces act at different points in a single turn.
 
 ```mermaid
 flowchart TB
-    subgraph WF["Durable workflow orchestrator, re-executed every episode"]
-        CM["L3: context_mode / context_filter<br/>full, last_agent, custom"]
-    end
+    CM["Workflow orchestrator, re-executed every episode<br/>L3: context_mode / context_filter"]
 
     subgraph ENT["AgentEntity, one operation and one state write"]
-        DUP{"correlation id<br/>already answered?"}
-        RECORDED["return the recorded response"]
-        REQ["record the request<br/>content dropped when another store owns it"]
-        OWN["resolve ownership for this run<br/>store option, else STORES_BY_DEFAULT"]
-        SESS["create the session,<br/>restore last turn's provider state"]
-        RESP["record the response"]
-        RET["L2: prune what compaction excluded<br/>Capacity: evict under pressure"]
+        DUP{"already answered?"}
+        DONE["return the recorded response"]
+        REC["record the request, resolve ownership for this run"]
+        RET["record the response<br/>L2: prune what compaction excluded, then evict under pressure"]
     end
 
     subgraph CORE["Inner agent, core pipeline unchanged"]
-        HP["DurableHistoryProvider<br/>yields nothing when the service owns the run"]
-        CP["L1: CompactionProvider<br/>projects what the model reads"]
+        HP["DurableHistoryProvider, silent when the service owns the run"]
+        CP["L1: CompactionProvider"]
         MODEL(["model call"])
     end
 
     STATE[("durable entity state")]
 
-    CM -->|"RunRequest.context_messages"| DUP
-    DUP -->|"yes"| RECORDED
-    DUP -->|"no"| REQ --> OWN --> SESS
-    SESS -->|"only the new messages"| HP
-    HP --> CP --> MODEL --> RESP --> RET --> STATE
+    CM -->|"context_messages"| DUP
+    DUP -->|"yes"| DONE
+    DUP -->|"no"| REC
+    REC -->|"session, plus only the new messages"| HP
+    HP --> CP --> MODEL --> RET --> STATE
     STATE -.->|"next turn"| HP
 ```
 
