@@ -230,9 +230,9 @@ flowchart TB
     SVC --> KEEPENV
 ```
 
-Only the leftmost branch makes the entity the owner of the conversation. In the other two the
-entity is a record of the exchange rather than a second copy of the content. Responses sit outside
-this entirely and are kept in every branch, for the reason below.
+Only the durable-entity-state branch makes the entity the owner of the conversation. In the other
+two the entity is a record of the exchange rather than a second copy of the content. Responses sit
+outside this entirely and are kept in every branch, for the reason below.
 
 The entity records every exchange in every configuration, because correlation ids and response
 delivery are its job and nothing else can do them. It does not have to be a second copy of the
