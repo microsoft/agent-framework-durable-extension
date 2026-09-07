@@ -10,7 +10,6 @@ public sealed class MaxSuperstepsExceededException : InvalidOperationException
     // Not used, but required by static analysis.
     private MaxSuperstepsExceededException()
     {
-        this.InstanceId = string.Empty;
     }
 
     /// <summary>
@@ -20,7 +19,6 @@ public sealed class MaxSuperstepsExceededException : InvalidOperationException
     public MaxSuperstepsExceededException(string message)
         : base(message)
     {
-        this.InstanceId = string.Empty;
     }
 
     /// <summary>
@@ -31,7 +29,6 @@ public sealed class MaxSuperstepsExceededException : InvalidOperationException
     public MaxSuperstepsExceededException(string message, Exception? innerException)
         : base(message, innerException)
     {
-        this.InstanceId = string.Empty;
     }
 
     /// <summary>
@@ -64,19 +61,19 @@ public sealed class MaxSuperstepsExceededException : InvalidOperationException
     }
 
     /// <summary>
-    /// Gets the ID of the workflow instance that exceeded the limit.
+    /// Gets the ID of the workflow instance that exceeded the limit, or <see langword="null"/> when not provided.
     /// </summary>
-    public string InstanceId { get; }
+    public string? InstanceId { get; }
 
     /// <summary>
-    /// Gets the configured maximum number of supersteps.
+    /// Gets the configured maximum number of supersteps, or <see langword="null"/> when not provided.
     /// </summary>
-    public int MaxSupersteps { get; }
+    public int? MaxSupersteps { get; }
 
     /// <summary>
-    /// Gets the number of executors that still had queued work.
+    /// Gets the number of executors that still had queued work, or <see langword="null"/> when not provided.
     /// </summary>
-    public int RemainingExecutors { get; }
+    public int? RemainingExecutors { get; }
 
     private static string GetMessage(string instanceId, int maxSupersteps, int remainingExecutors)
     {
