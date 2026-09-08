@@ -9,8 +9,9 @@ informed:
 
 # Thread Compaction for Durable Agents and Workflows
 
-> **How to read this.** The decision comes first. The later sections record the Python prototype
-> and the gaps it exposed. **.NET is not implemented yet.**
+> **How to read this.** The decision sections describe the revised target contract. The Python
+> prototype still uses the combined execution/transcript layout described below. Prototype evidence
+> is not validation of the revised layout. Later sections record the remaining Python and .NET gaps.
 >
 > **Naming.** .NET's `ChatHistoryProvider` and Python's `HistoryProvider` are the same concept. The
 > decision sections use the .NET name, and the implementation sections use the Python one.
@@ -92,6 +93,9 @@ agent configuration bounds model input and the persisted store can be bounded se
   parallel durable-only API.
 - **Reuse existing core hooks.** Do not reinvent triggers, strategies or grouping. Reuse the in-run
   filter and the store reducer.
+- **Provider-independent execution.** Correlation, completion, errors, result delivery and duplicate
+  suppression have the same contract regardless of the history owner. Transcript storage is a
+  separate responsibility, even when both live in one entity.
 - **Separate storage capacity from context management.** Bound model input with compaction (parity
   with core), raise backend capacity where possible, and configure storage deletion independently.
 - **Deletion is explicit and observable.** Entity state is a state bag, not an immutable system of
@@ -151,6 +155,12 @@ Chosen option: **Option 6, express durable conversation storage as a core `ChatH
 combined with workflow context projection and delta transport (Option 4). The two solve different
 surfaces.
 
+**The entity's execution and delivery contract is independent of the history provider.** Every
+configuration uses the same request-level bookkeeping, original result delivery and completion
+receipts. The selected history owner decides where transcript messages and compaction metadata live.
+An entity-local durable transcript is one implementation of that history contract, not the entity's
+execution journal.
+
 | Surface | Mechanism | Behavior |
 | --- | --- | --- |
 | **L1, agent context** | The user's configured core `CompactionProvider` / `compaction_strategy` | Non-lossy projection of model input. The same agent configuration works durably. |
@@ -158,39 +168,38 @@ surfaces.
 | **L3, workflow context** | Existing `AgentExecutor.context_mode` / `context_filter` projection plus per-target delta transport | Controls what crosses between executors without repeatedly sending the same prefix. This is not a core compaction hook. |
 | **Capacity safety** | Optional `max_state_bytes` budget | Evicts oldest groups under pressure, independently of whether compaction is configured. |
 
-The surfaces act at different points in a single turn.
+The common path below applies to durable, external and service-owned history. Workflow projection
+and delta selection happen before the request reaches the entity. The two storage policies are
+independent opt-ins and never rewrite the caller's result.
 
 ```mermaid
-flowchart TB
-    CM["Workflow orchestrator, re-executed every episode<br/>L3: context_mode / context_filter"]
-
-    subgraph ENT["AgentEntity, one operation and one state write"]
-        DUP{"mailbox payload or<br/>completed tombstone?"}
-        DONE["return the response or<br/>an already-completed result"]
-        REC["record the request, resolve ownership for this run"]
-        RESP["record the response in the transcript and mailbox"]
-        L2["L2, if enabled: prune what compaction excluded"]
-        CAP["Capacity, if enabled: evict under pressure"]
+sequenceDiagram
+  participant C as Caller / workflow
+  participant E as Durable entity
+  participant A as Agent + selected history owner
+  C->>E: Request and correlation ID
+  alt Completion already recorded
+    E-->>C: Original result or already-completed status
+  else New request
+    E->>E: Restore session and ingestion state
+    E->>A: Current input and session
+    Note over A: Owner supplies history<br/>Core L1 applies where supported
+    A-->>E: Original response or runtime error
+    E->>E: Stage result, completion and session state
+    opt Effective eager pruning enabled
+      E->>E: Prune excluded local transcript groups
     end
-
-    subgraph CORE["Inner agent, core pipeline unchanged"]
-        HP["DurableHistoryProvider, silent when the service owns the run"]
-        CP["L1: CompactionProvider"]
-        MODEL(["model call"])
+    opt Pressure budget configured
+      E->>E: Evict eligible local transcript groups
     end
-
-    STATE[("durable entity state")]
-
-    CM -->|"context_messages"| DUP
-    DUP -->|"yes"| DONE
-    DUP -->|"no"| REC
-    REC -->|"session, plus only the new messages"| HP
-    HP --> CP --> MODEL --> RESP --> L2 --> CAP --> STATE
-    STATE -.->|"next turn"| HP
+    E->>E: Commit entity-local state together
+    E-->>C: Result, directly or through polling
+  end
 ```
 
-  L3 decides what crosses between workflow nodes, L1 decides what the model reads, and the two
-  storage controls decide what survives. Only the storage controls delete, and each is opt-in.
+L3 decides what crosses between workflow nodes, L1 decides what the model reads, and transcript
+retention decides what history remains available. Mailbox expiry is a separate delivery policy.
+External provider and service writes are not part of the entity's atomic commit.
 
 This gives agent-level **configuration parity**, not byte-for-byte parity in every workflow cycle.
 Durable workflow nodes intentionally deduplicate repeated upstream context before persisting it. The
@@ -204,72 +213,59 @@ this" only under `follow_compaction`.
 
 ### Who bounds what
 
-Every store bounds what it owns. This is the rule the rest of this section follows, and it is worth
-stating plainly because it decides which copy of a conversation is authoritative.
+The entity always owns request-level execution and delivery state. That includes correlation and
+completion information, the original response or a retrievable reference, and session/workflow
+control state. These responsibilities do not move when the history provider changes. They are not
+strictly metadata-only. A waiting caller needs its answer, not just evidence it once existed.
 
-| Where the conversation lives | What bounds it | What the entity keeps |
+Transcript ownership is the independent choice below. Each store bounds its own transcript.
+
+| History owner for the run | Where the transcript lives | What bounds that transcript |
 | --- | --- | --- |
-| The customer's own store (Redis, Cosmos, file) | Their store's own policy, for example Redis `max_messages` or a Cosmos container TTL | The exchange, not the content |
-| Durable entity state | Explicit `follow_compaction`, an optional pressure budget, or ultimately the backend limit | Everything, since nothing else holds it |
-| The model service | The service's own retention | The exchange, not the content |
-| No context pipeline at all | Explicit `follow_compaction`, an optional pressure budget, or ultimately the backend limit | Everything, since nothing else holds it |
-
-The same four cases as a path. The branch decides where the conversation lives, and that in turn
-decides what the entity keeps.
+| `DurableHistoryProvider` | Entity-local `conversationHistory`, with messages, IDs and annotations | Explicit eager pruning, an optional pressure budget, or the backend limit |
+| Redis, Cosmos, file or custom provider | The provider's chosen store | Its own policy, such as `max_messages` or container TTL |
+| Model service | The service | The service's retention |
+| No context pipeline | Entity-local transcript, supplied by the legacy replay path | Optional pressure eviction or the backend limit |
 
 ```mermaid
 flowchart TB
-    AGENT["Inner agent with core's context pipeline"]
-    NOPIPE["Agent without the context pipeline"]
-    SLOT{"which provider holds<br/>the conversation?"}
-
-    AGENT --> SLOT
-    SLOT -->|"durable, injected or swapped in"| ES["durable entity state<br/>explicit retention, pressure budget, or backend limit"]
-    SLOT -->|"Redis, Cosmos, file, custom,<br/>left exactly as configured"| EXT["the customer's store<br/>bounded by their own policy"]
-    SLOT -->|"durable attached but silent,<br/>the service owns this run"| SVC["the model service<br/>bounded by the service"]
-    NOPIPE -->|"entity replays its own history"| ES
-
-    ES --> KEEPALL["entity keeps the content,<br/>because nothing else holds it"]
-    EXT --> KEEPENV["entity keeps the envelope,<br/>correlation id, timestamps and message ids,<br/>and forgets the request content"]
-    SVC --> KEEPENV
+  COMMON["Every run uses the same entity contract<br/>Execution, delivery, session and workflow control"]
+  COMMON --> OWNER{"Who owns history on this run?"}
+  OWNER -->|"Durable provider or legacy replay"| LOCAL["Entity-local transcript<br/>Messages, IDs and annotations"]
+  OWNER -->|"External provider"| EXTERNAL["Provider's store<br/>No required entity-side message mirror"]
+  OWNER -->|"Model service"| SERVICE["Service transcript<br/>Conversation ID in entity session state"]
 ```
 
-Only the durable-entity-state branch makes the entity the owner of the conversation. In the other
-two the entity is a record of the exchange rather than a second copy of the content. Responses sit
-outside this entirely and are kept in every branch, for the reason below.
+For externally or service-owned turns, the common execution record does not require a contentless
+copy of each request message or a locally generated ID purporting to identify a message in the
+external store. Message-level journaling needs an explicit consumer and lifecycle, not a default
+mirror. This does not remove response delivery obligations or the custom-ID deduplication dependency
+described below. Existing local transcript data remains subject to its own retention and transition
+rules. Choosing an external owner is not permission to discard it implicitly.
 
-The entity records every exchange in every configuration, because correlation ids and response
-delivery are its job and nothing else can do them. It does not have to be a second copy of the
-conversation, and being one would put the customer's content under two different retention,
-residency and deletion policies when they deliberately chose one store for it. So when another
-provider owns the conversation, the entity keeps the envelope, the correlation id, the timestamps
-and the message ids, and forgets the content.
-
-Orchestrations reach the entity through `call_entity` instead, which returns the value directly. The
-same bytes then exist in two places, but they are not two copies of one thing: the orchestrator
-records a **task result**, which is what makes its replay deterministic, while the entity records
-**what the assistant said**, which is what the next turn's model context is built from. Neither is
-removable, and the overlap is two systems recording the same event for different reasons rather than
-a defect in either.
+Orchestrations reach the entity through `call_entity`, which returns the value directly. The
+orchestrator records that task result for deterministic replay. The entity records completion and
+result delivery under the same contract as a client or HTTP call. If durable owns history, an
+assistant message also belongs to its transcript. These records can contain the same payload for
+different lifecycles. None should be used as the other's deletion or completion signal.
 
 **Ownership is resolved per run, as it is in core.** Core gives an explicit `store` in the effective
 run options precedence over the client's `STORES_BY_DEFAULT`, so an agent registered against a
 service-storing client can still be asked to keep one turn client-side. Durable mirrors that rule
 rather than pinning an owner for the session and rejecting a core-supported run option.
 
-A durable history provider is attached at registration even for a service-storing client. It
-claims the history slot before core can inject an `InMemoryHistoryProvider` on a later `store=False`
-run. Persisting that injected provider with the session grew state by 321 bytes per turn in the
-prototype and put the transcript outside durable retention. The durable provider instead yields no
-history on runs the service owns, so the model is never sent a transcript the service already
-carries.
+A durable history provider is attached for a service-storing client **when no external primary
+history provider is configured**. It claims the slot before core can inject an
+`InMemoryHistoryProvider` on a `store=False` run. Persisting that injected provider with the session
+grew state by 321 bytes per turn in the prototype and put the transcript outside durable retention.
+An external primary already occupies that slot, so durable is not added alongside it.
 
-Changing `store` does not migrate history between owners. A client-side turn after service-owned
-turns therefore sees a gap, which is the same behavior as core. The entity still keeps contentless
-envelopes in `conversationHistory` for correlation and audit. Their message `contents` are empty,
-and the history provider omits those messages from model context rather than rebuilding blank turns.
-An explicit migrate or fork operation would be a core capability, not a durable-specific
-reinterpretation of `store`.
+Attachment is not ownership. An attached durable provider yields no local history on a service-owned
+run and is available for client-owned runs. This does not require retaining shells for messages
+whose contents it never stored. Changing `store` neither imports the service transcript nor promotes
+mailbox responses into history. Existing contentless records are already skipped by the prototype's
+replay converters. An explicit migrate or fork operation would be a core capability, not a
+durable-specific reinterpretation of `store`.
 
 ### Response delivery and duplicate suppression
 
@@ -290,44 +286,74 @@ tombstones. They can therefore become part of the non-evictable floor and cause 
 rather than permit duplicate execution. Automatic entity cleanup is tracked separately under entity
 lifetime.
 
-The response can still participate in model context while its transcript entry survives. The
-mailbox controls whether the caller can collect the result, while transcript retention controls
-whether a later model call sees it. An implementation may share the underlying payload while both
-references are live, but deletion decisions remain independent.
+The mailbox preserves the original success or runtime-error result, including its response metadata.
+Compaction may annotate, summarize or remove transcript messages without changing that result.
+Errors that describe a failed entity operation and completion receipts are not model context.
+
+The selected owner may also retain the assistant response as history. The mailbox determines
+whether the caller can collect it, while that owner's retention determines whether a later model
+call sees it. Immutable payload storage may be shared, but a mailbox reference must remain readable
+through its delivery window even if the transcript entry is deleted. It cannot be only a pointer
+into an evictable transcript. Transcript pruning or clearing never clears completion receipts.
+
+These delivery guarantees begin with a successful entity commit. If capacity prevents that commit,
+there may be no room to persist even an error response. Surface the failure through the operation's
+error channel where available and diagnostics. A signal caller polling state may instead time out,
+not receive a durable capacity-error result. Do not write a success or completion receipt for an
+uncommitted turn. Retrying it can repeat side effects, as described under worker failures.
 
 ### What the entity persists
 
-Retention, workflow deduplication and session continuity all read and write the same entity state,
-so it is worth seeing its shape before the sections that manipulate it.
+The revised design has three logical slices. The diagram groups responsibilities, not a requirement
+to introduce new nested JSON objects or move `conversationHistory` to a new field.
 
 ```mermaid
 flowchart LR
-    D["DurableAgentState.data"]
-    D --> CH["conversationHistory<br/>model transcript and exchange record"]
-    D --> MB["responseMailbox<br/>response delivery"]
-    D --> CC["completedCorrelations<br/>duplicate suppression"]
-    D --> SE["session<br/>provider state bag,<br/>service conversation id"]
-    D --> IP["ingestedPositions<br/>workflow redelivery safety net"]
-    D --> TR["truncation<br/>evictedMessageCount,<br/>firstEvictedAt, lastEvictedAt"]
+  ENTITY["One entity / one session<br/>One total size budget"]
+  ENTITY --> EXEC["Execution and delivery, every owner<br/>Request-level bookkeeping<br/>responseMailbox + completedCorrelations"]
+  ENTITY --> CONTROL["Session and workflow control, as needed<br/>session + ingestedPositions<br/>Custom-ID deduplication bookkeeping"]
+  ENTITY --> HISTORY["Local transcript, when used<br/>conversationHistory<br/>Messages, IDs, annotations + truncation"]
 ```
 
-The fields separate six lifecycles that one conversation array cannot safely own. Transcript
-retention, response delivery, duplicate suppression, provider state, workflow redelivery and the
-audit evidence of truncation can now expire or fail independently. Pressure eviction deletes only
-from `conversationHistory`. Mailbox payloads follow their delivery expiry, while correlation
-tombstones are non-evictable proof that an operation already completed.
+Execution and delivery have the same semantics in every configuration, not necessarily identical
+bytes or a permanently populated record for every field. History providers do not own correlation
+receipts or polling. A durable provider owns the read, append and reconciliation behavior for its
+entity-local transcript just as an external provider owns those operations for its store. The
+entity runtime remains the physical writer of all entity-local slices at the operation boundary.
 
-`ingestedPositions` survives eviction deliberately, because a watermark stored among the messages
-would be removed with them and a redelivered workflow delta would then be accepted twice. `session`
-excludes the durable provider's own history slice, since `conversationHistory` is the record of
-truth and carrying both would store the conversation twice. `truncation` exists because deletion
-has to be discoverable afterwards, and its absence says nothing has been dropped.
+There must be exactly one append path for each transcript input and output. The prototype instead
+appends in `AgentEntity`, leaving `DurableHistoryProvider.save_messages()` as a no-op. The revised
+implementation must rewire that ownership without appending from both places or losing provider
+storage choices. This does not require an upstream lifecycle API for existing external providers.
+
+`ingestedPositions` and any required custom-ID deduplication record live outside the evictable
+transcript. `session` carries provider state and any service conversation ID, excluding the durable
+provider's transient working buffer. `truncation` records transcript loss, not request completion.
+Only eligible local transcript groups are candidates for eager pruning or pressure eviction.
+
+**One budget, not a budget per slice.** Measure the whole serialized entity, including delivery
+payloads, completion receipts, session state, cursors and any compatibility data. Separate fields do
+not remove duplicate bytes from this calculation. If protected state alone cannot fit, report
+capacity failure rather than evicting delivery obligations or pretending an external store can be
+trimmed by entity retention. Mailbox expiry remains an independent cleanup policy.
 
 Each entity holds one durable agent session. A new standalone session gets a new entity key, and a
 workflow agent node is keyed by workflow instance plus executor. The 1 MB DTS limit and any
 `max_state_bytes` budget therefore apply to one session, not to every conversation for an agent.
 Old sessions occupy separate entities and do not reduce the budget of later sessions. How long those
 abandoned entities remain is the separate entity-lifetime concern described below.
+
+**Why the prototype kept the combined layout.** A1 changed new writes by clearing externally owned
+request content while preserving `conversationHistory` and its message envelopes. We chose it over
+A2, relocating the transcript into a separate history field, to avoid a transcript-location
+migration for existing entities and workflows paused across deployments. It was a compatibility
+trade-off, not evidence that every empty message envelope had a delivery consumer.
+
+The mailbox and completion-receipt changes already require a compatible transition. The revised
+target therefore separates responsibilities consistently while retaining the transcript field
+where possible. Physical relocation is not a prerequisite, and neither this separation nor a new
+schema version makes old worker and polling behavior compatible automatically. The state-evolution
+section defines that transition. A1 remains the prototype, not the target storage contract.
 
 ### Retention
 
@@ -432,6 +458,8 @@ optional pressure retention are inherited by workflow agent executors**. The wor
 
 - **Configuration parity.** Existing agent compaction configuration works durably without changing
   the agent. Retention does not choose the current model projection.
+- **Consistent execution state.** Request completion and delivery do not change when transcript
+  ownership changes. External and service-owned turns do not require a metadata-only message mirror.
 - **Independent deletion policies.** Users can follow their own compaction exclusions without
   enabling pressure eviction, or enable pressure eviction while preserving those exclusions in the
   stored transcript.
@@ -441,8 +469,10 @@ optional pressure retention are inherited by workflow agent executors**. The wor
 - **Delivery correctness has its own cost.** Mailbox entries and completed-correlation tombstones
   cannot be pressure-evicted. They consume part of the floor so the system fails rather than
   silently re-executing a completed request.
-- **Larger entity change.** The history-provider design must preserve response polling and the
-  entity's conversation record.
+- **Compatible transition, not a field move.** Separating lifecycles requires old/new response
+  lookup and in-flight upgrade tests even if the transcript keeps its existing field name.
+- **Independent external commits.** Local slices commit together, but external history writes can
+  succeed before an entity commit. Uniform bookkeeping does not create a distributed transaction.
 - **Python-only eager pruning.** .NET would duplicate the transcript if it persisted current
   compaction state (gap 4), so a .NET implementation could use pressure retention but not L2 yet.
 - **Core workarounds.** Python must publish and reconcile a working buffer because core binds
@@ -459,21 +489,37 @@ twenty turns against a reduced budget. Scheduler integration covers persisted an
 message ids, external-provider session identity, schema conformance, downstream workflow context,
 and Redis as the sole owner of an external conversation.
 
+The prototype's `_to_message()` and `_to_replayable_message()` already skip messages with no
+replayable content. The revised tests must preserve that behavior while changing storage layout.
+The test named `test_request_message_ids_survive_for_deduplication` checks request presence and
+roles, not ID-based repeated input. It does not prove that all metadata-only envelopes are needed.
+
 **Required for the revised implementation.** Not covered by the prototype yet.
 
-- Response mailbox expiry and completed-correlation tombstones, including a redelivery after the
-  transcript response has been evicted.
+- The same execution/delivery contract across durable, external, service-owned and legacy agents,
+  including success, errors, polling, duplicate correlations and cold reloads.
+- Immutable mailbox responses and completed-correlation receipts after annotation changes, summary
+  insertion, transcript pruning, delivery expiry and transcript clearing.
+- Exactly one transcript append path, preserving input/output storage choices, stable message IDs,
+  annotations and ordering without adding an external-provider mirror.
 - Independent eager-pruning and pressure controls, the `"backend_limit"` sentinel, configurable
-  watermarks, and a floor that cannot trigger futile deletion.
-- Contentless envelope suppression when a session changes from service-owned to client-owned.
-- Per-target workflow delta transport across cycles, fan-out, fan-in and orchestration replay.
+  watermarks, and whole-entity capacity checks for metadata-only and oversized-response floors.
+- Per-run `store` transitions across cold reloads, with and without service-issued IDs, preserving
+  current input and session state without synthesizing history from delivery records.
+- Per-target workflow delta transport across cycles, fan-out, fan-in and replay, plus custom-ID,
+  missing-ID and fully repeated context cases distinct from duplicate request delivery.
 - Registration failure for more than one load-enabled history provider.
+- Legacy-state reading, idempotent conversion, response availability for old/new pollers, resumed
+  HITL workflows and supported rollback, including a new request after rollback. Include legacy
+  responses partially altered by compaction, Python/.NET rewrites and unknown-data preservation.
+- Failure injection around local commit and external-provider writes. Verify that uncommitted side
+  effects are not represented as protected completed operations and specify poller timeout behavior
+  when capacity prevents even a durable error response.
 
 **Longer-term validation.** Tracked here until the ADR is approved and follow-up issues are filed.
 
 - Retention crossing the real scheduler limit against a live backend, rather than a reduced budget
   in process.
-- Bidirectional Python/.NET state tests, including unknown entry-kind preservation and rollback.
 - The .NET realization and its compaction-state blocker (gap 4).
 - Blob offload (Option 7) against a real scheduler. It remains unreachable through Durable Functions
   Python 1.x and the 2.x preview (gap 6).
@@ -488,6 +534,10 @@ and Redis as the sole owner of an external conversation.
   future LLM reducer must give summaries stable identities and be tested across retries.
 - Response delivery and duplicate suppression do not depend on transcript retention. Pressure
   eviction cannot remove a live mailbox entry or the only completed-correlation tombstone.
+- No consumer of execution state may depend on the primary history provider's transcript layout.
+  The migration reader supplies legacy lookup behavior until the versioned transition completes.
+- Commit entity-local execution, session, ingestion and transcript changes at the same operation
+  boundary. External stores and model/tool effects are not in that transaction.
 - Registration permits exactly one load-enabled primary history provider. Additional providers are
   store-only sinks.
 - Workflow projection preserves `context_mode` semantics, while a replay-derived per-target cursor
@@ -626,22 +676,62 @@ converts `$type` through an enum that contains only those two values. Writing `e
 `compaction` before both readers understand them would therefore break a mixed-version worker and a
 rollback to the previous Python package.
 
+**Compatible reading includes behavior, not just JSON.** The prototype's polling paths use
+`try_get_agent_response()` to find responses in `conversationHistory`. A client that only preserves
+an unknown `responseMailbox` field would still fail to find a moved response. Workers, SDK clients
+and HTTP polling code must understand both representations before a writer stops emitting the
+legacy delivery representation.
+
 New entry kinds and lifecycle fields use a two-phase rollout.
 
-1. Ship readers in both runtimes that accept the new fields, preserve unknown optional data, and
-  round-trip an unknown entry as raw JSON without admitting it into model context.
-2. Only after those readers are available may a writer persist `errorResponse`, `compaction`,
-  `responseMailbox`, `completedCorrelations` or other new state shapes.
+1. Ship compatible readers and response lookup in both runtimes. They accept legacy and revised
+   layouts, preserve unknown optional data, and keep unknown entry kinds out of model context.
+   Legacy state resolves completion from recorded response entries. Revised state resolves it from
+   the mailbox and completion receipts, distinguishing expired delivery from work not yet completed.
+  Workers must also maintain the revised write contract when handling an already-converted entity.
+2. After every supported worker and response-reading client meets that reader floor, enable the
+   revised writer. A worker cannot inspect the versions of its peers or clients, so this is a
+   release and deployment gate, not a runtime handshake.
 
-Phase 1 ships as a separate compatibility change before any phase 2 writer. All workers sharing a
-task hub must move to that reader floor before a phase 2 package is deployed. A worker cannot
-inspect the versions of its peers, so this is a release and deployment gate rather than a runtime
-handshake.
+```mermaid
+flowchart TB
+    READERS["Deploy dual-layout workers and polling clients"]
+    READERS --> READY{"All supported readers upgraded?"}
+    READY -->|"No"| OLD["Keep legacy writes"]
+    READY -->|"Yes"| NEW["Enable revised writer"]
+    NEW --> MAP["Normalize existing state idempotently<br/>Preserve results, IDs and session control"]
+    MAP --> COMMIT["Commit revised layout at an operation boundary<br/>Keep the transcript location where possible"]
+    COMMIT --> ROLLBACK["Rollback only to compatible workers and clients<br/>Workers must preserve revised writes"]
+```
 
-Rollback is supported only to a reader from phase 1 or later. If that staged rollout is not
-possible, the writer must use a new major schema version and the runtime must gate the write rather
-than relying on the current major-only read check. Bidirectional tests must cover Python-written
-state read and rewritten by .NET, the reverse direction, unknown entry preservation, and rollback.
+An in-flight workflow can resume on a new deployment with an old entity. Transition code must read
+that state without replaying model or tool calls just to convert it. Conversion may be lazy at the
+next entity operation, but repeated conversion must not duplicate messages, mailbox entries or
+completion receipts. Preserve recorded outcomes, correlations, message IDs, order, annotations,
+session state and ingestion bookkeeping. Keep `conversationHistory` in place where possible rather
+than requiring a bulk transcript relocation.
+
+Only recorded outcomes justify backfilled completion receipts. If old retention already removed an
+outcome, migration cannot reconstruct it or claim that duplicate suppression covered that request.
+An existing response may itself have been partially pruned or annotated. Preserve its available
+payload and completion evidence, without claiming to reconstruct the original full response.
+Immutable original-result guarantees apply to revised writes, not retroactively to changed data.
+Legacy response expiry needs an explicit transition policy and grace period, not immediate expiry
+merely because an old response predates the new policy. Once converted, an expired delivery must not
+fall back to a transcript response and silently become available again. The schema/layout version,
+not the absence of one optional mailbox field, identifies which lookup contract applies.
+
+Stage conversion and the operation's entity-local changes before committing them together. Validate
+the whole serialized size, including any temporary compatibility copies, and leave the last
+committed state intact if conversion cannot fit. Do not migrate an external transcript or infer its
+ownership from a locally generated message ID.
+
+Rollback is supported only to versions that preserve both lookup and write semantics for converted
+entities. Read-only tolerance is insufficient if the next operation writes its response only to the
+old transcript. If a staged rollout is not possible, a new major schema version and gated deployment
+are required. A version bump alone does not make old workers or clients compatible. Required tests
+include paused HITL resumes, old/new polling, repeated conversion, a new request after rollback,
+polling after transcript pruning, Python/.NET round-trips and unknown-data preservation.
 
 ## L3 Realization: Workflow Context Parity
 
@@ -652,26 +742,27 @@ flowchart TB
     subgraph ORCH["Durable workflow orchestrator, re-executed every episode"]
         FC["full_conversation"]
         PROJ["L3: context_mode / context_filter<br/>full, last_agent, custom"]
-    DELTA["select the unseen suffix for this target<br/>with a replay-derived target, producer cursor"]
-    FC --> PROJ --> DELTA
+      DELTA["Select unseen positions for this target<br/>Replay-derived target and producer cursor"]
+      FC --> PROJ --> DELTA
     end
 
-    subgraph NODE["Agent node, the ordinary durable agent path"]
-    GUARD["ingestedPositions<br/>reject a redelivered delta"]
-    ENTITY["AgentEntity, one per node<br/>its own conversationHistory"]
-        INNER["inner agent<br/>L1, L2 and retention all inherited"]
-    GUARD --> ENTITY --> INNER
+    subgraph NODE["Agent node, the same execution contract as standalone"]
+      GUARD["ingestedPositions<br/>Reject repeated positions"]
+      ENTITY["AgentEntity for this workflow node<br/>Execution, delivery and session control"]
+      INNER["Inner agent + selected history owner<br/>Configured compaction and retention apply"]
+      GUARD --> ENTITY --> INNER
     end
 
-  DELTA -->|"only new context_messages,<br/>stamped wf executor position"| GUARD
+    DELTA -->|"New context_messages<br/>Stamped workflow identities"| GUARD
     INNER -->|"response"| FC
 ```
 
 Because a node runs the same `DurableAIAgent` to `AgentEntity` to inner agent path as a standalone
 durable agent, everything in the first diagram still applies inside it. Only the projection and the
-delta transport are workflow-specific. Each node keeps its own history, keyed by workflow instance
-and executor, so nodes do not share a conversation and their memory survives restarts independently
-of the workflow envelope.
+delta transport are workflow-specific. Each node has an entity identity scoped to workflow instance
+and executor. Its transcript remains with its selected history owner, rather than becoming another
+entity-local copy when that owner is external. Session identity and ingestion state survive restarts
+independently of the workflow envelope.
 
 In-process workflows give a downstream `AgentExecutor` the upstream conversation through
 `AgentExecutorResponse.full_conversation`, governed by `context_mode` (`full` | `last_agent` |
@@ -681,8 +772,9 @@ message's text**, so a downstream agent lost everything earlier nodes produced.
 Agent-level compaction needs no workflow-specific work: `AgentExecutor` passes its own session to
 `agent.run()`, so the agent's `CompactionProvider` runs normally. Inter-executor context has no core
 compaction hook. Durable instead honors the existing `context_mode` and invokes `context_filter` for
-`custom` mode, then sends the projection as `RunRequest.context_messages`. Those messages become part
-of the request entry and are visible to agent-level compaction.
+`custom` mode, then sends the projection's delta as `RunRequest.context_messages`. The received
+messages are invocation input, visible to supported agent-level compaction. Their transcript storage
+follows the selected owner, not a universal request-message journal in the entity.
 
 ### `context_filter` must be pure under durable
 
@@ -741,6 +833,15 @@ an at-least-once redelivery of a delta. Pressure retention never removes that po
 entity is already ahead of a replay-derived transport cursor, it drops the repeated positions and
 accepts only newer ones; neither side asks for an evicted prefix to be sent again.
 
+**Custom message IDs need an explicit deduplication record.** The prototype handles IDs outside the
+`wf_{executor}_{position}` format through a `known_ids` lookup built from stored message envelopes.
+Removing those envelopes changes that fallback. The revised implementation must preserve or replace
+this lookup in workflow/control state before omitting externally owned message records. Specify its
+identity scope and retention independently of transcript compaction, and test repeated custom input
+with a new request correlation as well as redelivery of an already-completed request. They are
+different forms of deduplication. No entity-local ID is assumed to identify a message in an external
+store, and arbitrary custom IDs cannot be treated as monotonic workflow positions.
+
 ### Projection and delta transport bound different costs
 
 `context_mode` is a semantic choice about what a target may see. Delta transport is a capacity
@@ -772,38 +873,38 @@ Registration must not require edits to an agent that already works in core. The 
 substitutes history at construction time. It shallow-copies the agent when substitution is needed,
 so the caller's instance remains unchanged.
 
+These rules select a history adapter, not a different execution-state layout. An external primary
+already supplies the history-provider role. No durable provider is added merely to record execution
+metadata, since the entity owns that responsibility directly in every configuration.
+
 | User configured | Durable behavior |
 | --- | --- |
-| Nothing | Inject a durable history provider, using the `source_id` core's auto-injected provider would have, so default-wired compaction still resolves. No compaction by default (same as core). |
+| No load-enabled primary, including configurations with only store-only sinks | Inject a durable history provider using core's default `source_id`. Preserve the sinks. No compaction by default (same as core). |
 | `InMemoryHistoryProvider` (± compaction) | Replace with the durable provider, **preserving `source_id` and `skip_excluded`** so any attached `CompactionProvider` keeps working untouched. |
 | `DurableHistoryProvider` wired by hand | Keep it. Rebuild it with the retention mode's pruning only when `prune_excluded` was left unset, since an unset value is the absence of an opinion rather than a decision. A pinned value wins over the mode. |
-| Cosmos / Redis / file / custom provider | **Leave alone.** The user chose where their conversation lives, and durable still supplies execution durability. Core injects nothing when one of these is present, so there is no slot to claim. |
-| Service-managed history | **Inject a provider anyway.** The service owning the conversation is a property of each run, not of the registration, and a run passing `store=False` would otherwise be answered by a provider core injects and retention cannot see. The provider yields no history on runs the service does own. |
+| Cosmos / Redis / file / custom load-enabled primary | **Leave alone.** The user chose the store, so do not add a second primary. Execution recording remains the entity's job. |
+| Service-storing client without an external primary | **Keep a durable provider available.** It pre-empts core's in-memory injection on client-owned runs and is silent on service-owned runs. Attachment does not require a local transcript for those service-owned turns. |
 | Agent without the core context pipeline | **Leave alone.** Falls back to replaying persisted history. |
 
 What that looks like as a single decision, taken once at registration.
 
 ```mermaid
 flowchart TB
-    CHECK{"more than one<br/>load-enabled provider?"}
-    REJECT["reject registration"]
-    Q{"what did the agent<br/>already have?"}
-
-    CHECK -->|"yes"| REJECT
-    CHECK -->|"no"| Q
-    Q -->|"nothing"| INJ["inject the durable provider, under the<br/>source_id core's own injection would have used"]
-    Q -->|"InMemoryHistoryProvider"| REP["replace it, preserving<br/>source_id and skip_excluded"]
-    Q -->|"DurableHistoryProvider, wired by hand"| KEEP["keep it, rebuilding with the mode's pruning<br/>only when prune_excluded was left unset"]
-    Q -->|"Redis, Cosmos, file, custom"| LEAVE["leave it alone, core injects nothing<br/>when one is present, so there is no slot to claim"]
-    Q -->|"no context pipeline at all"| NONE["leave the agent alone,<br/>the entity replays its own history instead"]
-
-    INJ --> SRC["an attached CompactionProvider keeps working,<br/>because it resolves history by source_id"]
-    REP --> SRC
+  PIPE{"Core context pipeline?"}
+  PIPE -->|"No"| LEGACY["Keep legacy entity-local replay"]
+  PIPE -->|"Yes"| COUNT{"Load-enabled primary providers?"}
+  COUNT -->|"More than one"| REJECT["Reject registration"]
+  COUNT -->|"None, including sink-only"| INJECT["Inject durable provider<br/>Preserve store-only sinks"]
+  COUNT -->|"One"| TYPE{"Which primary?"}
+  TYPE -->|"In-memory"| REPLACE["Replace with durable provider<br/>Preserve source_id and skip_excluded"]
+  TYPE -->|"Durable"| KEEP["Keep explicit pruning choice<br/>Otherwise inherit retention setting"]
+  TYPE -->|"External"| EXTERNAL["Keep external provider<br/>Do not add durable alongside it"]
 ```
 
-Substitution is a registration-time decision, but **who serves history is a per-run one**. A
-service-managed agent still gets a provider attached here, and the previous diagram shows why that
-provider then stays silent on the runs the service actually owns.
+Substitution is a registration-time decision, but **who serves history is a per-run one**. For a
+service-storing client without an external primary, an attached durable provider can be active or
+bypassed for history. These are not retention modes and do not change the common execution record.
+An external provider is left in place instead, not supplemented with a second primary.
 
 Preserving `source_id` is the load-bearing detail. `CompactionProvider` locates history through
 `history_source_id` (default `"in_memory"`), so a provider swapped in under the same id is invisible
@@ -821,18 +922,21 @@ on. Anything the caller had already accumulated in that provider stays where it 
 across, so the durable conversation begins empty. In practice this is invisible, because an in-memory
 provider's contents do not survive the process that registered the agent, and registration happens
 before any turn is taken. It would be visible to a caller who populated a provider in-process and then
-registered the same instance with a worker, which is worth knowing but is not a supported pattern. No
-migration path is offered for it.
+registered the same instance with a worker, which is worth knowing but is not a supported pattern.
+Importing that in-memory content is not part of the persisted-state upgrade contract. Existing
+durable entity state still requires the compatible transition described above.
 
 ### Entity Context Ownership
 
 1. **Who supplies conversation context?** If the agent exposes core's context-provider pipeline,
    the providers do, so the entity passes a session and delivers **only the new messages**. This
    holds whether history lives in durable state, an external store, or the model service.
-2. **Who bounds entity state?** The deployment does, by choosing `follow_compaction`, a pressure
-  budget, both, or neither. The entity records the exchange even when another provider owns model
-  context, but not always its content. The external provider's own policy remains authoritative for
-  the conversation it stores.
+2. **Who records execution and delivers results?** The entity, using the same correlation, outcome
+  and receipt contract in every case. That contract does not require a record of every externally
+  owned message. Necessary workflow/custom-ID bookkeeping has its own lifetime.
+3. **Who bounds storage?** The deployment selects eager pruning and pressure controls for eligible
+  entity-local history. The budget counts all local slices. An external provider's policy remains
+  authoritative for its transcript and is not changed by these controls.
 
 The entity therefore replays its own persisted history in exactly one case, an agent that does not
 expose the context pipeline. Passing a session re-engages external providers and core's in-run
@@ -842,9 +946,10 @@ full entity identity, name plus key, so workflow nodes cannot share an external-
 ### What survives a worker failure, and what does not
 
 Durability here is **per operation**, not per step within one. An entity operation records the
-request, invokes the agent, records the response and persists once. State is written at operation
-boundaries, so a worker lost mid-turn loses that turn's work and the operation is retried from its
-start. Provider state and the conversation are consistent afterwards because neither was written.
+request, invokes the agent and stages its outcome. Entity-local execution, session, ingestion and
+transcript changes commit together at the operation boundary. A worker lost before that commit
+leaves the previous local state intact and the operation may be retried from its start. A completion
+receipt is evidence only of a committed outcome, not of every step attempted within an operation.
 
 What that does not give is exactly-once execution of the side effects inside a turn. A tool call
 that has already run, or a model call already billed, will run again on retry. This is the same
@@ -853,10 +958,12 @@ because a reader could reasonably assume that "durable" means checkpointing betw
 does not, and an agent whose tools are not idempotent should say so through the usual mechanisms
 rather than expecting the entity to protect it.
 
-The one asymmetry is a service that stores conversations. If the model service accepted the turn
-before the worker died, the service has a turn the entity did not record, and the retry adds another
-one. The entity cannot see that, which is a further reason a conversation id refused by the service
-is retried in place rather than worked around.
+External history providers have their own commit boundaries. Redis, a custom store or the model
+service may accept a write before the entity commits. A retry can therefore repeat an external write
+or a tool side effect even though local slices are consistent. The common execution contract does
+not provide a cross-store transaction. Completion receipts suppress repeats of committed requests,
+not side effects from interrupted, uncommitted turns. This limitation applies to external providers
+as well as service-managed history.
 
 ### A conversation id the service refuses
 
@@ -883,16 +990,17 @@ rather than a silent cost.
 ### The session is persisted, not just its conversation id
 
 Providers use session state for data that must survive turns, including pending approvals. Because
-the entity creates a session per operation, it persists the serialized session rather than selecting
-fields from it. "Serialized session" here means what `AgentSession.to_dict()` produces, which is a
-lightweight container: identifiers plus a per-provider state bag. It is not the conversation, and
-the exact shape belongs to the hosting runtime rather than to this contract. Two details prevent
-duplication and type loss:
+the entity creates a session per operation, the current Python compatibility mechanism persists
+`AgentSession.to_dict()`. It carries identifiers and a provider state bag, not necessarily small or
+metadata-only. Logical slices do not remove message copies a provider keeps in
+that bag. The full payload counts toward the entity budget, and the hosting runtime owns its shape.
+Two details avoid an unnecessary local transcript copy:
 
 - The service-issued conversation id needs no bespoke field of its own - it is already part of
   `AgentSession.to_dict()`.
-- The durable history provider's own slice is **excluded** before persisting. It is derived from
-  `conversationHistory`, so storing it would duplicate the transcript.
+- The durable history provider's transient session slice is **excluded** before persisting. It is
+  derived from the local transcript, so storing it would duplicate that transcript. This is not the
+  durable transcript slice itself.
 
 The excluded slice is a transient working buffer, not the persisted compaction record. On each
 turn, `DurableHistoryProvider.get_messages()` rebuilds it from `conversationHistory`, including the
@@ -920,16 +1028,17 @@ creates a fresh session per operation, so that id is **persisted in durable stat
 the next turn** as part of the serialized session. Without it, every turn would start a new thread.
 
 Whether the service owns history is decided with **core's precedence, not the client class alone**.
-An explicit `store` in the agent's options wins, and only when it is unset does the client's
-`STORES_BY_DEFAULT` apply. This matters because clients that store by default (such as the Responses
-API) are routinely put back into client-side mode with `store=False`. Consulting only
-`STORES_BY_DEFAULT` would leave such an agent with a plain in-memory provider that the durable
-runtime never persists, silently losing the conversation between turns.
+Resolve `store` from run options, then agent defaults, then the client's `STORES_BY_DEFAULT`.
+Without a configured primary provider, a run using `store=False` could otherwise cause core to
+inject an in-memory history slice into session state. Keeping the durable provider available avoids
+that separate transcript outside local transcript retention. An external primary already prevents
+that injection, so it needs no additional durable provider.
 
-Core permits that choice to change between runs. Durable does not migrate service-owned content
-back into local history, so a client-side turn sees the same gap it would see in core. The entity's
-contentless records remain available for correlation and audit but are not replayed as blank model
-messages.
+Core permits that choice to change between runs. Durable preserves the service conversation ID and
+honors effective options, but does not import service content, replay mailbox results as history,
+or create a metadata-only transcript to represent missing content. The existing Python replay
+converters already skip contentless legacy records. The bounded service-ID retry described above
+uses the current invocation, not a mirror of past request messages.
 
 Core resolves this rule inside `Agent._run` and does not expose the result, so this layer
 **re-derives it** and can drift if core changes. *Upstream fix:* expose the resolved decision. The
@@ -951,7 +1060,8 @@ decision is approved.
 
 - **Provider lifecycle contract, upstream core.** Add concurrency-safe replace/flush,
   clear/delete, resolved ownership, and versioned snapshot/restore. Core owns the abstraction and no
-  provider can declare a versioned snapshot today.
+  shared provider-version/snapshot contract is exposed today. This does not block the logical
+  execution/transcript separation or change an existing external provider's storage API.
 - **Provider-owned session snapshots, after that contract.** A `{provider, version, payload}`
   envelope has no real version or migration policy until providers supply one.
 - **Explicit history-owner migrate/fork, upstream core.** `store` is a core per-run option. Durable
@@ -959,8 +1069,10 @@ decision is approved.
 - **Backend metadata for `max_state_bytes="backend_limit"`, where unavailable.** Direct DTS has a
   known 1 MB limit. Azure Storage has blob offload, and some hosting layers do not expose the active
   backend or a hard limit.
-- **Cross-language state compatibility, before a PR writes new kinds.** Choose the reader-first
-  rollout or a new major schema version, then add bidirectional and rollback tests.
+- **State and response-consumer compatibility, before revised writes.** Ship dual-layout workers
+  and polling clients, idempotent legacy conversion and the supported rollback contract. Retain
+  transcript location where possible. Verify in-flight/HITL resumes and bidirectional state tests
+  before enabling writers, not as a post-release cleanup.
 - **Move arbitrary `context_filter` execution out of orchestrator replay.** Existing issue
   [#79](https://github.com/microsoft/agent-framework-durable-extension/issues/79) tracks using an
   activity, which avoids replaying user I/O and side effects at the cost of a scheduling round trip.
