@@ -25,6 +25,8 @@
     <Project Path="samples/DurableAgents/ConsoleApps/08_FoundryManagedAgent/08_FoundryManagedAgent.csproj" />
     <Project Path="samples/DurableAgents/ConsoleApps/09_CustomHistoryProvider/09_CustomHistoryProvider.csproj" />
     <Project Path="samples/DurableAgents/ConsoleApps/09_CustomHistoryProvider/tests/09_CustomHistoryProvider.Tests.csproj" />
+    <Project Path="samples/DurableAgents/ConsoleApps/10_AutoHistoryRetention/10_AutoHistoryRetention.csproj" />
+    <Project Path="samples/DurableAgents/ConsoleApps/10_AutoHistoryRetention/tests/10_AutoHistoryRetention.Tests.csproj" />
   </Folder>
   <Folder Name="/samples/DurableAgents/AzureFunctions/">
     <Project Path="samples/DurableAgents/AzureFunctions/01_SingleAgent/01_SingleAgent.csproj" />
