@@ -102,6 +102,29 @@ internal static partial class Logs
         AgentSessionId sessionId);
 
     [LoggerMessage(
+        EventId = 12,
+        Level = LogLevel.Warning,
+        Message = "[{SessionId}] Durable state reached {InitialSizeBytes} bytes of a {MaxStateBytes} byte budget. Retention evicted {EvictedEntryCount} transcript entries containing {EvictedMessageCount} message(s), leaving {FinalSizeBytes} bytes.")]
+    public static partial void LogDurableHistoryTruncated(
+        this ILogger logger,
+        AgentSessionId sessionId,
+        int initialSizeBytes,
+        int maxStateBytes,
+        int evictedEntryCount,
+        int evictedMessageCount,
+        int finalSizeBytes);
+
+    [LoggerMessage(
+        EventId = 13,
+        Level = LogLevel.Error,
+        Message = "[{SessionId}] Durable state has a protected floor of {ProtectedStateSizeBytes} bytes against a {MaxStateBytes} byte budget after all eligible transcript eviction. Mailbox results, completion receipts, history binding, provider continuation, TTL, execution bookkeeping, system content, and the newest transcript exchange were not removed.")]
+    public static partial void LogDurableHistoryStillOverBudget(
+        this ILogger logger,
+        AgentSessionId sessionId,
+        int protectedStateSizeBytes,
+        int maxStateBytes);
+
+    [LoggerMessage(
         EventId = 14,
         Level = LogLevel.Error,
         Message = "[{SessionId}] Durable agent execution failed while restoring, running, or serializing the inner agent session.")]

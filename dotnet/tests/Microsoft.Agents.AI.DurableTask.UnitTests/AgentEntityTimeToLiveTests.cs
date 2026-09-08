@@ -157,6 +157,54 @@ public sealed class AgentEntityTimeToLiveTests
     }
 
     [Fact]
+    public async Task AutoRejectsUnauthorizedLegacyTtlMutationAsync()
+    {
+        DurableAgentState state = new();
+        state.Data.ExpirationTimeUtc = s_startTime.AddMinutes(5).UtcDateTime;
+        EntityHarness harness = CreateHarness(
+            TimeSpan.FromMinutes(5),
+            state,
+            registerAgent: false);
+        harness.Options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+        harness.Options.AuthorizeLegacyMigration = null;
+
+        _ = await Assert.ThrowsAsync<DurableAgentStateCorruptionException>(
+            () => harness.CheckExpirationAsync(
+                new AgentEntityDeletionCheck(state.Data.ExpirationTimeUtc.Value)));
+
+        Assert.Same(state, harness.State);
+        Assert.Equal(s_startTime.AddMinutes(5).UtcDateTime, state.Data.ExpirationTimeUtc);
+    }
+
+    [Fact]
+    public async Task AutoAppliesProtectedFloorWhenClearingTtlAsync()
+    {
+        DurableAgentState state = DurableAgentStateOutcomeResolver.PrepareRevisedWorkingState(
+            new DurableAgentState(),
+            hasAuthoritativeLegacyHistory: true);
+        DurableAgentStateOutcomeResolver.AddSuccessfulResult(
+            state,
+            "protected",
+            new AgentResponse(new ChatMessage(ChatRole.Assistant, new string('x', 2_000))),
+            s_startTime.AddMinutes(-5));
+        state.Data.ExpirationTimeUtc = s_startTime.AddMinutes(5).UtcDateTime;
+        EntityHarness harness = CreateHarness(
+            TimeSpan.FromMinutes(5),
+            state,
+            registerAgent: false);
+        harness.Options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+        harness.Options.MaxStateBytes = 500;
+
+        _ = await Assert.ThrowsAsync<DurableAgentStateSizeLimitExceededException>(
+            () => harness.CheckExpirationAsync(
+                new AgentEntityDeletionCheck(state.Data.ExpirationTimeUtc.Value)));
+
+        Assert.Same(state, harness.State);
+        Assert.Equal(s_startTime.AddMinutes(5).UtcDateTime, state.Data.ExpirationTimeUtc);
+        Assert.Single(state.Data.TerminalResults!);
+    }
+
+    [Fact]
     public async Task StaleLaterCheckDoesNotRescheduleEarlierCurrentExpirationAsync()
     {
         DurableAgentState state = new();

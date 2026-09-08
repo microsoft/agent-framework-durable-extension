@@ -123,6 +123,47 @@ public sealed class DurableAgentsOptions
     } = TimeSpan.FromMinutes(5);
 
     /// <summary>
+    /// Gets or sets how durable agent conversation state is retained. Defaults to
+    /// <see cref="DurableAgentHistoryRetentionMode.KeepAll"/>.
+    /// </summary>
+    /// <remarks>
+    /// Automatic retention requires mailbox-aware schema 2 state, but selecting
+    /// <see cref="DurableAgentHistoryRetentionMode.Auto"/> does not enable schema 2 production writes.
+    /// Writer activation remains an internal rollout gate until every participating reader is compatible.
+    /// Existing legacy sessions require explicitly authorized migration from independently authoritative
+    /// complete history.
+    /// </remarks>
+    public DurableAgentHistoryRetentionMode HistoryRetentionMode
+    {
+        get;
+        set => field = Enum.IsDefined(value)
+            ? value
+            : throw new ArgumentOutOfRangeException(
+                nameof(value),
+                value,
+                "The durable agent history retention mode is not supported.");
+    } = DurableAgentHistoryRetentionMode.KeepAll;
+
+    /// <summary>
+    /// Gets or sets the extension-controlled serialized state budget used when
+    /// <see cref="HistoryRetentionMode"/> is <see cref="DurableAgentHistoryRetentionMode.Auto"/>.
+    /// Defaults to 1 MiB.
+    /// </summary>
+    /// <remarks>
+    /// This budget measures the exact JSON payload produced by this extension. Durable Task backends can add
+    /// envelope bytes outside this payload, so the default retention watermarks intentionally leave headroom.
+    /// The budget is inactive in <see cref="DurableAgentHistoryRetentionMode.KeepAll"/> mode.
+    /// Automatic retention fails the operation if protected state cannot fit below the high watermark.
+    /// </remarks>
+    public int MaxStateBytes
+    {
+        get;
+        set => field = value > 0
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(value), value, "The durable agent state budget must be positive.");
+    } = 1_048_576;
+
+    /// <summary>
     /// Declares that the model service manages history for an agent that enables Agent Framework's
     /// per-service-call history persistence mode.
     /// </summary>
