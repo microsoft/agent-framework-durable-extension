@@ -155,16 +155,33 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             // without comparing request content, so callers must not reuse it for another request.
             // Surface failures before optional migration so failed delivery never writes state.
             AgentResponse committedResponse = resolvedOutcome.GetResponse(correlationId);
-            if (this._options.EnablePersistentRequestOutcomes &&
+            bool legacyMailboxMigrationRequested =
+                this._options.EnablePersistentRequestOutcomes &&
+                this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion;
+            bool migrationAuthorized =
+                legacyMailboxMigrationRequested &&
+                this._options.AuthorizeLegacyMigration?.Invoke(this.State) == true;
+            if (this._options.HistoryRetentionMode == DurableAgentHistoryRetentionMode.Auto &&
                 this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
-                this._options.AuthorizeLegacyMigration?.Invoke(this.State) == true &&
+                !migrationAuthorized)
+            {
+                throw new DurableAgentStateCorruptionException(
+                    "Automatic history retention requires schema 2 mailbox state. Legacy terminal transcript " +
+                    "entries must be converted from independently authoritative complete history before delivery.");
+            }
+            if (legacyMailboxMigrationRequested &&
+                migrationAuthorized &&
+                migrationAuthorized &&
                 resolvedOutcome.Kind != DurableAgentRunOutcomeKind.CompletedResultUnavailable)
             {
                 // Legacy evidence is converted without constructing or invoking the agent.
                 DurableAgentState migrated = DurableAgentStateOutcomeResolver.PrepareRevisedWorkingState(
                     this.State, hasAuthoritativeLegacyHistory: true);
-                ValidateForCommit(migrated);
-                this.State = migrated;
+                this.ApplyRetentionAndCommit(
+                    migrated,
+                    sessionId,
+                    logger,
+                    entityDeletionCheckExpiration: null);
             }
 
             return committedResponse;
@@ -197,6 +214,15 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         bool migrateLegacy = this._options.EnablePersistentRequestOutcomes &&
             this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
             this._options.AuthorizeLegacyMigration?.Invoke(this.State) == true;
+        if (this._options.HistoryRetentionMode == DurableAgentHistoryRetentionMode.Auto &&
+            this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
+            !migrateLegacy)
+        {
+            throw new DurableAgentStateCorruptionException(
+                "Automatic history retention requires schema 2 mailbox state. Legacy terminal transcript " +
+                "entries must be converted from independently authoritative complete history before execution.");
+        }
+
         DurableAgentState workingState = migrateLegacy
             ? DurableAgentStateOutcomeResolver.PrepareRevisedWorkingState(this.State, hasAuthoritativeLegacyHistory: true)
             : this.State.Clone();
@@ -523,9 +549,11 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
 
             DateTime? entityDeletionCheckExpiration =
                 this.UpdateEntityExpiration(workingState, sessionId, logger);
-            this._cancellationToken.ThrowIfCancellationRequested();
-            this.CommitWorkingState(workingState, sessionId, logger, entityDeletionCheckExpiration);
-
+            this.ApplyRetentionAndCommit(
+                workingState,
+                sessionId,
+                logger,
+                entityDeletionCheckExpiration);
             return response;
         }
         catch (InvalidOperationException exception) when (
@@ -663,7 +691,7 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             cancellationToken);
     }
 
-    private void CommitWorkingState(
+    private void ApplyRetentionAndCommit(
         DurableAgentState workingState,
         AgentSessionId sessionId,
         ILogger logger,
@@ -676,6 +704,14 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             currentTime,
             previousResultCheckTime,
             out AgentEntityResultExpirationCheck? nextResultExpirationSignal);
+
+        _ = DurableAgentStateRetention.Enforce(
+            workingState,
+            this._options.HistoryRetentionMode,
+            this._options.MaxStateBytes,
+            currentTime,
+            logger,
+            sessionId);
 
         this._cancellationToken.ThrowIfCancellationRequested();
         ValidateForCommit(workingState);
