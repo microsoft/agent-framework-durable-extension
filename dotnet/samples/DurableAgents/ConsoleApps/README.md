@@ -11,8 +11,9 @@ This directory contains samples for console app hosting of durable agents. These
 - **[07_ReliableStreaming](07_ReliableStreaming)**: A sample that demonstrates how to implement reliable streaming for durable agents using Redis Streams, enabling clients to disconnect and reconnect without losing messages.
 - **[08_FoundryManagedAgent](08_FoundryManagedAgent)**: Draft/experimental source for binding a server-managed, versioned Microsoft Foundry agent to a stable logical service owner and restoring its opaque service continuation across a host restart. Runtime execution remains gated.
 - **[09_CustomHistoryProvider](09_CustomHistoryProvider)**: Draft/experimental JSON-file external history provider with a stable logical key, more than 1 MiB of cumulative history, a bounded model window, and cold-restored external references. Runtime execution remains gated.
+- **[10_AutoHistoryRetention](10_AutoHistoryRetention)**: Draft/experimental opt-in transcript-pressure retention sample with protected completion evidence and OpenTelemetry observations. Runtime execution remains gated.
 
-Samples 08 and 09 require schema 2 mailbox state, whose writer remains internal and disabled by
+Samples 08 through 10 require schema 2 mailbox state, whose writer remains internal and disabled by
 default. They cannot be enabled in mixed-runtime production until Python, the dashboard, pollers, and
 all other readers meet the rollout floor.
 

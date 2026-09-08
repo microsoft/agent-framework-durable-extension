@@ -133,6 +133,26 @@ internal static class DurableAgentSamples
                 "The output should not contain error messages or stack traces.",
             ],
         },
+        new SampleDefinition
+        {
+            Name = "DurableAgents_Console_10_AutoHistoryRetention",
+            ProjectPath = "samples/DurableAgents/ConsoleApps/10_AutoHistoryRetention",
+            RequiredEnvironmentVariables =
+            [
+                "FOUNDRY_PROJECT_ENDPOINT",
+                "FOUNDRY_MODEL",
+                "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
+            ],
+            Inputs = ["automatic retention sample"],
+            ExpectedOutputDescription =
+            [
+                "The output should explain why successful responses are normally protected for 60 seconds and why the sample waits 61 seconds.",
+                "The output should print the original random marker, the diagnostic question, the model response, and an honest observation.",
+                "The output should explain that OpenTelemetry metrics are attempt-level operational evidence rather than durable committed truth.",
+                "The output should identify the scenario as durable pressure retention rather than stateful Agent Framework compaction.",
+                "The output should not contain error messages or stack traces.",
+            ],
+        },
     ];
 
     public static IReadOnlyList<SampleDefinition> AzureFunctions { get; } =
