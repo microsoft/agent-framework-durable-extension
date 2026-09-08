@@ -140,7 +140,7 @@ internal partial class AgentEntity
             DurableAgentState workingState = DurableAgentStateJsonConverter.DeserializeRevisedContract(
                 DurableAgentStateJsonConverter.SerializeRevisedContract(this.State));
             workingState.PersistentRequestOutcomesAuthorized = true;
-            this.CommitWorkingState(
+            this.ApplyRetentionAndCommit(
                 workingState,
                 sessionId,
                 logger,
@@ -192,10 +192,37 @@ internal partial class AgentEntity
             if (expirationTime.HasValue)
             {
                 logger.LogTTLExpirationTimeCleared(sessionId);
-                DurableAgentState workingState = this.State.Clone();
+                bool migrateLegacy =
+                    this._options.EnablePersistentRequestOutcomes &&
+                    this._options.HistoryRetentionMode == DurableAgentHistoryRetentionMode.Auto &&
+                    this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
+                    this._options.AuthorizeLegacyMigration?.Invoke(this.State) == true;
+                if (this._options.HistoryRetentionMode == DurableAgentHistoryRetentionMode.Auto &&
+                    this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
+                    !migrateLegacy)
+                {
+                    throw new DurableAgentStateCorruptionException(
+                        "Automatic history retention requires schema 2 mailbox state. Legacy terminal transcript " +
+                        "entries must be converted from independently authoritative complete history before TTL mutation.");
+                }
+
+                DurableAgentState workingState = migrateLegacy
+                    ? DurableAgentStateOutcomeResolver.PrepareRevisedWorkingState(
+                        this.State,
+                        hasAuthoritativeLegacyHistory: true)
+                    : this.State.Clone();
+                if (this._options.EnablePersistentRequestOutcomes &&
+                    workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
+                {
+                    workingState.PersistentRequestOutcomesAuthorized = true;
+                }
+
                 workingState.Data.ExpirationTimeUtc = null;
-                ValidateForCommit(workingState);
-                this.State = workingState;
+                this.ApplyRetentionAndCommit(
+                    workingState,
+                    sessionId,
+                    logger,
+                    entityDeletionCheckExpiration: null);
             }
 
             return;
