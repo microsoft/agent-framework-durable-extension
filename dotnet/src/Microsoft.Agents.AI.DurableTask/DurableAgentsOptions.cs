@@ -12,6 +12,9 @@ public sealed class DurableAgentsOptions
     // Agent names are case-insensitive
     private readonly Dictionary<string, Func<IServiceProvider, AIAgent>> _agentFactories = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TimeSpan?> _agentTimeToLive = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _serviceManagedPerServiceCallHistoryAgents = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DurableAgentHistoryReplayMode> _historyReplayModes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _historyProviderKeys = new(StringComparer.OrdinalIgnoreCase);
     private bool _defaultTimeToLiveConfigured;
 
     // Agents that were discovered on a workflow rather than registered explicitly by the caller. Hosts use
@@ -120,6 +123,84 @@ public sealed class DurableAgentsOptions
     } = TimeSpan.FromMinutes(5);
 
     /// <summary>
+    /// Declares that the model service manages history for an agent that enables Agent Framework's
+    /// per-service-call history persistence mode.
+    /// </summary>
+    /// <param name="agentName">The registered agent name.</param>
+    /// <returns>The options instance.</returns>
+    /// <remarks>
+    /// This declaration is consulted only when
+    /// <c>ChatClientAgentOptions.RequirePerServiceCallChatHistoryPersistence</c> is enabled. It has no
+    /// effect otherwise, and normal ownership is inferred from the session and history provider.
+    /// Framework-local per-service-call history is not supported because Agent Framework uses a local
+    /// conversation-ID sentinel and its provider callbacks do not identify the final response of a tool loop.
+    /// </remarks>
+    public DurableAgentsOptions SetServiceManagedPerServiceCallHistory(string agentName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
+        this._serviceManagedPerServiceCallHistoryAgents.Add(agentName);
+        return this;
+    }
+
+    /// <summary>
+    /// Configures input history for an agent that does not expose an Agent Framework
+    /// <see cref="ChatClientAgent"/> context pipeline.
+    /// </summary>
+    /// <param name="agentName">The registered agent name.</param>
+    /// <param name="mode">The history replay mode.</param>
+    /// <returns>The options instance.</returns>
+    /// <remarks>
+    /// Agents with a discoverable <see cref="ChatClientAgent"/> continue to use its history provider or
+    /// service conversation. For other agents, the default is
+    /// <see cref="DurableAgentHistoryReplayMode.PreloadEntityHistory"/> for backward compatibility.
+    /// Server-managed custom agents whose serialized session owns continuation should select
+    /// <see cref="DurableAgentHistoryReplayMode.CurrentRequestOnly"/>.
+    /// </remarks>
+    public DurableAgentsOptions SetHistoryReplayMode(
+        string agentName,
+        DurableAgentHistoryReplayMode mode)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
+        if (!Enum.IsDefined(mode))
+        {
+            throw new ArgumentOutOfRangeException(nameof(mode), mode, "The history replay mode is not supported.");
+        }
+
+        this._historyReplayModes[agentName] = mode;
+        return this;
+    }
+
+    /// <summary>
+    /// Configures the stable logical key that identifies a non-entity history owner.
+    /// </summary>
+    /// <param name="agentName">The registered agent name.</param>
+    /// <param name="providerKey">
+    /// A stable, non-secret identifier for the logical provider, service, or opaque agent-session store.
+    /// </param>
+    /// <returns>The options instance.</returns>
+    /// <remarks>
+    /// The key is persisted in the durable session's fixed history binding and must remain unchanged when
+    /// provider or agent instances are recreated. It must not contain credentials or be derived from CLR
+    /// type names, process instances, or opaque session-state keys.
+    /// </remarks>
+    public DurableAgentsOptions SetHistoryProviderKey(string agentName, string providerKey)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(providerKey);
+        DurableAgentStateContract.ValidateIdentifier(providerKey, nameof(providerKey));
+
+        if (this._historyProviderKeys.TryGetValue(agentName, out string? existingKey) &&
+            !string.Equals(existingKey, providerKey, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Agent '{agentName}' already has logical history provider key '{existingKey}'.");
+        }
+
+        this._historyProviderKeys[agentName] = providerKey;
+        return this;
+    }
+
+    /// <summary>
     /// Adds an AI agent factory to the options.
     /// </summary>
     /// <param name="name">The name of the agent.</param>
@@ -128,6 +209,10 @@ public sealed class DurableAgentsOptions
     /// <returns>The options instance.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="name"/> or <paramref name="factory"/> is null.</exception>
     /// <exception cref="ArgumentException">Thrown when an agent with the same name has already been registered explicitly.</exception>
+    /// <remarks>
+    /// The factory is not invoked for validation during registration. Its returned agent is validated once, before
+    /// session restoration or model/provider execution, on each entity operation that needs to execute the agent.
+    /// </remarks>
     public DurableAgentsOptions AddAIAgentFactory(string name, Func<IServiceProvider, AIAgent> factory, TimeSpan? timeToLive = null)
     {
         ArgumentNullException.ThrowIfNull(name);
@@ -154,6 +239,9 @@ public sealed class DurableAgentsOptions
     /// <remarks>
     /// Registering an agent that a workflow already discovered is allowed: the explicit registration takes over,
     /// so an agent can be promoted to a standalone agent regardless of whether the workflow was configured first.
+    /// Static pipeline incompatibilities such as stateful compaction are rejected during this call. Validation that
+    /// depends on the completed options composition or restored session remains at entity execution time, before
+    /// provider, session, or model side effects.
     /// </remarks>
     public DurableAgentsOptions AddAIAgent(AIAgent agent, TimeSpan? timeToLive = null)
     {
@@ -164,6 +252,9 @@ public sealed class DurableAgentsOptions
             throw new ArgumentException($"{nameof(agent.Name)} must not be null or whitespace.", nameof(agent));
         }
 
+        // Direct registrations expose the constructed pipeline, so reject static incompatibilities now.
+        // Factory registrations are validated after their single per-operation construction.
+        DurableAgentHistoryOwnershipResolver.ValidateStaticConfiguration(agent);
         this.AddExplicitAgentFactory(agent.Name, sp => agent, nameof(agent));
         if (timeToLive.HasValue)
         {
@@ -246,6 +337,34 @@ public sealed class DurableAgentsOptions
 
         // The legacy idle default must not silently delete completion evidence in revised state.
         return revisedState && !this._defaultTimeToLiveConfigured ? null : this.DefaultTimeToLive;
+    }
+
+    /// <summary>
+    /// Determines whether service-managed per-service-call history was declared for an agent.
+    /// </summary>
+    internal bool IsServiceManagedPerServiceCallHistory(string agentName)
+    {
+        return this._serviceManagedPerServiceCallHistoryAgents.Contains(agentName);
+    }
+
+    /// <summary>
+    /// Gets the configured history replay mode for an agent without a discoverable chat-context pipeline.
+    /// </summary>
+    internal DurableAgentHistoryReplayMode GetHistoryReplayMode(string agentName)
+    {
+        return this._historyReplayModes.TryGetValue(agentName, out DurableAgentHistoryReplayMode mode)
+            ? mode
+            : DurableAgentHistoryReplayMode.PreloadEntityHistory;
+    }
+
+    /// <summary>
+    /// Gets the configured stable logical history provider key.
+    /// </summary>
+    internal string? GetHistoryProviderKey(string agentName)
+    {
+        return this._historyProviderKeys.TryGetValue(agentName, out string? providerKey)
+            ? providerKey
+            : null;
     }
 
     /// <summary>

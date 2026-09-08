@@ -104,11 +104,20 @@ internal static partial class Logs
     [LoggerMessage(
         EventId = 14,
         Level = LogLevel.Error,
-        Message = "[{SessionId}] Durable agent execution failed.")]
+        Message = "[{SessionId}] Durable agent execution failed while restoring, running, or serializing the inner agent session.")]
     public static partial void LogDurableAgentExecutionFailed(
         this ILogger logger,
         Exception exception,
         AgentSessionId sessionId);
+
+    [LoggerMessage(
+        EventId = 16,
+        Level = LogLevel.Warning,
+        Message = "Unknown AI content metadata with runtime type '{RuntimeType}' could not be serialized. The value was omitted from durable state with failure category '{FailureCategory}'.")]
+    public static partial void LogUnknownContentSerializationFallback(
+        this ILogger logger,
+        string runtimeType,
+        string failureCategory);
 
     [LoggerMessage(
         EventId = 17,
@@ -119,15 +128,6 @@ internal static partial class Logs
         Exception exception,
         AgentSessionId sessionId,
         string correlationId);
-
-    [LoggerMessage(
-        EventId = 16,
-        Level = LogLevel.Warning,
-        Message = "Unknown AI content metadata with runtime type '{RuntimeType}' could not be serialized. The value was omitted from durable state with failure category '{FailureCategory}'.")]
-    public static partial void LogUnknownContentSerializationFallback(
-        this ILogger logger,
-        string runtimeType,
-        string failureCategory);
 
     // Durable workflow logs (EventIds 100-199)
 
