@@ -12,6 +12,8 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "$type")]
 [JsonDerivedType(typeof(DurableAgentStateRequest), "request")]
 [JsonDerivedType(typeof(DurableAgentStateResponse), "response")]
+[JsonDerivedType(typeof(DurableAgentStateErrorResponse), "errorResponse")]
+[JsonDerivedType(typeof(DurableAgentStateCompaction), "compaction")]
 internal abstract class DurableAgentStateEntry
 {
     /// <summary>
@@ -19,10 +21,11 @@ internal abstract class DurableAgentStateEntry
     /// </summary>
     /// <remarks>
     /// This ID is used to correlate <see cref="DurableAgentStateResponse"/> back to its
-    /// <see cref="DurableAgentStateRequest"/>.
+    /// <see cref="DurableAgentStateRequest"/>. Compaction entries do not have a correlation ID.
     /// </remarks>
     [JsonPropertyName("correlationId")]
-    public required string CorrelationId { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CorrelationId { get; init; }
 
     /// <summary>
     /// Gets the timestamp when this entry was created.
@@ -37,8 +40,15 @@ internal abstract class DurableAgentStateEntry
     public IReadOnlyList<DurableAgentStateMessage> Messages { get; init; } = [];
 
     /// <summary>
-    /// Gets any additional data found during deserialization that does not map to known properties.
+    /// Gets application-defined entry metadata from the schema's <c>extensionData</c> property.
+    /// </summary>
+    [JsonPropertyName("extensionData")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IDictionary<string, JsonElement>? ExtensionData { get; init; }
+
+    /// <summary>
+    /// Gets unknown entry properties that are outside the declared schema.
     /// </summary>
     [JsonExtensionData]
-    public IDictionary<string, JsonElement>? ExtensionData { get; set; }
+    public IDictionary<string, JsonElement>? UnknownProperties { get; set; }
 }

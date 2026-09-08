@@ -10,4 +10,10 @@
     <PackageReference Include="Microsoft.Agents.AI.Workflows" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="..\..\..\schemas\fixtures\python-durable-agent-state-1.2.json"
+          Link="Fixtures\python-durable-agent-state-1.2.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

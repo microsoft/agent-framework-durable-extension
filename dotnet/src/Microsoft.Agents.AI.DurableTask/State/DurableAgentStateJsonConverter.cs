@@ -12,6 +12,7 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
 {
     private const string SchemaVersionPropertyName = "schemaVersion";
     private const string DataPropertyName = "data";
+    private const string ExtensionDataPropertyName = "extensionData";
 
     /// <inheritdoc/>
     public override DurableAgentState? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
@@ -30,15 +31,10 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
             throw new InvalidOperationException("The durable agent state is missing the 'schemaVersion' property.");
         }
 
-        if (!Version.TryParse(versionElement.GetString(), out Version? schemaVersion))
-        {
-            throw new InvalidOperationException("The durable agent state has an invalid 'schemaVersion' property.");
-        }
-
-        if (schemaVersion.Major != 1)
-        {
-            throw new InvalidOperationException($"The durable agent state schema version '{schemaVersion}' is not supported.");
-        }
+        string? schemaVersionText = versionElement.ValueKind == JsonValueKind.String
+            ? versionElement.GetString()
+            : null;
+        _ = DurableAgentStateSchemaVersion.ParseSupported(schemaVersionText);
 
         if (!element.Value.TryGetProperty(DataPropertyName, out JsonElement dataElement))
         {
@@ -47,17 +43,38 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
 
         DurableAgentStateData? data = dataElement.Deserialize(
             DurableAgentStateJsonContext.Default.DurableAgentStateData);
+        Dictionary<string, JsonElement>? extensionData =
+            element.Value.TryGetProperty(ExtensionDataPropertyName, out JsonElement extensionDataElement)
+                ? ReadExtensionData(extensionDataElement)
+                : null;
+        Dictionary<string, JsonElement>? unknownProperties = null;
+        foreach (JsonProperty property in element.Value.EnumerateObject())
+        {
+            if (property.NameEquals(SchemaVersionPropertyName) ||
+                property.NameEquals(DataPropertyName) ||
+                property.NameEquals(ExtensionDataPropertyName))
+            {
+                continue;
+            }
+
+            unknownProperties ??= [];
+            unknownProperties[property.Name] = property.Value.Clone();
+        }
 
         return new DurableAgentState
         {
-            SchemaVersion = schemaVersion.ToString(),
-            Data = data ?? new DurableAgentStateData()
+            SchemaVersion = schemaVersionText!,
+            Data = data ?? new DurableAgentStateData(),
+            ExtensionData = extensionData,
+            UnknownProperties = unknownProperties,
         };
     }
 
     /// <inheritdoc/>
     public override void Write(Utf8JsonWriter writer, DurableAgentState value, JsonSerializerOptions options)
     {
+        _ = DurableAgentStateSchemaVersion.ParseSupported(value.SchemaVersion);
+
         writer.WriteStartObject();
         writer.WritePropertyName(SchemaVersionPropertyName);
         writer.WriteStringValue(value.SchemaVersion);
@@ -66,6 +83,57 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
             writer,
             value.Data,
             DurableAgentStateJsonContext.Default.DurableAgentStateData);
+        if (value.ExtensionData is not null)
+        {
+            writer.WritePropertyName(ExtensionDataPropertyName);
+            WriteExtensionData(writer, value.ExtensionData);
+        }
+
+        if (value.UnknownProperties is not null)
+        {
+            foreach ((string propertyName, JsonElement propertyValue) in value.UnknownProperties)
+            {
+                if (propertyName is not SchemaVersionPropertyName and
+                    not DataPropertyName and
+                    not ExtensionDataPropertyName)
+                {
+                    writer.WritePropertyName(propertyName);
+                    propertyValue.WriteTo(writer);
+                }
+            }
+        }
+
+        writer.WriteEndObject();
+    }
+
+    private static Dictionary<string, JsonElement>? ReadExtensionData(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            throw new JsonException("The durable agent state 'extensionData' property must be an object.");
+        }
+
+        return element.EnumerateObject().ToDictionary(
+            property => property.Name,
+            property => property.Value.Clone());
+    }
+
+    private static void WriteExtensionData(
+        Utf8JsonWriter writer,
+        IDictionary<string, JsonElement> extensionData)
+    {
+        writer.WriteStartObject();
+        foreach ((string propertyName, JsonElement propertyValue) in extensionData)
+        {
+            writer.WritePropertyName(propertyName);
+            propertyValue.WriteTo(writer);
+        }
+
         writer.WriteEndObject();
     }
 }
