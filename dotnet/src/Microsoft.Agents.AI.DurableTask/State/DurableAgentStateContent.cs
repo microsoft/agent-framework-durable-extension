@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Agents.AI.DurableTask.State;
 
@@ -42,10 +43,10 @@ internal abstract class DurableAgentStateContent
         JsonSerializer.SerializeToElement(value: null, jsonTypeInfo: s_objectTypeInfo);
 
     /// <summary>
-    /// Gets any additional data found during deserialization that does not map to known properties.
+    /// Gets unknown content properties that are outside the declared schema.
     /// </summary>
     [JsonExtensionData]
-    public IDictionary<string, JsonElement>? ExtensionData { get; set; }
+    public IDictionary<string, JsonElement>? UnknownProperties { get; set; }
 
     /// <summary>
     /// Converts this durable agent state content to an <see cref="AIContent"/>.
@@ -57,8 +58,9 @@ internal abstract class DurableAgentStateContent
     /// Creates a <see cref="DurableAgentStateContent"/> from an <see cref="AIContent"/>.
     /// </summary>
     /// <param name="content">The <see cref="AIContent"/> to convert.</param>
+    /// <param name="logger">The logger used to report safe unknown-content fallbacks.</param>
     /// <returns>A <see cref="DurableAgentStateContent"/> representing the original <see cref="AIContent"/>.</returns>
-    public static DurableAgentStateContent FromAIContent(AIContent content)
+    public static DurableAgentStateContent FromAIContent(AIContent content, ILogger? logger = null)
     {
         return content switch
         {
@@ -72,7 +74,7 @@ internal abstract class DurableAgentStateContent
             TextReasoningContent textReasoningContent => DurableAgentStateTextReasoningContent.FromTextReasoningContent(textReasoningContent),
             UriContent uriContent => DurableAgentStateUriContent.FromUriContent(uriContent),
             UsageContent usageContent => DurableAgentStateUsageContent.FromUsageContent(usageContent),
-            _ => DurableAgentStateUnknownContent.FromUnknownContent(content)
+            _ => DurableAgentStateUnknownContent.FromUnknownContent(content, logger)
         };
     }
 
