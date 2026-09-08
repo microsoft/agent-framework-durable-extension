@@ -8,7 +8,11 @@
       "properties": {
           "inputTokenCount": { "type": "integer" },
           "outputTokenCount": { "type": "integer" },
-          "totalTokenCount": { "type": "integer" }
+          "totalTokenCount": { "type": "integer" },
+          "extensionData": {
+            "type": "object",
+            "description": "Provider-specific usage values that must round-trip without interpretation. Runtimes project only numeric integral values representable by their usage-count type and ignore other values when constructing runtime usage objects."
+          }
       }
     },
     "dataContent": {
@@ -110,10 +114,10 @@
     },
     "unknownContent": {
       "type": "object",
-      "description": "The unknown content of a message exchanged with the agent.",
+      "description": "The unknown content of a message exchanged with the agent. The content value is opaque and producers and consumers must preserve its fields without interpreting generic payload properties such as $runtimeType. The namespaced $microsoftAgentFrameworkDurableTask property is reserved for a versioned, non-operative durable-extension metadata envelope; it never identifies or requests construction of a runtime type.",
       "properties": {
         "$type": { "type": "string", "const": "unknown" },
-        "content": { "description": "The unknown message content serialized as JSON." }
+        "content": { "description": "The opaque unknown message content serialized as JSON." }
       },
       "required": ["$type", "content"]
     },
@@ -140,9 +144,18 @@
         "role": { "type": "string", "enum": ["user", "assistant", "system", "tool"] },
         "contents": {
           "type": "array",
+          "description": "The message content. An empty array is a valid metadata-only message.",
           "items": { "$ref": "#/$defs/chatContentItem" }
         },
-        "createdAt": { "type": "string", "format": "date-time", "description": "When this message was created (RFC 3339)." }
+        "createdAt": { "type": "string", "format": "date-time", "description": "When this message was created (RFC 3339)." },
+        "messageId": {
+          "type": "string",
+          "description": "Stable identity for this message. Assigned by the runtime when the producer left it unset."
+        },
+        "extensionData": {
+          "type": "object",
+          "description": "Message-level additional properties that must round-trip without interpretation."
+        }
       },
       "required": ["role"]
     },
@@ -156,7 +169,11 @@
       "properties": {
         "createdAt": { "type": "string", "format": "date-time", "description": "When this exchange was created (RFC 3339)." },
         "correlationId": { "type": "string", "description": "An optional correlation ID to group related exchanges." },
-        "messages": { "$ref": "#/$defs/chatMessages" }
+        "messages": { "$ref": "#/$defs/chatMessages" },
+        "extensionData": {
+          "type": "object",
+          "description": "Entry-level additional properties that must round-trip without interpretation."
+        }
       }
     },
     "agentRequest": {
@@ -164,6 +181,7 @@
         { "$ref": "#/$defs/conversationEntry" }
       ],
       "description": "The request (i.e. prompt) sent to the agent.",
+      "required": ["$type"],
       "properties": {
         "$type": { "type": "string", "const": "request" },
         "orchestrationId": {
@@ -185,11 +203,35 @@
         { "$ref": "#/$defs/conversationEntry" }
       ],
       "description": "The response received from the agent.",
+      "required": ["$type"],
       "properties": {
         "$type": { "type": "string", "const": "response" },
         "usage": {
           "$ref": "#/$defs/usage"
         }
+      }
+    },
+    "agentErrorResponse": {
+      "allOf": [
+        { "$ref": "#/$defs/conversationEntry" }
+      ],
+      "description": "A failed turn. Consumers must not replay it to the model.",
+      "required": ["$type"],
+      "properties": {
+        "$type": { "type": "string", "const": "errorResponse" },
+        "usage": {
+          "$ref": "#/$defs/usage"
+        }
+      }
+    },
+    "compaction": {
+      "allOf": [
+        { "$ref": "#/$defs/conversationEntry" }
+      ],
+      "description": "A compacted transcript message written by a compatible runtime. It answers no request and has no correlation ID.",
+      "required": ["$type"],
+      "properties": {
+        "$type": { "type": "string", "const": "compaction" }
       }
     },
     "data": {
@@ -199,7 +241,46 @@
         "conversationHistory": {
           "type": "array",
           "description": "Ordered list of conversation entries.",
-          "items": { "$ref": "#/$defs/conversationEntry" }
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/agentRequest" },
+              { "$ref": "#/$defs/agentResponse" },
+              { "$ref": "#/$defs/agentErrorResponse" },
+              { "$ref": "#/$defs/compaction" }
+            ]
+          }
+        },
+        "session": {
+          "type": "object",
+          "description": "Opaque runtime-defined serialized session; this schema layer does not interpret it."
+        },
+        "ingestedPositions": {
+          "type": "object",
+          "description": "Highest chained-conversation position this entity has taken from each workflow executor, keyed by executor id. The .NET workflow path preserves but does not currently populate these watermarks.",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "truncation": {
+          "type": "object",
+          "description": "Producer-supplied bounded evidence that messages were removed from this conversation.",
+          "properties": {
+            "evictedMessageCount": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "firstEvictedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "lastEvictedAt": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": ["evictedMessageCount", "firstEvictedAt", "lastEvictedAt"]
+        },
+        "extensionData": {
+          "type": "object",
+          "description": "Data-level additional properties that must round-trip without interpretation."
         }
       }
     }
@@ -208,10 +289,14 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Semantic version of this state schema. By convention, this should be the first property.",
-      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+      "description": "Numeric SemVer core version of this state schema (major.minor.patch only, without leading zeroes, prerelease, or build metadata). By convention, this should be the first property.",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
     },
-    "data": { "$ref": "#/$defs/data" }
+    "data": { "$ref": "#/$defs/data" },
+    "extensionData": {
+      "type": "object",
+      "description": "Root-level additional properties that must round-trip without interpretation."
+    }
   },
   "required": ["schemaVersion", "data"]
 }

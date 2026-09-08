@@ -1,0 +1,168 @@
+{
+  "schemaVersion": "1.2.0",
+  "data": {
+    "conversationHistory": [
+      {
+        "$type": "request",
+        "correlationId": "corr-python",
+        "createdAt": "2026-07-27T12:34:50+00:00",
+        "messages": [
+          {
+            "role": "user",
+            "messageId": "producer-request-id",
+            "extensionData": {
+              "origin": "python"
+            },
+            "contents": [
+              {
+                "$type": "text",
+                "text": "hello"
+              }
+            ]
+          }
+        ],
+        "extensionData": {
+          "requestFuture": true
+        }
+      },
+      {
+        "$type": "response",
+        "correlationId": "corr-python",
+        "createdAt": "2026-07-27T12:34:51+00:00",
+        "messages": [
+          {
+            "role": "assistant",
+            "authorName": "python-agent",
+            "createdAt": "2026-07-27T12:34:51+00:00",
+            "messageId": "python-metadata-only",
+            "extensionData": {
+              "metadataOrigin": "python"
+            },
+            "contents": []
+          },
+          {
+            "role": "assistant",
+            "contents": [
+              {
+                "$type": "text",
+                "text": "world"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "contents": [
+              {
+                "$type": "reasoning",
+                "text": "private reasoning"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "messageId": "python-unknown-content",
+            "contents": [
+              {
+                "$type": "unknown",
+                "content": {
+                  "$runtimeType": "python-owned-user-field",
+                  "type": "future_python_content",
+                  "payload": "python-value",
+                  "annotations": [
+                    {
+                      "kind": "citation",
+                      "value": "python-ref"
+                    }
+                  ],
+                  "additional_properties": {
+                    "producer": "python"
+                  },
+                  "future_payload": {
+                    "nested": [
+                      1,
+                      2,
+                      3
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "inputTokenCount": 4,
+          "outputTokenCount": 2,
+          "totalTokenCount": 6,
+          "extensionData": {
+            "providerCount": 7,
+            "futureNumeric": 11,
+            "futureString": "seven",
+            "futureObject": {
+              "count": 8
+            },
+            "futureArray": [
+              9
+            ]
+          }
+        }
+      },
+      {
+        "$type": "errorResponse",
+        "correlationId": "corr-error",
+        "createdAt": "2026-07-27T12:34:52+00:00",
+        "messages": [
+          {
+            "role": "assistant",
+            "contents": [
+              {
+                "$type": "error",
+                "message": "failed",
+                "errorCode": "Example"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "$type": "compaction",
+        "createdAt": "2026-07-27T12:34:56.123456+00:00",
+        "messages": [
+          {
+            "role": "assistant",
+            "contents": [
+              {
+                "$type": "text",
+                "text": "summary"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "session": {
+      "type": "session",
+      "session_id": "@dafx-agent@session",
+      "state": {
+        "custom": {
+          "value": 1
+        }
+      }
+    },
+    "ingestedPositions": {
+      "input": 0,
+      "writer": 3
+    },
+    "extensionData": {
+      "dataProducer": "python"
+    },
+    "futureDataProperty": {
+      "preserve": true
+    }
+  },
+  "extensionData": {
+    "rootProducer": "interop-fixture"
+  },
+  "futureRootProperty": {
+    "preserve": true
+  }
+}
