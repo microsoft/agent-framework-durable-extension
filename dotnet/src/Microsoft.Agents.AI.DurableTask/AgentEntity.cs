@@ -13,14 +13,20 @@ namespace Microsoft.Agents.AI.DurableTask;
 
 internal class AgentEntity(IServiceProvider services, CancellationToken cancellationToken = default) : TaskEntity<DurableAgentState>, ITaskEntity
 {
+    private const string HistoryProviderConflictMessage =
+        "Only ConversationId or ChatHistoryProvider may be used, but not both. " +
+        "The service returned a conversation id indicating server-side chat history management, " +
+        "but the agent has a ChatHistoryProvider configured.";
+    private const string MissingServiceConversationIdMessage =
+        "Service did not return a valid conversation id when using an AgentSession with service managed chat history.";
     private static readonly TimeSpan s_minimumResultExpirationSignalDelay = TimeSpan.FromMinutes(1);
     private readonly IServiceProvider _services = services;
     private readonly DurableTaskClient _client = services.GetRequiredService<DurableTaskClient>();
     private readonly ILoggerFactory _loggerFactory = services.GetRequiredService<ILoggerFactory>();
     private readonly IAgentResponseHandler? _messageHandler = services.GetService<IAgentResponseHandler>();
     private readonly DurableAgentsOptions _options = services.GetRequiredService<DurableAgentsOptions>();
-    // Entity operations execute once rather than replaying like orchestrations, and
-    // TaskEntityContext does not expose a deterministic clock.
+    // Entity operations rehydrate and execute once rather than replaying like orchestrations, and
+    // TaskEntityContext has no deterministic clock. Use wall-clock UTC through an injectable source.
     private readonly TimeProvider _timeProvider = services.GetService<TimeProvider>() ?? TimeProvider.System;
     private readonly CancellationToken _cancellationToken = cancellationToken != default
         ? cancellationToken
@@ -94,6 +100,7 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
         ArgumentNullException.ThrowIfNull(request);
 
         AgentSessionId sessionId = this.Context.Id;
+        // Logger category is Microsoft.DurableTask.Agents.{registeredAgentName}.{sessionId}
         ILogger logger = this.GetLogger(sessionId.Name, sessionId.Key);
 
         string correlationId = request.CorrelationId;
@@ -178,12 +185,41 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             _ = AgentEntityResultExpirySchedule.Read(workingState, this.Context.Id.ToString());
         }
 
-        workingState.Data.ConversationHistory.Add(
-            workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion
-                ? DurableAgentStateRequest.FromRunRequestV2(request, logger)
-                : DurableAgentStateRequest.FromRunRequest(request, logger));
+        bool isLegacyState =
+            this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion;
+        DurableAgentStateHistoryBinding? persistedHistoryBinding =
+            DurableAgentHistoryBinding.Parse(this.State.Data.HistoryBinding);
+        DurableAgentHistoryBinding.ValidateMarkedProfile(
+            this.State.Data.HistoryBinding,
+            persistedHistoryBinding);
+        DurableAgentStateHistoryBinding? existingHistoryBinding =
+            DurableAgentHistoryBinding.IsSealedByCSharp(persistedHistoryBinding)
+                ? persistedHistoryBinding
+                : null;
+        string? configuredHistoryProviderKey =
+            this._options.GetHistoryProviderKey(sessionId.Name) ??
+            persistedHistoryBinding?.ProviderKey;
+        DurableAgentHistoryBinding.ValidateContinuationPresence(
+            existingHistoryBinding,
+            this.State.Data.Session);
+        DurableAgentHistoryBinding.ValidateConfiguredKey(
+            existingHistoryBinding,
+            configuredHistoryProviderKey);
+        if (workingState.SchemaVersion != DurableAgentState.RevisedSchemaVersion)
+        {
+            workingState.Data.ConversationHistory.Add(
+                DurableAgentStateRequest.FromRunRequest(request, logger));
+        }
+
         AIAgent agent = this.GetAgent(sessionId);
-        EntityAgentWrapper agentWrapper = new(agent, this.Context, request, this._services);
+        bool serviceManagedPerServiceCallHistory =
+            this._options.IsServiceManagedPerServiceCallHistory(sessionId.Name);
+        ValidatedDurableAgentHistoryConfiguration validatedHistoryConfiguration =
+            DurableAgentHistoryOwnershipResolver.ValidateRunConfiguration(
+                agent,
+                serviceManagedPerServiceCallHistory);
+        DurableAgentHistoryReplayMode historyReplayMode =
+            this._options.GetHistoryReplayMode(sessionId.Name);
 
         foreach (ChatMessage msg in request.Messages)
         {
@@ -201,13 +237,98 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
 
         try
         {
+            AgentSession session = await DurableAgentSessionState.RestoreAsync(
+                agent,
+                workingState.Data.Session,
+                this._cancellationToken).ConfigureAwait(false);
+            (DurableAgentHistoryOwnership ownership, ChatClientAgent? chatClientAgent) =
+                DurableAgentHistoryOwnershipResolver.Resolve(
+                    session,
+                    validatedHistoryConfiguration);
+            DurableAgentHistoryOwnership effectiveOwnership =
+                DurableAgentHistoryOwnershipResolver.GetEffectiveOwnership(
+                    ownership,
+                    historyReplayMode);
+            DurableAgentHistoryBinding.ValidatePreExecutionContinuationContract(
+                effectiveOwnership,
+                session,
+                chatClientAgent,
+                validatedHistoryConfiguration.RequiresPerServiceCallPersistence);
+            if (effectiveOwnership != DurableAgentHistoryOwnership.Entity &&
+                this.State.Data.HistoryBinding.ValueKind != JsonValueKind.Undefined &&
+                persistedHistoryBinding is null)
+            {
+                throw new DurableAgentHistoryBindingMismatchException(
+                    "The durable session contains an opaque shared historyBinding that the C# runtime " +
+                    $"cannot use to prove {effectiveOwnership} ownership. Preserve that state with its " +
+                    "originating runtime or start a new C# durable session with an explicit logical provider key.");
+            }
+
+            if (effectiveOwnership != DurableAgentHistoryOwnership.Entity &&
+                workingState.SchemaVersion != DurableAgentState.RevisedSchemaVersion)
+            {
+                throw new InvalidOperationException(
+                    "External, service, and opaque agent-session history require schema 2 mailbox writes. " +
+                    "Enable mailbox writes and authorize any legacy migration before continuing this durable session.");
+            }
+
+            DurableAgentStateHistoryBinding expectedHistoryBinding =
+                DurableAgentHistoryBinding.Create(
+                    effectiveOwnership,
+                    configuredHistoryProviderKey);
+            if (existingHistoryBinding is null)
+            {
+                DurableAgentHistoryBinding.ValidateLegacyAdoption(
+                    this.State,
+                    effectiveOwnership,
+                    session,
+                    chatClientAgent,
+                    validatedHistoryConfiguration.RequiresPerServiceCallPersistence);
+            }
+            DurableAgentHistoryBinding.ValidateExisting(
+                existingHistoryBinding,
+                expectedHistoryBinding);
+            if (existingHistoryBinding is not null)
+            {
+                DurableAgentHistoryBinding.ValidateBoundContinuation(
+                    effectiveOwnership,
+                    session,
+                    chatClientAgent);
+            }
+            bool entityOwnedHistory =
+                effectiveOwnership == DurableAgentHistoryOwnership.Entity;
+
+            // The provider is bound per invocation because it needs this operation's working state and
+            // correlation ID. A registration-time provider cannot safely bind either value.
+            DurableChatHistoryProvider? durableHistoryProvider =
+                entityOwnedHistory &&
+                workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion
+                ? new(
+                    workingState.Data.ConversationHistory,
+                    request,
+                    workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion,
+                    logger)
+                : null;
+            EntityAgentWrapper agentWrapper = new(
+                agent,
+                this.Context,
+                request,
+                this._services,
+                durableHistoryProvider);
+
+            IEnumerable<ChatMessage> inputMessages = BuildAgentInputMessages(
+                workingState,
+                request,
+                effectiveOwnership,
+                chatClientAgent is not null &&
+                    (durableHistoryProvider is not null || !entityOwnedHistory),
+                historyReplayMode,
+                workingState.SchemaVersion != DurableAgentState.RevisedSchemaVersion);
+
             // Start the agent response stream
             IAsyncEnumerable<AgentResponseUpdate> responseStream = agentWrapper.RunStreamingAsync(
-                workingState.Data.ConversationHistory.SelectMany(e => e.Messages).Select(
-                    message => workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion
-                        ? message.ToChatMessageV2()
-                        : message.ToChatMessage()),
-                await agentWrapper.CreateSessionAsync(this._cancellationToken).ConfigureAwait(false),
+                inputMessages,
+                session,
                 options: null,
                 this._cancellationToken);
 
@@ -266,12 +387,90 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             response.ContinuationToken = continuationToken;
 #pragma warning restore MEAI001
 
-            // Persist the agent response to the entity state for client polling
-            DurableAgentStateResponse storedResponse =
-                workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion
-                    ? DurableAgentStateResponse.FromResponseV2(correlationId, response, logger)
-                    : DurableAgentStateResponse.FromResponse(correlationId, response, logger);
-            workingState.Data.ConversationHistory.Add(storedResponse);
+            (DurableAgentHistoryOwnership finalOwnership, _) =
+                DurableAgentHistoryOwnershipResolver.Resolve(
+                    session,
+                    validatedHistoryConfiguration);
+            finalOwnership = DurableAgentHistoryOwnershipResolver.GetEffectiveOwnership(
+                finalOwnership,
+                historyReplayMode);
+            bool remoteServiceTransition =
+                finalOwnership != effectiveOwnership &&
+                finalOwnership == DurableAgentHistoryOwnership.Service;
+            if (finalOwnership != DurableAgentHistoryOwnership.Entity &&
+                this.State.Data.HistoryBinding.ValueKind != JsonValueKind.Undefined &&
+                persistedHistoryBinding is null)
+            {
+                throw new DurableAgentHistoryBindingMismatchException(
+                    "The completed call resolved non-entity history ownership, but the durable session " +
+                    "contains an opaque shared historyBinding that the C# runtime cannot seal or resume. " +
+                    "Durable state was not committed. The remote service may already have observed the call; " +
+                    "preserve the state with its originating runtime or start a new C# durable session.");
+            }
+
+            DurableAgentStateHistoryBinding finalHistoryBinding =
+                DurableAgentHistoryBinding.Create(
+                    finalOwnership,
+                    configuredHistoryProviderKey,
+                    remoteServiceTransition);
+            if (existingHistoryBinding is null)
+            {
+                DurableAgentHistoryBinding.ValidateLegacyTransition(
+                    this.State,
+                    effectiveOwnership,
+                    finalOwnership,
+                    remoteServiceTransition);
+            }
+
+            DurableAgentHistoryBinding.ValidateExisting(
+                existingHistoryBinding,
+                finalHistoryBinding,
+                remoteTransitionDetectedAfterExecution: remoteServiceTransition);
+            DurableAgentHistoryBinding.ValidateBoundContinuation(
+                finalOwnership,
+                session,
+                chatClientAgent,
+                remoteServiceTransition);
+
+            FinalizeConversationEntries(
+                workingState,
+                request,
+                response,
+                finalOwnership,
+                durableHistoryProvider,
+                logger);
+
+            workingState.Data.Session = await SerializeSessionWithoutDuplicateHistoryAsync(
+                agent,
+                session,
+                chatClientAgent,
+                finalOwnership,
+                this._cancellationToken).ConfigureAwait(false);
+            if (workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
+            {
+                if (existingHistoryBinding is not null ||
+                    persistedHistoryBinding is not null ||
+                    this.State.Data.HistoryBinding.ValueKind == JsonValueKind.Undefined)
+                {
+                    DurableAgentStateHistoryBinding bindingToSeal =
+                        existingHistoryBinding ??
+                        DurableAgentHistoryBinding.MergeProvisionalMetadata(
+                            finalHistoryBinding,
+                            persistedHistoryBinding);
+                    workingState = DurableAgentHistoryBinding.Seal(
+                        workingState,
+                        bindingToSeal);
+                }
+
+                workingState.MailboxWritesAuthorized = true;
+            }
+
+            DurableAgentStateResponse? storedResponse =
+                finalOwnership == DurableAgentHistoryOwnership.Entity
+                    ? workingState.Data.ConversationHistory
+                        .OfType<DurableAgentStateResponse>()
+                        .LastOrDefault(entry => entry.CorrelationId == correlationId)
+                    : null;
             if (workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
             {
                 DateTimeOffset completedAt = this._timeProvider.GetUtcNow();
@@ -285,7 +484,7 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
                 DurableAgentJsonUtilities.CaptureRetainedResult(
                     response, workingState.Data.TerminalResults![correlationId].Response!);
             }
-            else
+            else if (storedResponse is not null)
             {
                 DurableAgentJsonUtilities.CaptureRetainedLegacyResult(response, storedResponse);
             }
@@ -308,6 +507,19 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             this.CommitWorkingState(workingState, sessionId, logger, deletionCheckExpiration);
 
             return response;
+        }
+        catch (InvalidOperationException exception) when (
+            IsPostResponseServiceHistoryFailure(
+                exception,
+                validatedHistoryConfiguration.ChatClientAgent))
+        {
+            DurableAgentHistoryBindingMismatchException bindingException = new(
+                "Agent Framework rejected the completed call while updating service history ownership. " +
+                exception.Message +
+                " The remote service may already have observed the rejected call, but durable state was not committed.",
+                exception);
+            logger.LogDurableAgentExecutionFailed(bindingException, sessionId);
+            throw bindingException;
         }
         catch (Exception exception)
         {
@@ -393,7 +605,7 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
         logger.LogTTLDeletionCheck(sessionId, expirationTime, currentTime);
 
         // A delayed signal can outlive a deleted entity. TaskEntity initializes missing state
-        // before dispatch, so remove that otherwise-empty placeholder instead of recreating it.
+        // before dispatch, so delete that otherwise-empty placeholder instead of recreating it.
         if (!expirationTime.HasValue && IsEmptyInitializedState(this.State))
         {
             this.State = null!;
@@ -411,6 +623,7 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             !this._options.GetTimeToLive(
                 sessionId.Name, this.State.SchemaVersion == DurableAgentState.RevisedSchemaVersion).HasValue)
         {
+            // Configuration can change while a durable delayed signal is outstanding.
             if (expirationTime.HasValue)
             {
                 logger.LogTTLExpirationTimeCleared(sessionId);
@@ -435,7 +648,8 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             return;
         }
 
-        // A shorter TTL creates an earlier signal. Its older, later counterpart is stale.
+        // Later interactions normally extend expiration and let the earlier signal move the chain
+        // forward. A shorter TTL schedules an earlier signal; its older, later counterpart is stale.
         if (scheduledCheck is null ||
             scheduledCheck.ExpectedExpirationTimeUtc <= expirationTime.Value)
         {
@@ -459,6 +673,26 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             state.UnknownProperties is null;
     }
 
+    private static bool IsPostResponseServiceHistoryFailure(
+        InvalidOperationException exception,
+        ChatClientAgent? chatClientAgent)
+    {
+        if (chatClientAgent is null)
+        {
+            return false;
+        }
+
+        return string.Equals(
+                exception.Message,
+                MissingServiceConversationIdMessage,
+                StringComparison.Ordinal) ||
+            (chatClientAgent.ChatHistoryProvider is not null &&
+                string.Equals(
+                    exception.Message,
+                    HistoryProviderConflictMessage,
+                    StringComparison.Ordinal));
+    }
+
     private void ScheduleDeletionCheck(
         AgentSessionId sessionId,
         ILogger logger,
@@ -480,6 +714,96 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             nameof(CheckAndDeleteIfExpired), // self-signal
             new AgentEntityDeletionCheck(expirationTime),
             options: new SignalEntityOptions { SignalTime = scheduledTime });
+    }
+
+    private static IEnumerable<ChatMessage> BuildAgentInputMessages(
+        DurableAgentState workingState,
+        RunRequest request,
+        DurableAgentHistoryOwnership ownership,
+        bool contextPipelineSuppliesHistory,
+        DurableAgentHistoryReplayMode historyReplayMode,
+        bool isLegacyState)
+    {
+        if (contextPipelineSuppliesHistory ||
+            ownership == DurableAgentHistoryOwnership.AgentSession ||
+            historyReplayMode == DurableAgentHistoryReplayMode.CurrentRequestOnly)
+        {
+            // A MAF history/context pipeline or a server-owned opaque session supplies prior context.
+            // Passing stored history here as well would duplicate messages.
+            return request.Messages;
+        }
+
+        if (isLegacyState)
+        {
+            return workingState.Data.ConversationHistory
+                .SelectMany(entry => entry.Messages)
+                .Select(message => message.ToChatMessage());
+        }
+
+        // Generic AIAgents have no discoverable context pipeline. In the backward-compatible preload
+        // mode, the entity manually replays prior durable history before the current request.
+        return DurableAgentStateReplay.GetMessages(
+                workingState.Data.ConversationHistory,
+                request.CorrelationId)
+            .Concat(request.Messages);
+    }
+
+    private static void FinalizeConversationEntries(
+        DurableAgentState workingState,
+        RunRequest request,
+        AgentResponse response,
+        DurableAgentHistoryOwnership ownership,
+        DurableChatHistoryProvider? durableHistoryProvider,
+        ILogger logger)
+    {
+        if (ownership != DurableAgentHistoryOwnership.Entity)
+        {
+            // Delivery is recorded in the schema 2 mailbox. Provider-, service-, and opaque
+            // agent-session owners keep their transcript outside conversationHistory.
+            return;
+        }
+
+        if (durableHistoryProvider?.HasStagedTurn is true)
+        {
+            // Provider callbacks already staged the entity-owned request and response. Replace only
+            // the staged response so aggregate usage and response metadata are retained once.
+            durableHistoryProvider.CompleteStagedResponse(response);
+            return;
+        }
+
+        if (workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
+        {
+            workingState.Data.ConversationHistory.Add(
+                DurableAgentStateRequest.FromRunRequestV2(request, logger));
+        }
+
+        workingState.Data.ConversationHistory.Add(
+            workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion
+                ? DurableAgentStateResponse.FromResponseV2(request.CorrelationId, response, logger)
+                : DurableAgentStateResponse.FromResponse(request.CorrelationId, response, logger));
+    }
+
+    private static ValueTask<JsonElement> SerializeSessionWithoutDuplicateHistoryAsync(
+        AIAgent agent,
+        AgentSession session,
+        ChatClientAgent? chatClientAgent,
+        DurableAgentHistoryOwnership ownership,
+        CancellationToken cancellationToken)
+    {
+        // InMemoryChatHistoryProvider state can contain a full transcript already retained by the
+        // entity. Exclude only that provider's declared keys; custom, compaction, and opaque
+        // server-session state remains authoritative and is preserved.
+        IEnumerable<string> excludedStateKeys =
+            chatClientAgent?.ChatHistoryProvider is InMemoryChatHistoryProvider inMemoryHistoryProvider &&
+            ownership is DurableAgentHistoryOwnership.Entity or DurableAgentHistoryOwnership.Service
+                ? inMemoryHistoryProvider.StateKeys
+                : [];
+
+        return DurableAgentSessionState.SerializeAsync(
+            agent,
+            session,
+            excludedStateKeys,
+            cancellationToken);
     }
 
     private DateTime? UpdateExpiration(
@@ -506,8 +830,8 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
         workingState.Data.ExpirationTimeUtc = newExpirationTime;
         logger.LogTTLExpirationTimeUpdated(sessionId, newExpirationTime);
 
-        // The first turn starts one delayed-check chain. An extension is picked up by the
-        // existing signal; only a shortened expiration needs a new earlier signal.
+        // The first turn starts one delayed-check chain. Extended expirations are picked up by the
+        // earlier check; only a shortened expiration needs a new earlier signal.
         return !previousExpirationTime.HasValue ||
             newExpirationTime < previousExpirationTime.Value
                 ? newExpirationTime
@@ -577,7 +901,8 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
         ValidateForCommit(workingState);
         if (deletionCheckExpiration.HasValue)
         {
-            // this.State still points at the hydrated state until the final assignment.
+            // Pass the working-copy value explicitly: this.State still refers to the original state
+            // until the operation commits.
             this.ScheduleDeletionCheck(sessionId, logger, deletionCheckExpiration.Value);
         }
 

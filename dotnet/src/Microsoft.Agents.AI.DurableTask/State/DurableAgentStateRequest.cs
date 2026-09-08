@@ -49,15 +49,23 @@ internal sealed class DurableAgentStateRequest : DurableAgentStateEntry
     public static DurableAgentStateRequest FromRunRequest(
         RunRequest request,
         ILogger? logger = null)
-        => FromRunRequest(request, allowLosslessV2: false, logger);
+        => FromRunRequestCore(request, request.Messages, allowLosslessV2: false, logger);
 
     internal static DurableAgentStateRequest FromRunRequestV2(
         RunRequest request,
         ILogger? logger = null)
-        => FromRunRequest(request, allowLosslessV2: true, logger);
+        => FromRunRequestCore(request, request.Messages, allowLosslessV2: true, logger);
 
-    private static DurableAgentStateRequest FromRunRequest(
+    internal static DurableAgentStateRequest FromRunRequest(
         RunRequest request,
+        IEnumerable<ChatMessage> messages,
+        bool allowLosslessV2,
+        ILogger? logger = null)
+        => FromRunRequestCore(request, messages, allowLosslessV2, logger);
+
+    private static DurableAgentStateRequest FromRunRequestCore(
+        RunRequest request,
+        IEnumerable<ChatMessage> messages,
         bool allowLosslessV2,
         ILogger? logger)
     {
@@ -66,7 +74,7 @@ internal sealed class DurableAgentStateRequest : DurableAgentStateEntry
         {
             CorrelationId = request.CorrelationId,
             OrchestrationId = request.OrchestrationId,
-            Messages = request.Messages.Select(
+            Messages = messages.Select(
                 (message, index) =>
                 {
                     string messageId = DurableAgentStateMessageIdentity.Create(
