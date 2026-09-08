@@ -1,5 +1,6 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
 
@@ -29,7 +30,7 @@ internal sealed class DurableAgentStateErrorContent : DurableAgentStateContent
     /// </summary>
     [JsonPropertyName("details")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? Details { get; init; }
+    public JsonElement? Details { get; init; }
 
     /// <summary>
     /// Creates a <see cref="DurableAgentStateErrorContent"/> from an <see cref="ErrorContent"/>.
@@ -41,7 +42,11 @@ internal sealed class DurableAgentStateErrorContent : DurableAgentStateContent
     {
         return new DurableAgentStateErrorContent()
         {
-            Details = content.Details,
+            Details = content.Details is null
+                ? null
+                : JsonSerializer.SerializeToElement(
+                    content.Details,
+                    DurableAgentStateJsonContext.Default.String),
             ErrorCode = content.ErrorCode,
             Message = content.Message
         };
@@ -52,7 +57,11 @@ internal sealed class DurableAgentStateErrorContent : DurableAgentStateContent
     {
         return new ErrorContent(this.Message)
         {
-            Details = this.Details,
+            Details = this.Details is JsonElement details
+                ? details.ValueKind == JsonValueKind.String
+                    ? details.GetString()
+                    : details.GetRawText()
+                : null,
             ErrorCode = this.ErrorCode
         };
     }

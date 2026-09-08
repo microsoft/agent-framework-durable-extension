@@ -3,6 +3,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Agents.AI.DurableTask.State;
 
@@ -26,6 +27,20 @@ internal sealed class DurableAgentStateMessage
     public DateTimeOffset? CreatedAt { get; init; }
 
     /// <summary>
+    /// Gets the stable message identifier.
+    /// </summary>
+    [JsonPropertyName("messageId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? MessageId { get; set; }
+
+    /// <summary>
+    /// Gets message-level additional properties from the schema's <c>extensionData</c> property.
+    /// </summary>
+    [JsonPropertyName("extensionData")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IDictionary<string, JsonElement>? AdditionalProperties { get; init; }
+
+    /// <summary>
     /// Gets the contents of this message.
     /// </summary>
     [JsonPropertyName("contents")]
@@ -38,24 +53,39 @@ internal sealed class DurableAgentStateMessage
     public required string Role { get; init; }
 
     /// <summary>
-    /// Gets any additional data found during deserialization that does not map to known properties.
+    /// Gets unknown message properties that are outside the declared schema.
     /// </summary>
     [JsonExtensionData]
-    public IDictionary<string, JsonElement>? ExtensionData { get; set; }
+    public IDictionary<string, JsonElement>? UnknownProperties { get; set; }
 
     /// <summary>
     /// Creates a <see cref="DurableAgentStateMessage"/> from a <see cref="ChatMessage"/>.
     /// </summary>
     /// <param name="message">The <see cref="ChatMessage"/> to convert.</param>
+    /// <param name="generatedMessageId">The stable identifier to use when the message does not already have one.</param>
+    /// <param name="logger">The logger used to report safe unknown-content fallbacks.</param>
     /// <returns>A <see cref="DurableAgentStateMessage"/> representing the original message.</returns>
-    public static DurableAgentStateMessage FromChatMessage(ChatMessage message)
+    public static DurableAgentStateMessage FromChatMessage(
+        ChatMessage message,
+        string? generatedMessageId = null,
+        ILogger? logger = null)
     {
+        Dictionary<string, JsonElement>? additionalProperties = message.AdditionalProperties?
+            .ToDictionary(
+                pair => pair.Key,
+                pair => JsonSerializer.SerializeToElement(
+                    pair.Value,
+                    DurableAgentJsonUtilities.DefaultOptions.GetTypeInfo(typeof(object))));
+
         return new DurableAgentStateMessage()
         {
             CreatedAt = message.CreatedAt,
             AuthorName = message.AuthorName,
+            MessageId = message.MessageId ?? generatedMessageId,
+            AdditionalProperties = additionalProperties,
             Role = message.Role.ToString(),
-            Contents = message.Contents.Select(DurableAgentStateContent.FromAIContent).ToList()
+            Contents = message.Contents.Select(content =>
+                DurableAgentStateContent.FromAIContent(content, logger)).ToList()
         };
     }
 
@@ -65,10 +95,18 @@ internal sealed class DurableAgentStateMessage
     /// <returns>A <see cref="ChatMessage"/> representing this message.</returns>
     public ChatMessage ToChatMessage()
     {
+        AdditionalPropertiesDictionary? additionalProperties = this.AdditionalProperties is null
+            ? null
+            : new AdditionalPropertiesDictionary(
+                this.AdditionalProperties.Select(pair =>
+                    new KeyValuePair<string, object?>(pair.Key, pair.Value)));
+
         return new ChatMessage()
         {
             CreatedAt = this.CreatedAt,
             AuthorName = this.AuthorName,
+            MessageId = this.MessageId,
+            AdditionalProperties = additionalProperties,
             Contents = this.Contents.Select(c => c.ToAIContent()).ToList(),
             Role = new(this.Role)
         };

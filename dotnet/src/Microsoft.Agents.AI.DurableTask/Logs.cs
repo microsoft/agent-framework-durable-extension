@@ -101,6 +101,15 @@ internal static partial class Logs
         this ILogger logger,
         AgentSessionId sessionId);
 
+    [LoggerMessage(
+        EventId = 16,
+        Level = LogLevel.Warning,
+        Message = "Unknown AI content metadata with runtime type '{RuntimeType}' could not be serialized. The value was omitted from durable state with failure category '{FailureCategory}'.")]
+    public static partial void LogUnknownContentSerializationFallback(
+        this ILogger logger,
+        string runtimeType,
+        string failureCategory);
+
     // Durable workflow logs (EventIds 100-199)
 
     [LoggerMessage(

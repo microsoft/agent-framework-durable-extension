@@ -34,10 +34,17 @@ internal sealed class DurableAgentStateUsage
     public long? TotalTokenCount { get; init; }
 
     /// <summary>
-    /// Gets any additional data found during deserialization that does not map to known properties.
+    /// Gets provider-specific usage counts from the schema's <c>extensionData</c> property.
+    /// </summary>
+    [JsonPropertyName("extensionData")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IDictionary<string, JsonElement>? ExtensionData { get; init; }
+
+    /// <summary>
+    /// Gets unknown usage properties that are outside the declared schema.
     /// </summary>
     [JsonExtensionData]
-    public IDictionary<string, JsonElement>? ExtensionData { get; set; }
+    public IDictionary<string, JsonElement>? UnknownProperties { get; set; }
 
     /// <summary>
     /// Creates a <see cref="DurableAgentStateUsage"/> from a <see cref="UsageDetails"/>.
@@ -51,7 +58,12 @@ internal sealed class DurableAgentStateUsage
             {
                 InputTokenCount = usage.InputTokenCount,
                 OutputTokenCount = usage.OutputTokenCount,
-                TotalTokenCount = usage.TotalTokenCount
+                TotalTokenCount = usage.TotalTokenCount,
+                ExtensionData = usage.AdditionalCounts?.ToDictionary(
+                    pair => pair.Key,
+                    pair => JsonSerializer.SerializeToElement(
+                        pair.Value,
+                        DurableAgentStateJsonContext.Default.Int64)),
             }
             : null;
 
@@ -61,11 +73,31 @@ internal sealed class DurableAgentStateUsage
     /// <returns>A <see cref="UsageDetails"/> representing this usage.</returns>
     public UsageDetails ToUsageDetails()
     {
+        AdditionalPropertiesDictionary<long>? additionalCounts = null;
+        foreach (IDictionary<string, JsonElement>? values in new[] { this.ExtensionData, this.UnknownProperties })
+        {
+            if (values is null)
+            {
+                continue;
+            }
+
+            foreach ((string name, JsonElement value) in values)
+            {
+                if (value.ValueKind == JsonValueKind.Number &&
+                    value.TryGetInt64(out long count))
+                {
+                    additionalCounts ??= [];
+                    additionalCounts[name] = count;
+                }
+            }
+        }
+
         return new()
         {
             InputTokenCount = this.InputTokenCount,
             OutputTokenCount = this.OutputTokenCount,
-            TotalTokenCount = this.TotalTokenCount
+            TotalTokenCount = this.TotalTokenCount,
+            AdditionalCounts = additionalCounts,
         };
     }
 }
