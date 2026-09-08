@@ -19,6 +19,8 @@ delivery independent of transcript ownership.
   suppression for every history configuration.
 - The selected history owner supplies the transcript. Durable-owned history remains entity-local.
   External and service-owned history does not require an entity-side message mirror.
+- Workflow delta transport preserves custom selection. Position monotonicity is a cursor
+  optimization condition, not a requirement on custom filters.
 - Core compaction controls model input. Eager transcript pruning and pressure eviction are separate
   opt-ins, defaulting to `retention="keep_all"` and `max_state_bytes=None`.
 - All entity-local slices share one size budget and commit at one operation boundary. External
@@ -112,7 +114,7 @@ does not imply that both implementations already provide every capability.
 3. **Separate on-storage maintenance, deferred.** It may suit expensive summarization, but cannot
    prevent state from exceeding its limit during an active turn.
 4. **Workflow projection and delta transport, selected.** Honor `AgentExecutor.context_mode` and
-   `context_filter`, then avoid repeatedly sending the same prefix to a target.
+  `context_filter`, then avoid resending already-delivered messages to a target.
 5. **Automatically derive a lossy store reducer, rejected as a default.** A model-input exclusion
    is not implicit permission to delete. Users can opt into `follow_compaction`, or independently
    set a pressure budget without configuring compaction.
@@ -165,15 +167,16 @@ relocating `conversationHistory`.
 flowchart LR
   ENTITY["One entity / one session<br/>One total size budget"]
   ENTITY --> EXEC["Execution and delivery, every owner<br/>Request-level bookkeeping<br/>responseMailbox + completedCorrelations"]
-  ENTITY --> CONTROL["Session and workflow control, as needed<br/>session + ingestedPositions<br/>Custom-ID deduplication bookkeeping"]
+  ENTITY --> CONTROL["Session and workflow control, as needed<br/>session + ingestion receipts<br/>Custom-ID deduplication bookkeeping"]
   ENTITY --> HISTORY["Local transcript, when used<br/>conversationHistory<br/>Messages, IDs, annotations + truncation"]
 ```
 
 History providers own transcript read, append and reconciliation behavior. The entity runtime
-physically commits all entity-local slices at the operation boundary. Exactly one path must append
-each transcript input and output, preserving provider storage choices without double-writing or
-dropping messages. The current prototype's append ownership is described in
-[Prototype Evidence](#prototype-evidence).
+physically commits all entity-local slices at the operation boundary. One owner must append each
+transcript input and output, preserving provider storage choices without competing writers. This
+does not guarantee a single external append across retries; see
+[failure boundaries](#commit-and-failure-boundaries). The prototype's append ownership is described
+in [Prototype Evidence](#prototype-evidence).
 
 Each standalone session receives a distinct entity key. Workflow agent entities are scoped by
 workflow instance and executor. Their full entity identity also supplies a stable external-provider
@@ -226,8 +229,12 @@ slice into persisted session state on a `store=False` run. An external primary a
 that role, so it needs no additional durable provider.
 
 Changing `store` does not migrate service history, create placeholders for missing content, or
-promote mailbox responses into the transcript. Preserve the service conversation ID and effective
-options. Explicit ownership migration or forking belongs in the core lifecycle follow-up.
+promote mailbox responses into the transcript. In a `store=True -> False -> True` sequence, exclude
+the saved service conversation ID from the client-owned model invocation and history-provider hook
+decisions, while retaining it in session control. The later service-owned run may resume that
+service branch if still valid, without importing the intervening client-owned transcript. Neither
+branch receives history synthesized from mailbox results. Explicit ownership migration or forking
+belongs in the core lifecycle follow-up.
 
 ## Execution, Delivery and Session Lifecycle
 
@@ -272,6 +279,11 @@ already-completed status, not another agent invocation. Transcript compaction an
 alter results, remove live mailbox obligations, or erase completion receipts. Runtime-error results
 and receipts are not model context.
 
+An indefinitely active entity accumulates tombstones without a fixed bound. They can eventually fill
+the non-evictable floor even after transcript pruning. This long-session limitation requires
+[bounded completion bookkeeping](#7-bounded-completion-bookkeeping) as a durable follow-up, not
+automatic receipt expiry under transcript retention.
+
 The transcript and mailbox may share immutable payload storage, but a delivery reference cannot
 depend solely on an evictable transcript entry. It must stay readable for its delivery window.
 Likewise, an orchestration records the `call_entity` result for replay, independently of entity
@@ -279,9 +291,10 @@ completion records and any assistant message retained as history.
 
 ### Session restoration
 
-Create each operation's session through the agent's own `create_session()` and restore its provider
-state and service conversation ID. Carry the resulting session forward for committed successes and
-errors, including pending tool approvals. The current Python serialization bridge uses
+Create each operation's session through the agent's own `create_session()` and restore provider
+state. Apply the [per-run ownership rules](#per-run-ownership) to the saved service conversation ID.
+Carry the resulting session, pending tool approvals and any inactive service conversation ID
+forward on committed successes and errors. The current Python serialization bridge uses
 `AgentSession.to_dict()` with JSON-compatibility validation. The state bag may contain more than
 metadata, and its full serialized size counts toward the entity budget.
 
@@ -304,6 +317,12 @@ retry may repeat those calls and side effects. The design does not checkpoint be
 External providers and the model service have independent commits. Their writes may succeed before
 the entity commits. Local slice consistency therefore does not provide a distributed transaction or
 exactly-once execution of uncommitted effects.
+
+An external append followed by a worker failure before local commit leaves no completion receipt
+for that attempt. Retrying can append the same logical write again, even with only one append path.
+Existing core history providers remain supported without a new idempotency requirement. Stronger
+external-write guarantees are an optional
+[durable integration capability](#8-retry-safe-external-history-writes).
 
 If capacity prevents the entity commit, even a durable error result may not fit. Report failure
 through the operation error channel where available and through diagnostics. A state-polling signal
@@ -402,20 +421,20 @@ selected history owner.
 Honor `AgentExecutor.context_mode`: `full` (the default), `last_agent`, or `custom` with a
 `context_filter` of type `Callable[[list[Message]], list[Message]]`. Project the upstream
 `AgentExecutorResponse.full_conversation` first, then send the target's unseen positions as
-`RunRequest.context_messages`. These are invocation inputs, not a
-mandatory entity-local transcript mirror.
+`RunRequest.context_messages`. Preserve the selected order among those new messages. These are
+invocation inputs, not a mandatory entity-local transcript mirror.
 
 ```mermaid
 flowchart TB
     subgraph ORCH["Durable workflow orchestrator, re-executed every episode"]
         FC["full_conversation"]
         PROJ["L3: context_mode / context_filter<br/>full, last_agent, custom"]
-      DELTA["Select unseen positions for this target<br/>Replay-derived target and producer cursor"]
+      DELTA["Select unseen positions for this target<br/>Replay-derived delivery bookkeeping"]
       FC --> PROJ --> DELTA
     end
 
     subgraph NODE["Agent node, the same execution contract as standalone"]
-      GUARD["ingestedPositions<br/>Reject repeated positions"]
+      GUARD["Ingestion receipts<br/>Reject delivered positions, not skipped ones"]
       ENTITY["AgentEntity for this workflow node<br/>Execution, delivery and session control"]
       INNER["Inner agent + selected history owner<br/>Configured compaction and retention apply"]
       GUARD --> ENTITY --> INNER
@@ -426,20 +445,35 @@ flowchart TB
 ```
 
 Projection controls which context may reach a target. Delta transport avoids repeatedly sending the
-same permitted prefix without changing that semantic choice. Entity-side deduplication occurs too
+same selected messages without changing that semantic choice. Entity-side deduplication occurs too
 late to reduce the serialized call payload. The prototype's complete-projection measurements are in
 [Prototype Evidence](#prototype-evidence).
 
-Workflow messages use `wf_{executor}_{position}` identities. Maintain a separate transport cursor
-for each `(target, producer)` pair, reconstructed from deterministic orchestration replay rather
-than checkpointed independently. Fan-out targets advance separately. Fan-in compares each message
-only with its own producer's cursor, never a minimum or maximum across different producers.
+Workflow messages use `wf_{executor}_{position}` identities. Maintain separate delivery bookkeeping
+for each `(target, producer)` pair, reconstructed through deterministic orchestration replay rather
+than checkpointed independently. Fan-out targets advance separately. Fan-in checks each message
+against its own producer's delivery record, never a minimum or maximum across different producers.
 
-The entity persists `ingestedPositions` as the redelivery guard. Neither its position map nor
-transport cursors rewind when transcript retention removes messages. If the entity is ahead of a
-replay-derived cursor, it rejects repeated positions and accepts newer ones. It must not request an
-evicted prefix again. This preserves configuration parity, not identical repeated-message counts in
-every cycle compared with an in-process workflow.
+Custom filters need not be position-monotonic. A scalar highest-position cursor is an internal
+optimization only where Durable can establish that it preserves the delivery decision. Otherwise,
+track actual sent and ingested positions, using sets or lossless ranges that preserve gaps. For
+example, after delivering positions `[1, 3]`, a later projection `[2, 4]` must deliver both `2` and
+`4`. Purity, determinism and sorting each projection do not make position `2` already delivered.
+
+Both source-side delta selection and entity-side redelivery checking must preserve this distinction.
+Resending a full projection is insufficient if the entity still rejects every position below its
+maximum. Persist ingestion receipts with the entity operation's other local changes. Neither side
+forgets delivery evidence when transcript retention removes message content. A previously delivered
+and evicted message must not be re-ingested merely because its transcript entry is gone.
+
+Exact position bookkeeping can grow for sparse selections. Count persisted ingestion receipts in
+the non-evictable floor, and report capacity failure rather than silently losing selected context or
+discarding delivery evidence. This preserves selection of previously undelivered context, not
+identical repeated-message counts in every cycle compared with an in-process workflow.
+
+Position tracking covers existing workflow message identities. Changed content under an already
+delivered identity or synthesized messages need separate identity and update handling in Durable.
+Position tracking alone does not establish full filter parity for those cases.
 
 Custom IDs outside the workflow format are not monotonic positions. The prototype uses a
 `known_ids` lookup derived from stored message envelopes. Before omitting externally owned message
@@ -449,10 +483,11 @@ completed request. Neither form of deduplication implies that local IDs match an
 
 ### Replay constraints and projection placement
 
-A `context_filter` must be synchronous, deterministic, side-effect-free and independent of time,
-randomness or external state. It runs inside orchestration replay, potentially more than once for
-a logical handoff. `full` and `last_agent` are deterministic list projections. A custom filter's
+While executed inside orchestration replay, a `context_filter` must be synchronous, deterministic,
+side-effect-free and independent of time, randomness or external state. It can run more than once
+for a logical handoff. `full` and `last_agent` are deterministic list projections. A custom filter's
 side effects can repeat, its I/O can fail a later replay, and its latency is paid on each episode.
+These execution-location constraints do not require position-monotonic selection.
 
 The evaluated Durable Task SDK compares action identity and kind, not action-input equality. A
 different recomputed input can be discarded in favor of the recorded result without a
@@ -509,6 +544,11 @@ completion receipts. Preserve recorded outcomes, correlations, message IDs, orde
 session state and ingestion bookkeeping. Keep `conversationHistory` in place where possible rather
 than requiring a bulk transcript relocation.
 
+Exact ingestion receipts require the same reader/writer and rollback gates. A scalar maximum does
+not reveal which lower positions were skipped. Require recorded delivery evidence or an explicit
+version-gated transition for such state; do not infer a fully delivered prefix or reconstruct
+receipts solely from the pruned transcript.
+
 Only recorded outcomes justify backfilled completion receipts. If old retention already removed an
 outcome, migration cannot reconstruct it or claim that duplicate suppression covered that request.
 An existing response may itself have been partially pruned or annotated. Preserve its available
@@ -538,11 +578,15 @@ polling after transcript pruning, Python/.NET round-trips and unknown-data prese
 - Eager pruning and pressure eviction can be enabled separately. Both remain non-deleting by
   default, so an unconfigured session can still reach its backend limit.
 - Pruning cannot change an original result or erase completion evidence. Those protected records
-  consume capacity and can prevent further writes even when transcript retention is enabled.
+  accumulate throughout an active entity's lifetime and can prevent further writes even when
+  transcript retention is enabled. Bounded completion bookkeeping remains a durable follow-up.
+- Custom selection can require growing sets of ingestion receipts. That control-state cost belongs
+  to Durable rather than a new monotonicity requirement on core filters.
 - Pressure eviction changes available future history, not the current model projection. It operates
   near the configured budget rather than deleting continuously.
 - Local slices commit together, but external writes and uncommitted tool effects can repeat after
-  failure. This is not a cross-store transaction or exactly-once side-effect guarantee.
+  failure. Optional retry-safe history adapters do not make the entity and store transactional or
+  guarantee exactly-once model/tool effects.
 - The state transition requires compatible workers and polling clients even if the transcript
   retains its field name. In-flight workflows and supported rollback are release requirements.
 - The Python integration uses a session-buffer bridge until core exposes provider lifecycle APIs.
@@ -562,23 +606,36 @@ existing prototype's coverage.
 3. **Retention matrix.** Exercise all four combinations of eager pruning and pressure budget,
    explicit provider overrides, `"backend_limit"`, custom watermarks and unresolved host limits.
    Test system messages, newest exchanges, atomic tool/reasoning groups, metadata-only floors,
-   oversized results, unreachable targets and truncation evidence.
+   growing completion/ingestion receipts, oversized results, unreachable targets and truncation
+   evidence.
 4. **Session continuity.** Restore provider types, pending approvals and service conversation IDs
-   on committed success/error paths. Test per-run `store` transitions with and without a service
-   ID, preserving current input and skipping contentless legacy records without importing mailbox
-   results into history. Exercise bounded matching-error retries and immediate failure on others.
-5. **Workflow inputs.** Test cycles, fan-out, fan-in, replay, cursors and evicted prefixes.
-   Distinguish repeated context under a new correlation from repeated request delivery. Include
-   custom, missing and fully repeated message IDs, plus deterministic custom projection.
+   on committed success/error paths. Cold-reload through `store=True -> False -> True` with a
+   valid saved service ID. The client-owned run must ignore that ID in model calls and history
+   hooks; the later service-owned invocation must receive the preserved ID. Neither transcript may
+   be synthesized from mailbox results or merged with the other. Also cover transitions without a
+   service ID, current-input preservation and contentless legacy records. Exercise bounded
+   matching-error retries and immediate failure on others.
+5. **Workflow inputs.** Test cycles, fan-out, fan-in, replay, delivery receipts and eviction.
+   A custom projection `[1, 3]` followed by `[2, 4]` must deliver both `2` and `4` on the second
+   visit at the sender and receiver, including after cold reload and transcript eviction. Assert
+   previously delivered positions are not re-ingested, each target/producer advances independently,
+   and the selected order is preserved. Distinguish repeated context under a new correlation from
+   repeated request delivery. Include custom, missing and fully repeated message IDs, plus
+   deterministic non-monotonic projection and any cursor fast path's equivalence to exact tracking.
 6. **Registration.** Verify no-primary and sink-only injection, in-memory replacement, preserved
    `source_id`/`skip_excluded`, explicit `prune_excluded` precedence, external-provider preservation
    and rejection of multiple load-enabled primaries.
 7. **State transition.** Test legacy reading, idempotent conversion, old/new polling, paused
    human-in-the-loop (HITL) resumes and new requests after rollback. Include partially altered
-   legacy results, expiry grace, Python/.NET rewrites and unknown-data preservation.
+   legacy results, expiry grace, Python/.NET rewrites and unknown-data preservation. Test scalar
+   ingestion state with missing delivery evidence rather than assuming every earlier position was
+   delivered when converting to exact receipts.
 8. **Failure boundaries.** Inject failures around local commit and external writes. Uncommitted
    effects must not become protected completed operations. Verify the polling timeout/error
-   behavior when capacity prevents even an error-response commit.
+   behavior when capacity prevents even an error-response commit. Include an ordinary append-only
+   provider whose write succeeds before a worker failure and can repeat on retry; do not claim
+   duplicate-free external storage for it. Retry-safe adapters, when added, require separate
+   failure-injection tests for their declared guarantees.
 
 Live scheduler-limit tests, offload validation and cross-language compaction parity remain required
 as those capabilities are implemented. Any future LLM-based reducer also needs stable summary
@@ -590,6 +647,9 @@ The constraints below describe the implementations evaluated during prototype de
 assertion that later package versions retain every limitation. Revalidate each dependency against
 the versions selected for its implementation PR. New follow-up issues will be filed after ADR
 approval.
+
+Bounded completion bookkeeping and retry-safe external writes are durable-owned follow-ups. They
+do not add mandatory capabilities to core history providers.
 
 ### 1. Provider-owned store reduction
 
@@ -666,6 +726,34 @@ Backend metadata for `max_state_bytes="backend_limit"` is also needed where the 
 a hard limit. Do not silently infer an unlimited or offloaded budget in that case. An explicit byte
 budget remains the portable option.
 
+### 7. Bounded completion bookkeeping
+
+Evaluate acknowledgement plus a defined redelivery window, compact sequence watermarks where the
+request protocol permits them, or offloaded completion receipts. Any bound must define what happens
+to a duplicate request after its receipt expires without silently allowing completed work to run
+again. Idle-session TTL does not bound an entity kept active by new requests. This work does not
+block the initial implementation; until a replacement protocol is defined, tombstones remain until
+entity deletion and their growth remains an explicit capacity limitation.
+
+### 8. Retry-safe external history writes
+
+Provide stronger append guarantees through optional durable-owned adapters or integration
+capabilities using the existing core history-provider API. Do not require every provider to change
+its implementation, and do not silently replace a user's selected external provider.
+
+A retry-safe integration needs a stable write identity scoped to provider, session, logical request
+and append step, established before the write and reused on retries. The backing store must
+atomically apply the append and its duplicate-detection record, or support an expected-version
+protocol that distinguishes a prior successful write from a conflicting one. Define behavior for
+the same identity with different content, partial batches and receipt expiry before claiming
+duplicate-free writes. Preserve provider callback cadence, including multiple appends within a run.
+
+An entity-only receipt, activity or outbox does not alone close the external-write/acknowledgement
+gap. The stronger guarantee requires backing-store cooperation, but not a universal core API change
+or an entity-side transcript mirror. It protects history appends, not repeated model calls or tool
+effects. Existing providers remain supported with the documented possible-duplicate behavior; this
+capability does not block their initial integration.
+
 ### Release gates and excluded scope
 
 - State and response-consumer compatibility must precede revised writes, following
@@ -702,7 +790,9 @@ Its retention tests cover the original `keep_all`, `auto` and `follow_compaction
 independent controls specified here. Twenty-turn tests use a reduced budget with `keep_all` as the
 control. Scheduler integration covers persisted metadata, external-provider session identity,
 schema conformance, downstream workflow context and a Redis-owned conversation. This does not
-validate the proposed mailbox/receipt layout or source-side delta transport.
+validate the proposed mailbox/receipt layout, exact delivery tracking, source-side delta transport
+or `store=True -> False -> True` service-branch isolation. The target's `ingestedPositions` remains
+a per-producer maximum, and the Redis sample appends without a retry receipt.
 
 ### Recorded observations
 
