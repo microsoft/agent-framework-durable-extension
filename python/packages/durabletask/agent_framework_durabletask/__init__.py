@@ -10,6 +10,13 @@ from . import _constants
 from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentCallbackContext, AgentResponseCallbackProtocol
 from ._client import DurableAIAgentClient
+from ._configuration import (
+    INHERIT,
+    Inherit,
+    StateBudgetOverride,
+    resolve_state_budget_override,
+    validate_response_delivery_window,
+)
 from ._constants import (
     DEFAULT_MAX_POLL_RETRIES,
     DEFAULT_POLL_INTERVAL_SECONDS,
@@ -52,11 +59,23 @@ from ._durable_agent_state import (
 )
 from ._entities import AgentEntity, AgentEntityStateProviderMixin
 from ._executors import DurableAgentExecutor
-from ._history_provider import DurableHistoryBinding, DurableHistoryProvider
+from ._history_provider import DurableHistoryBinding, DurableHistoryProvider, validate_history_providers
 from ._models import AgentSessionId, DurableAgentSession, RunRequest
 from ._orchestration_context import DurableAIAgentOrchestrationContext
-from ._response_utils import ensure_response_format, load_agent_response
-from ._retention import DEFAULT_MAX_STATE_BYTES, DEFAULT_RETENTION, RetentionMode
+from ._response_utils import ensure_response_format, load_agent_response, serialize_agent_response
+from ._retention import (
+    DEFAULT_MAX_STATE_BYTES,
+    DEFAULT_RETENTION,
+    DELIVERY_WINDOW_SECONDS,
+    DTS_MAX_STATE_BYTES,
+    HIGH_WATERMARK,
+    LOW_WATERMARK,
+    RetentionMode,
+    StateBudget,
+    StateCapacityError,
+    resolve_state_budget,
+    validate_retention,
+)
 from ._shim import DurableAIAgent, build_agent_task
 from ._worker import DurableAIAgentWorker
 from ._workflows.activity import execute_workflow_activity
@@ -119,8 +138,13 @@ __all__ = [
     "DEFAULT_MAX_STATE_BYTES",
     "DEFAULT_POLL_INTERVAL_SECONDS",
     "DEFAULT_RETENTION",
+    "DELIVERY_WINDOW_SECONDS",
+    "DTS_MAX_STATE_BYTES",
     "DURABLE_NAME_PREFIX",
+    "HIGH_WATERMARK",
+    "INHERIT",
     "LEGACY_THREAD_ID_FIELD",
+    "LOW_WATERMARK",
     "MIMETYPE_APPLICATION_JSON",
     "MIMETYPE_TEXT_PLAIN",
     "REQUEST_RESPONSE_FORMAT_JSON",
@@ -172,8 +196,12 @@ __all__ = [
     "DurableStateFields",
     "DurableTaskWorkflowContext",
     "DurableWorkflowClient",
+    "Inherit",
     "RetentionMode",
     "RunRequest",
+    "StateBudget",
+    "StateBudgetOverride",
+    "StateCapacityError",
     "WorkflowOrchestrationContext",
     "WorkflowRegistrationPlan",
     "__version__",
@@ -185,9 +213,15 @@ __all__ = [
     "is_auto_generated_workflow_name",
     "load_agent_response",
     "plan_workflow_registration",
+    "resolve_state_budget",
+    "resolve_state_budget_override",
     "run_agent_coroutine",
     "run_workflow_orchestrator",
+    "serialize_agent_response",
     "validate_executor_id",
+    "validate_history_providers",
+    "validate_response_delivery_window",
+    "validate_retention",
     "validate_workflow_name",
     "workflow_name_from_orchestrator",
     "workflow_orchestrator_name",

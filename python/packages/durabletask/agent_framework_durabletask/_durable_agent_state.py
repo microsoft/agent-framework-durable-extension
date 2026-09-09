@@ -31,8 +31,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import MutableMapping
-from datetime import datetime, timezone
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, ClassVar, cast
 
@@ -45,7 +47,9 @@ from agent_framework import (
 from dateutil import parser as date_parser
 
 from ._constants import ContentTypes, DurableStateFields
+from ._message_identity import message_identity
 from ._models import RunRequest, serialize_response_format
+from ._response_utils import serialize_agent_response
 
 logger = logging.getLogger("agent_framework.durabletask")
 
@@ -136,7 +140,23 @@ def _parse_history_entries(data_dict: dict[str, Any]) -> list[DurableAgentStateE
             elif entry_type == DurableAgentStateEntryJsonType.REQUEST:
                 deserialized_history.append(DurableAgentStateRequest.from_dict(entry_dict))
             else:
-                deserialized_history.append(DurableAgentStateEntry.from_dict(entry_dict))
+                deserialized_history.append(DurableAgentStateUnknownEntry(entry_dict))
+            entry = deserialized_history[-1]
+            known_fields = {
+                DurableStateFields.TYPE_DISCRIMINATOR,
+                DurableStateFields.JSON_TYPE,
+                DurableStateFields.CORRELATION_ID,
+                DurableStateFields.CREATED_AT,
+                DurableStateFields.MESSAGES,
+                DurableStateFields.EXTENSION_DATA,
+                DurableStateFields.ORCHESTRATION_ID,
+                DurableStateFields.RESPONSE_TYPE,
+                DurableStateFields.RESPONSE_SCHEMA,
+                DurableStateFields.USAGE,
+            }
+            entry.unknown_fields = {
+                key: deepcopy(value) for key, value in entry_dict.items() if key not in known_fields
+            }
         elif isinstance(raw_entry, DurableAgentStateEntry):
             deserialized_history.append(raw_entry)
     return deserialized_history
@@ -345,10 +365,11 @@ class DurableAgentStateData:
             bag plus any service-issued conversation id. Core treats session state as durable
             across turns, so it is persisted here rather than discarded with the per-operation
             session.
-        ingested_positions: Highest chained-conversation position taken from each workflow
-            executor. A workflow re-sends the whole conversation on every visit, and comparing
-            against stored ids stops working once retention deletes any of them, so the mark is
-            kept separately.
+        ingested_positions: Legacy per-producer maxima, retained for read compatibility.
+            Migration requires delivery evidence because a maximum does not identify skipped positions.
+        ingested_messages: Actual source identities and content fingerprints, independent of transcript pruning.
+        response_mailbox: Original serializable results with their delivery expiry.
+        completed_correlations: Completion evidence retained after mailbox expiry.
         truncation: What retention has removed, if anything. A log line is only visible to whoever
             was watching at the time, so the fact that this conversation is no longer complete is
             recorded in the state itself. Absent until the first eviction, so its absence is a
@@ -361,6 +382,10 @@ class DurableAgentStateData:
     ingested_positions: dict[str, int] | None
     truncation: dict[str, Any] | None
     extension_data: dict[str, Any] | None
+    response_mailbox: dict[str, dict[str, Any]]
+    completed_correlations: dict[str, dict[str, Any]]
+    ingested_messages: dict[str, list[str] | None]
+    unknown_fields: dict[str, Any]
 
     def __init__(
         self,
@@ -369,6 +394,9 @@ class DurableAgentStateData:
         session: dict[str, Any] | None = None,
         ingested_positions: dict[str, int] | None = None,
         truncation: dict[str, Any] | None = None,
+        response_mailbox: dict[str, dict[str, Any]] | None = None,
+        completed_correlations: dict[str, dict[str, Any]] | None = None,
+        ingested_messages: dict[str, list[str] | None] | None = None,
     ) -> None:
         """Initialize the data container.
 
@@ -376,18 +404,25 @@ class DurableAgentStateData:
             conversation_history: Initial conversation history (defaults to empty list)
             extension_data: Optional custom metadata
             session: Optional serialized ``AgentSession`` from the previous turn
-            ingested_positions: Highest chained-conversation position taken from each workflow
-                executor, used to recognize context this entity has already recorded
+            ingested_positions: Legacy scalar ingestion state, not exact delivery evidence.
             truncation: Record of what retention has removed, absent until something is
+            response_mailbox: Original response snapshots with independent delivery expiry.
+            completed_correlations: Completion evidence retained after result expiry.
+            ingested_messages: Exact message fingerprints or legacy identity-only markers.
         """
         self.conversation_history = conversation_history or []
         self.extension_data = extension_data
         self.session = session
         self.ingested_positions = ingested_positions
         self.truncation = truncation
+        self.response_mailbox = response_mailbox or {}
+        self.completed_correlations = completed_correlations or {}
+        self.ingested_messages = ingested_messages or {}
+        self.unknown_fields = {}
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
+            **deepcopy(self.unknown_fields),
             DurableStateFields.CONVERSATION_HISTORY: [entry.to_dict() for entry in self.conversation_history],
         }
         if self.extension_data is not None:
@@ -398,17 +433,81 @@ class DurableAgentStateData:
             result[DurableStateFields.INGESTED_POSITIONS] = self.ingested_positions
         if self.truncation:
             result[DurableStateFields.TRUNCATION] = self.truncation
+        if self.response_mailbox:
+            result[DurableStateFields.RESPONSE_MAILBOX] = deepcopy(self.response_mailbox)
+        if self.completed_correlations:
+            result[DurableStateFields.COMPLETED_CORRELATIONS] = deepcopy(self.completed_correlations)
+        if self.ingested_messages:
+            result[DurableStateFields.INGESTED_MESSAGES] = deepcopy(self.ingested_messages)
         return result
 
     @classmethod
     def from_dict(cls, data_dict: dict[str, Any]) -> DurableAgentStateData:
-        return cls(
+        for name in (
+            DurableStateFields.RESPONSE_MAILBOX,
+            DurableStateFields.COMPLETED_CORRELATIONS,
+            DurableStateFields.INGESTED_MESSAGES,
+        ):
+            if name in data_dict and not isinstance(data_dict[name], dict):
+                raise ValueError(f"{name} must be an object.")
+        result = cls(
             conversation_history=_parse_history_entries(data_dict),
             extension_data=data_dict.get(DurableStateFields.EXTENSION_DATA),
             session=data_dict.get(DurableStateFields.SESSION),
             ingested_positions=data_dict.get(DurableStateFields.INGESTED_POSITIONS),
             truncation=data_dict.get(DurableStateFields.TRUNCATION),
+            response_mailbox=deepcopy(data_dict.get(DurableStateFields.RESPONSE_MAILBOX, {})),
+            completed_correlations=deepcopy(data_dict.get(DurableStateFields.COMPLETED_CORRELATIONS, {})),
+            ingested_messages=deepcopy(data_dict.get(DurableStateFields.INGESTED_MESSAGES, {})),
         )
+        known = {
+            DurableStateFields.CONVERSATION_HISTORY,
+            DurableStateFields.EXTENSION_DATA,
+            DurableStateFields.SESSION,
+            DurableStateFields.INGESTED_POSITIONS,
+            DurableStateFields.TRUNCATION,
+            DurableStateFields.RESPONSE_MAILBOX,
+            DurableStateFields.COMPLETED_CORRELATIONS,
+            DurableStateFields.INGESTED_MESSAGES,
+        }
+        result.unknown_fields = {key: deepcopy(value) for key, value in data_dict.items() if key not in known}
+        for name, records in (
+            (DurableStateFields.RESPONSE_MAILBOX, result.response_mailbox),
+            (DurableStateFields.COMPLETED_CORRELATIONS, result.completed_correlations),
+        ):
+            if any(not isinstance(value, dict) for value in records.values()):
+                raise ValueError(f"{name} must contain objects keyed by correlation ID.")
+            for correlation_id, record in records.items():
+                if not isinstance(correlation_id, str) or not correlation_id:
+                    raise ValueError(f"{name} requires non-empty correlation IDs.")
+                timestamps = (
+                    (DurableStateFields.CREATED_AT, DurableStateFields.EXPIRES_AT)
+                    if name == DurableStateFields.RESPONSE_MAILBOX
+                    else (DurableStateFields.COMPLETED_AT,)
+                )
+                for field in timestamps:
+                    timestamp = record.get(field)
+                    if not isinstance(timestamp, str):
+                        raise ValueError(f"{name}.{field} must be an ISO timestamp.")
+                    try:
+                        datetime.fromisoformat(timestamp)
+                    except ValueError as exc:
+                        raise ValueError(f"{name}.{field} must be an ISO timestamp.") from exc
+                if name == DurableStateFields.RESPONSE_MAILBOX:
+                    response = record.get(DurableStateFields.RESPONSE)
+                    if not isinstance(response, dict):
+                        raise ValueError("responseMailbox.response must be an inline agent response.")
+                    response = cast(dict[str, Any], response)
+                    if response.get("type") != "agent_response" or not isinstance(response.get("messages"), list):
+                        raise ValueError("responseMailbox.response must be an inline agent response.")
+                elif "legacy" in record and not isinstance(record["legacy"], bool):
+                    raise ValueError("completedCorrelations.legacy must be a boolean.")
+        if not isinstance(result.ingested_messages, dict) or any(
+            values is not None and (not isinstance(values, list) or any(not isinstance(v, str) for v in values))
+            for values in result.ingested_messages.values()
+        ):
+            raise ValueError("ingestedMessages must contain fingerprint lists or legacy identity markers.")
+        return result
 
 
 class DurableAgentState:
@@ -440,8 +539,9 @@ class DurableAgentState:
         schema_version: Schema version string (defaults to SCHEMA_VERSION)
     """
 
-    # Durable Agent Schema version
-    SCHEMA_VERSION: str = "1.2.0"
+    # New layout requires compatible workers and response consumers. A version number
+    # does not make legacy .NET workers or older Python writers safe to share this state.
+    SCHEMA_VERSION: str = "2.0.0"
 
     data: DurableAgentStateData
     schema_version: str = SCHEMA_VERSION
@@ -454,10 +554,12 @@ class DurableAgentState:
         """
         self.data = DurableAgentStateData()
         self.schema_version = schema_version
+        self.unknown_fields: dict[str, Any] = {}
 
     def to_dict(self) -> dict[str, Any]:
 
         return {
+            **deepcopy(self.unknown_fields),
             DurableStateFields.SCHEMA_VERSION: self.schema_version,
             DurableStateFields.DATA: self.data.to_dict(),
         }
@@ -474,11 +576,24 @@ class DurableAgentState:
         """
         schema_version = state.get(DurableStateFields.SCHEMA_VERSION)
         if schema_version is None:
-            logger.warning("Resetting state as it is incompatible with the current schema, all history will be lost")
-            return cls()
+            raise ValueError("The durable agent state is missing schemaVersion; refusing to discard existing state.")
+        if not isinstance(schema_version, str) or not re.fullmatch(r"[12]\.\d+\.\d+", schema_version):
+            raise ValueError(f"Unsupported durable agent state schemaVersion: {schema_version!r}.")
+        raw_data = state.get(DurableStateFields.DATA)
+        if not isinstance(raw_data, dict):
+            raise ValueError("The durable agent state data must be an object.")
 
-        instance = cls(schema_version=state.get(DurableStateFields.SCHEMA_VERSION, DurableAgentState.SCHEMA_VERSION))
-        instance.data = DurableAgentStateData.from_dict(state.get(DurableStateFields.DATA, {}))
+        instance = cls(schema_version=schema_version)
+        instance.data = DurableAgentStateData.from_dict(cast(dict[str, Any], raw_data))
+        if schema_version.startswith("2.") and (
+            instance.data.response_mailbox.keys() - instance.data.completed_correlations.keys()
+        ):
+            raise ValueError("Every responseMailbox entry requires a matching completedCorrelations receipt.")
+        instance.unknown_fields = {
+            key: deepcopy(value)
+            for key, value in state.items()
+            if key not in (DurableStateFields.SCHEMA_VERSION, DurableStateFields.DATA)
+        }
 
         return instance
 
@@ -489,7 +604,9 @@ class DurableAgentState:
         except json.JSONDecodeError as e:
             raise ValueError("The durable agent state is not valid JSON.") from e
 
-        return cls.from_dict(obj)
+        if not isinstance(obj, dict):
+            raise ValueError("The durable agent state must be a JSON object.")
+        return cls.from_dict(cast(dict[str, Any], obj))
 
     @property
     def message_count(self) -> int:
@@ -497,30 +614,106 @@ class DurableAgentState:
         return len(self.data.conversation_history)
 
     def try_get_agent_response(self, correlation_id: str) -> AgentResponse | None:
-        """Try to get an agent response by correlation ID.
+        """Read a retained result or explicit completed status using the persisted layout.
 
-        This method searches the conversation history for a response entry matching the given
-        correlation ID and returns a dictionary suitable for HTTP API responses.
-
-        Note: The returned dictionary includes computed properties (message_count) that are
-        NOT part of the persisted state schema. These are derived values included for backward
-        compatibility with the HTTP API response format and should not be considered part of
-        the durable state structure.
-
-        Args:
-            correlation_id: The correlation ID to search for
-
-        Returns:
-            Response data dict with 'content', 'message_count', and 'correlationId' if found,
-            None otherwise
+        Version 2 never falls back to transcript responses, even after mailbox expiry.
+        Version 1 retains its legacy lookup until an operation migrates the state.
         """
-        # Search through conversation history for a response with this correlationId
+        if self.schema_version.startswith("2."):
+            mailbox = self.data.response_mailbox.get(correlation_id)
+            if mailbox is not None:
+                expiry = datetime.fromisoformat(mailbox[DurableStateFields.EXPIRES_AT])
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) < expiry:
+                    return AgentResponse.from_dict(deepcopy(mailbox[DurableStateFields.RESPONSE]))
+            if correlation_id in self.data.completed_correlations or mailbox is not None:
+                return AgentResponse(
+                    messages=[
+                        Message(
+                            "system",
+                            [
+                                Content.from_error(
+                                    message="This request completed, but its response delivery window has expired.",
+                                    error_code="response_expired",
+                                )
+                            ],
+                        )
+                    ],
+                    additional_properties={"durable_status": "already_completed", "correlation_id": correlation_id},
+                )
+            return None
         for entry in self.data.conversation_history:
             if entry.correlation_id == correlation_id and isinstance(entry, DurableAgentStateResponse):
-                # Found the entry, extract response data
                 return DurableAgentStateResponse.to_run_response(entry)
 
         return None
+
+    def record_response(
+        self,
+        correlation_id: str,
+        response: AgentResponse,
+        *,
+        delivery_window_seconds: int,
+        now: datetime | None = None,
+        legacy: bool = False,
+    ) -> None:
+        """Stage an independent JSON snapshot and completion receipt, without persisting them."""
+        if correlation_id in self.data.completed_correlations:
+            return
+        timestamp = now or datetime.now(timezone.utc)
+        payload = json.loads(json.dumps(serialize_agent_response(response), allow_nan=False))
+        self.data.response_mailbox[correlation_id] = {
+            DurableStateFields.RESPONSE: payload,
+            DurableStateFields.CREATED_AT: timestamp.isoformat(),
+            DurableStateFields.EXPIRES_AT: (timestamp + timedelta(seconds=delivery_window_seconds)).isoformat(),
+        }
+        self.data.completed_correlations[correlation_id] = {
+            DurableStateFields.COMPLETED_AT: timestamp.isoformat(),
+            **({"legacy": True} if legacy else {}),
+        }
+
+    def expire_responses(self, *, now: datetime | None = None) -> None:
+        """Expire result payloads only; completion evidence lives until entity deletion."""
+        timestamp = now or datetime.now(timezone.utc)
+        for correlation_id, mailbox in list(self.data.response_mailbox.items()):
+            expiry = datetime.fromisoformat(mailbox[DurableStateFields.EXPIRES_AT])
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            if timestamp >= expiry:
+                del self.data.response_mailbox[correlation_id]
+
+    def prepare_for_write(self, *, delivery_window_seconds: int) -> None:
+        """Convert a legacy layout conservatively at an entity operation boundary.
+
+        A legacy maximum cannot identify skipped or evicted workflow positions. Such
+        states need a version-gated migration with recorded delivery evidence instead
+        of guessing a prefix. Existing recorded responses receive a fresh delivery
+        grace window, but are not claimed to be immutable original results.
+        """
+        if self.schema_version.startswith("2."):
+            return
+        if self.data.ingested_positions:
+            raise ValueError(
+                "Legacy ingestedPositions cannot be converted to exact delivery receipts without "
+                "recorded delivery evidence. Use a version-gated workflow migration."
+            )
+        timestamp = datetime.now(timezone.utc)
+        for entry in self.data.conversation_history:
+            if isinstance(entry, DurableAgentStateResponse) and entry.correlation_id:
+                self.record_response(
+                    entry.correlation_id,
+                    entry.to_run_response(entry),
+                    delivery_window_seconds=delivery_window_seconds,
+                    now=timestamp,
+                    legacy=True,
+                )
+            if isinstance(entry, DurableAgentStateRequest):
+                for message in entry.messages:
+                    if message.message_id:
+                        # Preserve the old custom-ID lookup even if its content was already cleared.
+                        self.data.ingested_messages.setdefault(message.message_id, None)
+        self.schema_version = self.SCHEMA_VERSION
 
 
 class DurableAgentStateEntry:
@@ -551,7 +744,7 @@ class DurableAgentStateEntry:
         usage: Token usage statistics - only for response entries
     """
 
-    json_type: DurableAgentStateEntryJsonType
+    json_type: DurableAgentStateEntryJsonType | str
     correlation_id: str | None
     created_at: datetime
     messages: list[DurableAgentStateMessage]
@@ -559,7 +752,7 @@ class DurableAgentStateEntry:
 
     def __init__(
         self,
-        json_type: DurableAgentStateEntryJsonType,
+        json_type: DurableAgentStateEntryJsonType | str,
         correlation_id: str | None,
         created_at: datetime,
         messages: list[DurableAgentStateMessage],
@@ -570,9 +763,11 @@ class DurableAgentStateEntry:
         self.created_at = created_at
         self.messages = messages
         self.extension_data = extension_data
+        self.unknown_fields: dict[str, Any] = {}
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
+            **deepcopy(self.unknown_fields),
             DurableStateFields.TYPE_DISCRIMINATOR: self.json_type,
             DurableStateFields.CREATED_AT: self.created_at.isoformat(),
             DurableStateFields.MESSAGES: [m.to_dict() for m in self.messages],
@@ -583,6 +778,8 @@ class DurableAgentStateEntry:
             # exists and is empty. It also keeps the persisted shape a string wherever it appears,
             # which is what the schema and the .NET reader both expect.
             result[DurableStateFields.CORRELATION_ID] = self.correlation_id
+        if self.extension_data is not None:
+            result[DurableStateFields.EXTENSION_DATA] = deepcopy(self.extension_data)
         return result
 
     @classmethod
@@ -597,6 +794,22 @@ class DurableAgentStateEntry:
             messages=messages,
             extension_data=data.get(DurableStateFields.EXTENSION_DATA),
         )
+
+
+class DurableAgentStateUnknownEntry(DurableAgentStateEntry):
+    """Opaque future entry preserved for round-trip, never converted into model context."""
+
+    def __init__(self, raw: dict[str, Any]) -> None:
+        self.raw = deepcopy(raw)
+        super().__init__(
+            json_type=str(raw.get(DurableStateFields.TYPE_DISCRIMINATOR, "unknown")),
+            correlation_id=raw.get(DurableStateFields.CORRELATION_ID),
+            created_at=datetime.min.replace(tzinfo=timezone.utc),
+            messages=[],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return deepcopy(self.raw)
 
 
 class DurableAgentStateRequest(DurableAgentStateEntry):
@@ -669,7 +882,7 @@ class DurableAgentStateRequest(DurableAgentStateEntry):
     @staticmethod
     def from_run_request(request: RunRequest) -> DurableAgentStateRequest:
         # A workflow may deliver the upstream conversation instead of a single message.
-        if request.context_messages:
+        if request.context_messages is not None:
             messages = [
                 DurableAgentStateMessage.from_chat_message(Message.from_dict(raw)) for raw in request.context_messages
             ]
@@ -856,6 +1069,7 @@ class DurableAgentStateMessage:
     created_at: datetime | None = None
     message_id: str | None = None
     extension_data: dict[str, Any] | None = None
+    ingestion_identity: str | None = None
 
     def __init__(
         self,
@@ -949,13 +1163,15 @@ class DurableAgentStateMessage:
             DurableAgentStateContent.from_ai_content(c) for c in chat_message.contents
         ]
 
-        return DurableAgentStateMessage(
+        stored = DurableAgentStateMessage(
             role=chat_message.role if hasattr(chat_message.role, "value") else str(chat_message.role),
             contents=contents_list,
             author_name=chat_message.author_name,
             message_id=getattr(chat_message, "message_id", None),
-            extension_data=dict(chat_message.additional_properties) if chat_message.additional_properties else None,
+            extension_data=deepcopy(chat_message.additional_properties) if chat_message.additional_properties else None,
         )
+        stored.ingestion_identity = message_identity(chat_message) if chat_message.message_id else None
+        return stored
 
     def to_chat_message(self) -> Any:
         """Converts this DurableAgentStateMessage back to an agent framework Message.

@@ -152,6 +152,10 @@ class RunRequest:
         self.created_at = created_at if created_at is not None else datetime.now(tz=timezone.utc)
         self.orchestration_id = orchestration_id
         self.options = options if options is not None else {}
+        if context_messages is not None and (
+            not isinstance(context_messages, list) or any(not isinstance(message, dict) for message in context_messages)
+        ):
+            raise ValueError("contextMessages must be a list of message objects.")
         self.context_messages = context_messages
 
     @staticmethod
@@ -181,7 +185,7 @@ class RunRequest:
             result["created_at"] = self.created_at.isoformat()
         if self.orchestration_id:
             result["orchestrationId"] = self.orchestration_id
-        if self.context_messages:
+        if self.context_messages is not None:
             result["contextMessages"] = self.context_messages
         return result
 
@@ -211,7 +215,12 @@ class RunRequest:
 
         options = data.get("options")
         raw_context = data.get("contextMessages")
-        context_messages = cast("list[dict[str, Any]]", raw_context) if isinstance(raw_context, list) else None
+        if raw_context is not None and (
+            not isinstance(raw_context, list)
+            or any(not isinstance(message, dict) for message in cast("list[Any]", raw_context))
+        ):
+            raise ValueError("contextMessages must be a list of message objects.")
+        context_messages = cast("list[dict[str, Any]] | None", raw_context)
 
         return cls(
             message=data.get("message", ""),

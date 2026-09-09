@@ -19,9 +19,28 @@ from durabletask.worker import TaskHubGrpcWorker
 
 from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentResponseCallbackProtocol
+from ._configuration import (
+    INHERIT,
+    StateBudgetOverride,
+    resolve_state_budget_override,
+    validate_response_delivery_window,
+)
 from ._entities import AgentEntity, DurableTaskEntityStateProvider
 from ._feature_usage import FeatureIndex
-from ._retention import DEFAULT_MAX_STATE_BYTES, DEFAULT_RETENTION, RetentionMode
+from ._history_provider import validate_history_providers
+from ._response_utils import serialize_agent_response
+from ._retention import (
+    DEFAULT_MAX_STATE_BYTES,
+    DEFAULT_RETENTION,
+    DELIVERY_WINDOW_SECONDS,
+    DTS_MAX_STATE_BYTES,
+    HIGH_WATERMARK,
+    LOW_WATERMARK,
+    RetentionMode,
+    StateBudget,
+    resolve_state_budget,
+    validate_retention,
+)
 from ._workflows.activity import execute_workflow_activity
 from ._workflows.dt_context import DurableTaskWorkflowContext
 from ._workflows.naming import (
@@ -83,24 +102,35 @@ class DurableAIAgentWorker:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         retention: RetentionMode = DEFAULT_RETENTION,
-        max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
+        max_state_bytes: StateBudget = DEFAULT_MAX_STATE_BYTES,
+        high_watermark: float = HIGH_WATERMARK,
+        low_watermark: float = LOW_WATERMARK,
+        response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
     ):
         """Initialize the worker wrapper.
 
         Args:
             worker: The durabletask worker instance to wrap
             callback: Optional callback for agent response notifications
-            retention: Default conversation retention for registered agents. ``auto`` deletes only
-                under storage pressure, ``keep_all`` never deletes and lets the entity fail at the
-                backend limit, and ``follow_compaction`` first deletes what compaction excluded,
-                then uses the same pressure eviction as ``auto`` if that is not enough.
-            max_state_bytes: Budget for serialized entity state. Raise it when large payload
-                offload is configured on the worker and client.
+            retention: Eager pruning policy. ``keep_all`` does not prune compaction exclusions;
+                ``follow_compaction`` does. Pressure eviction is controlled separately by the budget.
+            max_state_bytes: Optional serialized-state budget. None disables pressure eviction;
+                ``backend_limit`` opts into the DTS limit. An explicit positive integer overrides it.
+            high_watermark: Budget fraction at which pressure eviction starts.
+            low_watermark: Target budget fraction after pressure eviction.
+            response_delivery_window_seconds: Positive integer response delivery window in seconds.
         """
+        validate_retention(retention, high_watermark, low_watermark)
+        resolved_max_state_bytes = resolve_state_budget(max_state_bytes, backend_limit=DTS_MAX_STATE_BYTES)
+        validate_response_delivery_window(response_delivery_window_seconds)
+
         self._worker = worker
         self._callback = callback
         self._retention: RetentionMode = retention
-        self._max_state_bytes = max_state_bytes
+        self._max_state_bytes = resolved_max_state_bytes
+        self._high_watermark = high_watermark
+        self._low_watermark = low_watermark
+        self._response_delivery_window_seconds = response_delivery_window_seconds
         self._registered_agents: dict[str, SupportsAgentRun] = {}
         self._workflows: dict[str, Workflow] = {}
         # Every workflow whose orchestration has been registered (top-level plus nested
@@ -117,6 +147,10 @@ class DurableAIAgentWorker:
         *,
         entity_id: str | None = None,
         retention: RetentionMode | None = None,
+        max_state_bytes: StateBudgetOverride = INHERIT,
+        high_watermark: float | None = None,
+        low_watermark: float | None = None,
+        response_delivery_window_seconds: int | None = None,
     ) -> None:
         """Register an agent with the worker.
 
@@ -131,9 +165,14 @@ class DurableAIAgentWorker:
                 ``agent.name``. Workflow hosting passes the executor's ``id`` so the
                 entity matches the identity the orchestrator dispatches to.
             retention: Per-agent retention override. When None, the worker-level setting is used.
+            max_state_bytes: Per-agent budget. INHERIT uses the worker default; None disables it.
+            high_watermark: Pressure trigger override, or None to inherit the worker default.
+            low_watermark: Pressure target override, or None to inherit the worker default.
+            response_delivery_window_seconds: Delivery window override, or None to inherit.
 
         Raises:
-            ValueError: If the agent doesn't have a name or is already registered
+            ValueError: If the name, retention settings, or history-provider composition is invalid,
+                or the agent is already registered.
         """
         registration_name = entity_id or agent.name
         if not registration_name:
@@ -142,29 +181,44 @@ class DurableAIAgentWorker:
         if registration_name in self._registered_agents:
             raise ValueError(f"Agent '{registration_name}' is already registered")
 
+        effective_retention = self._retention if retention is None else retention
+        effective_budget = resolve_state_budget_override(
+            max_state_bytes, self._max_state_bytes, backend_limit=DTS_MAX_STATE_BYTES
+        )
+        effective_high = self._high_watermark if high_watermark is None else high_watermark
+        effective_low = self._low_watermark if low_watermark is None else low_watermark
+        effective_window = (
+            self._response_delivery_window_seconds
+            if response_delivery_window_seconds is None
+            else response_delivery_window_seconds
+        )
+        validate_retention(effective_retention, effective_high, effective_low)
+        validate_response_delivery_window(effective_window)
+        validate_history_providers(agent)
+
         logger.info(
             "[DurableAIAgentWorker] Registering agent: %s as entity: dafx-%s", registration_name, registration_name
         )
-
-        # Store the agent reference
-        self._registered_agents[registration_name] = agent
 
         # Use agent-specific callback if provided, otherwise use worker-level callback
         effective_callback = callback or self._callback
 
         # Create a configured entity class using the factory
-        effective_retention: RetentionMode = self._retention if retention is None else retention
         entity_class = self.__create_agent_entity(
             agent,
             effective_callback,
             entity_id=registration_name,
             retention=effective_retention,
-            max_state_bytes=self._max_state_bytes,
+            max_state_bytes=effective_budget,
+            high_watermark=effective_high,
+            low_watermark=effective_low,
+            response_delivery_window_seconds=effective_window,
         )
 
         # Register the entity class with the worker
         # The worker.add_entity method takes a class
         entity_registered: str = self._worker.add_entity(entity_class)
+        self._registered_agents[registration_name] = agent
 
         logger.debug(
             "[DurableAIAgentWorker] Successfully registered entity class %s for agent: %s",
@@ -221,6 +275,10 @@ class DurableAIAgentWorker:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         retention: RetentionMode | None = None,
+        max_state_bytes: StateBudgetOverride = INHERIT,
+        high_watermark: float | None = None,
+        low_watermark: float | None = None,
+        response_delivery_window_seconds: int | None = None,
     ) -> None:
         """Register a :class:`Workflow` for automatic orchestration.
 
@@ -249,11 +307,16 @@ class DurableAIAgentWorker:
             retention: Retention for this workflow's agent nodes. When None, the worker-level
                 setting is used. Worth setting separately, since a workflow node's entity lives
                 for one orchestration while a standalone agent's can live indefinitely.
+            max_state_bytes: Budget for newly registered agent nodes in this workflow and its nested
+                workflows. INHERIT uses the worker default; None disables pressure eviction.
+            high_watermark: Pressure trigger override, or None to inherit the worker default.
+            low_watermark: Pressure target override, or None to inherit the worker default.
+            response_delivery_window_seconds: Delivery window override, or None to inherit.
 
         Raises:
             ValueError: If the workflow (or a nested sub-workflow) name is missing,
                 invalid, or auto-generated, or if the top-level workflow name is
-                already registered on this worker.
+                already registered, or retention settings or history providers are invalid.
         """
         workflow_name = workflow.name
         validate_workflow_name(workflow_name)
@@ -262,6 +325,20 @@ class DurableAIAgentWorker:
                 f"Workflow '{workflow_name}' is already registered on this worker "
                 "(workflow names are compared case-insensitively)."
             )
+
+        effective_retention = self._retention if retention is None else retention
+        effective_budget = resolve_state_budget_override(
+            max_state_bytes, self._max_state_bytes, backend_limit=DTS_MAX_STATE_BYTES
+        )
+        effective_high = self._high_watermark if high_watermark is None else high_watermark
+        effective_low = self._low_watermark if low_watermark is None else low_watermark
+        effective_window = (
+            self._response_delivery_window_seconds
+            if response_delivery_window_seconds is None
+            else response_delivery_window_seconds
+        )
+        validate_retention(effective_retention, effective_high, effective_low)
+        validate_response_delivery_window(effective_window)
 
         # Validate the whole composition (top-level plus every nested sub-workflow)
         # up front, so an invalid/auto-generated nested name (or an executor id that
@@ -272,6 +349,8 @@ class DurableAIAgentWorker:
             validate_workflow_name(hosted.name)
             for executor_id in hosted.executors:
                 validate_executor_id(executor_id)
+            for agent_executor in plan_workflow_registration(hosted).agent_executors:
+                validate_history_providers(agent_executor.agent)
 
         # Check every cross-call collision *before* mutating any state, so a clash
         # between a nested sub-workflow and an already-registered orchestration cannot
@@ -295,13 +374,26 @@ class DurableAIAgentWorker:
         for hosted in hosted_workflows:
             if hosted.name.casefold() in self._registered_orchestrations:
                 continue
-            self._register_single_workflow(hosted, callback, retention)
+            self._register_single_workflow(
+                hosted,
+                callback,
+                effective_retention,
+                max_state_bytes=effective_budget,
+                high_watermark=effective_high,
+                low_watermark=effective_low,
+                response_delivery_window_seconds=effective_window,
+            )
 
     def _register_single_workflow(
         self,
         workflow: Workflow,
         callback: AgentResponseCallbackProtocol | None,
         retention: RetentionMode | None = None,
+        *,
+        max_state_bytes: StateBudgetOverride = INHERIT,
+        high_watermark: float | None = None,
+        low_watermark: float | None = None,
+        response_delivery_window_seconds: int | None = None,
     ) -> None:
         """Register one workflow's durable primitives (no recursion into sub-workflows).
 
@@ -321,7 +413,16 @@ class DurableAIAgentWorker:
         for agent_executor in plan.agent_executors:
             scoped_id = workflow_scoped_executor_id(workflow.name, agent_executor.id)
             if scoped_id not in self._registered_agents:
-                self.add_agent(agent_executor.agent, callback=callback, entity_id=scoped_id, retention=retention)
+                self.add_agent(
+                    agent_executor.agent,
+                    callback=callback,
+                    entity_id=scoped_id,
+                    retention=retention,
+                    max_state_bytes=max_state_bytes,
+                    high_watermark=high_watermark,
+                    low_watermark=low_watermark,
+                    response_delivery_window_seconds=response_delivery_window_seconds,
+                )
 
         # Register non-agent executors as durable activities, scoped by workflow name.
         # WorkflowExecutor nodes are intentionally not registered as activities: their
@@ -387,7 +488,10 @@ class DurableAIAgentWorker:
         *,
         entity_id: str | None = None,
         retention: RetentionMode = DEFAULT_RETENTION,
-        max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
+        max_state_bytes: int | None = None,
+        high_watermark: float = HIGH_WATERMARK,
+        low_watermark: float = LOW_WATERMARK,
+        response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
     ) -> type[DurableTaskEntityStateProvider]:
         """Factory function to create a DurableEntity class configured with an agent.
 
@@ -401,7 +505,10 @@ class DurableAIAgentWorker:
                 ``agent.name`` (used by workflow hosting to key entities by
                 executor id).
             retention: How much of the conversation durable state may discard.
-            max_state_bytes: Budget for serialized entity state.
+            max_state_bytes: Resolved pressure budget, or None to disable pressure eviction.
+            high_watermark: Budget fraction at which pressure eviction starts.
+            low_watermark: Target budget fraction after pressure eviction.
+            response_delivery_window_seconds: Response delivery window in seconds.
 
         Returns:
             A new DurableEntity subclass configured for this agent
@@ -421,6 +528,9 @@ class DurableAIAgentWorker:
                     state_provider=self,
                     retention=retention,
                     max_state_bytes=max_state_bytes,
+                    high_watermark=high_watermark,
+                    low_watermark=low_watermark,
+                    response_delivery_window_seconds=response_delivery_window_seconds,
                 )
                 logger.debug(
                     "[ConfiguredAgentEntity] Initialized entity for agent: %s (entity name: %s)",
@@ -442,10 +552,10 @@ class DurableAIAgentWorker:
                 # shared agent clients/credentials stay bound to a live loop across
                 # successive entity invocations (avoids cross-loop hangs).
                 response = run_agent_coroutine(self._agent_entity.run(request))
-                return response.to_dict()
+                return serialize_agent_response(response)
 
             def reset(self) -> None:
-                """Reset the agent's conversation history."""
+                """Delegate reset to the configured AgentEntity."""
                 logger.debug("[ConfiguredAgentEntity.reset] Resetting agent: %s", agent_name)
                 self._agent_entity.reset()
 

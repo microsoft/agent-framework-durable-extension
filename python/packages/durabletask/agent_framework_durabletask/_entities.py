@@ -10,6 +10,7 @@ import json
 import logging
 import warnings
 from collections.abc import Mapping, Sequence
+from copy import copy, deepcopy
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -26,6 +27,7 @@ from agent_framework import (
 from durabletask.entities import DurableEntity
 
 from ._callbacks import AgentCallbackContext, AgentResponseCallbackProtocol
+from ._configuration import validate_response_delivery_window
 from ._durable_agent_state import (
     DurableAgentState,
     DurableAgentStateEntry,
@@ -33,6 +35,7 @@ from ._durable_agent_state import (
     DurableAgentStateMessage,
     DurableAgentStateRequest,
     DurableAgentStateResponse,
+    DurableAgentStateUnknownEntry,
 )
 from ._history_provider import (
     DurableHistoryBinding,
@@ -42,15 +45,21 @@ from ._history_provider import (
     service_stores_history,
     unbind_durable_history,
 )
+from ._message_identity import message_identity
 from ._models import RunRequest
 from ._retention import (
     DEFAULT_MAX_STATE_BYTES,
     DEFAULT_RETENTION,
+    DELIVERY_WINDOW_SECONDS,
+    HIGH_WATERMARK,
+    LOW_WATERMARK,
     RetentionMode,
+    StateBudget,
     enforce_budget,
     prunes_excluded,
+    resolve_state_budget,
+    validate_retention,
 )
-from ._workflows.naming import parse_workflow_message_id
 
 logger = logging.getLogger("agent_framework.durabletask")
 
@@ -84,39 +93,16 @@ _REJECTED_ID_BACKOFF_SECONDS = 0.5
 """Multiplied by the attempt number, so the waits are 0.5s, 1s, 1.5s."""
 
 
-def _forget_message_content(messages: list[DurableAgentStateMessage]) -> None:
-    """Drop the content of these messages, keeping the record that they happened.
-
-    Used when a history provider the caller configured owns the conversation. The entity always
-    records the exchange, in every configuration, because correlation ids and delivery are its
-    job. It does not need to be a second copy of the conversation itself, and being one would put
-    the customer's content under two different retention, residency and deletion policies while
-    only one of them is the store they chose.
-
-    What survives is the envelope and the message id. Ids matter because deduplicating repeated
-    upstream context in a workflow is done by id, so forgetting them would let the same message be
-    ingested twice.
-
-    Args:
-        messages: The stored messages, emptied in place.
-    """
-    for stored in messages:
-        stored.contents = []
-
-
 def _is_missing_previous_response(exc: BaseException) -> bool:
     """Return whether the service refused the conversation id from the previous turn.
 
     A service that keeps the conversation can hand back the id of a finished response before that
     response is durably readable, so the next turn is refused even though the id is genuine and
-    was captured correctly. The conversation is not lost, it is simply unreachable by id, and
-    resending the transcript recovers it.
+    was captured correctly. Bounded identical-request retries may recover visibility delays;
+    genuinely expired IDs still fail. No transcript recovery is attempted.
 
-    Matching is deliberately narrow. Replaying the transcript is only correct for this one
-    failure, and a looser test would swallow real request errors and quietly answer without the
-    context the caller asked for. So the provider's structured error ``code`` is used rather than
-    a substring of the message, and the cause chain is walked because layers above the provider
-    may wrap the original error.
+    Match only the structured error code, including wrapped causes, so unrelated
+    request failures are not retried as conversation visibility failures.
     """
     seen: set[int] = set()
     current: BaseException | None = exc
@@ -251,6 +237,10 @@ class AgentEntityStateProviderMixin:
             self._state_cache = DurableAgentState()
         self._set_state_dict(self._state_cache.to_dict())
 
+    def replace_cached_state(self, state: DurableAgentState) -> None:
+        """Stage or restore an operation snapshot without writing to the backend."""
+        self._state_cache = state
+
     def reset(self) -> None:
         """Clear conversation history by resetting state to a fresh DurableAgentState."""
         self._state_cache = DurableAgentState()
@@ -274,15 +264,23 @@ class AgentEntity:
         *,
         state_provider: AgentEntityStateProviderMixin,
         retention: RetentionMode = DEFAULT_RETENTION,
-        max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
+        max_state_bytes: StateBudget = DEFAULT_MAX_STATE_BYTES,
+        high_watermark: float = HIGH_WATERMARK,
+        low_watermark: float = LOW_WATERMARK,
+        response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
     ) -> None:
+        validate_retention(retention, high_watermark, low_watermark)
+        validate_response_delivery_window(response_delivery_window_seconds)
         # Back the agent's conversation history with durable entity state so an agent that
         # already works in core runs durably without any configuration change.
         self.agent = ensure_durable_history(agent, prune_excluded=prunes_excluded(retention))
         self.callback = callback
         self._state_provider = state_provider
         self._retention = retention
-        self._max_state_bytes = max_state_bytes
+        self._max_state_bytes = resolve_state_budget(max_state_bytes)
+        self._high_watermark = high_watermark
+        self._low_watermark = low_watermark
+        self._response_delivery_window_seconds = response_delivery_window_seconds
 
         logger.debug("[AgentEntity] Initialized with agent type: %s", type(agent).__name__)
 
@@ -298,11 +296,24 @@ class AgentEntity:
         self._state_provider.persist_state()
 
     def reset(self) -> None:
-        self._state_provider.reset()
+        """Clear local history/session context without erasing execution receipts."""
+        if self._has_context_pipeline() and self._find_durable_history_provider() is None:
+            raise NotImplementedError("Reset of external history requires a provider-owned clear operation.")
+        original = self.state
+        self._state_provider.replace_cached_state(deepcopy(original))
+        try:
+            self.state.prepare_for_write(delivery_window_seconds=self._response_delivery_window_seconds)
+            self.state.data.conversation_history.clear()
+            self.state.data.session = None
+            self.state.expire_responses()
+            self.persist_state()
+        except BaseException:
+            self._state_provider.replace_cached_state(original)
+            raise
 
     def _is_error_response(self, entry: DurableAgentStateEntry) -> bool:
         """Check if a conversation history entry records a failed turn."""
-        return isinstance(entry, DurableAgentStateErrorResponse)
+        return isinstance(entry, (DurableAgentStateErrorResponse, DurableAgentStateUnknownEntry))
 
     async def run(
         self,
@@ -316,6 +327,26 @@ class AgentEntity:
         else:
             run_request = request
 
+        already_answered = self.state.try_get_agent_response(run_request.correlation_id)
+        if already_answered is not None:
+            return already_answered
+        original = self.state
+        self._state_provider.replace_cached_state(deepcopy(original))
+        try:
+            self.state.prepare_for_write(delivery_window_seconds=self._response_delivery_window_seconds)
+            self.state.expire_responses()
+            response = await self._execute_request(run_request)
+            await self._enforce_retention()
+            self.persist_state()
+            return response
+        except BaseException:
+            # A failed commit must not leave a warm worker with staged completion or
+            # ingestion receipts. External effects are outside this local rollback.
+            self._state_provider.replace_cached_state(original)
+            raise
+
+    async def _execute_request(self, run_request: RunRequest) -> AgentResponse:
+        """Stage a turn without committing until every local slice and budget is valid."""
         message = run_request.message
         session_id = self._state_provider.session_id
         correlation_id = run_request.correlation_id
@@ -328,40 +359,17 @@ class AgentEntity:
 
         logger.debug("[AgentEntity.run] Received SessionId %s Message: %s", session_id, run_request)
 
-        already_answered = self.state.try_get_agent_response(correlation_id)
-        if already_answered is not None:
-            # This exact request has already been answered. Entity signals are delivered at least
-            # once, and every path mints a fresh correlation id per request, so a repeat is a
-            # duplicate delivery rather than a caller deliberately asking again. Running the agent
-            # a second time would spend another model call, re-run the tools, and produce a
-            # different answer that nothing could collect: pollers read by correlation id and take
-            # the first match, so the second response was already unreachable. Returning the
-            # recorded answer is what turns at-least-once delivery into a single effect.
-            logger.info(
-                "[AgentEntity.run] Correlation id %s on session %s has already been answered, "
-                "returning the recorded response rather than running the agent again.",
-                correlation_id,
-                session_id,
-            )
-            return already_answered
-
         durable_history = self._find_durable_history_provider()
         uses_context_pipeline = self._has_context_pipeline()
         # A property of the run rather than of the registration, since ``store`` is an ordinary
         # run option. The provider stays attached either way so core never injects one of its own.
         service_owns_history = service_stores_history(self.agent, options)
-
+        prior_receipts = deepcopy(self.state.data.ingested_messages)
         state_request = DurableAgentStateRequest.from_run_request(run_request)
-        if run_request.context_messages:
+        if run_request.context_messages is not None:
             state_request.messages = self._drop_already_stored(state_request.messages)
-        self.state.data.conversation_history.append(state_request)
-
-        # Some other store holds this conversation, either one the caller configured or the model
-        # service itself, so our copy of what the user said is redundant. Keeping it would put the
-        # same content under two retention, residency and deletion policies while only one of them
-        # is the store actually being used. Forgotten *after* the run rather than before it,
-        # because the run input is built from these same messages.
-        forget_request_content = uses_context_pipeline and (durable_history is None or service_owns_history)
+        if not uses_context_pipeline:
+            self.state.data.conversation_history.append(state_request)
 
         binding_token = (
             bind_durable_history(
@@ -381,6 +389,9 @@ class AgentEntity:
         # raise, and referencing an unbound name while handling that would replace the agent's
         # error with a NameError.
         session: Any = None
+        inactive_service_id: Any = None
+        succeeded = False
+        original_agent = self.agent
 
         try:
             if uses_context_pipeline:
@@ -389,10 +400,26 @@ class AgentEntity:
                 # newly received request messages are passed as run input, so history lives in
                 # exactly one place and core providers work unchanged on the durable runtime.
                 session = self._create_session()
+                if not service_owns_history:
+                    inactive_service_id = getattr(session, "service_session_id", None)
+                    session.service_session_id = None
+                    # A conversation ID supplied through defaults/options must not
+                    # override the client-owned branch either. Copy, never mutate
+                    # the agent the application may be using elsewhere.
+                    defaults = getattr(self.agent, "default_options", None)
+                    if isinstance(defaults, Mapping) and "conversation_id" in defaults:
+                        invocation_agent = copy(self.agent)
+                        invocation_agent.default_options = {  # type: ignore[attr-defined]
+                            key: value
+                            for key, value in cast("Mapping[str, Any]", defaults).items()
+                            if key != "conversation_id"
+                        }
+                        self.agent = invocation_agent
+                    options.pop("conversation_id", None)
                 chat_messages = [
                     replayable_message
                     for m in state_request.messages
-                    if (replayable_message := self._to_replayable_message(m)) is not None
+                    if (replayable_message := self._to_current_message(m, run_request)) is not None
                 ]
                 run_kwargs: dict[str, Any] = {
                     "messages": chat_messages,
@@ -414,21 +441,8 @@ class AgentEntity:
                     request_message=message,
                 )
             except Exception as exc:
-                if session is None or not _is_missing_previous_response(exc):
+                if session is None or not service_owns_history or not _is_missing_previous_response(exc):
                     raise
-                # The service is holding this conversation but will not accept the id it issued
-                # for the previous turn. Measured against Azure OpenAI, a streamed response
-                # reports its id before that response is readable, so the id is genuine and was
-                # captured correctly, it just resolves a moment later. Re-sending the identical
-                # request is enough to recover that, costs about a second, and needs nothing
-                # stored. The same failure is handled the same way in Microsoft.Extensions.AI.
-                #
-                # An id that has genuinely expired cannot be recovered this way, and the error
-                # looks identical, so those turns fail. Resending our own transcript would rescue
-                # them, but only if the entity kept a full second copy of a conversation the
-                # service is already holding, on every turn, against the chance of needing it.
-                # Core does not make that trade and neither do we. If the case turns out to
-                # matter, it comes back as an explicit opt-in rather than a silent cost.
                 retried = await self._retry_rejected_conversation_id(
                     run_kwargs=run_kwargs,
                     correlation_id=correlation_id,
@@ -440,15 +454,10 @@ class AgentEntity:
                     raise
                 agent_run_response = retried
 
-            state_response = DurableAgentStateResponse.from_run_response(correlation_id, agent_run_response)
-            self.state.data.conversation_history.append(state_response)
-            if forget_request_content:
-                _forget_message_content(state_request.messages)
-            self._capture_session(session)
-            await self._enforce_retention()
-            self.persist_state()
-
-            return agent_run_response
+            # Resolve structured output inside the runtime-error boundary. A parsing
+            # error is a committed error result, not an invisible post-run failure.
+            _ = agent_run_response.value
+            succeeded = True
 
         except Exception as exc:
             logger.exception("[AgentEntity.run] Agent execution failed.")
@@ -466,29 +475,54 @@ class AgentEntity:
                     Content.from_text(detail),
                 ],
             )
-            error_response = AgentResponse(
+            agent_run_response = AgentResponse(
                 messages=[error_message],
                 created_at=datetime.now(tz=timezone.utc).isoformat(),
+                additional_properties={"durable_status": "error", "correlation_id": correlation_id},
             )
 
-            error_state_response = DurableAgentStateErrorResponse.from_run_response(correlation_id, error_response)
-            self.state.data.conversation_history.append(error_state_response)
-            if forget_request_content:
-                _forget_message_content(state_request.messages)
-            # Captured here too, not only on success. The entity absorbs the failure so the caller
-            # can take another turn, and that is only true if what the providers and the service
-            # left on the session survives with it. Dropping it would lose a queued tool approval,
-            # or a conversation id the service had already issued, and the next turn would start a
-            # fresh thread while the old one was left orphaned.
-            self._capture_session(session)
-            await self._enforce_retention()
-            self.persist_state()
-
-            return error_response
-
         finally:
-            if binding_token is not None:
-                unbind_durable_history(binding_token)
+            try:
+                if session is not None and durable_history is not None and not service_owns_history:
+                    if not succeeded:
+                        durable_history.finalize_failed_run(session.state.get(durable_history.source_id, {}))
+                    durable_history.flush(session.state.get(durable_history.source_id, {}))
+            finally:
+                if session is not None and not service_owns_history:
+                    session.service_session_id = inactive_service_id
+                if binding_token is not None:
+                    unbind_durable_history(binding_token)
+                self.agent = original_agent
+
+        if not succeeded and uses_context_pipeline:
+            # A failed pre-invocation/provider load did not deliver these messages.
+            # Retain receipts only for inputs actually staged by durable history;
+            # no portable external provider API proves an interrupted append.
+            staged_inputs = {
+                stored.ingestion_identity
+                for entry in self.state.data.conversation_history
+                if isinstance(entry, DurableAgentStateRequest) and entry.correlation_id == correlation_id
+                for stored in entry.messages
+            }
+            self.state.data.ingested_messages = prior_receipts
+            for stored in state_request.messages:
+                if stored.message_id and stored.ingestion_identity in staged_inputs:
+                    fingerprints = self.state.data.ingested_messages.get(stored.message_id, [])
+                    if fingerprints is not None and stored.ingestion_identity:
+                        if stored.ingestion_identity not in fingerprints:
+                            fingerprints.append(stored.ingestion_identity)
+                        self.state.data.ingested_messages[stored.message_id] = fingerprints
+        self.state.record_response(
+            correlation_id,
+            agent_run_response,
+            delivery_window_seconds=self._response_delivery_window_seconds,
+        )
+        if not uses_context_pipeline and succeeded:
+            self.state.data.conversation_history.append(
+                DurableAgentStateResponse.from_run_response(correlation_id, agent_run_response)
+            )
+        self._capture_session(session)
+        return agent_run_response
 
     async def _retry_rejected_conversation_id(
         self,
@@ -509,8 +543,8 @@ class AgentEntity:
         continuing from the same point rather than restarting it from a resent transcript.
 
         A retry cannot rescue an id that has genuinely expired, and the error is identical either
-        way, so the attempts are few and short. Exhausting them is not a failure, it is the signal
-        to fall back to something that does not depend on the service still holding the thread.
+        way, so the attempts are few and short. Exhausting them fails the turn without
+        reconstructing a transcript or starting a different service conversation.
 
         Args:
             run_kwargs: The unchanged arguments of the request that was refused.
@@ -557,15 +591,15 @@ class AgentEntity:
         return None
 
     async def _enforce_retention(self) -> None:
-        """Bound durable state before it is persisted, unless the caller asked to keep everything.
-
-        This lives on the entity rather than the history provider because the entity records the
-        conversation in every configuration, including external providers, service-managed agents
-        and agents with no context pipeline. Those are exactly the cases with no other mitigation.
-        """
-        if self._retention == "keep_all":
+        """Apply optional whole-state pressure budgeting independently of eager pruning."""
+        if self._max_state_bytes is None:
             return
-        await enforce_budget(self.state, max_state_bytes=self._max_state_bytes)
+        await enforce_budget(
+            self.state,
+            max_state_bytes=self._max_state_bytes,
+            high_watermark=self._high_watermark,
+            low_watermark=self._low_watermark,
+        )
 
     def _has_context_pipeline(self) -> bool:
         """Whether the agent exposes core's context-provider pipeline.
@@ -621,67 +655,33 @@ class AgentEntity:
         try:
             json.dumps(payload)
         except (TypeError, ValueError) as exc:
-            logger.warning(
-                "[AgentEntity] Session state could not be serialized and was not persisted, so the "
-                "previous turn's state is kept. A context provider is holding a value that is not "
-                "JSON-compatible: %s",
-                exc,
-            )
-            return
+            raise ValueError("Agent session state is not JSON-compatible; the operation cannot commit.") from exc
         self.state.data.session = payload
 
     def _drop_already_stored(self, messages: list[DurableAgentStateMessage]) -> list[DurableAgentStateMessage]:
-        """Filter out chained conversation this entity has already recorded.
+        """Remember actual identities, including skipped positions and content revisions.
 
-        A workflow node that runs more than once (for example in a cycle) receives the whole
-        upstream conversation each time. Without filtering it re-records all of it on every visit.
-
-        Filtering is by **position**, not by stored identity. The obvious check, "is this id
-        already in my history", stops working the moment retention evicts anything: those ids
-        leave the comparison set, the orchestrator re-sends them because its own conversation is
-        never evicted, and the entity re-records exactly what was deleted. That oscillates instead
-        of settling. A high-water mark per producing executor is unaffected by deletion, and is
-        per executor rather than global because a fan-out gives two branches the same position.
-
-        Messages without a workflow id fall back to the identity check, which is enough for them
-        because nothing re-delivers them.
-
-        The final message is always kept so the agent still receives an input.
+        Receipts outlive transcript eviction. Anonymous direct inputs are not content-
+        deduplicated; the workflow sender supplies scoped IDs for anonymous projections.
+        Entirely repeated projections stay empty instead of re-ingesting their last item.
         """
-        ingested = dict(self.state.data.ingested_positions or {})
-        seen: dict[str, int] = {}
+        receipts = self.state.data.ingested_messages
         kept: list[DurableAgentStateMessage] = []
-
-        known_ids = {
-            stored.message_id
-            for entry in self.state.data.conversation_history
-            for stored in entry.messages
-            if stored.message_id
-        }
-
+        for entry in self.state.data.conversation_history:
+            if isinstance(entry, DurableAgentStateRequest):
+                for stored in entry.messages:
+                    if stored.message_id and stored.message_id not in receipts:
+                        fingerprint = stored.ingestion_identity or message_identity(stored.to_chat_message())
+                        receipts[stored.message_id] = [fingerprint] if stored.contents else None
         for message in messages:
-            marker = parse_workflow_message_id(message.message_id)
-            if marker is not None:
-                executor, position = marker
-                seen[executor] = max(seen.get(executor, -1), position)
-                if position <= ingested.get(executor, -1):
+            if message.message_id:
+                fingerprint = message.ingestion_identity or message_identity(message.to_chat_message())
+                known = receipts.get(message.message_id, [])
+                if known is None or fingerprint in known:
                     continue
-            elif message.message_id and message.message_id in known_ids:
-                continue
+                known.append(fingerprint)
+                receipts[message.message_id] = known
             kept.append(message)
-
-        for executor, position in seen.items():
-            ingested[executor] = max(ingested.get(executor, -1), position)
-        if ingested:
-            self.state.data.ingested_positions = ingested
-
-        if not kept and messages:
-            # Keep the newest message so the agent still has an input, but drop the id it shares
-            # with the copy already in history. Two stored messages under one id collide in the
-            # compaction position map, so annotations and pruning would target the wrong one.
-            repeated = messages[-1]
-            repeated.message_id = None
-            return [repeated]
         return kept
 
     def _find_durable_history_provider(self) -> DurableHistoryProvider | None:
@@ -737,9 +737,8 @@ class AgentEntity:
     def _replay_all_messages(self) -> list[Message]:
         """Build run input from the whole persisted transcript.
 
-        Used whenever history cannot come from anywhere else: agents with no context pipeline,
-        where the entity owns the conversation outright, and recovery for a service-managed agent
-        whose stored conversation id the service would not accept.
+        Used only for agents without the core context pipeline. Service conversation
+        errors do not trigger local transcript reconstruction.
 
         Failed turns are skipped so an error reply is never presented back to the model as
         something it said.
@@ -753,6 +752,19 @@ class AgentEntity:
         ]
 
     @staticmethod
+    def _to_current_message(message: DurableAgentStateMessage, request: RunRequest) -> Message | None:
+        """Preserve core input content metadata rather than round-tripping through legacy types."""
+        if request.context_messages is not None and message.ingestion_identity:
+            for raw in request.context_messages:
+                original = Message.from_dict(deepcopy(raw))
+                if (
+                    original.message_id == message.message_id
+                    and message_identity(original) == message.ingestion_identity
+                ):
+                    return original
+        return AgentEntity._to_replayable_message(message)
+
+    @staticmethod
     def _to_replayable_message(message: DurableAgentStateMessage) -> Message | None:
         """Convert persisted history into a message safe to replay into chat clients."""
         chat_message = message.to_chat_message()
@@ -764,6 +776,7 @@ class AgentEntity:
             role=chat_message.role,
             contents=replayable_contents,
             author_name=chat_message.author_name,
+            message_id=chat_message.message_id,
             additional_properties=chat_message.additional_properties,
         )
 
@@ -785,33 +798,31 @@ class AgentEntity:
 
         run_callable = self.agent.run
 
-        # Try streaming first with run(stream=True)
+        # Only negotiate an unsupported streaming signature before consuming a stream.
+        # Errors raised while consuming it must never restart model/tool execution.
         try:
             stream_candidate = run_callable(stream=True, **run_kwargs)
             if inspect.isawaitable(stream_candidate):
                 stream_candidate = await stream_candidate
-
-            return await self._consume_stream(
-                stream=stream_candidate,
-                callback_context=callback_context,
-            )
         except TypeError as type_error:
-            if "__aiter__" not in str(type_error) and "stream" not in str(type_error):
+            detail = str(type_error)
+            if not (
+                "stream is not supported" in detail
+                or "streaming not supported" in detail
+                or "unexpected keyword argument 'stream'" in detail
+                or 'unexpected keyword argument "stream"' in detail
+            ):
                 raise
             logger.debug(
-                "run(stream=True) returned a non-async result; falling back to run(): %s",
+                "Agent does not support streaming; invoking non-streaming run(): %s",
                 type_error,
             )
-        except Exception as stream_error:
-            if _is_missing_previous_response(stream_error):
-                # Falling back to run() would resend the id the service just refused and fail the
-                # same way. Surface it so the caller can rebuild the request without that id.
-                raise
-            logger.warning(
-                "run(stream=True) failed; falling back to run(): %s",
-                stream_error,
-                exc_info=True,
-            )
+        else:
+            if isinstance(stream_candidate, AgentResponse):
+                direct_response = cast(AgentResponse, stream_candidate)
+                await self._notify_final_response(direct_response, callback_context)
+                return direct_response
+            return await self._consume_stream(stream=stream_candidate, callback_context=callback_context)
         agent_run_response = run_callable(**run_kwargs)
         if inspect.isawaitable(agent_run_response):
             agent_run_response = await agent_run_response
@@ -829,10 +840,7 @@ class AgentEntity:
         callback_context: AgentCallbackContext | None = None,
     ) -> AgentResponse:
         """Consume streaming responses and build the final AgentResponse."""
-        updates: list[AgentResponseUpdate] = []
-
         async for update in stream:
-            updates.append(update)
             await self._notify_stream_update(update, callback_context)
 
         response = await stream.get_final_response()

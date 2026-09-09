@@ -137,9 +137,16 @@ class DurableStateFields:
     # Serialized AgentSession: the provider state bag plus any service-issued conversation id
     SESSION: Final[str] = "session"
 
-    # Highest chained-conversation position ingested from each workflow executor. Survives
-    # retention, which identity-based duplicate detection cannot.
+    # Legacy scalar cursors are read for migration, never inferred to be exact receipts.
     INGESTED_POSITIONS: Final[str] = "ingestedPositions"
+    INGESTED_MESSAGES: Final[str] = "ingestedMessages"
+
+    # Result delivery is independent from the model transcript.
+    RESPONSE_MAILBOX: Final[str] = "responseMailbox"
+    COMPLETED_CORRELATIONS: Final[str] = "completedCorrelations"
+    RESPONSE: Final[str] = "response"
+    EXPIRES_AT: Final[str] = "expiresAt"
+    COMPLETED_AT: Final[str] = "completedAt"
 
     # What retention has removed from this conversation. Present only once something has been
     # evicted, so its absence means the record is complete.

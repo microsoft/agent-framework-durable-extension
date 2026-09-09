@@ -14,8 +14,11 @@ Usage:
     uv run pytest packages/azurefunctions/tests/integration_tests/test_01_single_agent.py -v
 """
 
+import json
+
 import pytest
-from agent_framework_durabletask import SESSION_ID_HEADER
+from agent_framework import AgentResponse
+from agent_framework_durabletask import SESSION_ID_HEADER, serialize_agent_response
 
 # Module-level markers - applied to all tests in this file
 pytestmark = [
@@ -35,6 +38,29 @@ class TestSampleSingleAgent:
         self.base_url = f"{base_url}/api/agents/Joker"
         self.helper = sample_helper
 
+    def _assert_success_response(self, response, session_id: str) -> dict:
+        """Check actual response delivery independently of local transcript storage."""
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["status"] == "success", data
+        assert data["session_id"] == session_id
+        assert data["correlation_id"]
+        assert data["response"].strip()
+
+        # The legacy field counts local transcript entries, not completed executions.
+        # Sample 01 uses Foundry's default service-managed history.
+        assert data["message_count"] == 0
+
+        snapshot = data["agent_response"]
+        assert snapshot["type"] == "agent_response"
+        assert snapshot["created_at"], "the Foundry result timestamp was lost"
+        delivered = AgentResponse.from_dict(snapshot)
+        assert delivered.messages
+        assert delivered.text == data["response"]
+        assert all(content.type != "error" for message in delivered.messages for content in message.contents)
+        assert json.loads(json.dumps(serialize_agent_response(delivered))) == snapshot
+        return data
+
     def test_health_check(self, base_url: str, sample_helper) -> None:
         """Test health check endpoint."""
         response = sample_helper.get(f"{base_url}/api/health")
@@ -48,23 +74,12 @@ class TestSampleSingleAgent:
             f"{self.base_url}/run",
             {"message": "Tell me a short joke about cloud computing.", "session_id": "test-simple-json"},
         )
-        # Agent can return 200 (immediate) or 202 (async with wait_for_response=false)
-        assert response.status_code in [200, 202]
-        data = response.json()
-
-        if response.status_code == 200:
-            # Synchronous response - check result directly
-            assert data["status"] == "success"
-            assert "response" in data
-            assert data["message_count"] >= 1
-        else:
-            # Async response - check we got correlation info
-            assert "correlation_id" in data or "session_id" in data
+        self._assert_success_response(response, "test-simple-json")
 
     def test_simple_message_plain_text(self) -> None:
         """Test sending a message with plain text payload."""
         response = self.helper.post_text(f"{self.base_url}/run", "Tell me a short joke about networking.")
-        assert response.status_code in [200, 202]
+        assert response.status_code == 200, response.text
 
         # Agent responded with plain text when the request body was text/plain.
         assert response.text.strip()
@@ -75,7 +90,7 @@ class TestSampleSingleAgent:
         response = self.helper.post_text(
             f"{self.base_url}/run?session_id=test-query-session", "Tell me a short joke about weather in Texas."
         )
-        assert response.status_code in [200, 202]
+        assert response.status_code == 200, response.text
 
         assert response.text.strip()
         assert response.headers.get(SESSION_ID_HEADER) == "test-query-session"
@@ -85,7 +100,7 @@ class TestSampleSingleAgent:
         response = self.helper.post_text(
             f"{self.base_url}/run?thread_id=test-legacy-query", "Tell me a short joke about weather in Texas."
         )
-        assert response.status_code in [200, 202]
+        assert response.status_code == 200, response.text
 
         assert response.text.strip()
         assert response.headers.get(SESSION_ID_HEADER) == "test-legacy-query"
@@ -93,7 +108,7 @@ class TestSampleSingleAgent:
         assert response.headers.get("x-ms-thread-id") is None
 
     def test_conversation_continuity(self) -> None:
-        """History must accumulate *and* reach the model on later turns."""
+        """Service-managed context must reach the model without a local transcript."""
         session_id = "test-continuity"
 
         # First message establishes a fact that exists nowhere else.
@@ -101,30 +116,18 @@ class TestSampleSingleAgent:
             f"{self.base_url}/run",
             {"message": "My favorite animal is the axolotl. Tell me a short joke about it.", "session_id": session_id},
         )
-        assert response1.status_code in [200, 202]
+        data1 = self._assert_success_response(response1, session_id)
 
-        if response1.status_code == 200:
-            data1 = response1.json()
-            assert data1["message_count"] == 2  # Initial + reply
-
-            # Second message in same session; only answerable from persisted history.
-            response2 = self.helper.post_json(
-                f"{self.base_url}/run",
-                {"message": "What is my favorite animal? Reply with just the animal name.", "session_id": session_id},
-            )
-            assert response2.status_code == 200
-            data2 = response2.json()
-            assert data2["message_count"] == 4
-            assert "axolotl" in str(data2["response"]).lower(), (
-                f"Agent lost conversation context across turns. Got: {data2['response']!r}"
-            )
-        else:
-            # In async mode, we can't easily test message count
-            # Just verify we can make multiple calls
-            response2 = self.helper.post_json(
-                f"{self.base_url}/run", {"message": "What about Texas?", "session_id": session_id}
-            )
-            assert response2.status_code == 202
+        # The follow-up needs the same session's service-managed context.
+        response2 = self.helper.post_json(
+            f"{self.base_url}/run",
+            {"message": "What is my favorite animal? Reply with just the animal name.", "session_id": session_id},
+        )
+        data2 = self._assert_success_response(response2, session_id)
+        assert data2["correlation_id"] != data1["correlation_id"]
+        assert "axolotl" in data2["response"].lower(), (
+            f"Agent lost conversation context across turns. Got: {data2['response']!r}"
+        )
 
 
 if __name__ == "__main__":

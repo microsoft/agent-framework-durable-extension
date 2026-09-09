@@ -275,7 +275,14 @@ class TestAgentFunctionAppSetup:
 
         http_route_mock.assert_called_once_with("OverrideAgent")
         agent_entity_mock.assert_called_once_with(
-            mock_agent, "OverrideAgent", None, retention="auto", max_state_bytes=DEFAULT_MAX_STATE_BYTES
+            mock_agent,
+            "OverrideAgent",
+            None,
+            retention="keep_all",
+            max_state_bytes=DEFAULT_MAX_STATE_BYTES,
+            high_watermark=0.85,
+            low_watermark=0.70,
+            response_delivery_window_seconds=60,
         )
         assert app._agent_metadata["OverrideAgent"].http_endpoint_enabled is True
 
@@ -294,7 +301,14 @@ class TestAgentFunctionAppSetup:
 
         http_route_mock.assert_not_called()
         agent_entity_mock.assert_called_once_with(
-            mock_agent, "DisabledOverride", None, retention="auto", max_state_bytes=DEFAULT_MAX_STATE_BYTES
+            mock_agent,
+            "DisabledOverride",
+            None,
+            retention="keep_all",
+            max_state_bytes=DEFAULT_MAX_STATE_BYTES,
+            high_watermark=0.85,
+            low_watermark=0.70,
+            response_delivery_window_seconds=60,
         )
         assert app._agent_metadata["DisabledOverride"].http_endpoint_enabled is False
 

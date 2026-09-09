@@ -28,7 +28,11 @@ from agent_framework_durabletask import (
     DEFAULT_MAX_STATE_BYTES,
     DEFAULT_POLL_INTERVAL_SECONDS,
     DEFAULT_RETENTION,
+    DELIVERY_WINDOW_SECONDS,
+    HIGH_WATERMARK,
+    INHERIT,
     LEGACY_THREAD_ID_FIELD,
+    LOW_WATERMARK,
     MIMETYPE_APPLICATION_JSON,
     MIMETYPE_TEXT_PLAIN,
     REQUEST_RESPONSE_FORMAT_JSON,
@@ -44,9 +48,17 @@ from agent_framework_durabletask import (
     DurableAIAgent,
     RetentionMode,
     RunRequest,
+    StateBudget,
+    StateBudgetOverride,
     deserialize_workflow_output,
     execute_workflow_activity,
     plan_workflow_registration,
+    resolve_state_budget,
+    resolve_state_budget_override,
+    serialize_agent_response,
+    validate_history_providers,
+    validate_response_delivery_window,
+    validate_retention,
 )
 from agent_framework_durabletask._workflows.naming import (
     SUBWORKFLOW_REQUEST_SEPARATOR,
@@ -251,7 +263,15 @@ class AgentFunctionApp(DFAppBase):
         default_callback: AgentResponseCallbackProtocol | None = None,
         retention: RetentionMode = DEFAULT_RETENTION,
         workflow_retention: RetentionMode | None = None,
-        max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
+        max_state_bytes: StateBudget = DEFAULT_MAX_STATE_BYTES,
+        *,
+        high_watermark: float = HIGH_WATERMARK,
+        low_watermark: float = LOW_WATERMARK,
+        response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
+        workflow_max_state_bytes: StateBudgetOverride = INHERIT,
+        workflow_high_watermark: float | None = None,
+        workflow_low_watermark: float | None = None,
+        workflow_response_delivery_window_seconds: int | None = None,
     ):
         """Initialize the AgentFunctionApp.
 
@@ -271,19 +291,51 @@ class AgentFunctionApp(DFAppBase):
         :param poll_interval_seconds: Delay in seconds between polling attempts.
             Defaults to ``DEFAULT_POLL_INTERVAL_SECONDS``.
         :param default_callback: Optional callback invoked for agents without specific callbacks.
-        :param retention: Default conversation retention for agents hosted by this app, including
-            agents inside hosted workflows. ``auto`` deletes only under storage pressure,
-            ``keep_all`` never deletes and lets the entity fail at the backend limit, and
-            ``follow_compaction`` first deletes what compaction excluded, then uses the same
-            pressure eviction as ``auto`` if that is not enough. ``add_agent`` can override it
-            per agent.
-        :param max_state_bytes: Budget for serialized entity state.
+        :param retention: Eager pruning policy. ``keep_all`` does not prune compaction exclusions;
+            ``follow_compaction`` does. Pressure eviction is controlled separately by the budget.
+        :param max_state_bytes: Positive integer serialized-state budget, or None to disable pressure
+            eviction. ``backend_limit`` is unsupported because Functions cannot infer its backend limit.
         :param workflow_retention: Retention for agent nodes inside hosted workflows. When None,
-            ``retention`` applies. Worth setting separately, since a workflow node's entity lives
-            for one orchestration while a standalone agent's can live indefinitely.
+            ``retention`` applies.
+        :param high_watermark: Budget fraction at which pressure eviction starts.
+        :param low_watermark: Target budget fraction after pressure eviction.
+        :param response_delivery_window_seconds: Positive integer response delivery window in seconds.
+        :param workflow_max_state_bytes: Workflow budget default. INHERIT uses the host budget;
+            None disables pressure eviction for workflow agents.
+        :param workflow_high_watermark: Workflow pressure trigger, or None to inherit.
+        :param workflow_low_watermark: Workflow pressure target, or None to inherit.
+        :param workflow_response_delivery_window_seconds: Workflow delivery window, or None to inherit.
 
         :note: If no agents are provided, they can be added later using :meth:`add_agent`.
         """
+        validate_retention(retention, high_watermark, low_watermark)
+        resolved_budget = resolve_state_budget(max_state_bytes)
+        validate_response_delivery_window(response_delivery_window_seconds)
+        resolved_workflow_retention = retention if workflow_retention is None else workflow_retention
+        resolved_workflow_budget = resolve_state_budget_override(workflow_max_state_bytes, resolved_budget)
+        resolved_workflow_high = high_watermark if workflow_high_watermark is None else workflow_high_watermark
+        resolved_workflow_low = low_watermark if workflow_low_watermark is None else workflow_low_watermark
+        resolved_workflow_window = (
+            response_delivery_window_seconds
+            if workflow_response_delivery_window_seconds is None
+            else workflow_response_delivery_window_seconds
+        )
+        validate_retention(resolved_workflow_retention, resolved_workflow_high, resolved_workflow_low)
+        validate_response_delivery_window(resolved_workflow_window)
+
+        initial_workflows = self._collect_workflows(workflow, workflows)
+        # Preflight every supplied agent, including nested workflows, before registering any triggers.
+        for agent_instance in agents or []:
+            validate_history_providers(agent_instance)
+        for initial_workflow in initial_workflows:
+            validate_workflow_name(initial_workflow.name)
+            for hosted in collect_hosted_workflows(initial_workflow):
+                validate_workflow_name(hosted.name)
+                for executor_id in hosted.executors:
+                    validate_executor_id(executor_id)
+                for agent_executor in plan_workflow_registration(hosted).agent_executors:
+                    validate_history_providers(agent_executor.agent)
+
         logger.debug("[AgentFunctionApp] Initializing with Durable Entities...")
 
         # Initialize parent DFApp
@@ -302,8 +354,15 @@ class AgentFunctionApp(DFAppBase):
         self.enable_mcp_tool_trigger = enable_mcp_tool_trigger
         self.default_callback = default_callback
         self._retention: RetentionMode = retention
-        self._workflow_retention: RetentionMode | None = workflow_retention
-        self._max_state_bytes = max_state_bytes
+        self._workflow_retention: RetentionMode = resolved_workflow_retention
+        self._max_state_bytes = resolved_budget
+        self._high_watermark = high_watermark
+        self._low_watermark = low_watermark
+        self._response_delivery_window_seconds = response_delivery_window_seconds
+        self._workflow_max_state_bytes = resolved_workflow_budget
+        self._workflow_high_watermark = resolved_workflow_high
+        self._workflow_low_watermark = resolved_workflow_low
+        self._workflow_response_delivery_window_seconds = resolved_workflow_window
 
         try:
             retries = int(max_poll_retries)
@@ -319,7 +378,7 @@ class AgentFunctionApp(DFAppBase):
 
         # Register each hosted workflow. ``workflow=`` is a convenience alias for a
         # single-element ``workflows``; both may be combined.
-        for wf in self._collect_workflows(workflow, workflows):
+        for wf in initial_workflows:
             self._register_workflow(wf)
 
         # Back-compat: expose the sole workflow as ``.workflow`` when exactly one is
@@ -364,7 +423,49 @@ class AgentFunctionApp(DFAppBase):
             collected.extend(workflows)
         return collected
 
-    def _register_workflow(self, workflow: Workflow) -> None:
+    def configure_workflow(
+        self,
+        workflow: Workflow,
+        *,
+        retention: RetentionMode | None = None,
+        max_state_bytes: StateBudgetOverride = INHERIT,
+        high_watermark: float | None = None,
+        low_watermark: float | None = None,
+        response_delivery_window_seconds: int | None = None,
+    ) -> None:
+        """Register a workflow with overrides for its newly registered agent nodes.
+
+        Args:
+            workflow: Named workflow to register, including its nested workflows.
+            retention: Eager pruning policy, or None to use the app's workflow default.
+            max_state_bytes: Workflow budget. INHERIT uses the workflow default; None disables it.
+            high_watermark: Pressure trigger override, or None to inherit the workflow default.
+            low_watermark: Pressure target override, or None to inherit the workflow default.
+            response_delivery_window_seconds: Delivery window override, or None to inherit.
+
+        Raises:
+            ValueError: Workflow names, agent history providers, or retention settings are invalid.
+        """
+        self._register_workflow(
+            workflow,
+            retention=retention,
+            max_state_bytes=max_state_bytes,
+            high_watermark=high_watermark,
+            low_watermark=low_watermark,
+            response_delivery_window_seconds=response_delivery_window_seconds,
+        )
+        self.workflow = next(iter(self._workflows.values())) if len(self._workflows) == 1 else None
+
+    def _register_workflow(
+        self,
+        workflow: Workflow,
+        *,
+        retention: RetentionMode | None = None,
+        max_state_bytes: StateBudgetOverride = INHERIT,
+        high_watermark: float | None = None,
+        low_watermark: float | None = None,
+        response_delivery_window_seconds: int | None = None,
+    ) -> None:
         """Register a top-level workflow's durable primitives and HTTP routes.
 
         The "what to register" decision (agent -> entity, non-agent -> activity,
@@ -386,6 +487,18 @@ class AgentFunctionApp(DFAppBase):
                 "(workflow names are compared case-insensitively)."
             )
 
+        effective_retention = self._workflow_retention if retention is None else retention
+        effective_budget = resolve_state_budget_override(max_state_bytes, self._workflow_max_state_bytes)
+        effective_high = self._workflow_high_watermark if high_watermark is None else high_watermark
+        effective_low = self._workflow_low_watermark if low_watermark is None else low_watermark
+        effective_window = (
+            self._workflow_response_delivery_window_seconds
+            if response_delivery_window_seconds is None
+            else response_delivery_window_seconds
+        )
+        validate_retention(effective_retention, effective_high, effective_low)
+        validate_response_delivery_window(effective_window)
+
         # Validate the whole composition (top-level plus every nested sub-workflow)
         # up front, so an invalid/auto-generated nested name (or an executor id that
         # would break durable naming / nested-HITL addressing) fails before any
@@ -395,6 +508,8 @@ class AgentFunctionApp(DFAppBase):
             validate_workflow_name(hosted.name)
             for executor_id in hosted.executors:
                 validate_executor_id(executor_id)
+            for agent_executor in plan_workflow_registration(hosted).agent_executors:
+                validate_history_providers(agent_executor.agent)
 
         # Check every cross-call collision *before* mutating any state, so a clash
         # between a nested sub-workflow and an already-registered orchestration cannot
@@ -418,13 +533,29 @@ class AgentFunctionApp(DFAppBase):
         for hosted in hosted_workflows:
             if hosted.name.casefold() in self._registered_orchestrations:
                 continue
-            self._register_workflow_primitives(hosted)
+            self._register_workflow_primitives(
+                hosted,
+                retention=effective_retention,
+                max_state_bytes=effective_budget,
+                high_watermark=effective_high,
+                low_watermark=effective_low,
+                response_delivery_window_seconds=effective_window,
+            )
 
         # HTTP routes are only exposed for the top-level workflow; sub-workflows are
         # driven by the parent via call_sub_orchestrator, not addressed directly.
         self._register_workflow_routes(workflow)
 
-    def _register_workflow_primitives(self, workflow: Workflow) -> None:
+    def _register_workflow_primitives(
+        self,
+        workflow: Workflow,
+        *,
+        retention: RetentionMode,
+        max_state_bytes: int | None,
+        high_watermark: float,
+        low_watermark: float,
+        response_delivery_window_seconds: int,
+    ) -> None:
         """Register one workflow's entities, activities, and orchestrator (no routes)."""
         validate_workflow_name(workflow.name)
         self._registered_orchestrations[workflow.name.casefold()] = workflow
@@ -441,7 +572,11 @@ class AgentFunctionApp(DFAppBase):
                 agent_executor.agent,
                 callback=self.default_callback,
                 entity_id=workflow_scoped_executor_id(workflow.name, agent_executor.id),
-                retention=self._workflow_retention,
+                retention=retention,
+                max_state_bytes=max_state_bytes,
+                high_watermark=high_watermark,
+                low_watermark=low_watermark,
+                response_delivery_window_seconds=response_delivery_window_seconds,
             )
         for executor in plan.activity_executors:
             # Set up a Functions activity trigger for each non-agent executor, scoped
@@ -850,6 +985,10 @@ class AgentFunctionApp(DFAppBase):
         *,
         entity_id: str | None = None,
         retention: RetentionMode | None = None,
+        max_state_bytes: StateBudgetOverride = INHERIT,
+        high_watermark: float | None = None,
+        low_watermark: float | None = None,
+        response_delivery_window_seconds: int | None = None,
     ) -> None:
         """Add an agent to the function app after initialization.
 
@@ -867,9 +1006,14 @@ class AgentFunctionApp(DFAppBase):
                 identity the orchestrator dispatches to. Mirrors
                 ``DurableAIAgentWorker.add_agent(entity_id=...)``.
             retention: Per-agent retention override. When None, the app-level setting is used.
+            max_state_bytes: Per-agent budget. INHERIT uses the host default; None disables it.
+                Functions requires an explicit integer instead of ``backend_limit``.
+            high_watermark: Pressure trigger override, or None to inherit the host default.
+            low_watermark: Pressure target override, or None to inherit the host default.
+            response_delivery_window_seconds: Delivery window override, or None to inherit.
 
         Raises:
-            ValueError: If the agent doesn't have a 'name' attribute.
+            ValueError: If the agent has no name, or retention settings or history providers are invalid.
         """
         # Get agent name from the agent's name attribute
         name = getattr(agent, "name", None)
@@ -886,6 +1030,19 @@ class AgentFunctionApp(DFAppBase):
                 "[AgentFunctionApp] Agent '%s' is already registered, skipping duplicate.", registration_name
             )
             return
+
+        effective_retention = self._retention if retention is None else retention
+        effective_budget = resolve_state_budget_override(max_state_bytes, self._max_state_bytes)
+        effective_high = self._high_watermark if high_watermark is None else high_watermark
+        effective_low = self._low_watermark if low_watermark is None else low_watermark
+        effective_window = (
+            self._response_delivery_window_seconds
+            if response_delivery_window_seconds is None
+            else response_delivery_window_seconds
+        )
+        validate_retention(effective_retention, effective_high, effective_low)
+        validate_response_delivery_window(effective_window)
+        validate_history_providers(agent)
 
         effective_enable_http_endpoint = (
             self.enable_http_endpoints if enable_http_endpoint is None else self._coerce_to_bool(enable_http_endpoint)
@@ -907,15 +1064,7 @@ class AgentFunctionApp(DFAppBase):
             f"[AgentFunctionApp] MCP tool trigger: {'enabled' if effective_enable_mcp_endpoint else 'disabled'}"
         )
 
-        # Store agent metadata
-        self._agent_metadata[registration_name] = AgentMetadata(
-            agent=agent,
-            http_endpoint_enabled=effective_enable_http_endpoint,
-            mcp_tool_enabled=effective_enable_mcp_endpoint,
-        )
-
         effective_callback = callback or self.default_callback
-        effective_retention: RetentionMode = self._retention if retention is None else retention
 
         self._setup_agent_functions(
             agent,
@@ -924,7 +1073,16 @@ class AgentFunctionApp(DFAppBase):
             effective_enable_http_endpoint,
             effective_enable_mcp_endpoint,
             retention=effective_retention,
-            max_state_bytes=self._max_state_bytes,
+            max_state_bytes=effective_budget,
+            high_watermark=effective_high,
+            low_watermark=effective_low,
+            response_delivery_window_seconds=effective_window,
+        )
+
+        self._agent_metadata[registration_name] = AgentMetadata(
+            agent=agent,
+            http_endpoint_enabled=effective_enable_http_endpoint,
+            mcp_tool_enabled=effective_enable_mcp_endpoint,
         )
 
         logger.debug(f"[AgentFunctionApp] Agent '{registration_name}' added successfully")
@@ -971,7 +1129,10 @@ class AgentFunctionApp(DFAppBase):
         enable_mcp_tool_trigger: bool,
         *,
         retention: RetentionMode = DEFAULT_RETENTION,
-        max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
+        max_state_bytes: int | None = None,
+        high_watermark: float = HIGH_WATERMARK,
+        low_watermark: float = LOW_WATERMARK,
+        response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
     ) -> None:
         """Set up the HTTP trigger, entity, and MCP tool trigger for a specific agent.
 
@@ -982,7 +1143,10 @@ class AgentFunctionApp(DFAppBase):
             enable_http_endpoint: Whether to create HTTP endpoint
             enable_mcp_tool_trigger: Whether to create MCP tool trigger
             retention: How much of the conversation durable state may discard.
-            max_state_bytes: Budget for serialized entity state.
+            max_state_bytes: Resolved pressure budget, or None to disable pressure eviction.
+            high_watermark: Budget fraction at which pressure eviction starts.
+            low_watermark: Target budget fraction after pressure eviction.
+            response_delivery_window_seconds: Response delivery window in seconds.
         """
         logger.debug(f"[AgentFunctionApp] Setting up functions for agent '{agent_name}'...")
 
@@ -993,7 +1157,16 @@ class AgentFunctionApp(DFAppBase):
                 "[AgentFunctionApp] HTTP run route disabled for agent '%s'",
                 agent_name,
             )
-        self._setup_agent_entity(agent, agent_name, callback, retention=retention, max_state_bytes=max_state_bytes)
+        self._setup_agent_entity(
+            agent,
+            agent_name,
+            callback,
+            retention=retention,
+            max_state_bytes=max_state_bytes,
+            high_watermark=high_watermark,
+            low_watermark=low_watermark,
+            response_delivery_window_seconds=response_delivery_window_seconds,
+        )
 
         if enable_mcp_tool_trigger:
             agent_description = agent.description
@@ -1083,9 +1256,15 @@ class AgentFunctionApp(DFAppBase):
                     )
 
                     logger.debug(f"[HTTP Trigger] Result status: {result.get('status', 'unknown')}")
+                    if result.get("status") == "success":
+                        status_code = 200
+                    elif result.get("error_code") == "response_expired":
+                        status_code = 410
+                    else:
+                        status_code = 500
                     return self._create_http_response(
                         payload=result,
-                        status_code=200 if result.get("status") == "success" else 500,
+                        status_code=status_code,
                         request_response_format=request_response_format,
                         session_id=session_id,
                     )
@@ -1137,7 +1316,10 @@ class AgentFunctionApp(DFAppBase):
         callback: AgentResponseCallbackProtocol | None,
         *,
         retention: RetentionMode = DEFAULT_RETENTION,
-        max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
+        max_state_bytes: int | None = None,
+        high_watermark: float = HIGH_WATERMARK,
+        low_watermark: float = LOW_WATERMARK,
+        response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
     ) -> None:
         """Register the durable entity responsible for agent state.
 
@@ -1146,10 +1328,22 @@ class AgentFunctionApp(DFAppBase):
             agent_name: The agent name (used for both entity identification and function naming)
             callback: Optional callback for response updates
             retention: How much of the conversation durable state may discard.
-            max_state_bytes: Budget for serialized entity state.
+            max_state_bytes: Resolved pressure budget, or None to disable pressure eviction.
+            high_watermark: Budget fraction at which pressure eviction starts.
+            low_watermark: Target budget fraction after pressure eviction.
+            response_delivery_window_seconds: Response delivery window in seconds.
         """
         # Use the prefixed entity name for both registration and function naming
         entity_name_with_prefix = AgentSessionId.to_entity_name(agent_name)
+        entity_handler = create_agent_entity(
+            agent,
+            callback,
+            retention=retention,
+            max_state_bytes=max_state_bytes,
+            high_watermark=high_watermark,
+            low_watermark=low_watermark,
+            response_delivery_window_seconds=response_delivery_window_seconds,
+        )
 
         def entity_function(context: df.DurableEntityContext) -> None:
             """Durable entity that manages agent execution and conversation state.
@@ -1157,9 +1351,8 @@ class AgentFunctionApp(DFAppBase):
             Operations:
             - run: Execute the agent with a message
             - run_agent: (Deprecated) Execute the agent with a message
-            - reset: Clear conversation history
+            - reset: Delegate reset to AgentEntity
             """
-            entity_handler = create_agent_entity(agent, callback, retention=retention, max_state_bytes=max_state_bytes)
             entity_handler(context)
 
         # Set function name for Azure Functions (used in function.json generation)
@@ -1446,14 +1639,50 @@ class AgentFunctionApp(DFAppBase):
                 return None
 
             agent_response = state.try_get_agent_response(correlation_id)
-            if agent_response:
-                result = self._build_success_result(
-                    response_message=agent_response.text,
-                    message=message,
-                    session_id=session_id,
-                    correlation_id=correlation_id,
-                    state=state,
+            if agent_response is not None:
+                snapshot = serialize_agent_response(agent_response)
+                errors = [
+                    content
+                    for response_message in agent_response.messages
+                    for content in response_message.contents
+                    if content.type == "error"
+                ]
+                expired_error = next((error for error in errors if error.error_code == "response_expired"), None)
+                expired = (
+                    expired_error is not None
+                    or agent_response.additional_properties.get("durable_status") == "already_completed"
                 )
+                if errors or expired:
+                    error = expired_error or (errors[0] if errors else None)
+                    error_message = error.message if error is not None else None
+                    error_code = "response_expired" if expired else (error.error_code if error is not None else None)
+                    if not error_message:
+                        error_message = agent_response.text or (
+                            "This request completed, but its response delivery window has expired."
+                            if expired
+                            else "Agent execution failed."
+                        )
+                    result = self._build_response_payload(
+                        response=None,
+                        message=message,
+                        session_id=session_id,
+                        status="already_completed" if expired else "error",
+                        correlation_id=correlation_id,
+                        extra_fields={
+                            "error": error_message,
+                            "error_code": error_code,
+                            ApiResponseFields.MESSAGE_COUNT: state.message_count,
+                        },
+                    )
+                else:
+                    result = self._build_success_result(
+                        response_message=agent_response.text,
+                        message=message,
+                        session_id=session_id,
+                        correlation_id=correlation_id,
+                        state=state,
+                    )
+                result["agent_response"] = snapshot
                 logger.debug(f"[HTTP Trigger] Found response for correlation ID: {correlation_id}")
 
         except Exception as exc:

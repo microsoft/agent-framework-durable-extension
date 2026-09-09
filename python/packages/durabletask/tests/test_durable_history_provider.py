@@ -1,11 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Tests for :class:`DurableHistoryProvider` (ADR-0032 Option 6).
-
-The provider makes durable entity state the store behind core's ``HistoryProvider``
-interface, so conversation history is persisted exactly once and core compaction
-plugs in unchanged.
-"""
+"""Core history-provider unit tests with recording clients and JSON state, without a live backend."""
 
 import json
 from collections.abc import AsyncIterable, Awaitable, Sequence
@@ -25,11 +20,13 @@ from agent_framework import (
     InMemoryHistoryProvider,
     Message,
     ResponseStream,
+    SessionContext,
 )
 
 from agent_framework_durabletask import (
     AgentEntity,
     AgentEntityStateProviderMixin,
+    DurableAgentState,
     DurableHistoryProvider,
 )
 from agent_framework_durabletask._history_provider import replayable_entries
@@ -80,20 +77,18 @@ class RecordingChatClient:
 class _InMemoryStateProvider(AgentEntityStateProviderMixin):
     """Test-only state provider that keeps the serialized entity state in memory."""
 
-    def __init__(self, *, session_id: str = "durable-history-session") -> None:
+    def __init__(self, *, session_id: str = "durable-history-session", raw: dict[str, Any] | None = None) -> None:
         self._session_id = session_id
-        self._state_dict: dict[str, Any] = {}
+        self._state_dict: dict[str, Any] = json.loads(json.dumps(raw or {}))
         self.writes = 0
 
     def _get_state_dict(self) -> dict[str, Any]:
-        return self._state_dict
+        return deepcopy(self._state_dict)
 
     def _set_state_dict(self, state: dict[str, Any]) -> None:
-        # The durable SDK serializes entity state as it is set, so a value it cannot encode
-        # surfaces here rather than later. Mirrored so tests see the same failure the host does.
-        json.dumps(state)
+        # Reject non-JSON state and avoid aliasing the staged operation snapshot.
+        self._state_dict = json.loads(json.dumps(state))
         self.writes += 1
-        self._state_dict = state
 
     def _get_session_id_from_entity(self) -> str:
         return self._session_id
@@ -203,7 +198,7 @@ def _stored_messages(entity: AgentEntity) -> list[Any]:
 
 
 class TestDurableHistoryProvider:
-    """Durable entity state is the single store behind core's HistoryProvider."""
+    """The local transcript backs core history independently of response delivery."""
 
     async def test_state_is_written_once_per_turn(self) -> None:
         """Each write serializes the whole conversation, so a spare one is not free.
@@ -248,13 +243,7 @@ class TestDurableHistoryProvider:
         assert annotated, "compaction marked messages excluded but none of it was persisted"
 
     async def test_a_failed_turn_never_becomes_model_context(self) -> None:
-        """A failure is for the caller, not for the model, and that has to survive a reload.
-
-        This used to be a boolean on the response entry that was never serialized. Every cold
-        start turned a failed turn back into an ordinary assistant reply, and the stored exception
-        text was replayed to the model as something it had said.
-        """
-        from agent_framework_durabletask import DurableAgentState
+        """A failed result remains deliverable from the mailbox, but is never model history."""
 
         class _FailingClient(RecordingChatClient):
             def get_response(self, messages: Any, **kwargs: Any) -> Any:
@@ -263,7 +252,7 @@ class TestDurableHistoryProvider:
         provider = _InMemoryStateProvider()
         entity = _make_entity(_build_agent(_FailingClient()), provider)  # type: ignore[arg-type]
 
-        await entity.run({"message": "please fail", "correlationId": "corr-fail"})
+        failed = await entity.run({"message": "please fail", "correlationId": "corr-fail"})
 
         reloaded = DurableAgentState.from_dict(provider._get_state_dict())
         replayed = [
@@ -271,39 +260,117 @@ class TestDurableHistoryProvider:
             for entry, index in replayable_entries(reloaded.data.conversation_history)
         ]
 
-        assert not any("kaboom" in text for text in replayed), (
-            f"the failure was replayed to the model after reload: {replayed}"
-        )
-        # It must still be readable by the caller that was waiting on it.
-        assert reloaded.try_get_agent_response("corr-fail") is not None
+        assert replayed == []
+        delivered = reloaded.try_get_agent_response("corr-fail")
+        assert delivered is not None
+        assert delivered.to_dict() == failed.to_dict()
+        assert any(content.type == "error" for message in delivered.messages for content in message.contents)
+        client = RecordingChatClient()
+        restarted = _make_entity(_build_agent(client), _InMemoryStateProvider(raw=provider._get_state_dict()))
+        await restarted.run({"message": "next", "correlationId": "corr-next"})
+        assert [[message.text for message in batch] for batch in client.received_messages] == [["next"]]
 
-    async def test_a_summary_is_never_returned_as_an_answer(self) -> None:
-        """Compaction output belongs to the transcript, not to any caller's response.
+    @pytest.mark.parametrize("prune_excluded", [False, True], ids=["annotate", "prune"])
+    async def test_a_summary_is_never_returned_as_an_answer(self, prune_excluded: bool) -> None:
+        """Original payloads and metadata survive compaction, transcript deletion and JSON reload."""
 
-        Summaries used to be inserted into whichever entry they followed. When that entry was a
-        response, polling its correlation returned the agent's answer plus a summary it never
-        produced.
-        """
+        class _MetadataClient(RecordingChatClient):
+            def get_response(self, messages: Any, *, stream: bool = False, **kwargs: Any) -> Awaitable[ChatResponse]:
+                if stream:
+                    raise TypeError("stream is not supported")
+                self.received_messages.append([message for message in messages if isinstance(message, Message)])
+
+                async def _get() -> ChatResponse:
+                    self._counter += 1
+                    return ChatResponse(
+                        messages=Message(
+                            role="assistant",
+                            contents=[
+                                Content.from_text(
+                                    f"reply-{self._counter}", additional_properties={"source": {"tags": ["original"]}}
+                                )
+                            ],
+                            message_id=f"answer-{self._counter}",
+                            author_name="metadata-client",
+                            additional_properties={"trace": {"tags": ["original"]}},
+                        ),
+                        response_id=f"response-{self._counter}",
+                        created_at="2026-09-08T12:00:00+00:00",
+                        finish_reason="stop",
+                        usage_details={"input_token_count": 7, "output_token_count": 11, "total_token_count": 18},
+                        additional_properties={"result_metadata": {"tags": ["original"]}},
+                    )
+
+                return _get()
+
+        client = _MetadataClient()
+        provider = _InMemoryStateProvider()
         entity = _make_entity(
-            _build_agent(RecordingChatClient(), with_compaction=True, strategy=_summarize_oldest),
-            _InMemoryStateProvider(),
+            _build_agent(client, with_compaction=True, prune_excluded=prune_excluded, strategy=_summarize_oldest),
+            provider,
         )
 
-        await _run_turns(entity, ["t1", "t2", "t3", "t4", "t5", "t6"])
+        originals: dict[str, dict[str, Any]] = {}
+        for index in range(6):
+            response = await entity.run({"message": f"t{index}", "correlationId": f"corr-{index}"})
+            original = json.loads(json.dumps(response.to_dict()))
+            assert original["response_id"] == f"response-{index + 1}"
+            assert original["created_at"] == "2026-09-08T12:00:00+00:00"
+            assert original["finish_reason"] == "stop"
+            assert original["usage_details"] == {
+                "input_token_count": 7,
+                "output_token_count": 11,
+                "total_token_count": 18,
+            }
+            assert original["additional_properties"]["result_metadata"] == {"tags": ["original"]}
+            assert original["messages"][0]["message_id"] == f"answer-{index + 1}"
+            assert original["messages"][0]["author_name"] == "metadata-client"
+            assert original["messages"][0]["additional_properties"]["trace"] == {"tags": ["original"]}
+            assert original["messages"][0]["contents"][0]["text"] == f"reply-{index + 1}"
+            assert original["messages"][0]["contents"][0]["additional_properties"]["source"] == {"tags": ["original"]}
+            originals[f"corr-{index}"] = original
+
+            # Mutating a returned result must not mutate its committed mailbox snapshot.
+            response.additional_properties["result_metadata"]["tags"].append("caller-mutation")
+            response.messages[0].additional_properties["trace"]["tags"].append("caller-mutation")
+            response.messages[0].contents[0].additional_properties["source"]["tags"].append("caller-mutation")
 
         summaries = [m for m in _stored_messages(entity) if "[summary of" in (m.to_chat_message().text or "")]
         assert summaries, "compaction produced no summary, so this proves nothing"
+        first_transcript_answer = [message for message in _stored_messages(entity) if message.message_id == "answer-1"]
+        if prune_excluded:
+            assert not first_transcript_answer
+        else:
+            assert first_transcript_answer
+            assert (first_transcript_answer[0].extension_data or {}).get("_excluded") is True
 
-        delivered = [
-            f"corr-{index}"
-            for index in range(6)
-            if (response := entity.state.try_get_agent_response(f"corr-{index}")) is not None
-            and any("[summary of" in (m.text or "") for m in response.messages)
-        ]
-        assert not delivered, f"a summary was returned as the agent's answer for {delivered}"
+        for correlation_id, original in originals.items():
+            delivered = entity.state.try_get_agent_response(correlation_id)
+            assert delivered is not None
+            assert delivered.to_dict() == original
 
-    async def test_history_is_stored_once(self) -> None:
-        """Messages live only in conversation history, never duplicated into the session blob."""
+        mailbox = deepcopy(entity.state.data.response_mailbox)
+        completions = deepcopy(entity.state.data.completed_correlations)
+        entity.state.data.conversation_history.clear()
+        entity.persist_state()
+        restarted_provider = _InMemoryStateProvider(raw=provider._get_state_dict())
+        restarted = _make_entity(_build_agent(client), restarted_provider)
+        assert restarted.state.data.conversation_history == []
+        assert restarted.state.data.response_mailbox == mailbox
+        assert restarted.state.data.completed_correlations == completions
+        before_retry = len(client.received_messages)
+        for correlation_id, original in originals.items():
+            delivered = await restarted.run({"message": "duplicate delivery", "correlationId": correlation_id})
+            assert delivered.to_dict() == original
+            delivered.messages[0].contents[0].text = "caller-modified lookup"
+            polled_again = restarted.state.try_get_agent_response(correlation_id)
+            assert polled_again is not None
+            assert polled_again.to_dict() == original
+        assert len(client.received_messages) == before_retry
+        assert restarted_provider.writes == 0
+
+    async def test_transcript_is_not_duplicated_in_session_state(self) -> None:
+        """The local transcript and delivery mailbox do not add a third copy in the session bag."""
         client = RecordingChatClient()
         provider = _InMemoryStateProvider()
         entity = _make_entity(_build_agent(client), provider)
@@ -351,8 +418,6 @@ class TestDurableHistoryProvider:
         assert excluded, "expected compaction annotations persisted in conversation history"
 
         # Annotations survive a full serialize/deserialize round-trip of entity state.
-        from agent_framework_durabletask import DurableAgentState
-
         restored = DurableAgentState.from_dict(entity.state.to_dict())
         restored_excluded = [
             m
@@ -409,8 +474,6 @@ class TestDurableHistoryProvider:
         assert summaries, "expected the inserted summary message to be persisted"
 
         # Identity and annotations survive a durable state round-trip.
-        from agent_framework_durabletask import DurableAgentState
-
         restored = DurableAgentState.from_dict(entity.state.to_dict())
         restored_ids = [
             m.message_id
@@ -512,10 +575,11 @@ class TestDurableHistoryProvider:
         assert len(first) == len(set(first)), f"synthesized ids collided within one run: {first}"
         assert first == second, f"synthesized ids changed across a cold start: {first} != {second}"
 
-    async def test_service_managed_session_is_skipped(self) -> None:
-        """When the model service owns the conversation, the provider must not participate."""
-        from types import SimpleNamespace
-
+    @pytest.mark.parametrize("service_session_id", [None, "svc-123"], ids=["no-service-id", "saved-service-id"])
+    @pytest.mark.parametrize("service_owns_history", [False, True], ids=["client-owned", "service-owned"])
+    async def test_history_hooks_use_binding_ownership_not_the_saved_service_id(
+        self, service_session_id: str | None, service_owns_history: bool
+    ) -> None:
         from agent_framework_durabletask._history_provider import (
             DurableHistoryBinding,
             bind_durable_history,
@@ -528,18 +592,40 @@ class TestDurableHistoryProvider:
         await _run_turns(entity, ["first", "second"])
 
         history = DurableHistoryProvider()
-        token = bind_durable_history(DurableHistoryBinding(state_provider=provider))
+        before = deepcopy(provider.state.to_dict())
+        token = bind_durable_history(
+            DurableHistoryBinding(state_provider=provider, service_owns_history=service_owns_history)
+        )
         try:
             state: dict[str, Any] = {}
-            context = SimpleNamespace(session_id="s", extend_messages=lambda *_: None)
-            service_session = SimpleNamespace(service_session_id="svc-123", state={})
+            session = AgentSession(session_id="s", service_session_id=service_session_id)
+            context = SessionContext(session_id="s", service_session_id=service_session_id, input_messages=[])
+            await history.before_run(agent=entity.agent, session=session, context=context, state=state)
 
-            await history.before_run(agent=None, session=service_session, context=context, state=state)
-            # Nothing was loaded, so no working buffer was published.
-            assert "messages" not in state
+            if service_owns_history:
+                assert state == {}
+                assert context.get_messages() == []
+                assert provider.state.to_dict() == before
+                stored = provider.state.data.conversation_history[0].messages[0]
+                changed = stored.to_chat_message()
+                changed.message_id = "must-not-flush"
+                state = {
+                    "messages": [changed],
+                    "_positions": {changed.message_id: (provider.state.data.conversation_history[0], 0)},
+                }
+            else:
+                assert [message.text for message in context.get_messages()] == ["first", "reply-1", "second", "reply-2"]
+                assert len(state["messages"]) == 4
+                assert len(state["_positions"]) == 4
 
-            # Flushing is likewise a no-op and must not raise.
-            await history.after_run(agent=None, session=service_session, context=context, state=state)
+            state["messages"][0].additional_properties["hook-marker"] = {"kept": True}
+            await history.after_run(agent=entity.agent, session=session, context=context, state=state)
+            if service_owns_history:
+                assert provider.state.to_dict() == before
+            else:
+                stored = provider.state.data.conversation_history[0].messages[0]
+                assert (stored.extension_data or {})["hook-marker"] == {"kept": True}
+            assert provider.writes == 2, "history hooks must not commit an intermediate snapshot"
         finally:
             unbind_durable_history(token)
 
@@ -794,44 +880,66 @@ class TestSessionStatePersistence:
         assert serialized_keys == [["other"]], f"the durable slice was serialized: {serialized_keys}"
         assert durable_history.source_id in session.state, "the caller's session was left modified"
 
-    async def test_unserializable_provider_state_does_not_break_the_turn(self) -> None:
-        """Core passes a value it cannot serialize straight through, without raising or warning.
-
-        Assigning that to entity state fails the save, and the error handler saves again with the
-        same payload, so the second failure escapes and masks whatever the agent returned. The
-        payload is checked first instead, keeping the last good session.
-        """
+    @pytest.mark.parametrize("prior_turn", [False, True], ids=["new-session", "existing-session"])
+    @pytest.mark.filterwarnings("ignore:AgentSession state value .* has unsupported type:RuntimeWarning")
+    async def test_unserializable_provider_state_fails_without_committing(self, prior_turn: bool) -> None:
+        """A successful model call is not a committed outcome when session serialization fails."""
 
         class _UnserializableProvider(ContextProvider):
             def __init__(self) -> None:
                 super().__init__("unserializable")
+                self.poison = True
 
             async def after_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
-                state["handle"] = object()
+                state["handle"] = object() if self.poison else "serializable"
 
         provider = _InMemoryStateProvider()
-        agent = _agent([InMemoryHistoryProvider(), _UnserializableProvider()])
+        client = RecordingChatClient()
+        if prior_turn:
+            await _make_entity(_build_agent(client), provider).run({"message": "first", "correlationId": "committed"})
+        stateful = _UnserializableProvider()
+        agent = _agent([InMemoryHistoryProvider(), stateful], client)
         entity = _make_entity(agent, provider)
+        before = json.loads(json.dumps(provider._get_state_dict()))
+        cached_before = json.loads(entity.state.to_json())
+        writes_before = provider.writes
+        calls_before = len(client.received_messages)
+        request = {
+            "message": "uncommitted input",
+            "correlationId": "uncommitted",
+            "contextMessages": [
+                Message(role="user", contents=["uncommitted input"], message_id="pending-id").to_dict()
+            ],
+        }
 
-        await _run_turns(entity, ["first"])
+        with pytest.raises(ValueError, match="session state.*JSON-compatible.*cannot commit"):
+            await entity.run(request)
 
-        stored = provider._get_state_dict()
-        assert stored["data"].get("session") is None, "an unusable session payload was persisted"
-        # The turn still completed and the conversation was recorded.
-        assert len(entity.state.data.conversation_history) == 2
-        json.dumps(stored)
+        assert len(client.received_messages) == calls_before + 1
+        assert provider.writes == writes_before
+        assert provider._get_state_dict() == before
+        assert entity.state.to_dict() == cached_before
+        assert entity.state.try_get_agent_response("uncommitted") is None
+        assert "uncommitted" not in entity.state.data.response_mailbox
+        assert "uncommitted" not in entity.state.data.completed_correlations
+        assert "pending-id" not in entity.state.data.ingested_messages
+
+        cold = _make_entity(_build_agent(client), _InMemoryStateProvider(raw=before))
+        assert cold.state.to_dict() == cached_before
+        assert cold.state.try_get_agent_response("uncommitted") is None
+
+        stateful.poison = False
+        response = await entity.run(request)
+        assert response.text == f"reply-{calls_before + 2}"
+        assert len(client.received_messages) == calls_before + 2
+        assert [message.text for message in client.received_messages[-1]].count("uncommitted input") == 1
+        assert provider.writes == writes_before + 1
+        assert "uncommitted" in entity.state.data.completed_correlations
+        assert provider._get_state_dict()["data"]["session"]["state"]["unserializable"]["handle"] == "serializable"
 
 
 class TestARequestIsAnsweredOnce:
-    """A repeated correlation id returns the recorded answer instead of running again.
-
-    Entity signals are delivered at least once, and every path mints a fresh correlation id per
-    request, so a repeat is a duplicate delivery rather than a caller deliberately asking again.
-    Running the agent a second time spends another model call, re-runs its tools, and produces a
-    different answer that nothing can collect, because pollers read by correlation id and take the
-    first match. Returning the recorded answer is what turns at-least-once delivery into a single
-    effect.
-    """
+    """A committed correlation returns its recorded outcome; uncommitted effects may repeat."""
 
     async def test_the_agent_does_not_run_twice(self) -> None:
         client = RecordingChatClient()
@@ -869,19 +977,26 @@ class TestARequestIsAnsweredOnce:
 
         class _FailingClient(RecordingChatClient):
             def get_response(self, messages: Any, **kwargs: Any) -> Any:
-                super().get_response(messages, **kwargs)
+                normalized = [m for m in messages if isinstance(m, Message)] if isinstance(messages, list) else []
+                self.received_messages.append(normalized)
                 raise RuntimeError("kaboom")
 
         client = _FailingClient()
-        entity = _make_entity(_build_agent(client), _InMemoryStateProvider())
+        provider = _InMemoryStateProvider()
+        entity = _make_entity(_build_agent(client), provider)
 
         first = await entity.run({"message": "hello", "correlationId": "dup"})
-        # A failing client makes the entity try streaming and then fall back, so one turn is more
-        # than one client call. What matters is that the count does not grow on the repeat.
-        after_first = len(client.received_messages)
-        second = await entity.run({"message": "hello", "correlationId": "dup"})
+        assert len(client.received_messages) == 1, "a failed stream must not trigger another agent execution"
+        raw = json.loads(json.dumps(provider._get_state_dict()))
+        assert raw["data"]["responseMailbox"]["dup"]["response"] == first.to_dict()
+        assert "dup" in raw["data"]["completedCorrelations"]
+        restarted_provider = _InMemoryStateProvider(raw=raw)
+        restarted = _make_entity(_build_agent(client), restarted_provider)
+        second = await restarted.run({"message": "hello", "correlationId": "dup"})
 
-        assert len(client.received_messages) == after_first
+        assert len(client.received_messages) == 1
+        assert restarted_provider.writes == 0
+        assert second.to_dict() == first.to_dict()
         assert any(content.type == "error" for content in first.messages[0].contents)
         assert any(content.type == "error" for content in second.messages[0].contents)
 

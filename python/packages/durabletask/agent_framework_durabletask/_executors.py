@@ -87,12 +87,11 @@ class DurableAgentTask(CompositeTask[AgentResponse], CompletableTask[AgentRespon
         try:
             response = load_agent_response(raw_result)
 
-            if self._response_format is not None:
-                ensure_response_format(
-                    self._response_format,
-                    self._correlation_id,
-                    response,
-                )
+            ensure_response_format(
+                self._response_format,
+                self._correlation_id,
+                response,
+            )
 
             # Set the typed AgentResponse as this task's result
             self.complete(response)
@@ -368,12 +367,11 @@ class ClientAgentExecutor(DurableAgentExecutor[AgentResponse]):
         if agent_response is not None:
             try:
                 # Validate response format if specified
-                if response_format is not None:
-                    ensure_response_format(
-                        response_format,
-                        correlation_id,
-                        agent_response,
-                    )
+                ensure_response_format(
+                    response_format,
+                    correlation_id,
+                    agent_response,
+                )
 
                 return agent_response
 

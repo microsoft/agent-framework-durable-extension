@@ -156,7 +156,7 @@ class TestDurableAgentState:
     def test_schema_version(self) -> None:
         """Test that schema version is set correctly."""
         state = DurableAgentState()
-        assert state.schema_version == "1.2.0"
+        assert state.schema_version == "2.0.0"
 
     def test_to_dict_serialization(self) -> None:
         """Test that to_dict produces correct structure."""
@@ -165,7 +165,7 @@ class TestDurableAgentState:
 
         assert "schemaVersion" in data
         assert "data" in data
-        assert data["schemaVersion"] == "1.2.0"
+        assert data["schemaVersion"] == "2.0.0"
         assert "conversationHistory" in data["data"]
 
     def test_from_dict_deserialization(self) -> None:

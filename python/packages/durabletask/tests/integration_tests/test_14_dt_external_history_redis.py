@@ -7,19 +7,25 @@ file behaves the same) must get the same behavior under the durable runtime as i
 
 - the provider is not swapped out for durable-backed history,
 - it participates in the run and its stored history reaches the model on later turns,
-- it is handed the entity's stable session id, so its keys line up across turns.
+- it is handed the entity's stable session id, so its keys line up across turns,
+- fresh durable state has no local transcript mirror or metadata-only exchange envelopes,
+- responses and completion evidence are stored separately, keyed by correlation id.
 
-The last point is the load-bearing one: the entity builds a fresh session per operation, and if
+The stable session id matters because the entity builds a fresh session per operation, and if
 that session carried a generated id an externally keyed store would silently start over every turn.
+This sample uses blind Redis appends. These tests do not assert exactly-once external writes across
+an interrupted operation or portable reset support.
 """
 
+import json
 import os
+from datetime import datetime
 from typing import Any, Protocol
 
 import pytest
 import redis.asyncio as aioredis
 
-from agent_framework_durabletask import DurableAgentState, DurableAIAgentClient
+from agent_framework_durabletask import DurableAgentState, DurableAIAgentClient, serialize_agent_response
 
 
 class AgentClientFactoryProtocol(Protocol):
@@ -111,38 +117,48 @@ class TestExternalHistoryProvider:
         assert any("12" in entry for entry in entries)
         assert any("teal" in entry for entry in entries)
 
-    def test_durable_state_records_the_exchange_but_not_a_second_copy(self) -> None:
-        """The entity records that the turn happened, not the content Redis is already holding.
-
-        Correlation and delivery are the entity's job and nothing else can do them, so the
-        exchange is always recorded. Being a second copy of the conversation is a different thing,
-        and it would put the same content under two retention, residency and deletion policies
-        when the caller deliberately chose one store for it.
-
-        Responses are the deliberate exception. A caller collects its answer by polling the entity
-        for a correlation id, so the entity is the only thing that can produce it.
-        """
+    def test_external_history_has_no_local_transcript_but_keeps_correlated_delivery(self) -> None:
+        """Fresh external history needs no local transcript to deliver completed results."""
         agent = self.agent_client.get_agent("Archivist")
         session = agent.create_session()
+        completed: set[str] = set()
 
-        assert agent.run("Note that the archive opens at nine.", session=session) is not None
+        for prompt in ("Note that the archive opens at nine.", "Name a weekday."):
+            response = agent.run(prompt, session=session)
+            assert response.text
+            assert all(content.type != "error" for message in response.messages for content in message.contents)
+            expected = json.loads(json.dumps(serialize_agent_response(response)))
+            assert expected["created_at"], "the Foundry result timestamp was lost"
 
-        state = self._read_state(session.durable_session_id)
-        history = state.data.conversation_history
-        assert history, "expected the entity to record the exchange"
+            state = self._read_state(session.durable_session_id)
+            assert state.data.conversation_history == [], "external history must not create a local transcript mirror"
+            assert state.message_count == 0, "transcript count is not a delivery or completion count"
 
-        requests = [e for e in history if e.json_type.value == "request"]
-        responses = [e for e in history if e.json_type.value == "response"]
-        assert requests and responses, f"expected both sides recorded, found {[e.json_type.value for e in history]}"
+            # Discover the new correlation from completion state, never from transcript entries.
+            correlations = set(state.data.completed_correlations)
+            assert completed <= correlations, "earlier completion receipts were lost"
+            new_correlations = correlations - completed
+            assert len(new_correlations) == 1
+            correlation_id = new_correlations.pop()
+            assert correlation_id
+            completed = correlations
 
-        # The envelope survives, because delivery and deduplication depend on it.
-        assert all(entry.correlation_id for entry in requests + responses)
+            # Check this turn immediately rather than assuming older payloads remain within
+            # their delivery window after another model call. Receipts outlive those payloads.
+            assert correlation_id in state.data.response_mailbox
+            assert set(state.data.response_mailbox) <= completed
+            mailbox = state.data.response_mailbox[correlation_id]
+            assert mailbox["response"] == expected
+            assert mailbox["response"]["created_at"] == expected["created_at"]
+            assert len(mailbox["response"]["messages"]) == len(response.messages)
+            assert state.data.completed_correlations[correlation_id]["completedAt"] == mailbox["createdAt"]
+            assert datetime.fromisoformat(mailbox["expiresAt"]) > datetime.fromisoformat(mailbox["createdAt"])
 
-        # The question itself lives in Redis, so the entity does not keep it too.
-        assert all(not message.contents for entry in requests for message in entry.messages)
+            delivered = state.try_get_agent_response(correlation_id)
+            assert delivered is not None
+            assert json.loads(json.dumps(serialize_agent_response(delivered))) == expected
 
-        # The answer stays, because polling by correlation id is how the caller collects it.
-        assert any(message.contents for entry in responses for message in entry.messages)
+        assert len(completed) == 2, "two completed turns must not require two local transcript exchanges"
 
     def _read_state(self, session_id: Any) -> DurableAgentState:
         """Load the agent entity's persisted state straight from the scheduler.

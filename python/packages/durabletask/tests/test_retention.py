@@ -2,18 +2,21 @@
 
 """Tests for retention (ADR-0032, "Retention").
 
-Retention bounds durable entity state so an agent does not simply stop working when it reaches the
-backend limit. It is a capacity concern and deliberately separate from compaction: an exclusion made
-for token cost is not consent to delete the record.
+An explicit pressure budget evicts eligible transcript history independently of eager compaction
+pruning. An exclusion made for token cost is not consent to delete the record, and an unreachable
+protected floor reports capacity failure without deleting state.
 """
 
 import json
 from collections.abc import AsyncIterator
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
-from typing import Any, cast
+from typing import Any, cast, get_args
 
+import pytest
 from agent_framework import (
     Agent,
+    AgentResponse,
     BaseChatClient,
     ChatResponse,
     ChatResponseUpdate,
@@ -32,8 +35,11 @@ from agent_framework_durabletask import (
     DurableAgentStateResponse,
 )
 from agent_framework_durabletask._retention import (
+    DELIVERY_WINDOW_SECONDS,
     HIGH_WATERMARK,
     LOW_WATERMARK,
+    RetentionMode,
+    StateCapacityError,
     _token_budget,
     enforce_budget,
     prunes_excluded,
@@ -44,7 +50,7 @@ BUDGET = 40_000
 
 
 def _state(turns: int, *, chars: int = 400, excluded_before: int = 0, excluded_recent: int = 0) -> DurableAgentState:
-    """Build entity state with the given number of user/assistant turns.
+    """Build legacy transcript-delivered state with the given number of user/assistant turns.
 
     Args:
         turns: How many exchanges to record.
@@ -59,12 +65,12 @@ def _state(turns: int, *, chars: int = 400, excluded_before: int = 0, excluded_r
     Returns:
         The populated state.
     """
-    state = DurableAgentState()
+    # These manually appended responses use legacy history lookup. Version 2 fixtures must
+    # record independent mailbox results instead of treating transcript entries as delivery.
+    state = DurableAgentState(schema_version="1.2.0")
     now = datetime.now(tz=timezone.utc)
-    # Turns are spaced a minute apart rather than all stamped "now". Retention refuses to evict a
-    # response recent enough that its caller could still be reading it, so a conversation where
-    # every turn happened this instant is entirely protected and nothing can be evicted at all.
-    # Real conversations are spread over time, and the tests need to look like one.
+    # Space legacy turns a minute apart so their delivery windows have elapsed. Tests of live
+    # delivery explicitly refresh timestamps rather than depending on the test's running time.
     marked = 0
     for index in range(turns):
         occurred_at = now - timedelta(minutes=turns - index)
@@ -112,15 +118,21 @@ class TestRetentionModes:
     """The mode decides whether an exclusion may become a deletion."""
 
     def test_only_follow_compaction_prunes_on_write(self) -> None:
-        assert prunes_excluded("follow_compaction") is True
-        assert prunes_excluded("auto") is False
-        assert prunes_excluded("keep_all") is False
+        modes = get_args(RetentionMode)
+        assert set(modes) == {"keep_all", "follow_compaction"}
+        for mode in modes:
+            assert prunes_excluded(mode) is (mode == "follow_compaction")
 
-    def test_the_default_is_auto(self) -> None:
-        """Which is the deliberate behavior change: previously nothing bounded storage."""
+    def test_auto_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="retention"):
+            prunes_excluded(cast(Any, "auto"))
+
+    def test_the_defaults_do_not_enable_deletion(self) -> None:
         from agent_framework_durabletask import DurableAIAgentWorker
 
-        assert DurableAIAgentWorker(cast(Any, object()))._retention == "auto"
+        worker = DurableAIAgentWorker(cast(Any, object()))
+        assert worker._retention == "keep_all"
+        assert worker._max_state_bytes is None
 
 
 class TestBudgetEnforcement:
@@ -128,12 +140,12 @@ class TestBudgetEnforcement:
 
     async def test_below_the_watermark_nothing_is_touched(self) -> None:
         state = _state(turns=4)
-        before = _message_ids(state)
+        before = state.to_json()
 
         removed = await enforce_budget(state, max_state_bytes=BUDGET)
 
         assert removed == 0
-        assert _message_ids(state) == before
+        assert state.to_json() == before
 
     async def test_over_the_watermark_evicts_to_the_low_watermark(self) -> None:
         state = _state(turns=60)
@@ -142,7 +154,7 @@ class TestBudgetEnforcement:
         removed = await enforce_budget(state, max_state_bytes=BUDGET)
 
         assert removed > 0
-        assert _size(state) < BUDGET * HIGH_WATERMARK, "eviction did not get back under the trigger"
+        assert _size(state) <= BUDGET * LOW_WATERMARK, "eviction did not reach the low watermark"
 
     async def test_the_newest_turn_survives(self) -> None:
         """Evicting the turn that just happened would defeat the point of running it."""
@@ -150,7 +162,7 @@ class TestBudgetEnforcement:
 
         await enforce_budget(state, max_state_bytes=BUDGET)
 
-        assert _message_ids(state)[-1] == "a59"
+        assert _message_ids(state)[-2:] == ["u59", "a59"]
 
     async def test_eviction_is_hysteretic(self) -> None:
         """Evicting to just under the trigger would evict again on every following turn."""
@@ -161,11 +173,24 @@ class TestBudgetEnforcement:
 
         assert second == 0, "a second pass evicted again immediately, so there is no headroom"
 
-    async def test_keep_all_is_the_caller_s_decision(self) -> None:
-        """``keep_all`` is enforced by the entity, so the budget helper itself always acts."""
+    async def test_pressure_eviction_does_not_require_compaction_exclusions(self) -> None:
+        """An explicit budget can evict old groups without opting into eager pruning."""
         state = _state(turns=60)
 
         assert await enforce_budget(state, max_state_bytes=BUDGET) > 0
+
+    @pytest.mark.parametrize("turns", [0, 10])
+    async def test_metadata_floor_fails_without_mutating_state(self, turns: int) -> None:
+        state = _state(turns=turns)
+        state.data.session = {"state": {"pending_approvals": ["p" * (BUDGET * 2)]}}
+        state.data.ingested_positions = {"source": 7}
+        before = state.to_json()
+
+        with pytest.raises(StateCapacityError) as error:
+            await enforce_budget(state, max_state_bytes=BUDGET)
+
+        assert error.value.floor_bytes > BUDGET
+        assert state.to_json() == before
 
 
 class TestExclusionsAreNotConsentToDelete:
@@ -244,25 +269,34 @@ class TestSingleOversizedTurn:
     """Retention cannot save a conversation whose newest turn alone exceeds the budget."""
 
     async def test_the_current_turn_is_never_evicted(self) -> None:
-        """Core's fallback will drop everything if asked, which would lose the result being polled."""
+        """An unretainable current exchange reports capacity failure without deleting state."""
         state = _state(turns=1, chars=BUDGET * 2)
+        before = state.to_json()
 
-        removed = await enforce_budget(state, max_state_bytes=BUDGET)
+        with pytest.raises(StateCapacityError) as error:
+            await enforce_budget(state, max_state_bytes=BUDGET)
 
-        assert removed == 0
+        assert error.value.floor_bytes == len(before)
+        assert state.to_json() == before
         assert _message_ids(state) == ["u0", "a0"], "the turn that just ran was evicted"
 
     async def test_an_oversized_newest_turn_does_not_take_the_history_with_it(self) -> None:
         state = _state(turns=10)
-        state.data.conversation_history.extend(_state(turns=1, chars=BUDGET * 2).data.conversation_history)
+        state.data.conversation_history[-1].messages = [
+            DurableAgentStateMessage.from_chat_message(
+                Message(role="assistant", contents=["a" * (BUDGET * 2)], message_id="a9")
+            )
+        ]
+        before = state.to_json()
 
-        await enforce_budget(state, max_state_bytes=BUDGET)
+        with pytest.raises(StateCapacityError):
+            await enforce_budget(state, max_state_bytes=BUDGET)
 
-        assert _message_ids(state)[-2:] == ["u0", "a0"], "the newest exchange must survive"
+        assert state.to_json() == before, "capacity failure must preserve the entire original history"
 
 
 class TestAResponseIsNotEvictedBeforeItsCallerReadsIt:
-    """A caller reads its response by correlation id, from outside the entity.
+    """A legacy caller reads its response by correlation id from transcript entries.
 
     Nothing tells the entity that a response was collected, so a turn completing is not permission
     to delete the previous one. Evicting a response somebody is still polling for turns a run that
@@ -283,39 +317,40 @@ class TestAResponseIsNotEvictedBeforeItsCallerReadsIt:
             entry.created_at = datetime.now(tz=timezone.utc)
         correlation = early[0].correlation_id
         assert correlation is not None
-        assert state.try_get_agent_response(correlation) is not None
+        original = state.try_get_agent_response(correlation)
+        assert original is not None
+        original_payload = deepcopy(original.to_dict())
 
         removed = await enforce_budget(state, max_state_bytes=BUDGET)
 
         assert removed > 0, "nothing was evicted, so this proves nothing"
-        assert state.try_get_agent_response(correlation) is not None, (
-            "a response completed seconds ago was evicted before its caller could read it"
-        )
+        retained = state.try_get_agent_response(correlation)
+        assert retained is not None, "a recent response was evicted before its caller could read it"
+        assert retained.to_dict() == original_payload
 
     async def test_an_old_response_is_still_evictable(self) -> None:
         """Protection has to expire, or a long conversation could never be trimmed at all."""
         state = _state(turns=60)
+        assert state.try_get_agent_response("c0") is not None
 
         removed = await enforce_budget(state, max_state_bytes=BUDGET)
 
         assert removed > 0
         assert state.try_get_agent_response("c0") is None, "an ancient response was kept forever"
 
-    async def test_the_budget_wins_when_protection_cannot_be_honored(self) -> None:
-        """Turns arriving faster than the window can age them out must not pin state.
-
-        Losing a response costs one caller a retry. State too large to persist ends the session
-        for every caller, so protection yields rather than letting that happen.
-        """
+    async def test_capacity_failure_preserves_every_recent_response(self) -> None:
+        """A full delivery window reports capacity failure instead of sacrificing responses."""
         state = _state(turns=60)
         # Every turn happened just now, which is what a busy session looks like.
         for entry in state.data.conversation_history:
             entry.created_at = datetime.now(tz=timezone.utc)
+        before = state.to_json()
 
-        removed = await enforce_budget(state, max_state_bytes=BUDGET)
+        with pytest.raises(StateCapacityError) as error:
+            await enforce_budget(state, max_state_bytes=BUDGET)
 
-        assert removed > 0, "protection was treated as absolute and state stayed over budget"
-        assert _size(state) <= BUDGET
+        assert error.value.floor_bytes == len(before)
+        assert state.to_json() == before
 
     async def test_a_failed_turn_is_protected_too(self) -> None:
         """The caller waiting on a failed turn still needs to be told it failed."""
@@ -338,13 +373,53 @@ class TestAResponseIsNotEvictedBeforeItsCallerReadsIt:
         assert state.try_get_agent_response("boom") is not None
 
 
+class TestMailboxDeliverySurvivesTranscriptEviction:
+    async def test_original_result_is_retained_until_expiry_and_completion_outlives_it(self) -> None:
+        state = DurableAgentState()
+        state.data.conversation_history = _state(turns=60).data.conversation_history
+        now = datetime.now(tz=timezone.utc)
+        for entry in state.data.conversation_history[:2]:
+            entry.created_at = now
+        response = AgentResponse(
+            messages=[Message("assistant", ["a" * 400], message_id="a0")],
+            additional_properties={"delivery": {"original": True}},
+        )
+        state.record_response("c0", response, delivery_window_seconds=DELIVERY_WINDOW_SECONDS, now=now)
+        mailbox = deepcopy(state.data.response_mailbox)
+        completed = deepcopy(state.data.completed_correlations)
+        assert _size(state) > BUDGET * HIGH_WATERMARK
+
+        removed = await enforce_budget(state, max_state_bytes=BUDGET)
+
+        assert removed > 0
+        assert not {"u0", "a0"} & set(_message_ids(state)), "the recent transcript copy was not evicted"
+        restored = DurableAgentState.from_json(state.to_json())
+        expiry = now + timedelta(seconds=DELIVERY_WINDOW_SECONDS)
+        restored.expire_responses(now=expiry - timedelta(microseconds=1))
+        assert restored.data.response_mailbox == mailbox
+        assert restored.data.completed_correlations == completed
+        retained = restored.try_get_agent_response("c0")
+        assert retained is not None
+        assert retained.to_dict() == response.to_dict()
+
+        restored.expire_responses(now=expiry)
+
+        assert restored.data.response_mailbox == {}
+        assert restored.data.completed_correlations == completed
+        expired = DurableAgentState.from_json(restored.to_json()).try_get_agent_response("c0")
+        assert expired is not None
+        assert expired.additional_properties["durable_status"] == "already_completed"
+        assert expired.additional_properties["correlation_id"] == "c0"
+        assert expired.messages[0].contents[0].error_code == "response_expired"
+
+
 def _tool_state(turns: int, *, chars: int = 400) -> DurableAgentState:
     """Build a history of tool calls, which carry real bytes but no ``message.text``.
 
     This is the shape that broke the budget. A function call serializes to as much storage as
     prose of the same length, but reading ``.text`` off it returns an empty string.
     """
-    state = DurableAgentState()
+    state = DurableAgentState(schema_version="1.2.0")
     now = datetime.now(tz=timezone.utc)
     for index in range(turns):
         occurred_at = now - timedelta(minutes=turns - index)
@@ -403,7 +478,7 @@ class TestTheBudgetDoesNotAssumeProse:
         tools_left = len(_message_ids(tools))
         # Not identical, since the two shapes do not serialize to the same size per message, but
         # the same order of magnitude. Before the fix this was 8 against 1.
-        assert tools_left > 1
+        assert tools_left > 2, "the budget retained only the protected newest exchange"
         assert abs(prose_left - tools_left) <= max(2, prose_left // 2)
 
     async def test_a_tool_only_history_is_evicted_down_to_the_watermark(self) -> None:
@@ -412,7 +487,7 @@ class TestTheBudgetDoesNotAssumeProse:
         removed = await enforce_budget(state, max_state_bytes=BUDGET)
 
         assert removed > 0
-        assert _size(state) < BUDGET
+        assert _size(state) <= BUDGET * LOW_WATERMARK
 
     async def test_the_budget_scales_with_bytes_not_text(self) -> None:
         """Two histories of similar serialized size get similar budgets."""
@@ -476,11 +551,14 @@ class TestTheAgentsInstructionsSurviveTheBudget:
         assert self._system_count(state) == 1
 
     async def test_the_system_message_survives_a_budget_it_cannot_fit(self) -> None:
-        """Even when retention cannot reach the target, the instructions stay."""
+        """An unreachable protected floor leaves instructions and the entire history intact."""
         state = self._with_system(turns=30)
+        before = state.to_json()
 
-        await enforce_budget(state, max_state_bytes=1_500)
+        with pytest.raises(StateCapacityError):
+            await enforce_budget(state, max_state_bytes=1_500)
 
+        assert state.to_json() == before
         assert self._system_count(state) == 1
 
     async def test_ordinary_messages_are_still_evicted_around_it(self) -> None:
@@ -554,11 +632,12 @@ class TestEvictionLeavesEvidence:
 class TestStateShape:
     """Eviction must leave durable state usable."""
 
-    async def test_empty_entries_are_removed(self) -> None:
+    async def test_bare_transcript_entries_emptied_by_eviction_are_removed(self) -> None:
         state = _state(turns=60)
 
-        await enforce_budget(state, max_state_bytes=BUDGET)
+        removed = await enforce_budget(state, max_state_bytes=BUDGET)
 
+        assert removed > 0
         assert all(entry.messages for entry in state.data.conversation_history)
 
     async def test_state_still_round_trips(self) -> None:
@@ -615,8 +694,7 @@ class _EntityState(AgentEntityStateProviderMixin):
 
     def _set_state_dict(self, state: dict[str, Any]) -> None:
         # The real provider hands state to the SDK, which serializes it eagerly.
-        json.dumps(state)
-        self._state_dict = state
+        self._state_dict = json.loads(json.dumps(state))
 
     def _get_session_id_from_entity(self) -> str:
         return "retention-e2e"
@@ -633,16 +711,37 @@ class TestTheWholeLoopStaysUnderBudget:
         agent = Agent(client=cast(Any, client), name="verbose")
         provider = _EntityState()
         entity = AgentEntity(agent, state_provider=provider, **entity_kwargs)
+        budget = entity_kwargs.get("max_state_bytes")
 
         replies: list[str] = []
         for turn in range(self.TURNS):
-            result = await entity.run({"message": f"question {turn}", "correlationId": f"corr-{turn}"})
-            replies.append(result.text)
+            correlation_id = f"corr-{turn}"
+            result = await entity.run({"message": f"question {turn}", "correlationId": correlation_id})
+            persisted = DurableAgentState.from_dict(provider._get_state_dict())
+            polled = persisted.try_get_agent_response(correlation_id)
+            assert polled is not None
+            assert polled.to_dict() == result.to_dict()
+            replies.append(polled.text)
+            assert set(persisted.data.response_mailbox) == {correlation_id}
+            assert set(persisted.data.completed_correlations) == {f"corr-{index}" for index in range(turn + 1)}
+            if budget is not None:
+                assert _size(persisted) < int(budget * HIGH_WATERMARK)
+
+            if turn < self.TURNS - 1:
+                # Simulate the next operation arriving after delivery expires, but only after
+                # polling this result. Let the entity remove the payload on its next operation;
+                # neither transcript timestamps nor completion receipts are changed here.
+                persisted.data.response_mailbox[correlation_id]["expiresAt"] = (
+                    datetime.now(tz=timezone.utc) - timedelta(seconds=1)
+                ).isoformat()
+                provider.replace_cached_state(persisted)
+                provider.persist_state()
         return provider, replies
 
-    async def test_state_stays_bounded_across_many_turns(self) -> None:
-        provider, _ = await self._drive(max_state_bytes=self.LIMIT)
-        assert len(json.dumps(provider._get_state_dict())) <= self.LIMIT
+    @pytest.mark.parametrize("budget", [BUDGET, LIMIT])
+    async def test_keep_all_with_a_budget_stays_bounded_across_many_turns(self, budget: int) -> None:
+        provider, _ = await self._drive(retention="keep_all", max_state_bytes=budget)
+        assert len(json.dumps(provider._get_state_dict())) <= budget
 
     async def test_follow_compaction_falls_back_to_pressure_eviction(self) -> None:
         """With nothing to prune, only the shared pressure fallback can bound this run."""
@@ -650,7 +749,7 @@ class TestTheWholeLoopStaysUnderBudget:
         state = DurableAgentState.from_dict(provider._get_state_dict())
 
         assert len(json.dumps(provider._get_state_dict())) <= self.LIMIT
-        assert 0 < len(state.data.conversation_history) < self.TURNS * 2
+        assert 2 <= len(_message_ids(state)) < self.TURNS * 2
 
     async def test_every_turn_still_gets_its_own_answer(self) -> None:
         """Eviction must not disturb the response the caller is waiting on."""
@@ -660,10 +759,17 @@ class TestTheWholeLoopStaysUnderBudget:
     async def test_history_is_actually_trimmed_not_just_small(self) -> None:
         """Without this the bounded assertion above could pass for the wrong reason."""
         provider, _ = await self._drive(max_state_bytes=self.LIMIT)
-        kept = len(DurableAgentState.from_dict(provider._get_state_dict()).data.conversation_history)
-        assert 0 < kept < self.TURNS * 2
+        state = DurableAgentState.from_dict(provider._get_state_dict())
+        # Metadata-only envelopes are protected state, not retained transcript messages.
+        kept = len(_message_ids(state))
+        assert 2 <= kept < self.TURNS * 2
+        assert state.data.truncation is not None
+        assert state.data.truncation["evictedMessageCount"] == self.TURNS * 2 - kept
 
-    async def test_keep_all_lets_it_grow_past_the_limit(self) -> None:
+    async def test_keep_all_without_a_budget_lets_it_grow_past_the_limit(self) -> None:
         """Proves the run is genuinely over budget, so the bounded case is a real result."""
-        provider, _ = await self._drive(retention="keep_all", max_state_bytes=self.LIMIT)
+        provider, _ = await self._drive(retention="keep_all", max_state_bytes=None)
+        state = DurableAgentState.from_dict(provider._get_state_dict())
         assert len(json.dumps(provider._get_state_dict())) > self.LIMIT
+        assert len(_message_ids(state)) == self.TURNS * 2
+        assert state.data.truncation is None

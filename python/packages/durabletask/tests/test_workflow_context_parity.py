@@ -167,12 +167,8 @@ class TestEntityContextIngestion:
 
         assert [m.message_id for m in entry.messages] == ["m1"]
 
-    def test_fully_duplicate_context_keeps_last_message(self) -> None:
-        """The agent must always receive at least one input message.
-
-        The kept copy loses its id, because storing two messages under one id would collide in the
-        compaction position map and send annotations or pruning to the wrong stored message.
-        """
+    def test_fully_duplicate_context_stays_empty(self) -> None:
+        """A repeated projection must not re-ingest its final message as a new input."""
         provider = _InMemoryStateProvider()
         entity = AgentEntity(_stub_agent(), state_provider=provider)
 
@@ -184,9 +180,7 @@ class TestEntityContextIngestion:
         entry = DurableAgentStateRequest.from_run_request(self._request(messages, "corr-1"))
         entry.messages = entity._drop_already_stored(entry.messages)
 
-        assert len(entry.messages) == 1
-        assert entry.messages[0].message_id is None
-        assert entry.messages[0].to_chat_message().text == "hello"
+        assert entry.messages == []
 
     def test_repeated_context_does_not_duplicate_message_ids(self) -> None:
         """A cycle that re-delivers the whole upstream conversation must not collide ids."""
@@ -310,8 +304,9 @@ class TestDedupSurvivesRetention:
         conversation = build_agent_executor_response("B", "b1", None, conversation)
         self._deliver(entity, list(conversation.full_conversation), "corr-1")
 
-        marks = entity.state.data.ingested_positions or {}
-        assert set(marks) == {"input", "A", "B"}, f"expected a mark per producing executor, got {marks}"
+        receipts = entity.state.data.ingested_messages
+        assert set(receipts) == {"wf_input_0", "wf_A_1", "wf_B_2"}
+        assert all(values and len(values) == 1 for values in receipts.values())
 
     def test_the_mark_round_trips_through_durable_state(self) -> None:
         provider = _InMemoryStateProvider()
@@ -322,7 +317,8 @@ class TestDedupSurvivesRetention:
         entity.persist_state()
 
         restored = DurableAgentState.from_dict(provider._get_state_dict())
-        assert restored.data.ingested_positions == entity.state.data.ingested_positions
+        assert restored.data.ingested_messages == entity.state.data.ingested_messages
+        assert restored.data.ingested_messages
 
 
 class TestCoreSessionIdentity:

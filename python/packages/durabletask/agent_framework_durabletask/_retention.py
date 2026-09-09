@@ -1,304 +1,447 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Bounding durable entity state so an agent does not simply stop working at the backend limit.
-
-Retention is a **capacity** concern, deliberately separate from compaction. Compaction decides what
-the model should read. Retention decides what durable state can afford to hold. An exclusion made
-for token cost is not consent to delete the record, so the two never share a decision.
-
-See ADR 0032, "Retention".
-"""
+"""Independent eager-pruning policy and opt-in whole-entity pressure eviction."""
 
 from __future__ import annotations
 
 import json
 import logging
+import math
+from collections.abc import Mapping
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
-from typing import Literal, cast
+from typing import Any, Literal, TypeAlias, cast
 
 from agent_framework import (
+    EXCLUDED_KEY,
+    GROUP_ANNOTATION_KEY,
+    GROUP_ID_KEY,
+    GROUP_INDEX_KEY,
     CharacterEstimatorTokenizer,
     Message,
     TokenBudgetComposedStrategy,
+    annotate_message_groups,
+    included_token_count,
 )
 
 from ._constants import DurableStateFields
 from ._durable_agent_state import (
     DurableAgentState,
     DurableAgentStateEntry,
+    DurableAgentStateEntryJsonType,
     DurableAgentStateMessage,
-    DurableAgentStateResponse,
 )
-from ._history_provider import EXCLUDED_KEY, prune_messages, replayable_entries
+
+__all__ = [
+    "DEFAULT_MAX_STATE_BYTES",
+    "DEFAULT_RETENTION",
+    "DELIVERY_WINDOW_SECONDS",
+    "DTS_MAX_STATE_BYTES",
+    "HIGH_WATERMARK",
+    "LOW_WATERMARK",
+    "RetentionMode",
+    "StateBudget",
+    "StateCapacityError",
+    "enforce_budget",
+    "prunes_excluded",
+    "resolve_state_budget",
+    "validate_retention",
+]
 
 logger = logging.getLogger("agent_framework.durabletask")
 
-DELIVERY_WINDOW_SECONDS = 60
-"""How long a completed response stays safe from eviction.
+RetentionMode: TypeAlias = Literal["keep_all", "follow_compaction"]
+"""Whether to eagerly prune compaction exclusions, independently of a pressure budget."""
 
-A caller reads its response by correlation id, from outside the entity, and has no way to say it
-has finished reading. So the entity cannot know a response was collected, only that enough time
-has passed that nobody plausibly still wants it. Until then the response is not evictable, or a
-run that succeeded would be reported to its caller as a timeout.
+StateBudget: TypeAlias = int | Literal["backend_limit"] | None
+"""An explicit byte budget, a host-resolved limit, or disabled pressure eviction."""
 
-The exposure this covers is smaller than a caller's total wait. Callers poll roughly once a
-second, so a response normally has to survive only until the next poll. The window is generous
-against that, which leaves room for a client that stalls or retries, while staying short enough
-that a busy session ages entries out rather than pinning them and defeating the budget.
-"""
-
-RetentionMode = Literal["keep_all", "auto", "follow_compaction"]
-"""How much of the conversation durable state is allowed to discard.
-
-``keep_all``
-    Never delete. The entity may reach the backend limit and fail. The honest choice when the
-    complete record matters more than availability.
-``auto``
-    Delete only under storage pressure, and only down to the low watermark. The default.
-``follow_compaction``
-    Delete whatever compaction excluded every turn, then use the same pressure eviction as
-    ``auto`` if the remaining state is still too large.
-"""
-
-DEFAULT_RETENTION: RetentionMode = "auto"
-
-DEFAULT_MAX_STATE_BYTES = 1_048_576
-"""The Durable Task Scheduler message limit. Raise it when large payload offload is configured."""
-
+DEFAULT_RETENTION: RetentionMode = "keep_all"
+DEFAULT_MAX_STATE_BYTES: StateBudget = None
+DTS_MAX_STATE_BYTES = 1_048_576
 HIGH_WATERMARK = 0.85
-"""Fraction of the budget that triggers eviction.
-
-Below 0.9 because the budget is approximate twice over, once in the byte-to-token estimate and once
-because a message's non-text content is not counted when calibrating that estimate.
-"""
-
 LOW_WATERMARK = 0.70
-"""Fraction of the budget to evict down to.
-
-The gap from the high watermark is hysteresis. Evicting to just under the trigger would evict again
-on every subsequent turn.
-"""
-
-_BYTES_PER_TOKEN = 4
-"""Matches ``CharacterEstimatorTokenizer``, which is a flat 4 characters per token."""
+DELIVERY_WINDOW_SECONDS = 60
+"""Legacy response protection when independent completion bookkeeping is absent."""
 
 _SYSTEM_ROLE = "system"
-"""Role of the messages retention refuses to evict, whatever the budget says."""
-
 _MAX_PASSES = 3
-"""Eviction re-measures rather than trusting the estimate, but must not loop indefinitely."""
+_Origin: TypeAlias = tuple[int, int]
+
+_EXCHANGE_KINDS = {
+    DurableAgentStateEntryJsonType.REQUEST,
+    DurableAgentStateEntryJsonType.RESPONSE,
+    DurableAgentStateEntryJsonType.ERROR_RESPONSE,
+}
+_TRANSCRIPT_KINDS = _EXCHANGE_KINDS | {DurableAgentStateEntryJsonType.COMPACTION}
+_BARE_ENTRY_FIELDS = {
+    DurableStateFields.TYPE_DISCRIMINATOR,
+    DurableStateFields.CORRELATION_ID,
+    DurableStateFields.CREATED_AT,
+    DurableStateFields.MESSAGES,
+}
+
+
+class StateCapacityError(ValueError):
+    """The protected state or an unreachable retention target prevents a safe commit."""
+
+    def __init__(self, *, size_bytes: int, max_state_bytes: int, floor_bytes: int, target_bytes: int) -> None:
+        """Describe the measured state, configured budget, protected floor and target."""
+        self.size_bytes = size_bytes
+        self.max_state_bytes = max_state_bytes
+        self.floor_bytes = floor_bytes
+        self.target_bytes = target_bytes
+        super().__init__(
+            f"Durable state capacity cannot meet the {target_bytes}-byte retention target: "
+            f"serialized size is {size_bytes} bytes, budget is {max_state_bytes} bytes, "
+            f"and the protected floor is {floor_bytes} bytes. No transcript changes were applied."
+        )
+
+
+def _positive_budget(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer, not a boolean or another value type.")
+    return value
+
+
+def resolve_state_budget(value: StateBudget, *, backend_limit: int | None = None) -> int | None:
+    """Resolve a pressure budget without enabling eager pruning or assuming a backend.
+
+    Raises:
+        ValueError: The value is invalid, or ``backend_limit`` is requested but unresolved.
+    """
+    if backend_limit is not None:
+        _positive_budget(backend_limit, "backend_limit")
+    if value is None:
+        return None
+    if isinstance(value, str) and value == "backend_limit":
+        if backend_limit is None:
+            raise ValueError("max_state_bytes='backend_limit' requires a known backend_limit from the host.")
+        return backend_limit
+    return _positive_budget(value, "max_state_bytes")
+
+
+def validate_retention(
+    retention: RetentionMode,
+    high_watermark: float = HIGH_WATERMARK,
+    low_watermark: float = LOW_WATERMARK,
+) -> None:
+    """Validate the eager-pruning mode and finite, ordered numeric watermarks.
+
+    Raises:
+        ValueError: The mode or watermarks do not satisfy the retention contract.
+    """
+    if not isinstance(retention, str) or retention not in ("keep_all", "follow_compaction"):
+        raise ValueError("retention must be 'keep_all' or 'follow_compaction'.")
+    for name, value in (("high_watermark", high_watermark), ("low_watermark", low_watermark)):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0 < value <= 1
+            or not math.isfinite(value)
+        ):
+            raise ValueError(f"{name} must be a finite number in (0, 1], not a boolean.")
+    if low_watermark >= high_watermark:
+        raise ValueError("watermarks must satisfy 0 < low_watermark < high_watermark <= 1.")
 
 
 def prunes_excluded(retention: RetentionMode) -> bool:
     """Whether compaction exclusions should be deleted as they are made."""
+    validate_retention(retention)
     return retention == "follow_compaction"
 
 
-async def enforce_budget(state: DurableAgentState, *, max_state_bytes: int = DEFAULT_MAX_STATE_BYTES) -> int:
-    """Evict oldest conversation groups when persisted state approaches the backend limit.
-
-    The measurement is exact rather than estimated. Serializing state at the 1 MB limit costs a few
-    milliseconds against a turn dominated by a model call, and ``to_dict()`` already runs on every
-    persist, so the incremental cost is small and only paid once per turn.
+async def enforce_budget(
+    state: DurableAgentState,
+    *,
+    max_state_bytes: int,
+    high_watermark: float = HIGH_WATERMARK,
+    low_watermark: float = LOW_WATERMARK,
+) -> int:
+    """Evict eligible oldest atomic groups using detached, byte-checked plans.
 
     Args:
-        state: The entity state, modified in place.
+        state: Modified only after a plan fits, including its truncation record.
 
     Keyword Args:
-        max_state_bytes: The budget for serialized state.
+        max_state_bytes: An already resolved positive budget. Callers skip this function for None.
+        high_watermark: The fraction at which pressure eviction starts.
+        low_watermark: The desired retained fraction, raised to the protected floor if necessary.
 
     Returns:
-        How many messages were removed. Zero is the common case.
+        The number of transcript messages removed.
+
+    Raises:
+        ValueError: A budget or watermark is invalid.
+        StateCapacityError: No safe target is reachable. The input state remains unchanged.
     """
-    high = int(max_state_bytes * HIGH_WATERMARK)
+    _positive_budget(max_state_bytes, "max_state_bytes")
+    validate_retention(DEFAULT_RETENTION, high_watermark, low_watermark)
+    high = int(max_state_bytes * high_watermark)
     size = _serialized_size(state)
     if size < high:
         return 0
 
-    history = state.data.conversation_history
-    target = int(max_state_bytes * LOW_WATERMARK)
-    removed: list[str] = []
-
-    for attempt in range(_MAX_PASSES):
-        # Tighten on each pass, since the byte-to-token conversion is a heuristic and a first
-        # attempt can land short of the target.
-        evicted = await _evict_once(history, serialized_size=size, target_bytes=target >> attempt)
-        if not evicted:
-            break
-        removed.extend(evicted)
-        size = _serialized_size(state)
-        if size < high:
-            break
-
-    undelivered_sacrificed = 0
-    if size >= high:
-        # Holding a response back for its caller is a strong preference, not a promise that
-        # outranks staying storable. A conversation busy enough to fill the budget inside the
-        # delivery window would otherwise protect everything and evict nothing, and state that
-        # cannot be persisted ends the session for every caller. Losing one response costs the
-        # caller a retry, so that is the cheaper failure.
-        forced = await _evict_once(history, serialized_size=size, target_bytes=target, honor_delivery_window=False)
-        if forced:
-            undelivered_sacrificed = len(forced)
-            removed.extend(forced)
-            size = _serialized_size(state)
-
-    if removed:
-        _record_truncation(state, len(removed))
-        logger.warning(
-            "[Retention] Durable state passed %d bytes of a %d budget, so %d message(s) were "
-            "evicted oldest-first (%s .. %s), leaving %d bytes. Set retention='keep_all' to "
-            "disable this, or raise max_state_bytes if large payload offload is enabled.",
-            high,
-            max_state_bytes,
-            len(removed),
-            removed[0],
-            removed[-1],
-            size,
+    baseline = deepcopy(state)
+    now = datetime.now(tz=timezone.utc)
+    messages, origins = _candidates(baseline, now=now)
+    floor_state = _stage_eviction(baseline, set(origins))
+    floor_without_record = _serialized_size(floor_state)
+    if origins:
+        record_truncation(floor_state, len(origins), now=now)
+    floor = _serialized_size(floor_state)
+    target = max(int(max_state_bytes * low_watermark), floor)
+    if floor >= high:
+        raise StateCapacityError(
+            size_bytes=size, max_state_bytes=max_state_bytes, floor_bytes=floor, target_bytes=high - 1
         )
-    if undelivered_sacrificed:
-        logger.error(
-            "[Retention] Staying inside the %d byte budget required evicting %d message(s) from "
-            "responses completed in the last %d seconds, which their callers may not have read "
-            "yet. Those callers will see a missing response and need to retry. This means turns "
-            "are arriving faster than the budget can hold them, so raise max_state_bytes.",
-            max_state_bytes,
-            undelivered_sacrificed,
-            DELIVERY_WINDOW_SECONDS,
+
+    groups: dict[str, list[int]] = {}
+    for index, message in enumerate(messages):
+        groups.setdefault(_group_id(message), []).append(index)
+    ordered_groups = list(groups.values())
+    group_tokens = [included_token_count([messages[index] for index in group]) for group in ordered_groups]
+    group_sizes = _prefix_sizes(
+        baseline,
+        origins,
+        ordered_groups,
+        size=size,
+        record_cost=floor - floor_without_record,
+    )
+    stored_origins = [
+        (baseline.data.conversation_history[entry], baseline.data.conversation_history[entry].messages[message])
+        for entry, message in origins
+    ]
+    evictable_bytes = sum(_message_size(stored) for _, stored in stored_origins)
+    planning_target = target
+
+    for _ in range(_MAX_PASSES):
+        cutoff = next(
+            (index + 1 for index, projected_size in enumerate(group_sizes) if projected_size <= planning_target),
+            len(ordered_groups),
         )
-    if size >= high:
-        # Reported whether or not anything was evicted. Retention did what it could and the state
-        # is still over budget, so the next write is the one that fails, and saying so here is the
-        # only warning anybody gets.
-        logger.error(
-            "[Retention] Durable state is still %d bytes against a %d budget after retention ran. "
-            "The exchange in flight is never evicted, so a single turn larger than the budget "
-            "cannot be resolved this way. Raise max_state_bytes or reduce what each turn stores.",
-            size,
-            max_state_bytes,
+        retained_tokens = sum(group_tokens[cutoff:])
+        estimate = _token_budget(
+            stored_origins,
+            serialized_size=size,
+            evictable_bytes=evictable_bytes,
+            target_bytes=planning_target,
+            floor_bytes=floor,
+            evictable_tokens=sum(group_tokens),
         )
-    return len(removed)
+        # Align the estimate to a byte-measured group boundary. A global bytes/token ratio
+        # alone can over-delete mixed Unicode, tool payloads and small prose messages.
+        token_budget = min(max(estimate, retained_tokens), retained_tokens + group_tokens[cutoff - 1] - 1)
+        planned = deepcopy(messages)
+        # Core 1.16 retains its last non-system group even above budget. A detached, empty
+        # user anchor occupies that slot, so the last eligible OLD group is not pinned.
+        anchor = Message("user", [], message_id="retention_anchor")
+        annotate_message_groups([anchor], tokenizer=CharacterEstimatorTokenizer())
+        planned.append(anchor)
+        strategy = TokenBudgetComposedStrategy(
+            token_budget=token_budget + included_token_count([anchor]),
+            tokenizer=CharacterEstimatorTokenizer(),
+            strategies=[],
+        )
+        await strategy(planned)
+        removed = {
+            origin
+            for origin, message in zip(origins, planned)
+            if message.additional_properties.get(EXCLUDED_KEY, False)
+        }
+        staged = _stage_eviction(baseline, removed)
+        if removed:
+            record_truncation(staged, len(removed), now=now)
+        measured = _serialized_size(staged)
+        if measured <= target and measured < high:
+            state.data.conversation_history[:] = staged.data.conversation_history
+            state.data.truncation = staged.data.truncation
+            logger.warning(
+                "[Retention] Evicted %d oldest transcript message(s), leaving %d serialized bytes "
+                "against a %d-byte budget. Set max_state_bytes=None to disable pressure eviction.",
+                len(removed),
+                measured,
+                max_state_bytes,
+            )
+            return len(removed)
+        # Correct the observed planning error, not an arbitrary fraction of the target.
+        # Subtracting only the excess over target can select the same group boundary again.
+        planning_error = max(measured - group_sizes[cutoff - 1], 1)
+        planning_target = max(floor, target - planning_error)
+
+    raise StateCapacityError(size_bytes=size, max_state_bytes=max_state_bytes, floor_bytes=floor, target_bytes=target)
 
 
-def _record_truncation(state: DurableAgentState, removed: int) -> None:
-    """Record in the state itself that this conversation is no longer complete.
-
-    Eviction is a lossy act performed by the runtime rather than by the user, and a log line is
-    only evidence to whoever happened to be watching at the time. Anyone reading this state later,
-    including the user asking why an answer lost context, needs to be able to tell that content
-    was removed. So the fact is persisted alongside the conversation.
-
-    Deliberately a counter and two timestamps rather than a list of what went. A list would grow
-    without bound in exactly the situation where state is already too large, which is the problem
-    this is part of solving. The absence of the record is itself meaningful: it says nothing has
-    ever been dropped.
-
-    Args:
-        state: The entity state, modified in place.
-        removed: How many messages this pass evicted.
-    """
-    now = datetime.now(tz=timezone.utc).isoformat()
+def record_truncation(state: DurableAgentState, removed: int, *, now: datetime | None = None) -> None:
+    """Accumulate bounded eviction evidence without discarding unknown metadata."""
+    timestamp = (now or datetime.now(tz=timezone.utc)).isoformat()
     existing = state.data.truncation or {}
     state.data.truncation = {
+        **existing,
         DurableStateFields.EVICTED_MESSAGE_COUNT: int(existing.get(DurableStateFields.EVICTED_MESSAGE_COUNT, 0))
         + removed,
-        DurableStateFields.FIRST_EVICTED_AT: existing.get(DurableStateFields.FIRST_EVICTED_AT, now),
-        DurableStateFields.LAST_EVICTED_AT: now,
+        DurableStateFields.FIRST_EVICTED_AT: existing.get(DurableStateFields.FIRST_EVICTED_AT, timestamp),
+        DurableStateFields.LAST_EVICTED_AT: timestamp,
     }
 
 
 def _serialized_size(state: DurableAgentState) -> int:
-    """Measure the state exactly as it will be persisted.
-
-    Counting characters is counting bytes here. ``json.dumps`` escapes non-ASCII by default, so
-    the result is pure ASCII, and the durable SDK serializes state with that same default. Text in
-    any language therefore costs the same against this budget as it does in storage.
-    """
+    """Measure default JSON serialization, including ASCII escapes but excluding transport framing."""
     return len(json.dumps(state.to_dict()))
 
 
-async def _evict_once(
-    history: list[DurableAgentStateEntry],
-    *,
-    serialized_size: int,
-    target_bytes: int,
-    honor_delivery_window: bool = True,
-) -> list[str]:
-    """Run one eviction pass, returning the ids of the messages removed.
+def _detached_message(stored: DurableAgentStateMessage) -> Message:
+    message: Message = deepcopy(stored).to_chat_message()
+    message.additional_properties.pop(EXCLUDED_KEY, None)
+    # Recount with this tokenizer rather than trusting another strategy's cached token count.
+    message.additional_properties.pop(GROUP_ANNOTATION_KEY, None)
+    return message
 
-    Core already knows how to drop oldest groups to a budget while keeping tool-call groups whole,
-    so that judgement is borrowed rather than reimplemented. Its handling of system messages is
-    not borrowed: they are held out of the candidate set here instead, because core's strict
-    fallback evicts them once anchors alone exceed the budget.
 
-    Args:
-        history: The conversation history, modified in place.
+def _group_id(message: Message) -> str:
+    return cast("str", message.additional_properties[GROUP_ANNOTATION_KEY][GROUP_ID_KEY])
 
-    Keyword Args:
-        serialized_size: Current size of the whole serialized state, used to work out how much of
-            it the evictable messages account for.
-        target_bytes: The size this pass is aiming to reach.
-        honor_delivery_window: When False, responses whose callers may still be reading them
-            become evictable. Reserved for the case where protecting them would leave state too
-            large to persist at all.
 
-    Returns:
-        The ids of the messages this pass removed.
-    """
+def _saved_group_id(stored: DurableAgentStateMessage) -> str | None:
+    annotation = (stored.extension_data or {}).get(GROUP_ANNOTATION_KEY)
+    if isinstance(annotation, Mapping):
+        group_id = cast("Mapping[str, object]", annotation).get(GROUP_ID_KEY)
+        if isinstance(group_id, str):
+            return group_id
+    return None
+
+
+def _link_atomic_groups(messages: list[Message], saved_ids: list[str | None]) -> list[int]:
+    """Unite core-inferred groups with persisted atomic links, including non-contiguous spans."""
+    parents = list(range(len(messages)))
+
+    def root(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    for group_ids in (saved_ids, [_group_id(message) for message in messages]):
+        first: dict[str, int] = {}
+        for index, group_id in enumerate(group_ids):
+            if group_id is not None:
+                left, right = root(first.setdefault(group_id, index)), root(index)
+                parents[max(left, right)] = min(left, right)
+
+    roots = [root(index) for index in range(len(messages))]
+    for message, group in zip(messages, roots):
+        annotation = cast("dict[str, Any]", message.additional_properties[GROUP_ANNOTATION_KEY])
+        annotation[GROUP_ID_KEY] = f"retention_group_{group}"
+        annotation[GROUP_INDEX_KEY] = group
+    return roots
+
+
+def _candidates(state: DurableAgentState, *, now: datetime) -> tuple[list[Message], list[_Origin]]:
+    history = state.data.conversation_history
+    completed = cast("Mapping[str, object] | None", getattr(state.data, "completed_correlations", None))
+    protected = {id(entry) for entry in _protected_entries(history, completed_correlations=completed, now=now)}
+    messages: list[Message] = []
+    origins: list[_Origin | None] = []
+    saved_ids: list[str | None] = []
+    held: set[int] = set()
+    reserved = {stored.message_id for entry in history for stored in entry.messages if stored.message_id}
+    seen: set[str] = set()
+
+    for entry_index, entry in enumerate(history):
+        known = entry.json_type in _TRANSCRIPT_KINDS
+        # Unknown entries are opaque barriers, not model-conversion inputs or deletion candidates.
+        for message_index, stored in enumerate(entry.messages if known else (entry.messages or [None])):
+            index = len(messages)
+            eligible = known and stored is not None and bool(stored.contents)
+            message = _detached_message(stored) if known and stored is not None else Message(_SYSTEM_ROLE, [])
+            if not eligible or id(entry) in protected or message.role == _SYSTEM_ROLE:
+                held.add(index)
+            message_id = message.message_id
+            if not message_id or message_id in seen:
+                suffix = index
+                message_id = f"retention_message_{suffix}"
+                while message_id in reserved:
+                    suffix += 1
+                    message_id = f"retention_message_{suffix}"
+                message.message_id = message_id
+                reserved.add(message_id)
+            seen.add(message_id)
+            messages.append(message)
+            origins.append((entry_index, message_index) if eligible else None)
+            saved_ids.append(_saved_group_id(stored) if stored is not None else None)
+
+    annotate_message_groups(messages, force_reannotate=True, tokenizer=CharacterEstimatorTokenizer())
+    roots = _link_atomic_groups(messages, saved_ids)
+    protected_groups = {roots[index] for index in held}
     candidates: list[Message] = []
-    origins: list[tuple[DurableAgentStateEntry, DurableAgentStateMessage]] = []
-    evictable_bytes = 0
-    protected = _protected_entries(history, honor_delivery_window=honor_delivery_window)
-    for entry, index in replayable_entries(history):
-        if entry in protected:
-            # Never evict the exchange that just happened, nor one whose caller could still be
-            # reading it. Core's budget fallback will drop everything if the budget demands it,
-            # and losing either would discard a result somebody is waiting for.
-            continue
-        stored = entry.messages[index]
-        if stored.role == _SYSTEM_ROLE:
-            # Kept out of the candidate set rather than trusted to core's protection. Core skips
-            # system groups in its first fallback but its *strict* fallback exists precisely to
-            # evict them, so a budget small enough to reach that stage would delete the agent's
-            # instructions. Excluded here, they are simply not evictable, and their bytes count
-            # toward the floor instead.
-            continue
-        message = cast("Message", stored.to_chat_message())
-        # The budget is computed over *included* messages, so a user's own compaction exclusions
-        # would make an over-budget conversation look empty. Clearing them here makes the budget
-        # reflect what is stored. This is a detached copy, so the persisted annotation is untouched.
-        message.additional_properties.pop(EXCLUDED_KEY, None)
-        candidates.append(message)
-        origins.append((entry, stored))
-        evictable_bytes += _message_size(stored)
+    candidate_origins: list[_Origin] = []
+    for index, origin in enumerate(origins):
+        if origin is not None and roots[index] not in protected_groups:
+            candidates.append(messages[index])
+            candidate_origins.append(origin)
+    return candidates, candidate_origins
 
-    if not candidates:
-        return []
 
-    strategy = TokenBudgetComposedStrategy(
-        token_budget=_token_budget(
-            origins,
-            serialized_size=serialized_size,
-            evictable_bytes=evictable_bytes,
-            target_bytes=target_bytes,
-        ),
-        tokenizer=CharacterEstimatorTokenizer(),
-        # No strategies, so this goes straight to core's deterministic oldest-group eviction.
-        # Passing the user's strategy would satisfy the budget immediately under early stop, and
-        # everything it had excluded for context reasons would then be deleted.
-        strategies=[],
+def _can_drop_entry(entry: DurableAgentStateEntry) -> bool:
+    # Only a bare transcript envelope may disappear with its final message. Keep usage,
+    # response schemas, orchestration metadata and unknown fields in the protected floor.
+    return (
+        entry.json_type in _TRANSCRIPT_KINDS
+        and not entry.extension_data
+        and entry.to_dict().keys() <= _BARE_ENTRY_FIELDS
     )
-    await strategy(candidates)
 
-    evicted = [
-        (position, origins[position])
-        for position, message in enumerate(candidates)
-        if message.additional_properties.get(EXCLUDED_KEY)
-    ]
-    if not evicted:
-        return []
-    prune_messages(history, [origin for _, origin in evicted])
-    return [candidates[position].message_id or "<no id>" for position, _ in evicted]
+
+def _stage_eviction(state: DurableAgentState, removed: set[_Origin]) -> DurableAgentState:
+    staged = deepcopy(state)
+    history: list[DurableAgentStateEntry] = []
+    for entry_index, entry in enumerate(staged.data.conversation_history):
+        remaining = [message for index, message in enumerate(entry.messages) if (entry_index, index) not in removed]
+        changed = len(remaining) != len(entry.messages)
+        entry.messages = remaining
+        # Do not incidentally remove an already-empty or unknown entry.
+        if remaining or not changed or not _can_drop_entry(entry):
+            history.append(entry)
+    staged.data.conversation_history = history
+    return staged
+
+
+def _prefix_sizes(
+    state: DurableAgentState,
+    origins: list[_Origin],
+    groups: list[list[int]],
+    *,
+    size: int,
+    record_cost: int,
+) -> list[int]:
+    """Compute default-JSON byte costs at core group boundaries without repeated whole-state copies."""
+    history = state.data.conversation_history
+    remaining = [len(entry.messages) for entry in history]
+    entry_sizes = [len(json.dumps(entry.to_dict())) for entry in history]
+    droppable = [_can_drop_entry(entry) for entry in history]
+    entry_count = len(history)
+    previous_count = int((state.data.truncation or {}).get(DurableStateFields.EVICTED_MESSAGE_COUNT, 0))
+    final_count_digits = len(str(previous_count + len(origins)))
+    removed = 0
+    sizes: list[int] = []
+    for group in groups:
+        for index in group:
+            entry_index, message_index = origins[index]
+            if remaining[entry_index] == 1 and droppable[entry_index]:
+                saved = entry_sizes[entry_index] + (2 if entry_count > 1 else 0)
+                entry_count -= 1
+            else:
+                stored = history[entry_index].messages[message_index]
+                saved = _message_size(stored) + (2 if remaining[entry_index] > 1 else 0)
+                entry_sizes[entry_index] -= saved
+            remaining[entry_index] -= 1
+            size -= saved
+            removed += 1
+        # The timestamp and unknown truncation fields are fixed across plans. Only the
+        # decimal width of the aggregate count varies with the chosen prefix.
+        count_correction = len(str(previous_count + removed)) - final_count_digits
+        sizes.append(size + record_cost + count_correction)
+    return sizes
 
 
 def _newest_exchange(history: list[DurableAgentStateEntry]) -> list[DurableAgentStateEntry]:
@@ -311,7 +454,7 @@ def _newest_exchange(history: list[DurableAgentStateEntry]) -> list[DurableAgent
     at the end stand in for the turn that actually just happened, leaving that turn unprotected.
     """
     for entry in reversed(history):
-        if entry.correlation_id is not None:
+        if entry.json_type in _EXCHANGE_KINDS and entry.correlation_id is not None:
             newest = entry.correlation_id
             return [candidate for candidate in history if candidate.correlation_id == newest]
     return [history[-1]] if history else []
@@ -323,39 +466,35 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def _protected_entries(
-    history: list[DurableAgentStateEntry], *, honor_delivery_window: bool = True
+    history: list[DurableAgentStateEntry],
+    *,
+    completed_correlations: Mapping[str, object] | None = None,
+    now: datetime | None = None,
 ) -> list[DurableAgentStateEntry]:
-    """Return the entries retention is not allowed to evict.
-
-    Two reasons an entry is off limits. It belongs to the exchange that just happened, which is
-    absolute because its caller is waiting on this very operation. Or it is a response recent
-    enough that its caller could still be polling for it, which is a preference that yields when
-    honoring it would leave state too large to persist.
-
-    Protection is by correlation, so a reply is never kept without the request that produced it.
-    """
+    """Protect the newest exchange and recent responses lacking independent completion records."""
     protected = list(_newest_exchange(history))
-    if not honor_delivery_window:
-        return protected
-
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(seconds=DELIVERY_WINDOW_SECONDS)
-    undelivered = {
-        entry.correlation_id
+    completed = completed_correlations or {}
+    cutoff = (now or datetime.now(tz=timezone.utc)) - timedelta(seconds=DELIVERY_WINDOW_SECONDS)
+    responses = [
+        entry
         for entry in history
-        if isinstance(entry, DurableAgentStateResponse)
-        and entry.correlation_id is not None
+        if entry.json_type in (DurableAgentStateEntryJsonType.RESPONSE, DurableAgentStateEntryJsonType.ERROR_RESPONSE)
+        and entry.correlation_id not in completed
         and _as_utc(entry.created_at) > cutoff
-    }
-    if undelivered:
-        protected.extend(entry for entry in history if entry.correlation_id in undelivered and entry not in protected)
+    ]
+    undelivered = {entry.correlation_id for entry in responses if entry.correlation_id is not None}
+    response_ids = {id(entry) for entry in responses}
+    protected_ids = {id(entry) for entry in protected}
+    protected.extend(
+        entry
+        for entry in history
+        if (id(entry) in response_ids or entry.correlation_id in undelivered) and id(entry) not in protected_ids
+    )
     return protected
 
 
 def _message_size(stored: DurableAgentStateMessage) -> int:
-    """Bytes this message contributes to persisted state.
-
-    Measured the same way the whole state is measured, so the two are directly comparable.
-    """
+    """The persisted message payload size, including non-text contents and metadata."""
     return len(json.dumps(stored.to_dict()))
 
 
@@ -365,37 +504,21 @@ def _token_budget(
     serialized_size: int,
     evictable_bytes: int,
     target_bytes: int,
+    floor_bytes: int | None = None,
+    evictable_tokens: int | None = None,
 ) -> int:
-    """Convert a byte budget into the token budget the strategy expects.
+    """Estimate tokens from persisted candidate bytes and core's actual token annotations.
 
-    The budget has to be expressed in tokens because that is what the strategy counts, but the
-    constraint being enforced is a byte limit. So the conversion is measured from the messages in
-    hand rather than assumed.
-
-    Only part of the state is evictable. Envelopes, the exchange in flight, responses inside the
-    delivery window and system messages all stay no matter what, so their bytes are a floor the
-    budget cannot reach below. What is left is what the evictable messages are allowed to occupy.
-
-    Tokens are related to bytes by the same shape core uses, ``max(1, size // 4)`` per message,
-    applied to the persisted form. Taking the ratio from these specific messages is what makes a
-    conversation of tool calls behave like one of prose. An earlier version used ``message.text``
-    as the numerator, which is empty for tool calls, so a tool-only history produced a budget of
-    one token and evicted everything it was allowed to touch.
-
-    Args:
-        origins: The evictable messages, each with the entry that owns it.
-
-    Keyword Args:
-        serialized_size: Current size of the whole serialized state.
-        evictable_bytes: How much of that size the evictable messages account for.
-        target_bytes: The size this pass is aiming to reach.
-
-    Returns:
-        A token budget of at least one.
+    The optional measurements let the engine reuse its detached grouping pass and exact floor.
+    The four original arguments remain usable by callers that only need a conservative estimate.
     """
     if evictable_bytes <= 0:
         return 1
-    floor_bytes = max(serialized_size - evictable_bytes, 0)
+    if floor_bytes is None:
+        floor_bytes = max(serialized_size - evictable_bytes, 0)
     allowed_bytes = max(target_bytes - floor_bytes, 0)
-    evictable_tokens = sum(max(1, _message_size(stored) // _BYTES_PER_TOKEN) for _, stored in origins)
-    return max(int(allowed_bytes * evictable_tokens / evictable_bytes), 1)
+    if evictable_tokens is None:
+        messages = [_detached_message(stored) for _, stored in origins]
+        annotate_message_groups(messages, tokenizer=CharacterEstimatorTokenizer())
+        evictable_tokens = included_token_count(messages)
+    return max(allowed_bytes * evictable_tokens // evictable_bytes, 1)

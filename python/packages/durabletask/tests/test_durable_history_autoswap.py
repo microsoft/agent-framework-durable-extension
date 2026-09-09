@@ -1,29 +1,34 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Tests for automatic durable history backing (ADR-0032).
-
-A user should be able to take an agent that already works in core, register it with the
-durable runtime, and get durable conversation history with no configuration change.
-These tests cover the substitution rules and confirm the user's agent is never mutated.
-"""
+"""Durable history substitution and ownership unit tests with recording doubles, without live services."""
 
 import json
 from collections.abc import AsyncIterable, Awaitable, Sequence
+from copy import deepcopy
 from typing import Any
 
 import pytest
 from agent_framework import (
     Agent,
+    AgentSession,
     ChatResponse,
     ChatResponseUpdate,
     Content,
+    ContextProvider,
     HistoryProvider,
     InMemoryHistoryProvider,
     Message,
     ResponseStream,
+    SessionContext,
 )
 
-from agent_framework_durabletask import AgentEntity, AgentEntityStateProviderMixin, DurableHistoryProvider, _entities
+from agent_framework_durabletask import (
+    AgentEntity,
+    AgentEntityStateProviderMixin,
+    DurableAgentState,
+    DurableHistoryProvider,
+    _entities,
+)
 from agent_framework_durabletask._history_provider import ensure_durable_history
 
 
@@ -92,6 +97,56 @@ class _RecordingServiceClient(_RecordingClient):
     STORES_BY_DEFAULT = True
 
 
+class _ConversationIdClient(_StubClient):
+    """Recording double that returns conversation IDs through core response types."""
+
+    def __init__(self, *, stores_by_default: bool, supports_streaming: bool) -> None:
+        super().__init__()
+        self.STORES_BY_DEFAULT = stores_by_default
+        self.supports_streaming = supports_streaming
+        self.calls: list[dict[str, Any]] = []
+        self._counter = 0
+
+    def get_response(
+        self,
+        messages: str | Message | list[str] | list[Message],
+        *,
+        stream: bool = False,
+        options: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Awaitable[ChatResponse] | ResponseStream[ChatResponseUpdate, ChatResponse]:
+        options = options or {}
+        self.calls.append(deepcopy({"messages": messages, "stream": stream, "options": options, "kwargs": kwargs}))
+        if stream and not self.supports_streaming:
+            raise TypeError("stream is not supported")
+
+        self._counter += 1
+        text = f"reply-{self._counter}"
+        response_id = f"result-{self._counter}"
+        conversation_id = f"service-branch-{self._counter}" if options.get("store", self.STORES_BY_DEFAULT) else None
+
+        if stream:
+
+            async def _updates() -> AsyncIterable[ChatResponseUpdate]:
+                yield ChatResponseUpdate(
+                    contents=[Content.from_text(text)],
+                    role="assistant",
+                    response_id=response_id,
+                    conversation_id=conversation_id,
+                )
+
+            return ResponseStream(_updates(), finalizer=ChatResponse.from_updates)
+
+        async def _get() -> ChatResponse:
+            return ChatResponse(
+                messages=Message(role="assistant", contents=[text]),
+                response_id=response_id,
+                conversation_id=conversation_id,
+            )
+
+        return _get()
+
+
 class _ExternalHistoryProvider(HistoryProvider):
     """Stand-in for Cosmos/Redis/file-backed history the user chose deliberately."""
 
@@ -106,15 +161,19 @@ class _ExternalHistoryProvider(HistoryProvider):
 
 
 class _InMemoryStateProvider(AgentEntityStateProviderMixin):
-    def __init__(self, *, session_id: str = "autoswap-session") -> None:
+    """JSON storage boundary without a durable backend."""
+
+    def __init__(self, *, session_id: str = "autoswap-session", raw: dict[str, Any] | None = None) -> None:
         self._session_id = session_id
-        self._state_dict: dict[str, Any] = {}
+        self._state_dict: dict[str, Any] = json.loads(json.dumps(raw or {}))
+        self.writes = 0
 
     def _get_state_dict(self) -> dict[str, Any]:
-        return self._state_dict
+        return deepcopy(self._state_dict)
 
     def _set_state_dict(self, state: dict[str, Any]) -> None:
-        self._state_dict = state
+        self._state_dict = json.loads(json.dumps(state))
+        self.writes += 1
 
     def _get_session_id_from_entity(self) -> str:
         return self._session_id
@@ -302,11 +361,11 @@ class TestFollowCompactionRetention:
     """Follow-compaction retention physically deletes exclusions."""
 
     def test_off_by_default(self) -> None:
-        agent = _agent()
+        entity = AgentEntity(_agent(), state_provider=_InMemoryStateProvider())
 
-        prepared = ensure_durable_history(agent)
-
-        assert _history_providers(prepared)[0].prune_excluded is False
+        assert entity._retention == "keep_all"
+        assert entity._max_state_bytes is None
+        assert _history_providers(entity.agent)[0].prune_excluded is False
 
     def test_enabled_via_registration(self) -> None:
         agent = _agent(context_providers=[InMemoryHistoryProvider()])
@@ -322,12 +381,22 @@ class TestFollowCompactionRetention:
 
         assert _history_providers(entity.agent)[0].prune_excluded is True
 
-    def test_other_retention_modes_do_not_prune_on_write(self) -> None:
-        """Only ``follow_compaction`` treats a compaction exclusion as consent to delete."""
-        for mode in ("auto", "keep_all"):
-            entity = AgentEntity(_agent(), state_provider=_InMemoryStateProvider(), retention=mode)
+    @pytest.mark.parametrize("max_state_bytes", [None, 100_000])
+    def test_keep_all_does_not_prune_on_write(self, max_state_bytes: int | None) -> None:
+        """A pressure budget does not enable eager pruning."""
+        entity = AgentEntity(
+            _agent(),
+            state_provider=_InMemoryStateProvider(),
+            retention="keep_all",
+            max_state_bytes=max_state_bytes,
+        )
 
-            assert _history_providers(entity.agent)[0].prune_excluded is False, mode
+        assert _history_providers(entity.agent)[0].prune_excluded is False
+
+    def test_auto_is_not_a_retention_mode(self) -> None:
+        invalid_mode: Any = "auto"
+        with pytest.raises(ValueError, match="retention"):
+            AgentEntity(_agent(), state_provider=_InMemoryStateProvider(), retention=invalid_mode)
 
     def test_explicit_provider_configuration_wins(self) -> None:
         """A hand-configured provider is never overridden by the registration flag."""
@@ -360,48 +429,83 @@ class TestFollowCompactionRetention:
         # The caller's own object is never mutated.
         assert unset.prune_excluded is None
 
-    def test_an_unset_provider_stays_unpruned_under_auto(self) -> None:
+    def test_an_unset_provider_stays_unpruned_under_keep_all(self) -> None:
         unset = DurableHistoryProvider()
         agent = _agent(context_providers=[unset])
 
-        prepared = ensure_durable_history(agent, prune_excluded=False)
+        entity = AgentEntity(agent, state_provider=_InMemoryStateProvider(), retention="keep_all")
 
-        providers = _history_providers(prepared)
+        providers = _history_providers(entity.agent)
         assert providers[0].prune_excluded is False
 
 
 class _StoringExternalProvider(HistoryProvider):
-    """External store that actually keeps what it is given, so both copies can be compared."""
+    """External-store double with a blind append, not its own input deduplication."""
 
     def __init__(self) -> None:
         super().__init__(source_id="external-store")
         self.saved: list[Message] = []
+        self.saved_batches: list[list[Message]] = []
 
     async def get_messages(self, session_id: str | None, **kwargs: Any) -> list[Message]:
-        return list(self.saved)
+        return deepcopy(self.saved)
 
     async def save_messages(self, session_id: str | None, messages: Any, **kwargs: Any) -> None:
-        self.saved.extend(messages)
+        batch = deepcopy(list(messages))
+        self.saved_batches.append(batch)
+        self.saved.extend(batch)
+
+
+class _ServiceAwareExternalProvider(_StoringExternalProvider):
+    """Test provider whose hooks defer to a service ID on the active session."""
+
+    async def before_run(
+        self, *, agent: Any, session: AgentSession, context: SessionContext, state: dict[str, Any]
+    ) -> None:
+        if session.service_session_id is None:
+            await super().before_run(agent=agent, session=session, context=context, state=state)
+
+    async def after_run(
+        self, *, agent: Any, session: AgentSession, context: SessionContext, state: dict[str, Any]
+    ) -> None:
+        if session.service_session_id is None:
+            await super().after_run(agent=agent, session=session, context=context, state=state)
+
+
+class _SessionObserver(ContextProvider):
+    def __init__(self) -> None:
+        super().__init__("session-observer")
+        self.before: list[dict[str, Any]] = []
+        self.after: list[dict[str, Any]] = []
+
+    @staticmethod
+    def _snapshot(session: AgentSession, context: SessionContext) -> dict[str, Any]:
+        return {
+            "service_session_id": session.service_session_id,
+            "context_service_session_id": context.service_session_id,
+            "texts": [message.text for message in context.get_messages(include_input=True)],
+        }
+
+    async def before_run(
+        self, *, agent: Any, session: AgentSession, context: SessionContext, state: dict[str, Any]
+    ) -> None:
+        self.before.append(self._snapshot(session, context))
+
+    async def after_run(
+        self, *, agent: Any, session: AgentSession, context: SessionContext, state: dict[str, Any]
+    ) -> None:
+        self.after.append(self._snapshot(session, context))
 
 
 class TestWeDoNotKeepASecondCopyOfSomeoneElsesConversation:
-    """When the caller brought their own store, the entity records the exchange, not the content.
-
-    The entity has to record every exchange in every configuration, because correlation ids and
-    delivery are its job and nothing else can do them. It does not have to be a second copy of the
-    conversation. Being one puts the customer's content under two different retention, residency
-    and deletion policies when they deliberately chose one store for it.
-
-    Responses are the exception, and not an arbitrary one. A caller collects its answer by polling
-    the entity for a correlation id, so the entity is the only thing that can produce it.
-    """
+    """External history needs delivery and ingestion receipts, not a local message mirror."""
 
     def _content_items(self, entity: AgentEntity, kind: str) -> int:
         return sum(
             len(m.contents)
             for entry in entity.state.data.conversation_history
             for m in entry.messages
-            if entry.json_type.value == kind
+            if entry.json_type == kind
         )
 
     async def _run(self, providers: list[Any], turns: int = 4) -> AgentEntity:
@@ -416,42 +520,78 @@ class TestWeDoNotKeepASecondCopyOfSomeoneElsesConversation:
 
         entity = await self._run([external])
 
-        assert len(external.saved) > 0
-        assert self._content_items(entity, "request") == 0
+        assert len(external.saved) == 8
+        assert entity.state.data.conversation_history == []
 
-    async def test_responses_are_kept_so_callers_can_collect_them(self) -> None:
+    async def test_responses_are_kept_in_the_mailbox_for_delivery(self) -> None:
         external = _StoringExternalProvider()
 
         entity = await self._run([external])
 
-        assert self._content_items(entity, "response") > 0
-        assert entity.state.try_get_agent_response("c0") is not None
+        restored = DurableAgentState.from_json(entity.state.to_json())
+        assert restored.data.conversation_history == []
+        assert set(restored.data.response_mailbox) == {f"c{index}" for index in range(4)}
+        for index in range(4):
+            response = restored.try_get_agent_response(f"c{index}")
+            assert response is not None
+            assert response.text == f"reply-{index + 1}"
+            assert response.to_dict() == restored.data.response_mailbox[f"c{index}"]["response"]
 
-    async def test_the_exchange_is_still_recorded(self) -> None:
-        """Envelopes survive, because delivery and correlation depend on them."""
+    async def test_completion_is_recorded_separately_from_the_transcript(self) -> None:
         external = _StoringExternalProvider()
 
         entity = await self._run([external])
 
-        history = entity.state.data.conversation_history
-        assert len(history) == 8
-        assert [e.correlation_id for e in history] == [f"c{i // 2}" for i in range(8)]
-        assert all(e.created_at is not None for e in history)
+        data = json.loads(entity.state.to_json())["data"]
+        assert data["conversationHistory"] == []
+        assert set(data["completedCorrelations"]) == {f"c{index}" for index in range(4)}
+        assert all(receipt["completedAt"] for receipt in data["completedCorrelations"].values())
 
-    async def test_request_message_ids_survive_for_deduplication(self) -> None:
-        """Workflow fan-out is deduplicated by id, so forgetting ids would double-ingest."""
+    @pytest.mark.parametrize("include_new_message", [False, True], ids=["repeated-only", "repeated-and-new"])
+    async def test_custom_context_ids_are_deduplicated_after_json_cold_reload(self, include_new_message: bool) -> None:
         external = _StoringExternalProvider()
+        client = _RecordingClient()
+        provider = _InMemoryStateProvider()
+        entity = AgentEntity(_agent(client, context_providers=[external]), state_provider=provider)
+        original = Message(role="user", contents=["upstream original"], message_id="custom-source-id")
+        fresh = Message(role="user", contents=["upstream new"], message_id="another-custom-id")
 
-        entity = await self._run([external])
+        first = await entity.run({
+            "message": "upstream original",
+            "correlationId": "first-delivery",
+            "contextMessages": [original.to_dict()],
+        })
+        raw = json.loads(json.dumps(provider._get_state_dict()))
+        assert raw["schemaVersion"] == "2.0.0"
+        assert raw["data"]["conversationHistory"] == []
+        original_receipt = raw["data"]["ingestedMessages"]["custom-source-id"]
+        assert original_receipt
+        assert external.saved_batches[0][0].message_id == "custom-source-id"
 
-        request_messages = [
-            m
-            for entry in entity.state.data.conversation_history
-            if entry.json_type.value == "request"
-            for m in entry.messages
-        ]
-        assert request_messages
-        assert all(m.role for m in request_messages)
+        restarted_provider = _InMemoryStateProvider(raw=raw)
+        restarted = AgentEntity(_agent(client, context_providers=[external]), state_provider=restarted_provider)
+        follow_up = [original, fresh] if include_new_message else [original]
+        await restarted.run({
+            "message": "logging-only input must not be replayed",
+            "correlationId": "new-delivery",
+            "contextMessages": [message.to_dict() for message in follow_up],
+        })
+
+        new_texts = [fresh.text] if include_new_message else []
+        assert len(client.received) == 2, "a new correlation must run even when its projected input is already ingested"
+        assert [message.text for message in client.received[1]] == [original.text, "reply-1", *new_texts]
+        assert [message.text for message in external.saved_batches[1]] == [*new_texts, "reply-2"]
+        assert sum(message.message_id == original.message_id for message in external.saved) == 1
+
+        restored = DurableAgentState.from_json(json.dumps(restarted_provider._get_state_dict()))
+        assert restored.data.conversation_history == []
+        assert restored.data.ingested_messages["custom-source-id"] == original_receipt
+        expected_ids = {"custom-source-id", "another-custom-id"} if include_new_message else {"custom-source-id"}
+        assert set(restored.data.ingested_messages) == expected_ids
+        assert set(restored.data.completed_correlations) == {"first-delivery", "new-delivery"}
+        delivered = restored.try_get_agent_response("first-delivery")
+        assert delivered is not None
+        assert delivered.to_dict() == first.to_dict()
 
     async def test_our_own_history_is_kept_in_full(self) -> None:
         """Nothing else is holding it, so forgetting it would lose the conversation."""
@@ -464,15 +604,127 @@ class TestWeDoNotKeepASecondCopyOfSomeoneElsesConversation:
 class TestServiceManagedSessions:
     """Service-backed agents let the service own the conversation."""
 
-    async def test_a_service_owned_run_is_not_sent_its_own_history(self) -> None:
-        """The provider is attached, so it must stay quiet while the service holds the thread.
+    @pytest.mark.parametrize("streaming", [False, True], ids=["nonstream-fallback", "streaming"])
+    @pytest.mark.parametrize("external_history", [False, True], ids=["durable-primary", "external-primary"])
+    @pytest.mark.parametrize(
+        ("stores_by_default", "default_options", "service_options", "local_options"),
+        [
+            pytest.param(True, {}, {}, {"store": False}, id="client-default-true"),
+            pytest.param(False, {"store": True}, {}, {"store": False}, id="agent-default-true"),
+            pytest.param(False, {}, {"store": True}, {}, id="client-default-false"),
+            pytest.param(True, {"store": False}, {"store": True}, {}, id="agent-default-false"),
+        ],
+    )
+    async def test_core_pipeline_isolates_service_and_local_branches_after_json_reload(
+        self,
+        streaming: bool,
+        external_history: bool,
+        stores_by_default: bool,
+        default_options: dict[str, Any],
+        service_options: dict[str, Any],
+        local_options: dict[str, Any],
+    ) -> None:
+        """True/False/False/True through core Agent, with recording doubles rather than live services."""
+        client = _ConversationIdClient(stores_by_default=stores_by_default, supports_streaming=streaming)
+        observer = _SessionObserver()
+        external = _ServiceAwareExternalProvider() if external_history else None
+        providers: list[ContextProvider] = [external, observer] if external is not None else [observer]
+        prompts = ["service-first", "local-first", "local-second", "service-resumed"]
+        expected_inputs = [
+            ["service-first"],
+            ["local-first"],
+            ["local-first", "reply-2", "local-second"],
+            ["service-resumed"],
+        ]
+        expected_local_history = [
+            [],
+            ["local-first", "reply-2"],
+            ["local-first", "reply-2", "local-second", "reply-3"],
+            ["local-first", "reply-2", "local-second", "reply-3"],
+        ]
+        raw: dict[str, Any] = {}
+        originals: dict[str, dict[str, Any]] = {}
+        attempts = [True] if streaming else [True, False]
 
-        Attaching a provider to a service-backed agent is what stops core injecting one whose
-        state nothing bounds. But core continues a stored conversation by id rather than by
-        resending it, so a provider that also loaded history would hand the model the whole
-        transcript on top of the copy the service already has. Measured before this was fixed, the
-        prompt went from one message a turn to the entire conversation every turn.
-        """
+        for index, prompt in enumerate(prompts):
+            # Rebuild the agent, entity and state provider; only the recording doubles survive.
+            provider = _InMemoryStateProvider(raw=raw)
+            entity = AgentEntity(
+                _agent(client, context_providers=providers, default_options=default_options),
+                state_provider=provider,
+            )
+            history_providers = _history_providers(entity.agent)
+            if external is not None:
+                assert history_providers == [external]
+            else:
+                assert len(history_providers) == 1
+                assert isinstance(history_providers[0], DurableHistoryProvider)
+
+            store = index in (0, 3)
+            options = dict(service_options if store else local_options)
+            start = len(client.calls)
+            response = await entity.run({"message": prompt, "correlationId": f"c{index}", "options": options})
+            assert response.text == f"reply-{index + 1}"
+            assert response.response_id == f"result-{index + 1}"
+            originals[f"c{index}"] = json.loads(json.dumps(response.to_dict()))
+
+            calls = client.calls[start:]
+            assert [call["stream"] for call in calls] == attempts
+            active_id = "service-branch-1" if index == 3 else None
+            for call in calls:
+                assert [message.text for message in call["messages"]] == expected_inputs[index]
+                assert call["options"].get("store", stores_by_default) is store
+                assert call["options"].get("conversation_id") == active_id
+                assert call["kwargs"].get("conversation_id") is None
+                assert call["kwargs"]["client_kwargs"].get("conversation_id") is None
+                forwarded_session = call["kwargs"]["client_kwargs"]["session"]
+                assert forwarded_session.service_session_id == active_id
+                assert forwarded_session.session_id == "autoswap-session"
+
+            raw = json.loads(json.dumps(provider._get_state_dict()))
+            data = raw["data"]
+            assert provider.writes == 1
+            assert data["session"]["service_session_id"] == ("service-branch-4" if index == 3 else "service-branch-1")
+            assert InMemoryHistoryProvider.DEFAULT_SOURCE_ID not in data["session"]["state"]
+            local_texts = [
+                message.text for entry in entity.state.data.conversation_history for message in entry.messages
+            ]
+            assert local_texts == ([] if external is not None else expected_local_history[index])
+            assert set(data["responseMailbox"]) == set(originals)
+            assert set(data["completedCorrelations"]) == set(originals)
+            assert {key: entry["response"] for key, entry in data["responseMailbox"].items()} == originals
+
+        expected_active_ids = [None, None, None, "service-branch-1"]
+        assert [entry["service_session_id"] for entry in observer.before] == [
+            value for value in expected_active_ids for _ in attempts
+        ]
+        assert [entry["context_service_session_id"] for entry in observer.before] == [
+            value for value in expected_active_ids for _ in attempts
+        ]
+        assert [entry["texts"] for entry in observer.before] == [batch for batch in expected_inputs for _ in attempts]
+        assert [entry["service_session_id"] for entry in observer.after] == [
+            "service-branch-1",
+            None,
+            None,
+            "service-branch-4",
+        ]
+        assert [entry["context_service_session_id"] for entry in observer.after] == expected_active_ids
+        assert [entry["texts"] for entry in observer.after] == expected_inputs
+        if external is not None:
+            assert [message.text for message in external.saved] == expected_local_history[-1]
+            assert [[message.text for message in batch] for batch in external.saved_batches] == [
+                ["local-first", "reply-2"],
+                ["local-second", "reply-3"],
+            ]
+
+        reloaded = DurableAgentState.from_json(json.dumps(raw))
+        for correlation_id, original in originals.items():
+            delivered = reloaded.try_get_agent_response(correlation_id)
+            assert delivered is not None
+            assert delivered.to_dict() == original
+
+    async def test_a_service_owned_run_is_not_sent_its_own_history(self) -> None:
+        """A service-owned run receives only new input, even before a service ID has been issued."""
         client = _RecordingServiceClient()
         agent = _agent(client)
         entity = AgentEntity(agent, state_provider=_InMemoryStateProvider())
@@ -494,12 +746,7 @@ class TestServiceManagedSessions:
         assert [len(batch) for batch in client.received] == [1, 3, 5, 7]
 
     async def test_a_client_side_run_does_not_grow_opaque_session_state(self) -> None:
-        """The point of attaching: those turns land where retention can reach them.
-
-        Without a provider of ours, core injects its own and the transcript is persisted inside
-        the session bag, which retention never evicts from. It grew about 321 bytes a turn and
-        nothing would ever have reclaimed it.
-        """
+        """Client-owned turns stay in the local transcript, not a second history slice in the session bag."""
         provider = _InMemoryStateProvider()
         entity = AgentEntity(_agent(_RecordingServiceClient()), state_provider=provider)
 
@@ -586,18 +833,7 @@ class TestServiceManagedSessions:
 
 
 class TestRejectedConversationIdRecovery:
-    """A service can hand back a conversation id it will not accept on the next turn.
-
-    Measured against Azure OpenAI, a streamed response reports its id in the completion event
-    before that response is readable, so the very next turn can be refused for naming an id that
-    is genuinely valid. Roughly half of streamed turns were affected at the time it was measured,
-    against none of the non-streamed ones.
-
-    The entity re-sends the identical request a few times, which recovers that and needs nothing
-    stored. An id that has actually expired looks the same and cannot be recovered this way, so
-    those turns fail, as they do in core. Rescuing them would mean keeping a full second copy of
-    a conversation the service already holds, on every turn, against the chance of needing it.
-    """
+    """Injected service refusals exercise bounded identical-request retries, not transcript recovery."""
 
     @pytest.fixture(autouse=True)
     def _no_backoff(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -705,7 +941,7 @@ class TestRejectedConversationIdRecovery:
         # The stored id is left alone, so a service that recovers later still works.
         assert provider._get_state_dict()["data"]["session"]["service_session_id"] == "thread-1"
 
-    async def test_streaming_rejection_does_not_retry_with_the_same_id(self) -> None:
+    async def test_streaming_rejection_does_not_add_a_nonstreamed_attempt(self) -> None:
         """Falling back to a non-streamed call with the refused id only wastes a round trip."""
         attempts: list[tuple[str, str | None]] = []
 
@@ -738,13 +974,16 @@ class TestRejectedConversationIdRecovery:
                 session.service_session_id = "thread-1"
                 return AgentResponse(messages=[Message(role="assistant", contents=["ok"])])
 
-        entity = AgentEntity(_StreamingForgetfulAgent(), state_provider=_InMemoryStateProvider())  # type: ignore[arg-type]
+        entity = AgentEntity(
+            _StreamingForgetfulAgent(),  # type: ignore[arg-type]
+            state_provider=_InMemoryStateProvider(),
+        )
 
         await entity.run({"message": "first", "correlationId": "c0"})
         await entity.run({"message": "second", "correlationId": "c1"})
 
-        # The streamed attempt carrying the stale id is refused, and no non-streamed call
-        # repeats it. The recovery happens a level up, with the id cleared.
+        # Retry the streamed invocation at the entity boundary, without clearing the ID
+        # or adding a non-streamed attempt carrying the same refused ID.
         assert ("stream", "thread-1") in attempts
         assert ("nonstream", "thread-1") not in attempts
 

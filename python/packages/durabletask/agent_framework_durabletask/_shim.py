@@ -156,11 +156,17 @@ class DurableAIAgent(SupportsAgentRun, Generic[TaskT]):
         """
         if stream is not False:
             raise ValueError("DurableAIAgent does not support streaming mode (stream must be False)")
-        message_str = self._normalize_messages(messages)
+        # Explicit context is the invocation payload, including an empty delta or
+        # tool-only messages. The separate workflow string is just a logging preview.
+        message_str = (
+            messages
+            if context_messages is not None and isinstance(messages, str)
+            else self._normalize_messages(messages)
+        )
 
         # Only forward context messages when a workflow supplied them, so executors that do
         # not implement the parameter keep working unchanged.
-        extra: dict[str, Any] = {"context_messages": context_messages} if context_messages else {}
+        extra: dict[str, Any] = {"context_messages": context_messages} if context_messages is not None else {}
         run_request = self._executor.get_run_request(
             message=message_str,
             options=options,

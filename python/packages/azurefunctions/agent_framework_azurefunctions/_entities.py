@@ -18,11 +18,20 @@ from agent_framework import SupportsAgentRun
 from agent_framework_durabletask import (
     DEFAULT_MAX_STATE_BYTES,
     DEFAULT_RETENTION,
+    DELIVERY_WINDOW_SECONDS,
+    HIGH_WATERMARK,
+    LOW_WATERMARK,
     AgentEntity,
     AgentEntityStateProviderMixin,
     AgentResponseCallbackProtocol,
     RetentionMode,
+    StateBudget,
+    resolve_state_budget,
     run_agent_coroutine,
+    serialize_agent_response,
+    validate_history_providers,
+    validate_response_delivery_window,
+    validate_retention,
 )
 
 logger = logging.getLogger("agent_framework.azurefunctions")
@@ -59,7 +68,10 @@ def create_agent_entity(
     callback: AgentResponseCallbackProtocol | None = None,
     *,
     retention: RetentionMode = DEFAULT_RETENTION,
-    max_state_bytes: int = DEFAULT_MAX_STATE_BYTES,
+    max_state_bytes: StateBudget = DEFAULT_MAX_STATE_BYTES,
+    high_watermark: float = HIGH_WATERMARK,
+    low_watermark: float = LOW_WATERMARK,
+    response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
 ) -> Callable[[df.DurableEntityContext], None]:
     """Factory function to create an agent entity class.
 
@@ -68,14 +80,23 @@ def create_agent_entity(
         callback: Optional callback invoked during streaming and final responses
 
     Keyword Args:
-        retention: How much of the conversation durable state may discard. ``auto`` deletes only
-            under storage pressure, ``keep_all`` never deletes, and ``follow_compaction`` first
-            deletes what compaction excluded, then uses pressure eviction if needed.
-        max_state_bytes: Budget for serialized entity state.
+        retention: Eager pruning policy, independent of pressure eviction.
+        max_state_bytes: Positive integer pressure budget, or None to disable it. Functions cannot
+            resolve ``backend_limit`` because the storage backend is configured outside Python.
+        high_watermark: Budget fraction at which pressure eviction starts.
+        low_watermark: Target budget fraction after pressure eviction.
+        response_delivery_window_seconds: Positive integer response delivery window in seconds.
 
     Returns:
         Entity function configured with the agent
+
+    Raises:
+        ValueError: Retention settings or the agent's history providers are invalid.
     """
+    validate_retention(retention, high_watermark, low_watermark)
+    resolved_budget = resolve_state_budget(max_state_bytes)
+    validate_response_delivery_window(response_delivery_window_seconds)
+    validate_history_providers(agent)
 
     async def _entity_coroutine(context: df.DurableEntityContext) -> None:
         """Async handler that executes the entity operations."""
@@ -89,7 +110,10 @@ def create_agent_entity(
                 callback,
                 state_provider=state_provider,
                 retention=retention,
-                max_state_bytes=max_state_bytes,
+                max_state_bytes=resolved_budget,
+                high_watermark=high_watermark,
+                low_watermark=low_watermark,
+                response_delivery_window_seconds=response_delivery_window_seconds,
             )
 
             operation = context.operation_name
@@ -105,7 +129,7 @@ def create_agent_entity(
                     request = "" if input_data is None else str(cast(object, input_data))
 
                 result = await entity.run(request)
-                context.set_result(result.to_dict())
+                context.set_result(serialize_agent_response(result))
 
             elif operation == "reset":
                 entity.reset()

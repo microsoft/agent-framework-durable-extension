@@ -1,23 +1,34 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Integration tests for durable conversation compaction.
+"""Integration tests for compaction of client-owned durable history.
 
-Covers the behavior an agent gets by simply being registered with the durable runtime:
+Covers the sample's ``store=False`` agent with input/output storage enabled and explicit
+``retention="keep_all", max_state_bytes=None``:
 
-- history is persisted in the agent's durable entity and reaches the model on later turns,
-- the configured compaction strategy runs and its annotations are persisted, so compaction
-  state survives entity state serialization rather than being recomputed each turn,
-- the full conversation record is retained in storage even though the model sees less.
+- provider-selected history reaches the model on later turns,
+- compaction annotations and message identities survive entity state serialization,
+- excluded local history is retained without coupling delivery to transcript entries,
+- original response payloads live in the correlation-keyed mailbox with completion receipts.
+
+This is not a bounded-capacity stress test. Live mailbox payloads and completion receipts still
+consume state, and no delivery window is shortened to make the sample fit a small budget.
 """
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 import pytest
 from durabletask.entities import EntityInstanceId
 
-from agent_framework_durabletask import DurableAgentState, DurableAIAgentClient
+from agent_framework_durabletask import (
+    DurableAgentState,
+    DurableAgentStateRequest,
+    DurableAgentStateResponse,
+    DurableAIAgentClient,
+    serialize_agent_response,
+)
 
 # Matches worker.py: only the most recent groups stay in the model's context.
 KEEP_LAST_GROUPS = 4
@@ -41,7 +52,7 @@ pytestmark = [
 
 
 class TestConversationCompaction:
-    """Compaction runs durably without any durable-specific agent configuration."""
+    """Local provider history compacts without changing the sample's keep-all policy."""
 
     @pytest.fixture(autouse=True)
     def setup(self, agent_client_factory: type[AgentClientFactoryProtocol]) -> None:
@@ -119,8 +130,8 @@ class TestConversationCompaction:
         agent = self.agent_client.get_agent("Historian")
         session = agent.create_session()
         assert agent.run("Name a city.", session=session) is not None
-        # A second turn, because message ids are assigned when history is first loaded rather
-        # than when it is written. After one turn there is nothing to load and nothing to stamp.
+        # A second turn exercises loading persisted ids and annotations as well as assigning
+        # identities to new messages in the provider's append hooks.
         assert agent.run("Name another.", session=session) is not None
 
         state = self._read_state(session.durable_session_id)
@@ -148,8 +159,8 @@ class TestConversationCompaction:
     def test_compaction_annotations_are_persisted(self) -> None:
         """Compaction state must survive durable state serialization.
 
-        This is what stops compaction from being recomputed on every turn, and it only works
-        because message-level metadata and ids are persisted with the conversation.
+        The strategy still runs each turn. Persisted message metadata and ids let it operate on
+        the annotated history rather than losing prior exclusions across entity operations.
         """
         agent = self.agent_client.get_agent("Historian")
         session = agent.create_session()
@@ -170,21 +181,67 @@ class TestConversationCompaction:
         excluded = [m for m in annotated if (m.extension_data or {}).get("_excluded")]
         assert excluded, "expected the sliding window to exclude older messages"
 
-        # Reconciling compaction results across turns relies on stable ids, so every message
-        # the provider has processed must carry one. (The newest turn is annotated on the
-        # following load, so it is not required to have an id yet.)
-        assert all(m.message_id for m in annotated), "annotated messages must carry stable message ids"
+        # Provider appends assign identities without changing caller messages. Compaction
+        # reconciles by those ids, including the newest turn, not by transcript position.
+        assert all(m.message_id for m in stored), "stored messages must carry stable message ids"
+        assert len({m.message_id for m in stored}) == len(stored), "stored message ids must be unique"
 
-    def test_full_record_is_retained(self) -> None:
-        """Compaction bounds what the model sees; it does not delete the record by default."""
+    def test_local_provider_retains_selected_inputs_and_outputs_with_keep_all(self) -> None:
+        """This local provider stores both sides; compaction alone does not delete them."""
         agent = self.agent_client.get_agent("Historian")
         session = agent.create_session()
 
         turns = KEEP_LAST_GROUPS + 3
-        for index in range(turns):
-            assert agent.run(f"Name city number {index + 1}.", session=session) is not None
+        prompts = [f"Name city number {index + 1}." for index in range(turns)]
+        replies = [agent.run(prompt, session=session) for prompt in prompts]
+        assert all(reply.text for reply in replies)
+        assert all(
+            content.type != "error" for reply in replies for message in reply.messages for content in message.contents
+        )
 
         state = self._read_state(session.durable_session_id)
 
-        # One request entry and one response entry per turn: nothing was pruned.
-        assert len(state.data.conversation_history) == turns * 2
+        # These counts follow this sample's local provider flags and single-call, tool-free turns.
+        # They are not a delivery invariant for external or service-managed history.
+        requests = [entry for entry in state.data.conversation_history if isinstance(entry, DurableAgentStateRequest)]
+        responses = [entry for entry in state.data.conversation_history if isinstance(entry, DurableAgentStateResponse)]
+        assert len(requests) == len(responses) == turns
+        assert [message.text for entry in requests for message in entry.messages] == prompts
+        assert [[message.text for message in entry.messages] for entry in responses] == [
+            [message.text for message in reply.messages] for reply in replies
+        ]
+        assert len(state.data.completed_correlations) == turns
+        assert state.data.truncation is None
+
+    def test_mailbox_delivers_original_response_without_transcript_entries(self) -> None:
+        """A real stored result remains readable without reconstructing a transcript response."""
+        agent = self.agent_client.get_agent("Historian")
+        session = agent.create_session()
+        response = agent.run("Name a river.", session=session)
+        assert response.text
+        assert all(content.type != "error" for message in response.messages for content in message.contents)
+        expected = json.loads(json.dumps(serialize_agent_response(response)))
+        assert expected["created_at"], "the Foundry result timestamp was lost"
+
+        state = self._read_state(session.durable_session_id)
+        assert len(state.data.completed_correlations) == 1
+        correlation_id = next(iter(state.data.completed_correlations))
+        assert correlation_id
+        assert set(state.data.response_mailbox) == {correlation_id}
+        mailbox = state.data.response_mailbox[correlation_id]
+        assert mailbox["response"] == expected
+        # The result's date and message count are not the request's date or the transcript count.
+        assert mailbox["response"]["created_at"] == expected["created_at"]
+        assert len(mailbox["response"]["messages"]) == len(response.messages)
+        assert state.data.completed_correlations[correlation_id]["completedAt"] == mailbox["createdAt"]
+        assert datetime.fromisoformat(mailbox["expiresAt"]) > datetime.fromisoformat(mailbox["createdAt"])
+
+        # Mutate only this detached read, not scheduler state. Version 2 lookup must still use
+        # the mailbox even when no local transcript entry can provide an answer.
+        assert state.data.conversation_history
+        state.data.conversation_history.clear()
+        restored = DurableAgentState.from_json(state.to_json())
+        assert restored.message_count == 0
+        delivered = restored.try_get_agent_response(correlation_id)
+        assert delivered is not None
+        assert json.loads(json.dumps(serialize_agent_response(delivered))) == expected

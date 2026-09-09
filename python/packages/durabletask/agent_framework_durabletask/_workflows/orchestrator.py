@@ -19,12 +19,14 @@ task_any) is delegated to the ``WorkflowOrchestrationContext`` adapter.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import logging
 from collections import defaultdict
 from collections.abc import Generator
-from dataclasses import dataclass
+from copy import copy
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, cast
 
@@ -49,9 +51,11 @@ from agent_framework._workflows._edge import (
 )
 from agent_framework._workflows._state import State
 
+from .._message_identity import message_identity
 from .context import WorkflowOrchestrationContext
 from .naming import (
     WORKFLOW_INPUT_EXECUTOR_ID,
+    parse_workflow_message_id,
     qualify_subworkflow_request_id,
     workflow_executor_activity_name,
     workflow_message_id,
@@ -146,6 +150,21 @@ class PendingHITLRequest:
     response_type: str | None
 
 
+@dataclass
+class _WorkflowDeliveryLedger:
+    """Replay-derived dispatch receipts, owned by one orchestrator invocation.
+
+    Workflow IDs already encode the producer and position. Keeping exact message
+    fingerprints per target preserves gaps and updates under a source-scoped ID.
+    Handoff ordinals identify anonymous projections that have no source position.
+    Output positions advance per producer even when its incoming conversation resets.
+    """
+
+    sent: dict[str, set[str]] = field(default_factory=lambda: dict[str, set[str]]())
+    handoffs: dict[str, int] = field(default_factory=lambda: dict[str, int]())
+    produced_positions: dict[str, int] = field(default_factory=lambda: dict[str, int]())
+
+
 # ============================================================================
 # Routing Functions
 # ============================================================================
@@ -220,8 +239,15 @@ def build_agent_executor_response(
     response_text: str | None,
     structured_response: dict[str, Any] | None,
     previous_message: Any,
+    *,
+    position: int | None = None,
 ) -> AgentExecutorResponse:
-    """Build an AgentExecutorResponse from entity response data."""
+    """Build a response, optionally using a replay-local producer output position.
+
+    Standalone callers retain conversation-length positions. The orchestrator supplies
+    a monotonic position so independent incoming branches cannot reuse an output ID.
+    Upstream copies retain their source scope without mutating the caller's messages.
+    """
     final_text: str = response_text or ""
     if structured_response:
         final_text = json.dumps(structured_response)
@@ -230,8 +256,13 @@ def build_agent_executor_response(
     agent_response = AgentResponse(messages=[assistant_message])
 
     full_conversation: list[Message] = []
-    if isinstance(previous_message, AgentExecutorResponse) and previous_message.full_conversation:
-        full_conversation.extend(previous_message.full_conversation)
+    upstream = _upstream_responses(previous_message)
+    if upstream is not None:
+        for prior in upstream:
+            full_conversation.extend(
+                _with_workflow_message_id(m, prior.executor_id, source_position)
+                for source_position, m in enumerate(prior.full_conversation)
+            )
     elif isinstance(previous_message, str):
         full_conversation.append(
             Message(
@@ -240,12 +271,11 @@ def build_agent_executor_response(
                 message_id=workflow_message_id(WORKFLOW_INPUT_EXECUTOR_ID, 0),
             )
         )
-    # Core leaves message_id unset, and a node that runs more than once receives this
-    # conversation again every time. Without an id the entity cannot tell the repeat from new
-    # input, so it re-records the whole conversation on each visit and state grows without bound.
-    # The position is fixed once a message joins the conversation and the orchestrator rebuilds
-    # the same sequence on replay, so deriving the id from it is both unique and replay-safe.
-    assistant_message.message_id = workflow_message_id(executor_id, len(full_conversation))
+    # Keep the assigned identity when the conversation is forwarded. Conversation length
+    # alone is insufficient when a producer receives another short, independent input.
+    assistant_message.message_id = workflow_message_id(
+        executor_id, len(full_conversation) if position is None else position
+    )
     full_conversation.append(assistant_message)
 
     return AgentExecutorResponse(
@@ -260,15 +290,43 @@ def build_agent_executor_response(
 # ============================================================================
 
 
-def _build_context_messages(executor: AgentExecutor, message: Any) -> list[dict[str, Any]] | None:
+def _upstream_responses(message: Any) -> list[AgentExecutorResponse] | None:
+    """Recognize a chained response or a fan-in batch of chained responses."""
+    if isinstance(message, AgentExecutorResponse):
+        return [message]
+    if isinstance(message, list):
+        items = cast(list[Any], message)
+        if all(isinstance(item, AgentExecutorResponse) for item in items):
+            return cast(list[AgentExecutorResponse], items)
+    return None
+
+
+def _select_context_messages(executor: AgentExecutor, message: AgentExecutorResponse) -> list[Message]:
+    """Apply core's projection before assigning any transport-only identities."""
+    mode = getattr(executor, "_context_mode", "full")
+    if mode == "last_agent":
+        return list(message.agent_response.messages) if message.agent_response else []
+    if mode == "custom":
+        context_filter = getattr(executor, "_context_filter", None)
+        if context_filter is None:
+            raise ValueError("context_filter must be provided for 'custom' context_mode.")
+        return list(context_filter(list(message.full_conversation)))
+    return list(message.full_conversation)
+
+
+def _build_context_messages(  # pyright: ignore[reportUnusedFunction]
+    executor: AgentExecutor, message: Any
+) -> list[dict[str, Any]] | None:
     """Project the upstream conversation into messages for a downstream agent.
 
     Mirrors the in-process :class:`AgentExecutor` context behavior so a workflow behaves the
     same way durably: ``full`` forwards the whole upstream conversation, ``last_agent`` only the
     previous agent's messages, and ``custom`` applies the executor's ``context_filter``.
 
-    Returns ``None`` when there is no upstream conversation to forward (for example the first
-    node in a workflow, which receives the raw input instead).
+    Returns ``None`` when there is no upstream response (for example the first node,
+    which receives raw input instead). An empty projection is ``[]``, never a fallback
+    to unfiltered input. Fan-in responses are projected in their aggregation order.
+    This helper is stateless: delta selection belongs to agent task preparation.
 
     The mode and filter are read off private attributes because core takes them as constructor
     arguments and exposes no public accessor for either. Reading them is therefore the only way
@@ -276,23 +334,86 @@ def _build_context_messages(executor: AgentExecutor, message: Any) -> list[dict[
     covered: the projection tests build a real ``AgentExecutor`` for each mode, so if core ever
     renames these the fallback to ``full`` changes the projection and those tests fail.
     """
-    if not isinstance(message, AgentExecutorResponse):
+    upstream = _upstream_responses(message)
+    if upstream is None:
         return None
+    return [m.to_dict() for prior in upstream for m in _select_context_messages(executor, prior)]
 
-    mode = getattr(executor, "_context_mode", "full")
-    if mode == "last_agent":
-        selected = list(message.agent_response.messages) if message.agent_response else []
-    elif mode == "custom":
-        context_filter = getattr(executor, "_context_filter", None)
-        if context_filter is None:
-            return None
-        selected = list(context_filter(list(message.full_conversation)))
+
+def _with_workflow_message_id(message: Message, producer: str, position: int) -> Message:
+    """Scope source IDs on copies, preserving identities already owned by the workflow.
+
+    An unscoped custom ID belongs to the enclosing response's executor. No earlier
+    origin is inferred from matching content. Chained copies keep the resulting
+    transport ID, so forwarding through another executor does not rescope it. The
+    caller's original ID and additional properties are untouched; no metadata is added.
+    """
+    original_id = message.message_id
+    if original_id:
+        namespace, _, digest = original_id.rpartition(":")
+        scoped_hash = (
+            namespace in {"wf:external", "wf:projection"}
+            and len(digest) == 64
+            and all(character in "0123456789abcdef" for character in digest)
+        )
+        # These formats are reserved transport identities, not new producer-local IDs.
+        if parse_workflow_message_id(original_id) is not None or scoped_hash:
+            return message
+        address = json.dumps([producer, original_id], ensure_ascii=False)
+        message_id = "wf:external:" + hashlib.sha256(address.encode("utf-8")).hexdigest()
     else:
-        selected = list(message.full_conversation)
+        message_id = workflow_message_id(producer, position)
+    identified = copy(message)
+    identified.message_id = message_id
+    return identified
 
-    if not selected:
-        return None
-    return [m.to_dict() for m in selected]
+
+def _identify_context_messages(
+    prior: AgentExecutorResponse,
+    selected: list[Message],
+    target: str,
+    handoff: int,
+    response_ordinal: int,
+) -> list[Message]:
+    """Scope supplied custom IDs and assign anonymous selections replay-stable identities.
+
+    Resolve original positions before considering projection order. Object identity
+    only locates aliases within this call; it is never part of a transport ID. Copies
+    without IDs have no unambiguous source position, even if their text matches an
+    original. They and new anonymous summaries use a handoff/selection ordinal, not
+    a text match that could suppress an intentionally repeated new input.
+    """
+    if all(m.message_id for m in selected):
+        return [_with_workflow_message_id(m, prior.executor_id, ordinal) for ordinal, m in enumerate(selected)]
+
+    positions: dict[int, list[int]] = defaultdict(list)
+    for position, original in enumerate(prior.full_conversation):
+        if not original.message_id:
+            positions[id(original)].append(position)
+
+    used_positions: set[int] = set()
+    identified: list[Message] = []
+    for ordinal, message in enumerate(selected):
+        if message.message_id:
+            identified.append(_with_workflow_message_id(message, prior.executor_id, ordinal))
+            continue
+
+        candidates = positions.get(id(message), [])
+        if candidates:
+            position = next((p for p in candidates if p not in used_positions), candidates[0])
+            used_positions.add(position)
+            identified.append(_with_workflow_message_id(message, prior.executor_id, position))
+        else:
+            # Hash the structural address, not the text. JSON framing avoids ambiguities
+            # when caller-provided executor names themselves contain separators.
+            address = json.dumps([target, prior.executor_id, handoff, response_ordinal, ordinal], ensure_ascii=False)
+            synthetic = copy(message)
+            synthetic.message_id = "wf:projection:" + hashlib.sha256(address.encode("utf-8")).hexdigest()
+            identified.append(synthetic)
+    return identified
+
+
+_AGENT_TASK_MESSAGE_PREVIEW_LIMIT = 1024
 
 
 def _prepare_agent_task(
@@ -301,6 +422,7 @@ def _prepare_agent_task(
     executor_id: str,
     message: Any,
     workflow_name: str,
+    delivery_ledger: _WorkflowDeliveryLedger | None = None,
 ) -> Any:
     """Prepare an agent task for execution via the context adapter.
 
@@ -310,13 +432,43 @@ def _prepare_agent_task(
     ``dafx-``). The session *key* stays the orchestration instance id, so
     conversation state remains isolated per run.
 
-    Any upstream conversation is forwarded as context messages so a downstream agent sees
-    what earlier nodes produced, matching in-process workflow behavior.
+    Project first, then send only identities not yet dispatched to this target. The
+    caller shares a replay-local ledger across all dispatch paths, never on an executor
+    retained between workflow runs. A standalone helper call gets a fresh ledger.
     """
-    message_content = _extract_message_content(message)
-    context_messages = _build_context_messages(executor, message)
+    if delivery_ledger is None:
+        delivery_ledger = _WorkflowDeliveryLedger()
+    upstream = _upstream_responses(message)
+    context_messages: list[dict[str, Any]] | None = None
+    pending_keys: set[str] = set()
+    handoff = delivery_ledger.handoffs.get(executor_id, 0)
+    if upstream is None:
+        # With no context payload this field is the actual input, not a preview.
+        message_content = _extract_message_content(message)
+    else:
+        context_messages = []
+        message_content = ""
+        sent = delivery_ledger.sent.get(executor_id, set())
+        for response_ordinal, prior in enumerate(upstream):
+            selected = _select_context_messages(executor, prior)
+            for identified in _identify_context_messages(prior, selected, executor_id, handoff, response_ordinal):
+                key = message_identity(identified)
+                if key in sent or key in pending_keys:
+                    continue
+                context_messages.append(identified.to_dict())
+                pending_keys.add(key)
+                # Context is the input. The separate text field is only a bounded
+                # preview of new, selected input, never an excluded/old raw response.
+                message_content = identified.text[:_AGENT_TASK_MESSAGE_PREVIEW_LIMIT]
+
     scoped_id = workflow_scoped_executor_id(workflow_name, executor_id)
-    return ctx.prepare_agent_task(scoped_id, message_content, ctx.instance_id, context_messages)
+    task = ctx.prepare_agent_task(scoped_id, message_content, ctx.instance_id, context_messages)
+    # Preparation/serialization can fail before a task is scheduled. Do not record
+    # those messages or consume a synthetic identity until the adapter accepts it.
+    if pending_keys:
+        delivery_ledger.sent.setdefault(executor_id, set()).update(pending_keys)
+    delivery_ledger.handoffs[executor_id] = handoff + 1
+    return task
 
 
 def _prepare_activity_task(
@@ -386,30 +538,91 @@ def _prepare_subworkflow_task(
 # ============================================================================
 
 
+def _raise_for_agent_failure(agent_response: AgentResponse | dict[str, Any], executor_id: str) -> None:
+    """Reject terminal durable results before reducing them to downstream text.
+
+    Entities should mark runtime failures with response-level ``durable_status=error``.
+    Direct non-tool error content is the legacy fallback, only within AgentResponse
+    envelopes. Tool results (including nested errors) and application dicts are data.
+    Unmarked direct non-tool errors cannot distinguish application errors from legacy
+    entity failures, so that fallback treats them as terminal.
+    """
+    if isinstance(agent_response, AgentResponse):
+        properties: dict[str, Any] = agent_response.additional_properties
+        error_codes = [
+            content.error_code
+            for message in agent_response.messages
+            if message.role != "tool"
+            for content in message.contents
+            if content.type == "error"
+        ]
+    elif isinstance(agent_response, dict) and agent_response.get("type") == "agent_response":
+        properties = cast(dict[str, Any], agent_response.get("additional_properties") or {})
+        messages = cast(list[dict[str, Any]], agent_response.get("messages") or [])
+        # Inspect the wire envelope directly, without deserializing unknown fields.
+        error_codes = [
+            content.get("error_code")
+            for message in messages
+            if isinstance(message, dict) and message.get("role") != "tool"
+            for content in cast(list[dict[str, Any]], message.get("contents") or [])
+            if isinstance(content, dict) and content.get("type") == "error"
+        ]
+    else:
+        return
+
+    status = properties.get("durable_status")
+    # Do not include response text, error details or the request in the exception.
+    if status == "already_completed" or "response_expired" in error_codes:
+        raise RuntimeError(f"Agent executor {executor_id!r} returned an expired durable response.")
+    if status == "error" or error_codes:
+        raise RuntimeError(f"Agent executor {executor_id!r} returned a terminal runtime error.")
+
+
 def _process_agent_response(
-    agent_response: AgentResponse,
+    agent_response: AgentResponse | dict[str, Any],
     executor_id: str,
     message: Any,
+    delivery_ledger: _WorkflowDeliveryLedger,
 ) -> ExecutorResult:
-    """Process an agent response into an ExecutorResult."""
-    response_text = agent_response.text if agent_response else None
+    """Process a response with a producer position shared across all dispatch paths."""
+    _raise_for_agent_failure(agent_response, executor_id)
+    if isinstance(agent_response, dict) and agent_response.get("type") == "agent_response":
+        agent_response = AgentResponse.from_dict(agent_response)
+    if isinstance(agent_response, dict):
+        # Lightweight text/value payloads are data, not durable response envelopes.
+        response_text = agent_response.get("text")
+        response_value = agent_response.get("value")
+    else:
+        response_text = agent_response.text if agent_response else None
+        response_value = agent_response.value if agent_response else None
     structured_response: dict[str, Any] | None = None
 
-    if agent_response and agent_response.value is not None:
-        model_dump = getattr(agent_response.value, "model_dump", None)
+    if response_value is not None:
+        model_dump = getattr(response_value, "model_dump", None)
         if callable(model_dump):
             dumped = model_dump()
             if isinstance(dumped, dict):
                 structured_response = dumped  # type: ignore[assignment]
-        elif isinstance(agent_response.value, dict):
-            structured_response = agent_response.value
+        elif isinstance(response_value, dict):
+            structured_response = cast(dict[str, Any], response_value)
 
+    upstream = _upstream_responses(message)
+    upstream_length = (
+        sum(len(prior.full_conversation) for prior in upstream)
+        if upstream is not None
+        else int(isinstance(message, str))
+    )
+    # Conversation length preserves existing cycle IDs; the producer's prior position
+    # prevents reuse after a reset or a different branch with the same history length.
+    position = max(upstream_length, delivery_ledger.produced_positions.get(executor_id, -1) + 1)
     output_message = build_agent_executor_response(
         executor_id=executor_id,
         response_text=response_text,
         structured_response=structured_response,
         previous_message=message,
+        position=position,
     )
+    delivery_ledger.produced_positions[executor_id] = position
 
     return ExecutorResult(
         executor_id=executor_id,
@@ -904,6 +1117,7 @@ def _prepare_all_tasks(
     shared_state: dict[str, Any] | None,
     subworkflow_counter: list[int],
     address: dict[str, str],
+    delivery_ledger: _WorkflowDeliveryLedger | None = None,
 ) -> tuple[list[Any], list[TaskMetadata], list[tuple[str, Any, str]]]:
     """Prepare all pending tasks for parallel execution.
 
@@ -926,7 +1140,11 @@ def _prepare_all_tasks(
             (``{root_instance_id, root_workflow_name, request_path_prefix}``). Surfaced
             to activity executors via ``host_context`` and extended by one
             ``{executor}~{ordinal}~`` hop for each dispatched sub-workflow child.
+        delivery_ledger: Replay-local agent delivery receipts shared with sequential
+            dispatch and later supersteps. Standalone calls default to a fresh ledger.
     """
+    if delivery_ledger is None:
+        delivery_ledger = _WorkflowDeliveryLedger()
     all_tasks: list[Any] = []
     task_metadata_list: list[TaskMetadata] = []
     remaining_agent_messages: list[tuple[str, Any, str]] = []
@@ -1005,6 +1223,7 @@ def _prepare_all_tasks(
             first_msg[0],
             first_msg[1],
             workflow.name,
+            delivery_ledger,
         )
         all_tasks.append(task)
         task_metadata_list.append(
@@ -1102,6 +1321,11 @@ def run_workflow_orchestrator(
     # persists across supersteps so repeated sub-workflow invocations never collide.
     subworkflow_counter: list[int] = [0]
 
+    # Rebuilt by executing this generator on replay, not checkpointed separately or
+    # attached to the shared Workflow/AgentExecutor objects. Survives cycles and HITL
+    # waits within this invocation and is shared by parallel and sequential dispatch.
+    delivery_ledger = _WorkflowDeliveryLedger()
+
     # Accumulate workflow events and publish them to the orchestration custom status
     # after each superstep so an external client can stream progress by polling.
     # Non-agent executors are run inside a durable activity that captures their events
@@ -1171,7 +1395,7 @@ def run_workflow_orchestrator(
 
         # Phase 1: Prepare all tasks
         all_tasks, task_metadata_list, remaining_agent_messages = _prepare_all_tasks(
-            ctx, workflow, pending_messages, shared_state, subworkflow_counter, workflow_address
+            ctx, workflow, pending_messages, shared_state, subworkflow_counter, workflow_address, delivery_ledger
         )
 
         # Agents and sub-workflows bypass the per-executor activity, so synthesize their
@@ -1201,7 +1425,9 @@ def run_workflow_orchestrator(
             for idx, raw_result in enumerate(raw_results):
                 metadata = task_metadata_list[idx]
                 if metadata.task_type == TaskType.AGENT:
-                    result = _process_agent_response(raw_result, metadata.executor_id, metadata.message)
+                    result = _process_agent_response(
+                        raw_result, metadata.executor_id, metadata.message, delivery_ledger
+                    )
                     emit_event("executor_completed", metadata.executor_id)
                 elif metadata.task_type == TaskType.SUBWORKFLOW:
                     subworkflow_executor = cast(WorkflowExecutor, workflow.executors[metadata.executor_id])
@@ -1225,11 +1451,12 @@ def run_workflow_orchestrator(
                 executor_id,
                 message,
                 workflow.name,
+                delivery_ledger,
             )
-            agent_response: AgentResponse = yield task
+            agent_response: AgentResponse | dict[str, Any] = yield task
             logger.debug("Agent %s sequential response completed", executor_id)
 
-            result = _process_agent_response(agent_response, executor_id, message)
+            result = _process_agent_response(agent_response, executor_id, message, delivery_ledger)
             all_results.append(result)
             emit_event("executor_completed", executor_id)
 
