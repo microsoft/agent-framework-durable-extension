@@ -9,7 +9,13 @@ durable runtime requires no changes:
 - the runtime **leaves the provider alone** - the user picked where their conversation lives,
 - it hands the provider the entity's **stable** session id on every turn, so history continues
   across turns and across worker restarts,
-- durable state still records the conversation for audit, and execution stays durable.
+- the provider owns transcript appends according to its storage flags,
+- durable state stores session state, original responses in a correlation-keyed delivery mailbox,
+    and completion receipts, not a local transcript mirror.
+
+This minimal provider blindly appends to Redis. An interrupted operation retried after Redis
+accepted the append can duplicate messages. Durable execution does not make that external write
+exactly-once. Portable reset is unsupported for this provider and requires provider-owned clearing.
 
 Contrast with ``13_conversation_compaction``, where an in-memory provider is transparently
 swapped for a durable-backed one.

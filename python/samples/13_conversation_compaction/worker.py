@@ -6,18 +6,22 @@ The agent is configured exactly as it would be for in-process Agent Framework: a
 ``InMemoryHistoryProvider`` plus a ``CompactionProvider``. Registering it with the durable
 runtime transparently swaps the history provider for a durable-backed one, so:
 
-- conversation history is persisted in the agent's durable entity and survives restarts,
+- the history provider persists the inputs and outputs selected by its storage flags,
+- that client-owned history lives in the agent's durable entity and survives restarts,
 - the compaction strategy still runs, and its annotations are persisted alongside the
-  messages, so compaction state is not recomputed on every turn,
-- only the messages compaction keeps are sent to the model, bounding context growth.
+    messages for later turns,
+- only the history groups compaction keeps are sent to the model on the next turn.
 
 No durable-specific configuration is required on the agent itself.
 
-Note on service-managed conversations: compaction applies to history the *client* owns. When a
-chat client keeps the conversation on the service (Foundry and the Responses API both do so by
-default), the service owns the model's context and the durable entity keeps the full transcript
-purely as a record. This sample therefore sets ``store=False`` so history is client-side and
-compaction has something to compact.
+The sample keeps the default ``retention="keep_all"`` and ``max_state_bytes=None``. Compaction
+limits the number of history groups sent to the model, not total entity size or message size.
+Pruning exclusions and pressure eviction are separate opt-ins. Neither provides unlimited capacity.
+
+Compaction applies to history the client owns. On a service-owned turn the durable history
+provider neither loads nor appends a local transcript. The entity keeps session state, original
+responses in its delivery mailbox, and completion receipts. This sample sets ``store=False``
+so the history provider owns the model's context instead of Foundry's service-managed history.
 
 Prerequisites:
 - Set FOUNDRY_PROJECT_ENDPOINT and FOUNDRY_MODEL
@@ -50,7 +54,7 @@ KEEP_LAST_GROUPS = 4
 
 
 def create_historian_agent() -> Agent:
-    """Create an agent that remembers facts while its context stays bounded.
+    """Create an agent that recalls facts within a sliding history window.
 
     Returns:
         Agent: The configured Historian agent.
@@ -119,7 +123,11 @@ def setup_worker(worker: DurableTaskSchedulerWorker) -> DurableAIAgentWorker:
     Returns:
         DurableAIAgentWorker with agents registered
     """
-    agent_worker = DurableAIAgentWorker(worker)
+    # Keep compacted-out history by default. To delete eligible exclusions, choose
+    # retention="follow_compaction". Pressure eviction is independent: opt in with
+    # max_state_bytes="backend_limit" (1 MiB on DTS) or a positive integer budget.
+    # Budget for live response payloads, receipts and session state as well as history.
+    agent_worker = DurableAIAgentWorker(worker, retention="keep_all", max_state_bytes=None)
 
     agent = create_historian_agent()
     agent_worker.add_agent(agent)

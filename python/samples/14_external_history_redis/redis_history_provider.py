@@ -3,12 +3,13 @@
 """A minimal Redis-backed history provider.
 
 This is an ordinary Agent Framework ``HistoryProvider`` - nothing about it is durable-specific.
-It is included in the sample rather than imported from a package to keep the sample dependency
-free and to show exactly how little a "bring your own store" provider needs: read the messages
-for a session id, append new ones.
+It demonstrates reading messages for a session id and appending the new messages selected by
+the provider's storage flags.
 
 The durable runtime leaves providers like this alone: the user chose where their conversation
-lives, so durable supplies execution durability and stays out of the way of storage.
+lives. It does not add a local transcript mirror or make Redis writes exactly-once. This provider
+blindly appends, so retrying an interrupted operation after Redis accepted its write can duplicate
+messages. It supplies no provider-owned clear operation, so portable durable reset is unsupported.
 """
 
 from collections.abc import Sequence
@@ -23,6 +24,8 @@ class RedisHistoryProvider(HistoryProvider):
 
     Messages are keyed by session id, so the same session id must be used on every turn for the
     conversation to continue - which is exactly what the durable entity guarantees.
+    Writes are intentionally not idempotent. A production provider needs its own retry and
+    clearing policy; a stable session key alone does not deduplicate interrupted appends.
     """
 
     DEFAULT_SOURCE_ID = "redis_history"
@@ -81,6 +84,9 @@ class RedisHistoryProvider(HistoryProvider):
         **kwargs: Any,
     ) -> None:
         """Append messages to this session's Redis list.
+
+        This intentionally uses blind RPUSH. Repeating a save repeats its messages, including
+        when a durable operation is interrupted after this write but before its local commit.
 
         Args:
             session_id: The session ID to store messages for.

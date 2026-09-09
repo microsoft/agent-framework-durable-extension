@@ -71,8 +71,15 @@ az account show
 - **[12_subworkflow_hitl](12_subworkflow_hitl/)**: A human-in-the-loop pause that lives **inside a sub-workflow**. The nested request surfaces to the client with a qualified request id (`{executor}~{ordinal}~{requestId}`) behind a single top-level addressing surface.
 
 ### Conversation History
-- **[13_conversation_compaction](13_conversation_compaction/)**: Persist conversation history durably and compact it as it grows. An agent configured the ordinary core way (`InMemoryHistoryProvider` + `CompactionProvider`) gets durable-backed history automatically, with compaction annotations persisted alongside the messages.
-- **[14_external_history_redis](14_external_history_redis/)**: Keep conversation history in a store you chose (Redis here) instead of durable state. The durable runtime leaves your provider alone and hands it the entity's stable session id, so it continues the conversation across turns and restarts.
+
+History providers own transcript writes according to their storage flags. External and
+service-managed history do not get a local transcript mirror. The entity keeps response delivery
+payloads and completion receipts separately from model history. Retention defaults to `keep_all`
+with `max_state_bytes=None`. Eager pruning and pressure eviction are separate opt-ins, not a promise
+of unlimited capacity.
+
+- **[13_conversation_compaction](13_conversation_compaction/)**: Compact client-owned history with `InMemoryHistoryProvider` and `CompactionProvider`. Keep excluded history by default and choose transcript pruning or a state budget independently.
+- **[14_external_history_redis](14_external_history_redis/)**: Use an ordinary Redis history provider with a stable session id and no local transcript mirror. The minimal blind-append provider documents interrupted-retry duplicates and unsupported portable reset.
 
 ### Azure Functions Hosting
 
@@ -91,7 +98,7 @@ These samples host workflows and agents on Azure Durable Functions (`func start`
 - **[azure_functions/11_workflow_parallel](azure_functions/11_workflow_parallel/)**: Parallel execution of executors and agents in an Azure Durable Functions workflow.
 - **[azure_functions/12_workflow_hitl](azure_functions/12_workflow_hitl/)**: The workflow human-in-the-loop pattern on Azure Durable Functions, with the reviewer notified from inside the workflow via `WorkflowHitlContext`.
 - **[azure_functions/13_subworkflow_hitl](azure_functions/13_subworkflow_hitl/)**: A human-in-the-loop pause inside a sub-workflow on Azure Durable Functions, exposed through a single top-level respond surface.
-- **[azure_functions/14_conversation_compaction](azure_functions/14_conversation_compaction/)**: Persist conversation history durably and compact it as it grows, on Azure Functions. The Functions counterpart to [13_conversation_compaction](13_conversation_compaction/).
+- **[azure_functions/14_conversation_compaction](azure_functions/14_conversation_compaction/)**: Compact client-owned history on Azure Functions with independent retention and explicit byte-budget options. The Functions counterpart to [13_conversation_compaction](13_conversation_compaction/).
 
 ## Running the Samples
 

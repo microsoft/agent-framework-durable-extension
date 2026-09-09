@@ -3,7 +3,7 @@
 """Client that exercises a durable agent whose history is compacted as it grows.
 
 Runs a multi-turn conversation against the ``Historian`` agent hosted by ``worker.py`` and
-shows that the conversation keeps working while the model's context stays bounded.
+checks recall within a sliding history window. This is not a state-capacity stress test.
 """
 
 import logging
@@ -85,9 +85,9 @@ def run_client(agent_client: DurableAIAgentClient) -> None:
     print(f"[agent] {answer.text}\n")
 
     if CODENAME.lower() in answer.text.lower():
-        print("Recent context was retained while the conversation stayed compacted.")
+        print("The agent recalled the fact from its recent history window.")
     else:
-        print("The codename fell outside the retained window.")
+        print("The agent did not recall the recent fact. Inspect its response for errors.")
 
 
 def main() -> None:

@@ -5,17 +5,20 @@
 The agent is configured exactly as it would be for in-process Agent Framework: an
 ``InMemoryHistoryProvider`` plus a ``CompactionProvider``. Registering it with
 ``AgentFunctionApp`` transparently swaps the history provider for a durable-backed one, so
-history is persisted in the agent's durable entity, the compaction strategy still runs, and its
-annotations are persisted alongside the messages. Only the messages compaction keeps are sent to
-the model, bounding context growth.
+the provider persists the inputs and outputs selected by its storage flags in the agent's durable
+entity. Compaction annotations are persisted alongside those messages. Only the history groups
+compaction keeps are sent to the model on the next turn.
 
 This is the Azure Functions counterpart to the standalone ``13_conversation_compaction`` sample.
 
-Note on service-managed conversations: compaction applies to history the *client* owns. When a
-chat client keeps the conversation on the service (Foundry and the Responses API both do so by
-default), the service owns the model's context and the durable entity keeps the full transcript
-purely as a record. This sample therefore sets ``store=False`` so history is client-side and
-compaction has something to compact.
+Compaction applies to history the client owns. On a service-owned turn the durable history
+provider neither loads nor appends a local transcript. The entity still persists session state,
+original responses in its delivery mailbox, and completion receipts. This sample sets
+``store=False`` so the history provider owns model context instead of the service.
+
+The sample explicitly keeps ``retention="keep_all"`` and ``max_state_bytes=None``. A sliding
+window limits history groups, not message size or total state. Neither pruning nor an optional
+pressure budget provides unlimited capacity.
 
 Prerequisites: set `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL`, and sign in
 with Azure CLI before starting the Functions host."""
@@ -68,14 +71,22 @@ def _create_agent() -> Any:
 
 
 # 2. Register the agent with AgentFunctionApp so Azure Functions exposes the required triggers.
-#    Set retention="follow_compaction" here to delete compacted-out messages immediately, with
-#    pressure eviction as a fallback if the remaining state is still too large.
-app = AgentFunctionApp(agents=[_create_agent()], enable_health_check=True, max_poll_retries=50)
+#    Choose retention="follow_compaction" to prune eligible exclusions. Independently, set a
+#    positive integer max_state_bytes to enable pressure eviction. Functions cannot resolve
+#    "backend_limit". Allow space for live responses, completion receipts and session state.
+app = AgentFunctionApp(
+    agents=[_create_agent()],
+    enable_health_check=True,
+    max_poll_retries=50,
+    retention="keep_all",
+    max_state_bytes=None,
+)
 
 """
 Expected behavior when posting several turns with the same `session_id`:
 
-- every turn is answered with the earlier turns in context,
-- the model's context stops growing once the sliding window fills,
-- the durable entity keeps the whole conversation, with compacted-out messages marked excluded.
+- each turn uses the recent history groups kept by compaction,
+- the number of history groups sent to the model stops growing once the sliding window fills,
+- this configuration keeps stored inputs and outputs, with compacted-out messages marked excluded,
+- original responses and completion receipts are separate from the compacted local transcript.
 """
