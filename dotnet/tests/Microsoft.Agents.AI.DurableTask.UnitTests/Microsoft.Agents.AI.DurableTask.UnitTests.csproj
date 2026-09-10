@@ -11,8 +11,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="..\..\..\schemas\fixtures\python-durable-agent-state-1.2.json"
-          Link="Fixtures\python-durable-agent-state-1.2.json"
+    <None Include="..\..\..\schemas\fixtures\shared-durable-agent-state-1.2-python-shape.json"
+          Link="Fixtures\shared-durable-agent-state-1.2-python-shape.json"
           CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\..\schemas\fixtures\shared-durable-agent-state-2.0.json"
           Link="Fixtures\shared-durable-agent-state-2.0.json"
