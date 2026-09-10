@@ -188,6 +188,54 @@ public sealed class DurableAgentStateTests
     }
 
     [Fact]
+    public void OpaqueSessionIsClonedFromCallerOwnedJson()
+    {
+        DurableAgentState state = new();
+        using (JsonDocument document = JsonDocument.Parse(
+            """{"conversationId":"service-1","$runtimeType":"Untrusted.Type, Untrusted.Assembly"}"""))
+        {
+            state.Data.Session = document.RootElement;
+        }
+
+        string json = JsonSerializer.Serialize(
+            state,
+            DurableAgentStateJsonContext.Default.DurableAgentState);
+        DurableAgentState restored = Assert.IsType<DurableAgentState>(
+            JsonSerializer.Deserialize(json, DurableAgentStateJsonContext.Default.DurableAgentState));
+
+        JsonElement session = Assert.IsType<JsonElement>(restored.Data.Session);
+        Assert.Equal(JsonValueKind.Object, session.ValueKind);
+        Assert.Equal("service-1", session.GetProperty("conversationId").GetString());
+        Assert.Equal(
+            "Untrusted.Type, Untrusted.Assembly",
+            session.GetProperty("$runtimeType").GetString());
+        Assert.IsType<JsonElement>(restored.Data.Session);
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("\"session\"")]
+    [InlineData("[]")]
+    [InlineData("42")]
+    public void OpaqueSessionMustBeAJsonObject(string sessionJson)
+    {
+        string json = $$"""
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [],
+                "session": {{sessionJson}}
+              }
+            }
+            """;
+
+        Assert.Throws<JsonException>(
+            () => JsonSerializer.Deserialize(
+                json,
+                DurableAgentStateJsonContext.Default.DurableAgentState));
+    }
+
+    [Fact]
     public void DeclaredExtensionDataAndUnknownPropertiesRoundTripIndependently()
     {
         const string JsonText = """
@@ -456,10 +504,10 @@ public sealed class DurableAgentStateTests
     }
 
     [Fact]
-    public void PythonPr59ShapeFixtureMigratesIdsAndPreservesExtensions()
+    public void SharedPythonShapeFixtureMigratesIdsAndPreservesExtensions()
     {
         string json = File.ReadAllText(
-            Path.Combine(AppContext.BaseDirectory, "Fixtures", "python-durable-agent-state-1.2.json"));
+            Path.Combine(AppContext.BaseDirectory, "Fixtures", "shared-durable-agent-state-1.2-python-shape.json"));
         using JsonDocument sourceDocument = JsonDocument.Parse(json);
         JsonElement sourceUnknownContent = sourceDocument.RootElement.GetProperty("data")
             .GetProperty("conversationHistory")[1]

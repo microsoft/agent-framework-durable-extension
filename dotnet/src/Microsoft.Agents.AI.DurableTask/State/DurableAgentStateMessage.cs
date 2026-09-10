@@ -34,8 +34,14 @@ internal sealed class DurableAgentStateMessage
     public string? MessageId { get; set; }
 
     /// <summary>
-    /// Gets message-level additional properties from the schema's <c>extensionData</c> property.
+    /// Gets producer-defined message values from the schema's declared <c>extensionData</c> field.
     /// </summary>
+    /// <remarks>
+    /// The CLR name mirrors <see cref="ChatMessage.AdditionalProperties"/> so conversion does not invent a
+    /// second metadata vocabulary. The wire name remains <c>extensionData</c> for cross-language schema
+    /// compatibility. This declared field is distinct from <see cref="UnknownProperties"/>, which captures
+    /// undeclared future members adjacent to the message's known JSON fields.
+    /// </remarks>
     [JsonPropertyName("extensionData")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IDictionary<string, JsonElement>? AdditionalProperties { get; init; }
@@ -57,7 +63,7 @@ internal sealed class DurableAgentStateMessage
     public required string Role { get; init; }
 
     /// <summary>
-    /// Gets unknown message properties that are outside the declared schema.
+    /// Gets undeclared future message properties that appear beside the schema's known fields.
     /// </summary>
     [JsonExtensionData]
     public IDictionary<string, JsonElement>? UnknownProperties { get; set; }
