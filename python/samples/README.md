@@ -29,21 +29,28 @@ reject before revised actions execute. Rewrapping old starts is not history migr
 
 ## Prototype validation
 
-These local results were recorded for
-[prototype commit 3ad9d6c](https://github.com/microsoft/agent-framework-durable-extension/commit/3ad9d6cd0920e8d88e56366229555ac8d905ac79).
+These local results cover the integration-launcher and state-layout admission follow-up to
+[prototype commit 5b872d1](https://github.com/microsoft/agent-framework-durable-extension/commit/5b872d10fdc3d6aabc1e37417dff4a2036707ebc).
 They are not the current remote CI status or a claim of release readiness. See
 [PR #59 checks](https://github.com/microsoft/agent-framework-durable-extension/pull/59/checks)
 for remote results.
 
 | Local check | Result |
 | --- | --- |
-| Python 3.13 / core 1.16 | 3,259 passed, zero skipped |
-| Python 3.13 / core 1.13 | 3,259 passed, zero skipped |
-| Python 3.10 / core 1.16 | 3,259 passed, zero skipped |
+| Python 3.13 / core 1.16 | 3,303 passed, zero skipped |
+| Python 3.13 / core 1.13 | 3,303 passed, zero skipped |
+| Python 3.10 / core 1.16 | 3,303 passed, zero skipped |
 | Direct DTS integration suite | 42 passed, zero skipped |
 | Azure Functions integration suite | 43 passed, zero skipped |
 | Ruff, Pyright, MyPy, offline lock check and both package builds | Passed |
-| Unit coverage | 96% overall |
+| Earlier unit coverage at `3ad9d6c` | 96% overall, not remeasured for this follow-up |
+
+Both live suites ran with package-only pytest discovery, without the ancestor fixture or a parent
+`DURABLE_AGENTS_DEPLOYMENT_MODE` setting. Each launcher supplies `isolated_v2` only to its isolated
+test child. The 12 launcher regressions fail when that assignment is removed. The state-admission
+regressions fail in 31 cases against the old reader, with the valid native-state control passing.
+All 44 new cases pass with the fixes. The guard rejects known incompatible completion containers,
+not arbitrary unknown optional metadata or every possible future format.
 
 The live suites are text-based. They do not establish live multimodal/inline-file pressure
 behavior, cancellation coverage, retention-specific OTel measurements or cross-runtime compatibility.

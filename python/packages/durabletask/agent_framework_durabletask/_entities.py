@@ -537,7 +537,7 @@ class AgentEntity:
                 # The agent's own context providers supply prior turns - durable-backed history,
                 # an external store (Cosmos/Redis/file), or the model service itself. Only the
                 # newly received request messages are passed as run input, so history lives in
-                # exactly one place and core providers work unchanged on the durable runtime.
+                # its selected store, subject to the service-owned branch's inactive-primary gate.
                 session = self._create_session()
                 if not service_owns_history:
                     inactive_service_id = getattr(session, "service_session_id", None)
@@ -795,17 +795,12 @@ class AgentEntity:
         must behave the same way here. The serialized session also carries the service-issued
         conversation id, so service-backed agents continue the same thread.
 
-        The durable history provider's own slice is dropped before persisting: it is derived from
-        ``conversation_history`` on every turn, so storing it would duplicate the transcript and
-        let the copy drift from the record of truth. It is removed *before* serializing rather
-        than after, because that slice holds the working message buffer and its position index,
-        and serializing the whole transcript only to discard it is pure waste.
+        Omit only the durable provider's working message buffer and position index, which are
+        rebuilt from ``conversation_history`` each turn. Keep its other JSON-compatible state.
+        Removing those transient fields before serialization avoids encoding a second transcript.
 
-        Provider state is arbitrary, so the payload is checked before it replaces the last good
-        one. Core neither raises nor warns on a value it cannot serialize, it passes the live
-        object through, and the entity state provider serializes eagerly. An unusable payload
-        would therefore fail the save, and fail it again from the error handler, masking whatever
-        the agent actually returned.
+        Core can return live objects from session serialization. Validate the payload before
+        staging it so an unusable session fails the operation without replacing committed state.
         """
         if session is None:
             return

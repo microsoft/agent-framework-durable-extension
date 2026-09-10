@@ -344,6 +344,8 @@ def _start_function_app(sample_path: Path, port: int) -> subprocess.Popen[Any]:
     # This prevents conflicts between parallel or repeated test runs, as Durable Functions
     # use the task hub name to separate orchestration state.
     env["TASKHUB_NAME"] = f"test{uuid.uuid4().hex[:8]}"
+    # Opt in only for the subprocess using this isolated test hub.
+    env["DURABLE_AGENTS_DEPLOYMENT_MODE"] = "isolated_v2"
 
     # On Windows, use CREATE_NEW_PROCESS_GROUP to allow proper termination
     # shell=True only on Windows to handle PATH resolution

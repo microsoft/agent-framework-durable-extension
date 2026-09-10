@@ -54,6 +54,22 @@ from ._response_utils import load_agent_response, serialize_agent_response
 logger = logging.getLogger("agent_framework.durabletask")
 
 
+def _validate_delivery_layout(data: dict[str, Any]) -> None:
+    """Reject known alternate completion authorities, even with the same version label.
+
+    These top-level data fields describe a different proposed delivery contract.
+    Preserving them as extensions while treating their requests as incomplete would
+    permit duplicate execution. This is rejection, not migration or schema agreement.
+    Unrelated metadata, including nested occurrences of these names, stays opaque.
+    """
+    if "terminalResults" in data or "completionReceipts" in data:
+        raise ValueError(
+            "The durable agent state contains an incompatible delivery layout. "
+            "This prototype requires responseMailbox/completedCorrelations semantics; "
+            "a matching schemaVersion does not authorize interpreting another completion format."
+        )
+
+
 def _validate_json(value: Any) -> None:
     """Reject non-JSON values before the encoder can normalize them or collide keys."""
     if isinstance(value, dict):
@@ -582,6 +598,7 @@ class DurableAgentStateData:
         self.unknown_fields = {}
 
     def to_dict(self) -> dict[str, Any]:
+        _validate_delivery_layout(self.unknown_fields)
         result: dict[str, Any] = {
             **deepcopy(self.unknown_fields),
             DurableStateFields.CONVERSATION_HISTORY: [entry.to_dict() for entry in self.conversation_history],
@@ -604,6 +621,7 @@ class DurableAgentStateData:
 
     @classmethod
     def from_dict(cls, data_dict: dict[str, Any]) -> DurableAgentStateData:
+        _validate_delivery_layout(data_dict)
         for name in (
             DurableStateFields.RESPONSE_MAILBOX,
             DurableStateFields.COMPLETED_CORRELATIONS,
@@ -788,6 +806,7 @@ class DurableAgentState:
         Returns:
             Retained response, expired-response status, or None when no matching result exists.
         """
+        _validate_delivery_layout(self.data.unknown_fields)
         if self.schema_version.startswith("2."):
             mailbox = self.data.response_mailbox.get(correlation_id)
             if mailbox is not None:
@@ -868,6 +887,7 @@ class DurableAgentState:
             delivery_window_seconds: Retained for source compatibility; migration now
                 requires an explicit destination operation, including its grace policy.
         """
+        _validate_delivery_layout(self.data.unknown_fields)
         if self.schema_version == self.SCHEMA_VERSION:
             return
         if re.fullmatch(r"1\.[0-9]+\.[0-9]+", self.schema_version) is None:

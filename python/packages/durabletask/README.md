@@ -32,6 +32,11 @@ read/round-tripped, but `run`, `reset` and `expire_responses` reject those layou
 silently upgrades legacy state. Rollback requires compatible version-2 workers, clients and workflow
 protocol. Names are unchanged. Reusing an old `@name@key` on an empty new hub is not migration.
 
+A matching version label does not prove layout compatibility. The reader rejects known alternate
+`data.terminalResults` or `data.completionReceipts` containers instead of treating their completed
+requests as new work. Unrelated optional metadata remains opaque, including nested uses of those
+names. This guard is not a general format detector or a conversion between proposed schemas.
+
 `DurableWorkflowClient` and internal child dispatch wrap new starts with workflow engine version 2.
 Raw/legacy starts reject before revised actions execute. Native custom scheduling must use public
 `wrap_workflow_input` for new instances. It does not authorize input or migrate old action histories.
