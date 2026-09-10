@@ -14,6 +14,8 @@ public sealed class DurableAgentStateTests
         DurableAgentState state = new();
 
         Assert.Equal(DurableAgentState.CurrentSchemaVersion, state.SchemaVersion);
+        Assert.Equal("1.2.0", state.SchemaVersion);
+        Assert.Equal("2.0.0", DurableAgentState.RevisedSchemaVersion);
     }
 
     [Fact]
@@ -122,12 +124,12 @@ public sealed class DurableAgentStateTests
     }
 
     [Fact]
-    public void BreakingVersion()
+    public void UnsupportedMajorVersion()
     {
         // Arrange
         const string JsonText = """
             {
-                "schemaVersion": "2.0.0"
+                "schemaVersion": "3.0.0"
             }
             """;
 

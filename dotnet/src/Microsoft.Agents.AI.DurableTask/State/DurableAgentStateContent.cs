@@ -97,7 +97,7 @@ internal abstract class DurableAgentStateContent
         return value switch
         {
             null => s_nullElement,
-            JsonElement element => element,
+            JsonElement element => element.Clone(),
             _ => JsonSerializer.SerializeToElement(value: value, jsonTypeInfo: s_objectTypeInfo)
         };
     }
