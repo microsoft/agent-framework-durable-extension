@@ -39,26 +39,71 @@ internal sealed class DurableAgentStateData
     public DurableAgentStateHistoryBinding? HistoryBinding { get; init; }
 
     /// <summary>
-    /// Gets or sets the serialized inner agent session.
-    /// </summary>
-    [JsonPropertyName("session")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public JsonElement? Session { get; set; }
-
-    /// <summary>
-    /// Gets or sets the highest workflow conversation position ingested from each executor.
+    /// Gets or sets the opaque state produced by the configured agent's session serialization contract.
     /// </summary>
     /// <remarks>
-    /// The .NET workflow path does not populate these watermarks yet, but they are preserved for
-    /// cross-language schema compatibility.
+    /// This value can contain service conversation identity, continuation state, and provider-specific
+    /// state that cannot be reduced to a conversation ID. The durable state layer owns only the JSON
+    /// representation: it requires an object, clones assigned values away from caller-owned
+    /// <see cref="JsonDocument"/> instances, and round-trips the object without interpreting property
+    /// names such as <c>$type</c> or <c>$runtimeType</c>. It never uses this JSON to select or construct a
+    /// CLR type. A later integration layer may return the object only to the configured agent through
+    /// that agent's session deserialization contract.
+    ///
+    /// The normal <c>System.Text.Json</c> nesting limit applies when the enclosing state is parsed.
+    /// This schema layer intentionally has no independent byte cap because valid opaque provider state can
+    /// vary in size; the durable entity storage budget and retention policy remain the outer trust boundary.
+    /// Producers must therefore treat session state as persisted data, not as a trusted instruction or an
+    /// object graph.
+    /// </remarks>
+    [JsonPropertyName("session")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public JsonElement? Session
+    {
+        get;
+        set
+        {
+            if (value is not JsonElement element)
+            {
+                field = null;
+                return;
+            }
+
+            if (element.ValueKind != JsonValueKind.Object)
+            {
+                throw new JsonException(
+                    "The durable agent state 'data.session' property must be a JSON object.");
+            }
+
+            field = element.Clone();
+        }
+    }
+
+    /// <summary>
+    /// Gets or sets the highest legacy scalar conversation position ingested from each workflow producer.
+    /// </summary>
+    /// <remarks>
+    /// This field records the legacy scalar-watermark design for workflow producers: a compatible producer
+    /// can use the highest known contiguous position to avoid redelivering messages it already incorporated.
+    /// It is distinct from the exact completion-receipt design used for terminal delivery. The current .NET
+    /// and Python production paths do not produce or consume these values; .NET preserves and round-trips
+    /// them so state written by a compatible workflow implementation is not discarded.
     /// </remarks>
     [JsonPropertyName("ingestedPositions")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IDictionary<string, int>? IngestedPositions { get; set; }
 
     /// <summary>
-    /// Gets or sets bounded evidence that retention removed conversation messages.
+    /// Gets or sets bounded evidence that transcript messages were removed from durable state.
     /// </summary>
+    /// <remarks>
+    /// The evidence persists after the corresponding transcript entries are gone and records the cumulative
+    /// count plus the first and latest eviction times. This lets readers and operators distinguish an
+    /// intentionally truncated transcript from one in which the missing messages were never persisted.
+    /// It is diagnostic provenance only: it is not model context, a terminal result, or proof that a
+    /// correlation completed. This layer preserves the contract but does not currently produce or consume
+    /// truncation evidence.
+    /// </remarks>
     [JsonPropertyName("truncation")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public DurableAgentStateTruncation? Truncation { get; set; }
@@ -72,14 +117,18 @@ internal sealed class DurableAgentStateData
     public DateTime? ExpirationTimeUtc { get; set; }
 
     /// <summary>
-    /// Gets application-defined data-level metadata from the schema's <c>extensionData</c> property.
+    /// Gets producer-defined values from the schema's declared data-level <c>extensionData</c> field.
     /// </summary>
+    /// <remarks>
+    /// This is an explicit interoperability field. It is separate from <see cref="UnknownProperties"/>,
+    /// which captures undeclared future JSON members through <see cref="JsonExtensionDataAttribute"/>.
+    /// </remarks>
     [JsonPropertyName("extensionData")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IDictionary<string, JsonElement>? ExtensionData { get; init; }
 
     /// <summary>
-    /// Gets unknown data properties that are outside the declared schema.
+    /// Gets undeclared future data properties that appear beside the schema's known fields.
     /// </summary>
     [JsonExtensionData]
     public IDictionary<string, JsonElement>? UnknownProperties { get; set; }

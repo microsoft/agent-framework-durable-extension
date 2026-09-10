@@ -45,6 +45,15 @@ internal sealed class DurableAgentStateTerminalResponse
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ContinuationToken { get; init; }
 
+    /// <summary>
+    /// Gets JSON-safe producer-defined values from the declared wire-level <c>extensionData</c> field.
+    /// </summary>
+    /// <remarks>
+    /// The CLR name mirrors <see cref="AgentResponse.AdditionalProperties"/>. Keeping that name makes the
+    /// projection boundary explicit while <see cref="JsonPropertyNameAttribute"/> preserves the shared
+    /// schema name. This field is not the same as <see cref="UnknownProperties"/>, which contains
+    /// undeclared future JSON members.
+    /// </remarks>
     [JsonPropertyName("extensionData")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IDictionary<string, JsonElement>? AdditionalProperties { get; init; }

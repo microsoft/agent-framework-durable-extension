@@ -43,6 +43,7 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
 
         DurableAgentStateData? data = dataElement.Deserialize(
             DurableAgentStateJsonContext.Default.DurableAgentStateData);
+        ValidateOpaqueSession(dataElement);
         DurableAgentStateSchemaVersion schemaVersion =
             DurableAgentStateSchemaVersion.ParseSupported(schemaVersionText);
         if (schemaVersion.Major == DurableAgentState.RevisedSchemaMajorVersion)
@@ -171,6 +172,17 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         ValidateUniqueObjectKeys(dataElement.GetProperty("terminalResults"), "terminalResults");
         ValidateUniqueObjectKeys(dataElement.GetProperty("completionReceipts"), "completionReceipts");
         ValidateTerminalMessages(dataElement.GetProperty("terminalResults"));
+    }
+
+    private static void ValidateOpaqueSession(JsonElement dataElement)
+    {
+        if (dataElement.ValueKind == JsonValueKind.Object &&
+            dataElement.TryGetProperty("session", out JsonElement session) &&
+            session.ValueKind != JsonValueKind.Object)
+        {
+            throw new JsonException(
+                "The durable agent state 'data.session' property must be a JSON object.");
+        }
     }
 
     private static void ValidateUniqueObjectKeys(JsonElement element, string propertyName)

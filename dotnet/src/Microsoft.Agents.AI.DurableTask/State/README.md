@@ -63,6 +63,12 @@ key. The key is explicit wire identity and must not be inferred from CLR type na
 These DTOs and converters are passive contracts. Delivery lookup and polling, binding selection and enforcement,
 result expiry, and transcript retention are implemented by later stack layers.
 
+Schema 2.0 must not be activated as a cross-language write format until every participating runtime either
+implements the mailbox/binding contract or explicitly rejects the new major version. The current C# reader is
+fail-closed for unsupported majors and defaults new writes to 1.2. Other runtimes require coordinated version
+gating before a 2.0 producer is enabled; preserving unknown fields alone is not sufficient because an
+unaware worker could ignore completion receipts and rerun completed work.
+
 ## Sample State
 
 ```json
