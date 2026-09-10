@@ -10,7 +10,7 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 internal readonly record struct DurableAgentStateSchemaVersion(BigInteger Major, BigInteger Minor, BigInteger Patch)
     : IComparable<DurableAgentStateSchemaVersion>
 {
-    private const int SupportedMajorVersion = 1;
+    private static readonly BigInteger[] s_supportedMajorVersions = [1, DurableAgentState.RevisedSchemaMajorVersion];
 
     /// <summary>
     /// Parses and validates a supported durable agent state schema version.
@@ -22,7 +22,7 @@ internal readonly record struct DurableAgentStateSchemaVersion(BigInteger Major,
             throw new InvalidOperationException("The durable agent state has an invalid 'schemaVersion' property.");
         }
 
-        if (version.Major != SupportedMajorVersion)
+        if (!s_supportedMajorVersions.Contains(version.Major))
         {
             throw new InvalidOperationException($"The durable agent state schema version '{value}' is not supported.");
         }
