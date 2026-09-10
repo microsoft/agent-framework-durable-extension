@@ -45,6 +45,24 @@ ignored by the runtime projection. Malformed known count fields fail deserializa
 This layer defines and round-trips the schema contracts only. Agent entity integration for session ownership,
 replay filtering, compaction, retention, and provider behavior is deferred to later stack layers.
 
+## Revised execution-state foundation
+
+The mailbox and fixed-history binding contracts use schema `2.0.0`. This is intentionally a fail-closed major
+version: a 1.x worker preserves unknown fields but does not understand completion receipts, so allowing it to
+process revised state could rerun work whose transcript result was already removed. The .NET reader accepts
+legacy 1.x state and revised 2.x state, but new state continues to default to `1.2.0`; this schema-only layer
+does not activate revised writes. A later execution layer must opt into `2.0.0` only when it writes the complete
+mailbox and binding layout.
+
+In revised state, `terminalResults` stores immutable result envelopes by correlation ID outside
+`conversationHistory`, while `completionReceipts` retains completion evidence after a result payload expires.
+No receipt means pending; an `available` receipt requires a matching result; an `unavailable` receipt proves
+completion without a result payload. `historyBinding` records a versioned owner kind and stable logical provider
+key. The key is explicit wire identity and must not be inferred from CLR type names or opaque session keys.
+
+These DTOs and converters are passive contracts. Delivery lookup and polling, binding selection and enforcement,
+result expiry, and transcript retention are implemented by later stack layers.
+
 ## Sample State
 
 ```json

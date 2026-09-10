@@ -43,6 +43,14 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
 
         DurableAgentStateData? data = dataElement.Deserialize(
             DurableAgentStateJsonContext.Default.DurableAgentStateData);
+        DurableAgentStateSchemaVersion schemaVersion =
+            DurableAgentStateSchemaVersion.ParseSupported(schemaVersionText);
+        if (schemaVersion.Major == DurableAgentState.RevisedSchemaMajorVersion)
+        {
+            ValidateRevisedLayout(dataElement);
+        }
+
+        (data ??= new DurableAgentStateData()).Validate(schemaVersionText!);
         Dictionary<string, JsonElement>? extensionData =
             element.Value.TryGetProperty(ExtensionDataPropertyName, out JsonElement extensionDataElement)
                 ? ReadExtensionData(extensionDataElement)
@@ -64,7 +72,7 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         return new DurableAgentState
         {
             SchemaVersion = schemaVersionText!,
-            Data = data ?? new DurableAgentStateData(),
+            Data = data,
             ExtensionData = extensionData,
             UnknownProperties = unknownProperties,
         };
@@ -74,6 +82,7 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
     public override void Write(Utf8JsonWriter writer, DurableAgentState value, JsonSerializerOptions options)
     {
         _ = DurableAgentStateSchemaVersion.ParseSupported(value.SchemaVersion);
+        value.Data.Validate(value.SchemaVersion);
 
         writer.WriteStartObject();
         writer.WritePropertyName(SchemaVersionPropertyName);
@@ -135,5 +144,85 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         }
 
         writer.WriteEndObject();
+    }
+
+    private static void ValidateRevisedLayout(JsonElement dataElement)
+    {
+        if (dataElement.ValueKind != JsonValueKind.Object)
+        {
+            throw new JsonException("The revised durable agent state 'data' property must be an object.");
+        }
+
+        foreach (string requiredProperty in new[]
+        {
+            "conversationHistory",
+            "terminalResults",
+            "completionReceipts",
+            "historyBinding",
+        })
+        {
+            if (!dataElement.TryGetProperty(requiredProperty, out _))
+            {
+                throw new InvalidOperationException(
+                    $"The revised durable agent state is missing the 'data.{requiredProperty}' property.");
+            }
+        }
+
+        ValidateUniqueObjectKeys(dataElement.GetProperty("terminalResults"), "terminalResults");
+        ValidateUniqueObjectKeys(dataElement.GetProperty("completionReceipts"), "completionReceipts");
+        ValidateTerminalMessages(dataElement.GetProperty("terminalResults"));
+    }
+
+    private static void ValidateUniqueObjectKeys(JsonElement element, string propertyName)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            throw new JsonException($"The revised durable agent state 'data.{propertyName}' property must be an object.");
+        }
+
+        HashSet<string> keys = new(StringComparer.Ordinal);
+        foreach (JsonProperty property in element.EnumerateObject())
+        {
+            if (!keys.Add(property.Name))
+            {
+                throw new InvalidOperationException(
+                    $"The revised durable agent state 'data.{propertyName}' property contains duplicate correlation ID '{property.Name}'.");
+            }
+        }
+    }
+
+    private static void ValidateTerminalMessages(JsonElement terminalResults)
+    {
+        foreach (JsonProperty result in terminalResults.EnumerateObject())
+        {
+            if (!result.Value.TryGetProperty("response", out JsonElement response) ||
+                !response.TryGetProperty("messages", out JsonElement messages))
+            {
+                throw new InvalidOperationException(
+                    $"Durable agent terminal result '{result.Name}' requires a response messages collection.");
+            }
+
+            if (messages.ValueKind != JsonValueKind.Array)
+            {
+                throw new InvalidOperationException(
+                    $"Durable agent terminal result '{result.Name}' contains a non-array response messages property.");
+            }
+
+            foreach (JsonElement message in messages.EnumerateArray())
+            {
+                if (message.ValueKind != JsonValueKind.Object)
+                {
+                    throw new InvalidOperationException(
+                        $"Durable agent terminal result '{result.Name}' contains a non-object message.");
+                }
+
+                if (message.TryGetProperty("contents", out JsonElement contents) &&
+                    contents.ValueKind != JsonValueKind.Array)
+                {
+                    throw new InvalidOperationException(
+                        $"Durable agent terminal result '{result.Name}' contains a non-array message contents property.");
+                }
+            }
+        }
     }
 }

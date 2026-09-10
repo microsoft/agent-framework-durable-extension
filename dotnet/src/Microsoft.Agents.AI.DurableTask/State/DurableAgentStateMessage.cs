@@ -44,7 +44,11 @@ internal sealed class DurableAgentStateMessage
     /// Gets the contents of this message.
     /// </summary>
     [JsonPropertyName("contents")]
-    public IReadOnlyList<DurableAgentStateContent> Contents { get; init; } = [];
+    public IReadOnlyList<DurableAgentStateContent> Contents
+    {
+        get;
+        init => field = value ?? [];
+    } = [];
 
     /// <summary>
     /// Gets the role of the message sender (e.g., "user", "assistant", "system").
@@ -69,13 +73,34 @@ internal sealed class DurableAgentStateMessage
         ChatMessage message,
         string? generatedMessageId = null,
         ILogger? logger = null)
+        => FromChatMessage(message, generatedMessageId, requireJsonSafeMetadata: false, logger);
+
+    internal static DurableAgentStateMessage FromTerminalChatMessage(
+        ChatMessage message,
+        string? generatedMessageId = null,
+        ILogger? logger = null)
+        => FromChatMessage(message, generatedMessageId, requireJsonSafeMetadata: true, logger);
+
+    private static DurableAgentStateMessage FromChatMessage(
+        ChatMessage message,
+        string? generatedMessageId,
+        bool requireJsonSafeMetadata,
+        ILogger? logger)
     {
-        Dictionary<string, JsonElement>? additionalProperties = message.AdditionalProperties?
-            .ToDictionary(
-                pair => pair.Key,
-                pair => JsonSerializer.SerializeToElement(
-                    pair.Value,
-                    DurableAgentJsonUtilities.DefaultOptions.GetTypeInfo(typeof(object))));
+        Dictionary<string, JsonElement>? additionalProperties = null;
+        if (message.AdditionalProperties is not null)
+        {
+            foreach ((string key, object? value) in message.AdditionalProperties)
+            {
+                JsonElement element = requireJsonSafeMetadata
+                    ? DurableAgentStateTerminalResponse.ConvertMetadata(value, key)
+                    : JsonSerializer.SerializeToElement(
+                        value,
+                        DurableAgentJsonUtilities.DefaultOptions.GetTypeInfo(typeof(object)));
+                additionalProperties ??= [];
+                additionalProperties[key] = element;
+            }
+        }
 
         return new DurableAgentStateMessage()
         {

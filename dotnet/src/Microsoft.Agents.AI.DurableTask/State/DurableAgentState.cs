@@ -12,6 +12,8 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 internal sealed class DurableAgentState
 {
     internal const string CurrentSchemaVersion = "1.2.0";
+    internal const string RevisedSchemaVersion = "2.0.0";
+    internal const int RevisedSchemaMajorVersion = 2;
     private static readonly DurableAgentStateSchemaVersion s_currentSchemaVersion =
         DurableAgentStateSchemaVersion.ParseSupported(CurrentSchemaVersion);
 
