@@ -26,7 +26,7 @@ Durable agents are implemented on top of [Durable Entities](https://learn.micros
 4. Entity-local changes are persisted. External provider writes and tool effects are not part of a distributed transaction.
 
 > [!WARNING]
-> The local Python PR #59 implementation uses schema `2.0.0`, independent response/completion storage and an explicit `isolated_v2` deployment gate. It does not require a local mirror of external/service-owned history. Existing .NET readers do not support this layout. Do not mix these writers or replay old workflow histories through the new Python engine. See [ADR-0032](../../decisions/0032-durable-thread-compaction.md#state-evolution-and-compatibility) for migration, rollback and deployment boundaries.
+> The [Python prototype in PR #59](https://github.com/microsoft/agent-framework-durable-extension/pull/59) uses schema `2.0.0`, independent response/completion storage and an explicit `isolated_v2` deployment gate. It does not require a local mirror of external/service-owned history. Existing .NET readers do not support this layout. Do not mix these writers or replay old workflow histories through the new Python engine. These are provisional [prototype deployment constraints](../../../python/packages/durabletask/README.md#version-2-deployment-warning). Design review belongs in [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88); the agreed implementation will follow in stacked PRs after ADR approval.
 
 Because the entity framework serializes access to each entity instance, concurrent messages to the same session are processed one at a time, eliminating race conditions.
 

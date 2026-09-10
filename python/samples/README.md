@@ -2,9 +2,14 @@
 
 This directory contains samples for durable agent hosting using the Durable Task Scheduler. These samples demonstrate the worker-client architecture pattern, enabling distributed agent execution with persistent conversation state.
 
-## Local PR #59 deployment contract
+## PR #59 prototype scope
 
-The local version-2 runtime requires `deployment_mode="isolated_v2"` on `DurableAIAgentWorker`,
+This is an integrated reference for [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88),
+not the final implementation PR. After ADR approval, the agreed changes will be split into stacked
+implementation PRs. [PR #59](https://github.com/microsoft/agent-framework-durable-extension/pull/59)
+remains the prototype until that stack lands. Its APIs and deployment choices are provisional.
+
+The prototype's version-2 runtime requires `deployment_mode="isolated_v2"` on `DurableAIAgentWorker`,
 `AgentFunctionApp` and the standalone Functions entity factory, or
 `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2` when the argument is omitted/`None`. Configure the sample
 host environment accordingly. This is operator acknowledgement, not proof of isolation. Use a
@@ -22,10 +27,29 @@ The workflow client, generated start routes and child dispatch wrap new starts w
 2. Native custom schedulers must use public `wrap_workflow_input` for new instances. Old/raw starts
 reject before revised actions execute. Rewrapping old starts is not history migration.
 
-The full unit matrix has passed on current/minimum core and Python 3.10. Both final live-host suites
-and dead-code cleanup checks passed. Exact results are recorded in
-[ADR-0032](../../docs/decisions/0032-durable-thread-compaction.md#current-local-implementation-status).
-That status also identifies blocked dependency checks and unsupported mixed-runtime rollout.
+## Prototype validation
+
+These local results were recorded for
+[prototype commit 3ad9d6c](https://github.com/microsoft/agent-framework-durable-extension/commit/3ad9d6cd0920e8d88e56366229555ac8d905ac79).
+They are not the current remote CI status or a claim of release readiness. See
+[PR #59 checks](https://github.com/microsoft/agent-framework-durable-extension/pull/59/checks)
+for remote results.
+
+| Local check | Result |
+| --- | --- |
+| Python 3.13 / core 1.16 | 3,259 passed, zero skipped |
+| Python 3.13 / core 1.13 | 3,259 passed, zero skipped |
+| Python 3.10 / core 1.16 | 3,259 passed, zero skipped |
+| Direct DTS integration suite | 42 passed, zero skipped |
+| Azure Functions integration suite | 43 passed, zero skipped |
+| Ruff, Pyright, MyPy, offline lock check and both package builds | Passed |
+| Unit coverage | 96% overall |
+
+The live suites are text-based. They do not establish live multimodal/inline-file pressure
+behavior, cancellation coverage, retention-specific OTel measurements or cross-runtime compatibility.
+Pydantic 2.11 runtime validation remains blocked by artifact downloads; the recorded runs used
+Pydantic 2.13.4. Existing .NET readers and legacy workflow histories are not compatible with the
+prototype's revised state/execution contract.
 
 ## Import convention
 

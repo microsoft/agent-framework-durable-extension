@@ -11,12 +11,15 @@ pip install agent-framework-durabletask --pre
 Requires Python 3.10+, `agent-framework-core>=1.13.0,<2` and `pydantic>=2.11,<3`.
 The full unit suite passed on Python 3.13/core 1.16, Python 3.13/core 1.13 and Python 3.10/core 1.16.
 Pydantic 2.11 runtime validation remains blocked by dependency artifact downloads. Lock verification passed.
-See the ADR status below for exact results and deployment limitations.
+See [prototype validation](../../samples/README.md#prototype-validation) for recorded results and limitations.
 
 ## Version 2 deployment warning
 
-The settings below describe the local PR #59 implementation, not release readiness or the contents
-of an already published package.
+The settings below describe the [PR #59 prototype](https://github.com/microsoft/agent-framework-durable-extension/pull/59),
+not an approved design or the contents of a published package. Design review belongs in
+[ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88).
+After ADR approval, the agreed implementation will be submitted as stacked PRs rather than merged
+from this prototype as-is.
 
 > **Breaking deployment and state contract.** `DurableAIAgentWorker` requires
 > `deployment_mode="isolated_v2"`, or `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2` when the argument
@@ -46,9 +49,10 @@ Only recorded responses receive legacy completion backfill and a delivery grace 
 payloads may be partial, not original full responses. Whole-request digest idempotency prevents grace
 refresh after an exact retry, cold reload or subsequent run. Migration retains the original logical
 session ID for external history and does not copy that store or migrate workflow histories. No
-generated HTTP/MCP migration endpoint is provided. See
-[ADR-0032](../../../docs/decisions/0032-durable-thread-compaction.md#state-evolution-and-compatibility)
-for evidence fields and [local status](../../../docs/decisions/0032-durable-thread-compaction.md#current-local-implementation-status).
+generated HTTP/MCP migration endpoint is provided. These are prototype constraints, not an agreed
+cross-runtime migration contract. See [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88)
+for the design discussion and [prototype validation](../../samples/README.md#prototype-validation)
+for recorded checks and remaining gaps.
 
 ## Durable Task Integration
 
