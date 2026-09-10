@@ -1,0 +1,100 @@
+{
+  "schemaVersion": "2.0.0",
+  "data": {
+    "conversationHistory": [
+      {
+        "$type": "request",
+        "correlationId": "corr-2",
+        "createdAt": "2026-09-10T05:00:00+00:00",
+        "messages": [
+          {
+            "role": "user",
+            "messageId": "request-2",
+            "contents": [
+              {
+                "$type": "text",
+                "text": "Generate the artifact."
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "terminalResults": {
+      "corr-2": {
+        "correlationId": "corr-2",
+        "outcome": "succeeded",
+        "completedAt": "2026-09-10T05:00:03+00:00",
+        "resultExpiresAt": "2026-09-11T05:00:03+00:00",
+        "response": {
+          "messages": [
+            {
+              "role": "assistant",
+              "authorName": "fixture-agent",
+              "messageId": "response-2",
+              "contents": [
+                {
+                  "$type": "text",
+                  "text": "Artifact generated."
+                },
+                {
+                  "$type": "uri",
+                  "uri": "https://example.test/artifacts/2",
+                  "mediaType": "application/json"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "inputTokenCount": 5,
+            "outputTokenCount": 3,
+            "totalTokenCount": 8
+          },
+          "createdAt": "2026-09-10T05:00:03+00:00",
+          "responseId": "response-id-2",
+          "agentId": "agent-id-2",
+          "finishReason": "stop",
+          "continuationToken": "AQID",
+          "extensionData": {
+            "region": "test",
+            "attempt": 1
+          },
+          "futureResponseField": {
+            "preserve": true
+          }
+        },
+        "futureResultField": "preserve"
+      }
+    },
+    "completionReceipts": {
+      "corr-2": {
+        "correlationId": "corr-2",
+        "outcome": "succeeded",
+        "completedAt": "2026-09-10T05:00:03+00:00",
+        "resultState": "available",
+        "resultExpiresAt": "2026-09-11T05:00:03+00:00",
+        "futureReceiptField": 7
+      },
+      "corr-expired": {
+        "correlationId": "corr-expired",
+        "outcome": "failed",
+        "completedAt": "2026-09-09T05:00:03+00:00",
+        "resultState": "unavailable",
+        "resultExpiresAt": "2026-09-10T05:00:03+00:00",
+        "resultUnavailableAt": "2026-09-10T05:00:04+00:00"
+      }
+    },
+    "historyBinding": {
+      "version": 1,
+      "ownerKind": "historyProvider",
+      "providerKey": "contoso.support-history.v1",
+      "futureBindingField": "preserve"
+    },
+    "futureDataField": {
+      "preserve": true
+    }
+  },
+  "futureRootField": {
+    "preserve": true
+  }
+}
