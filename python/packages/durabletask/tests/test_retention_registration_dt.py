@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 from agent_framework import Agent, AgentExecutor, Executor, InMemoryHistoryProvider, WorkflowExecutor
+from durabletask.azuremanaged.worker import DurableTaskSchedulerWorker
 
 import agent_framework_durabletask as durabletask
 from agent_framework_durabletask import (
@@ -117,7 +118,7 @@ def test_worker_defaults_reach_the_entity_consumer() -> None:
 def test_worker_pressure_budget_is_independent_of_retention(
     retention: RetentionMode, budget: Any, expected: int | None
 ) -> None:
-    grpc_worker = Mock()
+    grpc_worker = Mock(spec=DurableTaskSchedulerWorker) if budget == "backend_limit" else Mock()
     worker = DurableAIAgentWorker(
         grpc_worker,
         retention=retention,
@@ -152,7 +153,9 @@ def test_worker_pressure_budget_is_independent_of_retention(
 def test_budget_override_distinguishes_omitted_and_disabled(
     surface: str, overrides: dict[str, Any], expected: int | None
 ) -> None:
-    grpc_worker = Mock()
+    grpc_worker = (
+        Mock(spec=DurableTaskSchedulerWorker) if overrides.get("max_state_bytes") == "backend_limit" else Mock()
+    )
     worker = DurableAIAgentWorker(grpc_worker, max_state_bytes=8192)
     if surface == "agent":
         worker.add_agent(_agent(), **overrides)

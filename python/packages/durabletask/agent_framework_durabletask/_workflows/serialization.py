@@ -21,7 +21,9 @@ points already do it at the boundary. See
 :mod:`agent_framework._workflows._checkpoint_encoding` for the full security model.
 
 Contents:
-- ``serialize_value`` / ``deserialize_value``: internal codec aliases for encode/decode.
+- ``serialize_value`` / ``deserialize_value``: internal checkpoint encoding/decoding.
+- ``serialize_workflow_agent_response``: portable JSON for generated agent yields,
+  recognized by ``deserialize_value`` without loading worker response-format types.
 - ``reconstruct_to_type``: rebuilds HITL response data (which arrives without type
   markers) to a known type.
 - ``resolve_type``: resolves 'module:class' type keys to Python types.
@@ -37,7 +39,7 @@ from contextlib import suppress
 from dataclasses import is_dataclass
 from typing import Any, cast
 
-from agent_framework import WorkflowEvent
+from agent_framework import AgentResponse, Content, Message, WorkflowEvent
 from agent_framework._workflows._checkpoint_encoding import (
     _PICKLE_MARKER,  # pyright: ignore[reportPrivateUsage]
     _TYPE_MARKER,  # pyright: ignore[reportPrivateUsage]
@@ -47,7 +49,12 @@ from agent_framework._workflows._checkpoint_encoding import (
 from agent_framework._workflows._events import WorkflowEventType
 from pydantic import BaseModel
 
+from .._response_utils import load_agent_response, serialize_agent_response
+
 logger = logging.getLogger(__name__)
+
+_WORKFLOW_AGENT_RESPONSE_KEY = "_durable_agent_response"
+_WORKFLOW_AGENT_RESPONSE_VERSION = 1
 
 
 def resolve_type(type_key: str) -> type | None:
@@ -171,6 +178,14 @@ def strip_subworkflow_markers(data: Any) -> Any:
 # ============================================================================
 
 
+def serialize_workflow_agent_response(response: AgentResponse) -> dict[str, Any]:
+    """Encode a generated agent yield as base-response JSON, without worker types."""
+    return {
+        _WORKFLOW_AGENT_RESPONSE_KEY: _WORKFLOW_AGENT_RESPONSE_VERSION,
+        "response": serialize_agent_response(response),
+    }
+
+
 def serialize_value(value: Any) -> Any:
     """Encode a value for JSON-compatible cross-activity communication (internal).
 
@@ -188,13 +203,12 @@ def serialize_value(value: Any) -> Any:
 
 
 def deserialize_value(value: Any) -> Any:
-    """Decode a value previously encoded with :func:`serialize_value` (internal).
+    """Decode checkpoint values and known generated-agent response envelopes.
 
-    Framework-internal codec. Delegates to core checkpoint decoding which
-    unpickles base64-encoded values and verifies type integrity. Not part of the
-    public API: callers only ever hand it values that the framework produced
-    itself or that have already passed the :func:`strip_pickle_markers` trust
-    boundary, so untrusted markers can never reach ``pickle.loads()`` here.
+    Generated agent yields contain base-response JSON, not persisted Python type
+    names. Ordinary checkpoint envelopes still delegate to core decoding. Callers
+    must supply framework-produced data or values that have already passed the
+    :func:`strip_pickle_markers` trust boundary.
 
     Args:
         value: The serialized data (dict with pickle markers, list, or primitive)
@@ -202,16 +216,36 @@ def deserialize_value(value: Any) -> Any:
     Returns:
         Reconstructed typed object if type metadata found, otherwise original value.
     """
+    if isinstance(value, dict):
+        data = cast(dict[str, Any], value)
+        if _WORKFLOW_AGENT_RESPONSE_KEY in data:
+            version = data[_WORKFLOW_AGENT_RESPONSE_KEY]
+            if (
+                type(version) is not int
+                or version != _WORKFLOW_AGENT_RESPONSE_VERSION
+                or set(data) != {_WORKFLOW_AGENT_RESPONSE_KEY, "response"}
+                or not isinstance(data["response"], dict)
+            ):
+                raise ValueError("Invalid or unsupported workflow agent response envelope")
+            # The response loader follows only known envelope fields. In particular,
+            # value/additional_properties remain application JSON, not codec input.
+            return load_agent_response(cast("dict[str, Any]", data["response"]))
+        if _PICKLE_MARKER in data and _TYPE_MARKER in data:
+            # Do not walk the restored object: the core codec also pickles ordinary
+            # application dictionaries that contain reserved checkpoint keys.
+            return decode_checkpoint_value(data)
+        return {key: deserialize_value(item) for key, item in data.items()}
+    if isinstance(value, list):
+        return [deserialize_value(item) for item in cast(list[Any], value)]
     return decode_checkpoint_value(value)
 
 
 def deserialize_workflow_output(output: Any) -> Any:
-    """Reconstruct the workflow outputs produced by the shared activity.
+    """Reconstruct activity and generated agent outputs from the shared engine.
 
-    Each value an executor yields is encoded with :func:`serialize_value` before
-    it reaches the orchestrator, so typed objects (dataclasses, Pydantic models,
-    ``AgentResponse``, ...) are stored as checkpoint-marker dicts. This reverses
-    that encoding so callers receive the original objects.
+    Activity yields retain their checkpoint encoding. Generated agent yields use
+    a known response envelope and restore as base ``AgentResponse`` objects with
+    JSON structured values, without requiring the worker's response-format class.
 
     This is the single decode path shared by every host (the in-process
     :class:`DurableWorkflowClient` and the Azure Functions status endpoint) so
@@ -226,8 +260,8 @@ def deserialize_workflow_output(output: Any) -> Any:
             of yielded outputs or a single value).
 
     Returns:
-        The output with every checkpoint-encoded value reconstructed; primitives
-        and plain JSON structures pass through unchanged.
+        The output with checkpoint values and known response envelopes reconstructed;
+        primitives and other plain JSON structures pass through unchanged.
     """
     return deserialize_value(output)
 
@@ -323,8 +357,9 @@ def reconstruct_to_type(value: Any, target_type: type) -> Any:
     Tries strategies in order:
     1. Return as-is if already the correct type
     2. deserialize_value (for data with any type markers)
-    3. Pydantic model_validate (for Pydantic models)
-    4. Dataclass constructor (for dataclasses)
+    3. Safe base Content/Message construction (for those exact declared types)
+    4. Pydantic model_validate (for Pydantic models)
+    5. Dataclass constructor (for dataclasses)
 
     Args:
         value: The value to reconstruct (typically a dict from JSON)
@@ -332,6 +367,10 @@ def reconstruct_to_type(value: Any, target_type: type) -> Any:
 
     Returns:
         Reconstructed value if possible, otherwise the original value
+
+    Raises:
+        TypeError: If a declared Content or Message payload has invalid constructor fields.
+        ValueError: If a declared Content or Message payload has a malformed envelope.
     """
     if value is None:
         return None
@@ -350,6 +389,13 @@ def reconstruct_to_type(value: Any, target_type: type) -> Any:
     decoded = deserialize_value(value)
     if not isinstance(decoded, dict):
         return decoded
+
+    # The declared type is trusted, but nested payload type names are not. Use
+    # the fixed envelope loader, leaving arbitrary application data opaque.
+    if target_type is Message:
+        return load_agent_response({"messages": [value]}).messages[0]
+    if target_type is Content:
+        return load_agent_response({"messages": [{"role": "user", "contents": [value]}]}).messages[0].contents[0]
 
     # Try Pydantic model validation (for unmarked dicts, e.g., external HITL data)
     if issubclass(target_type, BaseModel):

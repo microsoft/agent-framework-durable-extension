@@ -127,6 +127,7 @@ class RunRequest:
     orchestration_id: str | None = None
     options: dict[str, Any] = field(default_factory=lambda: {})
     context_messages: list[dict[str, Any]] | None = None
+    context_message_ids: list[str] | None = None
 
     def __init__(
         self,
@@ -141,7 +142,10 @@ class RunRequest:
         orchestration_id: str | None = None,
         options: dict[str, Any] | None = None,
         context_messages: list[dict[str, Any]] | None = None,
+        context_message_ids: list[str] | None = None,
     ) -> None:
+        if not isinstance(correlation_id, str) or not correlation_id.strip():
+            raise ValueError("correlationId must be a non-empty string.")
         self.message = message
         self.correlation_id = correlation_id
         self.role = self.coerce_role(role)
@@ -157,6 +161,14 @@ class RunRequest:
         ):
             raise ValueError("contextMessages must be a list of message objects.")
         self.context_messages = context_messages
+        if context_message_ids is not None and (
+            context_messages is None
+            or not isinstance(context_message_ids, list)
+            or len(context_message_ids) != len(context_messages)
+            or any(not isinstance(identity, str) or not identity for identity in context_message_ids)
+        ):
+            raise ValueError("contextMessageIds must contain one non-empty occurrence ID per context message.")
+        self.context_message_ids = context_message_ids
 
     @staticmethod
     def coerce_role(value: str | None) -> str:
@@ -187,6 +199,8 @@ class RunRequest:
             result["orchestrationId"] = self.orchestration_id
         if self.context_messages is not None:
             result["contextMessages"] = self.context_messages
+        if self.context_message_ids is not None:
+            result["contextMessageIds"] = self.context_message_ids
         return result
 
     @classmethod
@@ -197,7 +211,9 @@ class RunRequest:
         except json.JSONDecodeError as e:
             raise ValueError("The durable agent state is not valid JSON.") from e
 
-        return cls.from_dict(dict_data)
+        if not isinstance(dict_data, dict):
+            raise ValueError("RunRequest must be a JSON object.")
+        return cls.from_dict(cast("dict[str, Any]", dict_data))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RunRequest:
@@ -234,6 +250,7 @@ class RunRequest:
             orchestration_id=data.get("orchestrationId"),
             options=cast(dict[str, Any], options) if isinstance(options, dict) else {},
             context_messages=context_messages,
+            context_message_ids=data.get("contextMessageIds"),
         )
 
 

@@ -41,6 +41,7 @@ class _InlineWorkflowHost:
         message: str,
         orchestration_instance_id: str,
         context_messages: list[dict[str, Any]] | None = None,
+        context_message_ids: list[str] | None = None,
     ) -> Any:
         raise AssertionError("This test workflow has no agent executors")
 

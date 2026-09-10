@@ -218,15 +218,16 @@ class TestDurableAgentState:
         assert len(restored.data.conversation_history) == len(state.data.conversation_history)
         assert restored.data.conversation_history[0].correlation_id == "test-456"
 
-    def test_function_call_round_trip_preserves_string_arguments(self) -> None:
-        """Function call arguments should remain strings across durable state replay."""
+    @pytest.mark.parametrize("arguments", ['{"location":"Chicago"}', '{\n  "location": "Chicago"\n}', '{"location":'])
+    def test_function_call_round_trip_preserves_string_arguments(self, arguments: str) -> None:
+        """Replay preserves the original argument string, including whitespace or partial JSON."""
         original = Message(
             role="assistant",
             contents=[
                 Content.from_function_call(
                     call_id="call-123",
                     name="get_weather",
-                    arguments='{"location":"Chicago"}',
+                    arguments=arguments,
                 )
             ],
         )
@@ -235,7 +236,7 @@ class TestDurableAgentState:
         restored = durable_message.to_chat_message()
 
         assert restored.contents[0].type == "function_call"
-        assert restored.contents[0].arguments == '{"location": "Chicago"}'
+        assert restored.contents[0].arguments == arguments
 
     def test_function_call_content_supports_legacy_mapping_arguments(self) -> None:
         """Existing persisted mapping arguments should still restore successfully."""
@@ -466,15 +467,23 @@ class TestDurableAgentStateUnknownContent:
 
         assert unknown.content == {"some": "data"}
 
-    def test_unknown_content_to_ai_content_fallback_on_invalid_type_dict(self) -> None:
-        """Test that to_ai_content falls back when dict has 'type' but is not valid Content."""
-        invalid = {"type": "bogus_not_a_real_content_type", "extra": "stuff"}
-        unknown = DurableAgentStateUnknownContent(content=invalid)
+    def test_unknown_content_to_ai_content_preserves_future_type(self) -> None:
+        """Core accepts arbitrary content type strings and ignores unknown envelope fields."""
+        future = {
+            "type": "bogus_not_a_real_content_type",
+            "extra": "stuff",
+            "additional_properties": {"opaque": [1]},
+        }
+        unknown = DurableAgentStateUnknownContent(content=future)
 
         result = unknown.to_ai_content()
 
-        assert result.type == "unknown"
-        assert result.additional_properties == {"content": invalid}
+        assert result.type == future["type"]
+        assert result.additional_properties == {"opaque": [1]}
+        assert not hasattr(result, "extra")
+        result.additional_properties["opaque"].append(2)
+        assert unknown.to_dict()["content"] == future
+        assert future["additional_properties"] == {"opaque": [1]}
 
     def test_from_ai_content_unknown_type_produces_serializable_state(self) -> None:
         """Test that unknown content types in message conversion produce JSON-serializable state."""

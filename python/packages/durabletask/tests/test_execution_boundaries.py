@@ -35,6 +35,7 @@ from agent_framework_durabletask._callbacks import AgentCallbackContext
 from agent_framework_durabletask._durable_agent_state import DurableAgentStateResponse
 from agent_framework_durabletask._history_provider import current_durable_history_binding
 from agent_framework_durabletask._message_identity import message_identity
+from agent_framework_durabletask._state_migration import migrate_legacy_state, state_snapshot_digest
 
 
 class _RecoverableExternalHistory(HistoryProvider):
@@ -618,7 +619,10 @@ async def test_unsupported_stream_type_error_still_allows_one_non_streaming_invo
 
     assert agent.run_modes == [True, False]
     assert len(client.received_messages) == 1 and response.text == "reply-1"
-    assert callback.updates == [] and callback.responses == [response]
+    assert callback.updates == [] and len(callback.responses) == 1
+    assert callback.responses[0] is not response
+    assert callback.responses[0].to_dict() == response.to_dict()
+    assert callback.responses[0].messages[0] is not response.messages[0]
     data = _committed(provider)["data"]
     assert data["responseMailbox"]["unsupported-stream"]["response"] == response.to_dict()
     assert "unsupported-stream" in data["completedCorrelations"] and provider.writes == 1
@@ -721,7 +725,15 @@ def test_response_writer_and_migration_keep_completion_evidence_after_payload_ex
     state = DurableAgentState("1.1.0" if legacy else "2.0.0")
     if legacy:
         state.data.conversation_history.append(DurableAgentStateResponse.from_run_response("completed", response))
-        state.prepare_for_write(delivery_window_seconds=3600)
+        source = state.to_dict()
+        state = migrate_legacy_state(
+            source,
+            source_digest=state_snapshot_digest(source),
+            source_session_id="source-session",
+            migration_id="expiry-migration",
+            ownership_transfer_id="quiesced-owner",
+            delivery_window_seconds=3600,
+        )
     else:
         state.record_response("completed", response, delivery_window_seconds=3600)
     raw = json.loads(state.to_json())

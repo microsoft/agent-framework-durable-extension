@@ -24,6 +24,7 @@ from agent_framework_durabletask import (
     AgentEntityStateProviderMixin,
     DurableAgentState,
     workflow_orchestrator_name,
+    wrap_workflow_input,
 )
 
 from agent_framework_azurefunctions import AgentFunctionApp
@@ -638,11 +639,11 @@ class TestAgentEntityFactory:
         mock_agent = Mock()
         entity_function = create_agent_entity(mock_agent)
 
-        # Mock context
+        # Reset an admitted v2 target, not a legacy session.
         mock_context = Mock()
         mock_context.operation_name = "reset"
         mock_context.get_state.return_value = {
-            "schemaVersion": "1.0.0",
+            "schemaVersion": DurableAgentState.SCHEMA_VERSION,
             "data": {
                 "conversationHistory": [
                     {
@@ -1095,6 +1096,7 @@ class TestWorkflowRunRoute:
 
         workflow = Mock()
         workflow.name = workflow_name
+        workflow.executors = {}
         app = AgentFunctionApp(enable_health_check=False)
 
         with (
@@ -1142,7 +1144,7 @@ class TestWorkflowRunRoute:
         client.start_new.assert_awaited_once_with(
             "dafx-test_workflow",
             instance_id="custom-run",
-            client_input={"message": "hello"},
+            client_input=wrap_workflow_input({"message": "hello"}),
         )
 
     async def test_wait_for_response_header_waits_with_default_timeout(self) -> None:
@@ -2289,9 +2291,8 @@ class TestAgentFunctionAppSubworkflow:
     def test_cross_registration_nested_collision_is_atomic(self) -> None:
         """A later top-level workflow whose nested child collides aborts before committing it.
 
-        Hosting ``[first, second]`` where ``second``'s nested sub-workflow reuses
-        ``first``'s child name must raise *before* ``second`` registers any primitives,
-        so the app is never left with ``second`` half-configured.
+        Configuring ``second`` after ``first`` must preserve the first registration
+        when the second workflow's nested child has a conflicting identity.
         """
         shared_a, _ = self._inner_agent_wf("shared", "agent_node")
         shared_b, _ = self._inner_agent_wf("shared", "other_node")  # different instance, same name
@@ -2301,15 +2302,43 @@ class TestAgentFunctionAppSubworkflow:
         with (
             patch.object(AgentFunctionApp, "_setup_executor_activity"),
             patch.object(AgentFunctionApp, "_setup_workflow_orchestration") as setup_orch,
-            pytest.raises(ValueError, match="collides"),
         ):
-            AgentFunctionApp(workflows=[first, second])
+            app = AgentFunctionApp(workflow=first)
+            identities = dict(app._registration_identities)
+            agents = app.agents
+            with pytest.raises(ValueError, match="collides"):
+                app.configure_workflow(second)
 
         # Only 'first' and its child 'shared' committed primitives; the collision aborted
         # before 'second' (or its colliding child) registered anything.
         registered = {call.args[0].name for call in setup_orch.call_args_list}
         assert registered == {"first", "shared"}
-        assert "second" not in registered
+        assert setup_orch.call_count == 2
+        assert app._registered_orchestrations == {"first": first, "shared": shared_a}
+        assert app._registration_identities == identities
+        assert app.agents == agents
+        assert app.workflows == {"first": first}
+        assert app.workflow is first
+
+    def test_constructor_nested_collision_is_preflighted_before_any_setup(self) -> None:
+        """Constructor validation covers every workflow before installing any triggers."""
+        shared_a, _ = self._inner_agent_wf("shared", "agent_node")
+        shared_b, _ = self._inner_agent_wf("shared", "other_node")
+        first = self._outer_wf("first", shared_a)
+        second = self._outer_wf("second", shared_b)
+
+        with (
+            patch.object(AgentFunctionApp, "_setup_agent_functions") as setup_agent,
+            patch.object(AgentFunctionApp, "_setup_executor_activity") as setup_activity,
+            patch.object(AgentFunctionApp, "_setup_workflow_orchestration") as setup_orch,
+            patch.object(AgentFunctionApp, "_register_workflow_routes") as setup_routes,
+            patch.object(AgentFunctionApp, "_setup_health_route") as setup_health,
+            pytest.raises(ValueError, match="collides"),
+        ):
+            AgentFunctionApp(workflows=[first, second])
+
+        for setup in (setup_agent, setup_activity, setup_orch, setup_routes, setup_health):
+            setup.assert_not_called()
 
     def test_executor_id_with_reserved_separator_is_rejected(self) -> None:
         """An executor id containing the nested-HITL separator is rejected at registration."""

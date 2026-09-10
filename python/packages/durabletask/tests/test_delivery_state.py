@@ -11,6 +11,7 @@ import pytest
 from agent_framework import AgentResponse, Annotation, Content, ContinuationToken, Message
 from pydantic import BaseModel
 
+from agent_framework_durabletask import migrate_legacy_state, state_snapshot_digest
 from agent_framework_durabletask._durable_agent_state import (
     DurableAgentState,
     DurableAgentStateEntryJsonType,
@@ -24,6 +25,18 @@ from agent_framework_durabletask._message_identity import message_identity
 DELIVERY_WINDOW_SECONDS = 60
 HISTORICAL_TIME = datetime(2024, 1, 1, tzinfo=timezone.utc)
 CORRELATION_ID = "correlation-1"
+SOURCE_SESSION_ID = "@dafx-delivery@legacy-source"
+
+
+def _migrate_legacy_payload(payload: dict[str, Any]) -> DurableAgentState:
+    return migrate_legacy_state(
+        payload,
+        source_digest=state_snapshot_digest(payload),
+        source_session_id=SOURCE_SESSION_ID,
+        migration_id="delivery-migration-1",
+        ownership_transfer_id="delivery-transfer-1",
+        delivery_window_seconds=DELIVERY_WINDOW_SECONDS,
+    )
 
 
 def _response(*, value: Any = None) -> AgentResponse[Any]:
@@ -427,11 +440,12 @@ def test_legacy_reader_round_trip_and_polling_do_not_upgrade_state(version: str,
 
 @pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
 def test_legacy_conversion_records_a_fresh_grace_window_not_a_historical_original(version: str) -> None:
-    state = DurableAgentState.from_dict(_legacy_payload(version))
-    legacy_response = state.try_get_agent_response(CORRELATION_ID)
+    payload = _legacy_payload(version)
+    original = deepcopy(payload)
+    legacy_response = DurableAgentState.from_dict(payload).try_get_agent_response(CORRELATION_ID)
     assert isinstance(legacy_response, AgentResponse)
     before = datetime.now(timezone.utc)
-    state.prepare_for_write(delivery_window_seconds=DELIVERY_WINDOW_SECONDS)
+    state = _migrate_legacy_payload(payload)
     after = datetime.now(timezone.utc)
 
     restored = DurableAgentState.from_json(state.to_json())
@@ -443,6 +457,15 @@ def test_legacy_conversion_records_a_fresh_grace_window_not_a_historical_origina
     assert datetime.fromisoformat(mailbox["expiresAt"]) - created_at == timedelta(seconds=DELIVERY_WINDOW_SECONDS)
     assert restored.data.completed_correlations[CORRELATION_ID] == {"completedAt": mailbox["createdAt"], "legacy": True}
     assert restored.data.ingested_messages == {"legacy-known-id": None}
+    assert restored.data.unknown_fields["migration"] == {
+        "id": "delivery-migration-1",
+        "sourceDigest": state_snapshot_digest(original),
+        "sourceSessionId": SOURCE_SESSION_ID,
+        "ownershipTransferId": "delivery-transfer-1",
+        "createdAt": mailbox["createdAt"],
+    }
+    assert restored.data.session == {"session_id": SOURCE_SESSION_ID, "state": {}}
+    assert payload == original
     delivered = restored.try_get_agent_response(CORRELATION_ID)
     assert isinstance(delivered, AgentResponse)
     assert delivered.to_dict() == legacy_response.to_dict()
@@ -471,6 +494,8 @@ def test_scalar_legacy_ingestion_cannot_be_migrated_without_evidence(version: st
     for _ in range(2):
         with pytest.raises(ValueError, match="ingestedPositions.*recorded delivery evidence"):
             state.prepare_for_write(delivery_window_seconds=DELIVERY_WINDOW_SECONDS)
+        with pytest.raises(ValueError, match="ingestedPositions.*recorded delivery evidence"):
+            _migrate_legacy_payload(payload)
         assert state.to_json() == before
         assert payload == original
         assert state.data.response_mailbox == {}
@@ -483,11 +508,12 @@ def test_scalar_legacy_ingestion_cannot_be_migrated_without_evidence(version: st
 
 
 @pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "2.0.0", "2.7.3"])
-def test_unknown_root_data_and_entry_properties_survive_reload_and_writer_upgrade(version: str) -> None:
+def test_unknown_root_data_and_entry_properties_survive_reload_and_explicit_migration(version: str) -> None:
     payload = _legacy_payload(version)
     payload["futureRoot"] = {"nested": [1, {"keep": True}]}
     payload["data"]["futureData"] = {"nested": [2, {"keep": None}]}
     payload["data"]["session"] = {
+        "session_id": SOURCE_SESSION_ID,
         "owner": "custom-provider",
         "state": {"external": {"messages": [{"custom": "owned data"}], "cursor": [3, 4]}},
     }
@@ -521,7 +547,15 @@ def test_unknown_root_data_and_entry_properties_survive_reload_and_writer_upgrad
     assert replayed == ["request", "response", "compaction"]
     assert state.try_get_agent_response("opaque") is None
 
-    state.prepare_for_write(delivery_window_seconds=DELIVERY_WINDOW_SECONDS)
+    if version.startswith("1."):
+        state = _migrate_legacy_payload(payload)
+    elif version == "2.0.0":
+        state.prepare_for_write(delivery_window_seconds=DELIVERY_WINDOW_SECONDS)
+    else:
+        # Future revisions remain readable without permitting a write or downgrading the source.
+        with pytest.raises(ValueError, match="Only 2.0.0 is writable"):
+            state.prepare_for_write(delivery_window_seconds=DELIVERY_WINDOW_SECONDS)
+        assert state.to_dict() == payload
     upgraded = DurableAgentState.from_json(state.to_json()).to_dict()
     assert upgraded["schemaVersion"] == ("2.0.0" if version.startswith("1.") else version)
     assert upgraded["futureRoot"] == payload["futureRoot"]

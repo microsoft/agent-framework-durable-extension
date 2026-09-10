@@ -79,6 +79,7 @@ class WorkflowOrchestrationContext(Protocol):
         message: str,
         orchestration_instance_id: str,
         context_messages: list[dict[str, Any]] | None = None,
+        context_message_ids: list[str] | None = None,
     ) -> Any:
         """Create a yieldable task that runs an agent executor.
 
@@ -88,6 +89,7 @@ class WorkflowOrchestrationContext(Protocol):
             orchestration_instance_id: Instance ID used as the entity session key.
             context_messages: Optional upstream conversation (serialized ``Message`` dicts)
                 delivered to the agent as prior context.
+            context_message_ids: Occurrence identities, without changing application-visible IDs.
 
         Returns:
             A yieldable task whose result is an ``AgentResponse``.

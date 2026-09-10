@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent_framework import (
-    AgentExecutorRequest,
     AgentExecutorResponse,
     AgentResponse,
     Message,
@@ -22,7 +21,6 @@ from agent_framework._workflows._edge import (
 )
 
 from agent_framework_azurefunctions._workflow import (
-    _extract_message_content,
     build_agent_executor_response,
     route_message_through_edge_groups,
 )
@@ -196,76 +194,6 @@ class TestBuildAgentExecutorResponse:
         assert response.full_conversation[0].text == "First"
         assert response.full_conversation[1].text == "Previous"
         assert response.full_conversation[2].text == "Current response"
-
-
-class TestExtractMessageContent:
-    """Test suite for _extract_message_content function."""
-
-    def test_extract_from_string(self) -> None:
-        """Test extracting content from plain string."""
-        result = _extract_message_content("Hello, world!")
-
-        assert result == "Hello, world!"
-
-    def test_extract_from_agent_executor_response_with_text(self) -> None:
-        """Test extracting from AgentExecutorResponse with text."""
-        response = AgentExecutorResponse(
-            executor_id="exec",
-            agent_response=AgentResponse(messages=[Message(role="assistant", contents=["Response text"])]),
-            full_conversation=[Message(role="assistant", contents=["Response text"])],
-        )
-
-        result = _extract_message_content(response)
-
-        assert result == "Response text"
-
-    def test_extract_from_agent_executor_response_with_messages(self) -> None:
-        """Test extracting from AgentExecutorResponse with messages."""
-        response = AgentExecutorResponse(
-            executor_id="exec",
-            agent_response=AgentResponse(
-                messages=[
-                    Message(role="user", contents=["First"]),
-                    Message(role="assistant", contents=["Last message"]),
-                ]
-            ),
-            full_conversation=[
-                Message(role="user", contents=["First"]),
-                Message(role="assistant", contents=["Last message"]),
-            ],
-        )
-
-        result = _extract_message_content(response)
-
-        # AgentResponse.text concatenates all message texts
-        assert result == "FirstLast message"
-
-    def test_extract_from_agent_executor_request(self) -> None:
-        """Test extracting from AgentExecutorRequest."""
-        request = AgentExecutorRequest(
-            messages=[
-                Message(role="user", contents=["First"]),
-                Message(role="user", contents=["Last request"]),
-            ]
-        )
-
-        result = _extract_message_content(request)
-
-        assert result == "Last request"
-
-    def test_extract_from_dict_returns_empty(self) -> None:
-        """Test that dict messages return empty string (unexpected input)."""
-        msg_dict = {"messages": [{"text": "Hello"}]}
-
-        result = _extract_message_content(msg_dict)
-
-        assert result == ""
-
-    def test_extract_returns_empty_for_unknown_type(self) -> None:
-        """Test that unknown types return empty string."""
-        result = _extract_message_content(12345)
-
-        assert result == ""
 
 
 class TestEdgeGroupIntegration:

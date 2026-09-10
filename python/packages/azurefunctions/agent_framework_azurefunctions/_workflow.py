@@ -25,7 +25,6 @@ from agent_framework_durabletask._workflows.orchestrator import (
     PendingHITLRequest,
     TaskMetadata,
     TaskType,
-    _extract_message_content,  # pyright: ignore[reportPrivateUsage]
     build_agent_executor_response,
     execute_hitl_response_handler,
     route_message_through_edge_groups,
@@ -48,7 +47,6 @@ __all__ = [
     "PendingHITLRequest",
     "TaskMetadata",
     "TaskType",
-    "_extract_message_content",
     "build_agent_executor_response",
     "execute_hitl_response_handler",
     "route_message_through_edge_groups",

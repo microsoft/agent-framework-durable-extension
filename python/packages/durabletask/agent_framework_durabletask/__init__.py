@@ -12,10 +12,14 @@ from ._callbacks import AgentCallbackContext, AgentResponseCallbackProtocol
 from ._client import DurableAIAgentClient
 from ._configuration import (
     INHERIT,
+    AgentRegistrationSettings,
     Inherit,
+    RegistrationIdentity,
     StateBudgetOverride,
     resolve_state_budget_override,
+    validate_agent_configuration,
     validate_response_delivery_window,
+    validate_runtime_deployment,
 )
 from ._constants import (
     DEFAULT_MAX_POLL_RETRIES,
@@ -62,7 +66,12 @@ from ._executors import DurableAgentExecutor
 from ._history_provider import DurableHistoryBinding, DurableHistoryProvider, validate_history_providers
 from ._models import AgentSessionId, DurableAgentSession, RunRequest
 from ._orchestration_context import DurableAIAgentOrchestrationContext
-from ._response_utils import ensure_response_format, load_agent_response, serialize_agent_response
+from ._response_utils import (
+    ensure_response_format,
+    is_terminal_agent_response,
+    load_agent_response,
+    serialize_agent_response,
+)
 from ._retention import (
     DEFAULT_MAX_STATE_BYTES,
     DEFAULT_RETENTION,
@@ -77,6 +86,7 @@ from ._retention import (
     validate_retention,
 )
 from ._shim import DurableAIAgent, build_agent_task
+from ._state_migration import migrate_legacy_state, state_snapshot_digest
 from ._worker import DurableAIAgentWorker
 from ._workflows.activity import execute_workflow_activity
 from ._workflows.client import DurableWorkflowClient
@@ -91,6 +101,7 @@ from ._workflows.naming import (
     workflow_orchestrator_name,
 )
 from ._workflows.orchestrator import run_workflow_orchestrator
+from ._workflows.protocol import WORKFLOW_ENGINE_VERSION, unwrap_workflow_input, wrap_workflow_input
 from ._workflows.registration import WorkflowRegistrationPlan, collect_hosted_workflows, plan_workflow_registration
 from ._workflows.runner_context import CapturingRunnerContext
 from ._workflows.serialization import deserialize_workflow_output
@@ -155,9 +166,11 @@ __all__ = [
     "THREAD_ID_HEADER",
     "WAIT_FOR_RESPONSE_FIELD",
     "WAIT_FOR_RESPONSE_HEADER",
+    "WORKFLOW_ENGINE_VERSION",
     "AgentCallbackContext",
     "AgentEntity",
     "AgentEntityStateProviderMixin",
+    "AgentRegistrationSettings",
     "AgentResponseCallbackProtocol",
     "AgentSessionId",
     "ApiResponseFields",
@@ -197,6 +210,7 @@ __all__ = [
     "DurableTaskWorkflowContext",
     "DurableWorkflowClient",
     "Inherit",
+    "RegistrationIdentity",
     "RetentionMode",
     "RunRequest",
     "StateBudget",
@@ -211,18 +225,25 @@ __all__ = [
     "ensure_response_format",
     "execute_workflow_activity",
     "is_auto_generated_workflow_name",
+    "is_terminal_agent_response",
     "load_agent_response",
+    "migrate_legacy_state",
     "plan_workflow_registration",
     "resolve_state_budget",
     "resolve_state_budget_override",
     "run_agent_coroutine",
     "run_workflow_orchestrator",
     "serialize_agent_response",
+    "state_snapshot_digest",
+    "unwrap_workflow_input",
+    "validate_agent_configuration",
     "validate_executor_id",
     "validate_history_providers",
     "validate_response_delivery_window",
     "validate_retention",
+    "validate_runtime_deployment",
     "validate_workflow_name",
     "workflow_name_from_orchestrator",
     "workflow_orchestrator_name",
+    "wrap_workflow_input",
 ]

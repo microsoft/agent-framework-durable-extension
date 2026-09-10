@@ -480,7 +480,9 @@ def test_entity_factory_serializes_live_pydantic_value_in_json_mode() -> None:
 def test_entity_factory_and_task_keep_expired_delivery_terminal(cleanup: bool) -> None:
     agent = Mock(context_providers=None)
     agent.run = AsyncMock()
-    context = _entity_context(_mailbox_state(_response(), expired=True, cleanup=cleanup))
+    state = _mailbox_state(_response(), expired=True, cleanup=cleanup)
+    before = deepcopy(state)
+    context = _entity_context(state)
 
     create_agent_entity(agent)(context)
 
@@ -497,7 +499,17 @@ def test_entity_factory_and_task_keep_expired_delivery_terminal(cleanup: bool) -
     assert task.result.messages[0].contents[0].message == EXPIRED_MESSAGE
     assert task.result.value is None
     agent.run.assert_not_called()
-    context.set_state.assert_not_called()
+    if cleanup:
+        context.set_state.assert_not_called()
+    else:
+        context.set_state.assert_called_once()
+        persisted = context.set_state.call_args.args[0]
+        expected = deepcopy(state)
+        del expected["data"]["responseMailbox"]
+        assert persisted == expected
+        assert persisted["data"]["completedCorrelations"] == state["data"]["completedCorrelations"]
+        assert CORRELATION_ID in persisted["data"]["completedCorrelations"]
+    assert state == before
 
 
 @pytest.mark.parametrize("response_format", [None, Answer])

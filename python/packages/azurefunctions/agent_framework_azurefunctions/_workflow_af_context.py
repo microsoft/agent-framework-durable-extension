@@ -62,6 +62,7 @@ class AzureFunctionsWorkflowContext:
         message: str,
         orchestration_instance_id: str,
         context_messages: list[dict[str, Any]] | None = None,
+        context_message_ids: list[str] | None = None,
     ) -> Any:
         return build_agent_task(
             AzureFunctionsAgentExecutor(self._context),
@@ -69,6 +70,7 @@ class AzureFunctionsWorkflowContext:
             message,
             orchestration_instance_id,
             context_messages,
+            context_message_ids,
         )
 
     def prepare_activity_task(self, activity_name: str, input_json: str) -> Any:

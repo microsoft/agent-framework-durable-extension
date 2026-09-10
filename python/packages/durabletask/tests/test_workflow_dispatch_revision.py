@@ -96,6 +96,11 @@ def _dispatch(
     assert wire["orchestrationId"] == context.instance_id
     assert wire["correlationId"] == str(UUID(int=host.call_entity.call_count))
     assert host.new_uuid.call_count == host.call_entity.call_count
+    if "contextMessages" in wire:
+        assert len(wire["contextMessageIds"]) == len(wire["contextMessages"])
+        assert all(isinstance(identity, str) and identity for identity in wire["contextMessageIds"])
+    else:
+        assert "contextMessageIds" not in wire
     host.signal_entity.assert_not_called()
     return task, wire
 
@@ -105,13 +110,15 @@ def test_shim_preserves_explicit_empty_context_in_the_real_run_request(preview: 
     executor = _CaptureExecutor()
     agent = DurableAIAgent(executor, "target")
 
-    request = agent.run(preview, context_messages=[])
+    request = agent.run(preview, context_messages=[], context_message_ids=[])
     wire = json.loads(json.dumps(request.to_dict()))
 
     assert executor.requests == [request]
     assert wire["contextMessages"] == []
+    assert wire["contextMessageIds"] == []
     restored = RunRequest.from_dict(wire)
     assert restored.context_messages == []
+    assert restored.context_message_ids == []
     assert DurableAgentStateRequest.from_run_request(restored).messages == []
 
 
@@ -135,12 +142,16 @@ def test_shim_does_not_preprocess_or_drop_raw_context_type_fields() -> None:
     before = deepcopy(context_messages)
     executor = _CaptureExecutor()
 
-    request = DurableAIAgent(executor, "target").run("", context_messages=context_messages)
+    request = DurableAIAgent(executor, "target").run(
+        "", context_messages=context_messages, context_message_ids=["occurrence-0"]
+    )
     wire = json.loads(json.dumps(request.to_dict(), allow_nan=False))
 
     assert wire["message"] == ""
     assert wire["contextMessages"] == before
+    assert wire["contextMessageIds"] == ["occurrence-0"]
     assert RunRequest.from_dict(wire).context_messages == before
+    assert RunRequest.from_dict(wire).context_message_ids == ["occurrence-0"]
     assert context_messages == before
 
 
@@ -215,9 +226,12 @@ def test_fully_duplicate_projection_reaches_the_dt_entity_on_the_second_call() -
 
     _, first = _dispatch(context, host, executor, upstream, ledger)
     assert first["contextMessages"] == expected
+    assert len(set(first["contextMessageIds"])) == 2
+    assert set(first["contextMessageIds"]).isdisjoint(message.message_id for message in messages)
     _, repeated = _dispatch(context, host, executor, upstream, ledger)
 
     assert repeated["contextMessages"] == []
+    assert repeated["contextMessageIds"] == []
     assert repeated["message"] == ""
     assert first["correlationId"] != repeated["correlationId"]
     assert DurableAgentStateRequest.from_run_request(RunRequest.from_dict(repeated)).messages == []
@@ -245,6 +259,8 @@ def test_tool_only_projection_survives_dt_dispatch_and_request_parsing() -> None
     assert wire["message"] == ""
     assert wire["contextMessages"] == [expected]
     request = RunRequest.from_json(json.dumps(wire))
+    assert request.context_message_ids == wire["contextMessageIds"]
+    assert request.context_message_ids != [message.message_id]
     entry = DurableAgentStateRequest.from_run_request(request)
     assert len(entry.messages) == 1
     forwarded = entry.messages[0].to_chat_message()
@@ -293,6 +309,7 @@ def test_eight_hundred_turns_have_a_bounded_real_dt_request_envelope() -> None:
 
     latest = upstream.full_conversation[-1]
     assert wire["contextMessages"] == [latest.to_dict()]
+    assert len(wire["contextMessageIds"]) == 1
     assert wire["message"] == latest.text[:_AGENT_TASK_MESSAGE_PREVIEW_LIMIT]
     assert len(wire["message"]) == _AGENT_TASK_MESSAGE_PREVIEW_LIMIT
     payload_bytes = len(json.dumps(wire).encode("utf-8"))
@@ -304,6 +321,7 @@ def test_eight_hundred_turns_have_a_bounded_real_dt_request_envelope() -> None:
 
     _, repeated = _dispatch(context, host, executor, upstream, ledger)
     assert repeated["contextMessages"] == []
+    assert repeated["contextMessageIds"] == []
     assert repeated["message"] == ""
     assert len(json.dumps(repeated).encode("utf-8")) < 512
     assert host.call_entity.call_count == 801

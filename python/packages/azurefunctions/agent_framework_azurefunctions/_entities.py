@@ -29,9 +29,10 @@ from agent_framework_durabletask import (
     resolve_state_budget,
     run_agent_coroutine,
     serialize_agent_response,
-    validate_history_providers,
+    validate_agent_configuration,
     validate_response_delivery_window,
     validate_retention,
+    validate_runtime_deployment,
 )
 
 logger = logging.getLogger("agent_framework.azurefunctions")
@@ -49,8 +50,10 @@ class AzureFunctionEntityStateProvider(AgentEntityStateProviderMixin):
 
     def _get_state_dict(self) -> dict[str, Any]:
         raw_state = self._context.get_state(lambda: {})
-        if not isinstance(raw_state, dict):
+        if raw_state is None:
             return {}
+        if not isinstance(raw_state, dict):
+            raise ValueError("Existing durable entity state must be a dictionary; refusing to replace malformed state.")
         return cast(dict[str, Any], raw_state)
 
     def _set_state_dict(self, state: dict[str, Any]) -> None:
@@ -67,6 +70,7 @@ def create_agent_entity(
     agent: SupportsAgentRun,
     callback: AgentResponseCallbackProtocol | None = None,
     *,
+    deployment_mode: str | None = None,
     retention: RetentionMode = DEFAULT_RETENTION,
     max_state_bytes: StateBudget = DEFAULT_MAX_STATE_BYTES,
     high_watermark: float = HIGH_WATERMARK,
@@ -80,6 +84,10 @@ def create_agent_entity(
         callback: Optional callback invoked during streaming and final responses
 
     Keyword Args:
+        deployment_mode: Exactly ``isolated_v2`` to acknowledge an isolated schema 2
+            deployment with upgraded clients. None reads ``DURABLE_AGENTS_DEPLOYMENT_MODE``.
+            Old workflow histories stay on the old engine. This acknowledgement is not runtime
+            proof of isolation and cannot detect peer workers.
         retention: Eager pruning policy, independent of pressure eviction.
         max_state_bytes: Positive integer pressure budget, or None to disable it. Functions cannot
             resolve ``backend_limit`` because the storage backend is configured outside Python.
@@ -91,12 +99,13 @@ def create_agent_entity(
         Entity function configured with the agent
 
     Raises:
-        ValueError: Retention settings or the agent's history providers are invalid.
+        ValueError: Deployment mode, retention settings, or the agent's history providers are invalid.
     """
+    validate_runtime_deployment(deployment_mode)
     validate_retention(retention, high_watermark, low_watermark)
     resolved_budget = resolve_state_budget(max_state_bytes)
     validate_response_delivery_window(response_delivery_window_seconds)
-    validate_history_providers(agent)
+    validate_agent_configuration(agent, retention=retention)
 
     async def _entity_coroutine(context: df.DurableEntityContext) -> None:
         """Async handler that executes the entity operations."""
@@ -134,6 +143,12 @@ def create_agent_entity(
             elif operation == "reset":
                 entity.reset()
                 context.set_result({"status": "reset"})
+
+            elif operation == "expire_responses":
+                context.set_result({"expired": entity.expire_responses()})
+
+            elif operation == "migrate":
+                context.set_result(entity.migrate(context.get_input()))
 
             else:
                 logger.error("[entity_function] Unknown operation: %s", operation)

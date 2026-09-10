@@ -71,18 +71,22 @@ def _response(
 
 
 def _ids(call: dict[str, Any]) -> list[str | None]:
+    """Read application IDs, which are independent of delivery occurrences."""
     assert call["contextMessages"] is not None
     return [message.get("message_id") for message in call["contextMessages"]]
+
+
+def _occurrences(call: dict[str, Any]) -> list[str]:
+    ids = call["contextMessageIds"]
+    assert isinstance(ids, list)
+    assert len(ids) == len(call["contextMessages"])
+    assert all(isinstance(value, str) and value.startswith("wf:occurrence:") for value in ids)
+    return ids
 
 
 def _texts(call: dict[str, Any]) -> list[str]:
     assert call["contextMessages"] is not None
     return [Message.from_dict(message).text for message in call["contextMessages"]]
-
-
-def _external_id(producer: str, original_id: str) -> str:
-    address = json.dumps([producer, original_id], ensure_ascii=False)
-    return "wf:external:" + hashlib.sha256(address.encode("utf-8")).hexdigest()
 
 
 class _RecordingHost:
@@ -116,16 +120,25 @@ class _RecordingHost:
         message: str,
         orchestration_instance_id: str,
         context_messages: list[dict[str, Any]] | None = None,
+        context_message_ids: list[str] | None = None,
     ) -> AgentResponse:
+        assert (context_messages is None) == (context_message_ids is None)
+        if context_messages is not None:
+            assert context_message_ids is not None
+            assert len(context_messages) == len(context_message_ids)
         # JSON round-trip the complete adapter arguments, not just a count of messages.
         self.calls.append(
             json.loads(
-                json.dumps({
-                    "executorId": executor_id,
-                    "message": message,
-                    "instanceId": orchestration_instance_id,
-                    "contextMessages": context_messages,
-                })
+                json.dumps(
+                    {
+                        "executorId": executor_id,
+                        "message": message,
+                        "instanceId": orchestration_instance_id,
+                        "contextMessages": context_messages,
+                        "contextMessageIds": context_message_ids,
+                    },
+                    allow_nan=False,
+                )
             )
         )
         if self.fail_prepare:
@@ -288,7 +301,8 @@ def test_projection_remains_stateless_and_does_not_stamp_filter_input() -> None:
 
     assert _build_context_messages(executor, upstream) == expected
     call = _dispatch(_RecordingHost(), executor, upstream, _WorkflowDeliveryLedger())
-    assert _ids(call) == ["wf_source_0"]
+    assert _ids(call) == [None]
+    assert len(_occurrences(call)) == 1
     assert _build_context_messages(executor, upstream) == expected
     assert original.message_id is None
 
@@ -321,7 +335,9 @@ def test_last_agent_delta_preserves_all_selected_assistant_and_tool_messages() -
     assert call["contextMessages"] == [first.to_dict(), second.to_dict()]
     assert call["message"] == ""
     assert _ids(_dispatch(host, executor, upstream, ledger)) == []
-    assert ledger.sent == {"target": {message_identity(first), message_identity(second)}}
+    assert ledger.sent == {
+        "target": set(zip(_occurrences(call), [message_identity(first), message_identity(second)], strict=True))
+    }
 
 
 def test_missing_custom_filter_fails_instead_of_forwarding_unfiltered_input() -> None:
@@ -346,32 +362,44 @@ def test_empty_selection_does_not_mark_unselected_positions_delivered() -> None:
 
 
 def test_sparse_custom_selection_delivers_previously_skipped_lower_positions() -> None:
-    executor = _agent(
-        context_mode="custom", context_filter=lambda messages: messages[::2] if len(messages) == 3 else messages[1::2]
-    )
+    positions = [0, 2]
+    executor = _agent(context_mode="custom", context_filter=lambda messages: [messages[i] for i in positions])
     host = _RecordingHost()
     ledger = _WorkflowDeliveryLedger()
+    upstream = _response([_message(i) for i in [1, 2, 3, 4]])
 
-    first = _dispatch(host, executor, _response([_message(i) for i in [1, 2, 3]]), ledger)
-    second = _dispatch(host, executor, _response([_message(i) for i in [1, 2, 3, 4]]), ledger)
-    repeated = _dispatch(host, executor, _response([_message(i) for i in [1, 2, 3, 4]]), ledger)
+    first = _dispatch(host, executor, upstream, ledger)
+    positions[:] = [1, 3]
+    second = _dispatch(host, executor, upstream, ledger)
+    repeated = _dispatch(host, executor, upstream, ledger)
 
     assert _ids(first) == ["wf_source_1", "wf_source_3"]
     assert _ids(second) == ["wf_source_2", "wf_source_4"]
     assert _ids(repeated) == []
     assert repeated["message"] == ""
-    assert ledger.sent == {"target": {message_identity(_message(i)) for i in [1, 2, 3, 4]}}
+    assert len(set(_occurrences(first) + _occurrences(second))) == 4
+    assert ledger.sent == {
+        "target": {
+            (occurrence, message_identity(Message.from_dict(message)))
+            for call in [first, second]
+            for occurrence, message in zip(_occurrences(call), call["contextMessages"], strict=True)
+        }
+    }
 
 
 def test_reordered_projection_preserves_new_message_order_without_a_cursor() -> None:
     host = _RecordingHost()
     ledger = _WorkflowDeliveryLedger()
-    executor = _agent()
+    positions = [2, 3]
+    executor = _agent(context_mode="custom", context_filter=lambda messages: [messages[i] for i in positions])
+    upstream = _response([_message(i) for i in [4, 2, 3, 1]])
 
-    _dispatch(host, executor, _response([_message(3), _message(1)]), ledger)
-    call = _dispatch(host, executor, _response([_message(i) for i in [4, 2, 3, 1]]), ledger)
+    first = _dispatch(host, executor, upstream, ledger)
+    positions[:] = [0, 1, 2, 3]
+    call = _dispatch(host, executor, upstream, ledger)
 
     assert _ids(call) == ["wf_source_4", "wf_source_2"]
+    assert set(_occurrences(first)).isdisjoint(_occurrences(call))
     assert call["message"] == "source-2"
 
 
@@ -380,12 +408,18 @@ def test_fanout_delivery_is_independent_for_each_target() -> None:
     ledger = _WorkflowDeliveryLedger()
     left, right = _agent("left"), _agent("right")
     first = _response([_message(1), _message(3)])
-    next_projection = _response([_message(2), _message(4), _message(1)])
+    next_projection = _response([_message(2), _message(4), first.full_conversation[0]], latest=[])
 
-    assert _ids(_dispatch(host, left, first, ledger)) == ["wf_source_1", "wf_source_3"]
-    assert _ids(_dispatch(host, right, next_projection, ledger)) == ["wf_source_2", "wf_source_4", "wf_source_1"]
-    assert _ids(_dispatch(host, left, next_projection, ledger)) == ["wf_source_2", "wf_source_4"]
-    assert _ids(_dispatch(host, right, first, ledger)) == ["wf_source_3"]
+    left_first = _dispatch(host, left, first, ledger)
+    right_next = _dispatch(host, right, next_projection, ledger)
+    left_next = _dispatch(host, left, next_projection, ledger)
+    right_first = _dispatch(host, right, first, ledger)
+    assert _ids(left_first) == ["wf_source_1", "wf_source_3"]
+    assert _ids(right_next) == ["wf_source_2", "wf_source_4", "wf_source_1"]
+    assert _ids(left_next) == ["wf_source_2", "wf_source_4"]
+    assert _ids(right_first) == ["wf_source_3"]
+    assert _occurrences(left_first) == [_occurrences(right_next)[-1], *_occurrences(right_first)]
+    assert _occurrences(left_next) == _occurrences(right_next)[:2]
 
 
 def test_fanin_tracks_each_messages_producer_not_the_immediate_sender() -> None:
@@ -398,8 +432,8 @@ def test_fanin_tracks_each_messages_producer_not_the_immediate_sender() -> None:
         _response([common, _message(1, "B")], "relay"),
     ]
     second = [
-        _response([common, _message(99, "A"), _message(100, "A")], "other-relay"),
-        _response([common, _message(0, "B"), _message(1, "B")], "other-relay"),
+        _response([common, _message(99, "A"), first[0].full_conversation[-1]], "other-relay", latest=[]),
+        _response([common, _message(0, "B"), first[1].full_conversation[-1]], "other-relay", latest=[]),
     ]
 
     projected = [m.to_dict() for response in first for m in response.full_conversation]
@@ -409,30 +443,39 @@ def test_fanin_tracks_each_messages_producer_not_the_immediate_sender() -> None:
 
 
 @pytest.mark.parametrize(
-    ("message_id", "already_scoped"),
+    "message_id",
     [
-        ("wf_source_7", True),
-        ("wf:external:" + "a" * 64, True),
-        ("wf:projection:" + "b" * 64, True),
-        ("custom-id", False),
-        ("wf_not_a_position", False),
-        ("wf:external:not-a-hash", False),
-        ("wf:projection:not-a-hash", False),
+        "wf_source_7",
+        "wf:external:" + "a" * 64,
+        "wf:projection:" + "b" * 64,
+        "custom-id",
+        "wf_not_a_position",
+        "wf:external:not-a-hash",
+        "wf:projection:not-a-hash",
     ],
 )
-def test_same_id_content_changes_are_delivered_and_exact_repeats_are_not(message_id: str, already_scoped: bool) -> None:
+def test_same_id_content_changes_are_delivered_and_exact_repeats_are_not(message_id: str) -> None:
     host = _RecordingHost()
     ledger = _WorkflowDeliveryLedger()
     executor = _agent()
     original = Message("assistant", ["old"], message_id=message_id)
     changed = Message("assistant", ["new"], message_id=message_id)
 
-    assert _texts(_dispatch(host, executor, _response([original]), ledger)) == ["old"]
-    assert _ids(_dispatch(host, executor, _response([deepcopy(original)]), ledger)) == []
-    call = _dispatch(host, executor, _response([changed]), ledger)
+    source = _response([original])
+    first = _dispatch(host, executor, source, ledger)
+    assert _texts(first) == ["old"]
+    copied = _agent(context_mode="custom", context_filter=lambda messages: deepcopy(messages))
+    assert _occurrences(_dispatch(host, copied, source, ledger)) == []
+    redacted = _agent(context_mode="custom", context_filter=lambda messages: [deepcopy(changed)])
+    call = _dispatch(host, redacted, source, ledger)
     assert _texts(call) == ["new"]
-    assert _ids(call) == [message_id if already_scoped else _external_id("source", message_id)]
-    assert _ids(_dispatch(host, executor, _response([original, changed]), ledger)) == []
+    assert _ids(call) == [message_id]
+    assert _occurrences(call) == _occurrences(first)
+    assert _occurrences(_dispatch(host, redacted, source, ledger)) == []
+    assert _occurrences(_dispatch(host, executor, source, ledger)) == []
+    independent = _dispatch(host, executor, _response([deepcopy(original)]), ledger)
+    assert _ids(independent) == [message_id]
+    assert set(_occurrences(first)).isdisjoint(_occurrences(independent))
     assert original.message_id == changed.message_id == message_id
 
 
@@ -444,13 +487,14 @@ def test_nontext_updates_and_repeated_ids_with_different_contents_are_not_lost()
         "tool", [{"type": "function_result", "call_id": "call", "result": {"answer": 1}}], message_id="m"
     )
     changed = Message("tool", [{"type": "function_result", "call_id": "call", "result": {"answer": 2}}], message_id="m")
-    call = _dispatch(host, executor, _response([original, deepcopy(original), changed]), ledger)
+    source = _response([original, deepcopy(original), changed])
+    call = _dispatch(host, executor, source, ledger)
 
-    assert call["contextMessages"] == [
-        {**message.to_dict(), "message_id": _external_id("source", "m")} for message in [original, changed]
-    ]
+    assert call["contextMessages"] == [message.to_dict() for message in source.full_conversation]
+    assert _ids(call) == ["m"] * 3
+    assert len(set(_occurrences(call))) == 3
     assert call["message"] == ""
-    assert _ids(_dispatch(host, executor, _response([original, changed]), ledger)) == []
+    assert _occurrences(_dispatch(host, executor, source, ledger)) == []
     assert original.message_id == changed.message_id == "m"
 
 
@@ -459,9 +503,12 @@ def test_distinct_custom_ids_do_not_globally_deduplicate_equal_text() -> None:
     ledger = _WorkflowDeliveryLedger()
     executor = _agent()
 
+    occurrences: list[str] = []
     for message_id in ["first-request", "second-request"]:
         call = _dispatch(host, executor, _response([Message("user", ["again"], message_id=message_id)]), ledger)
-        assert _ids(call) == [_external_id("source", message_id)]
+        assert _ids(call) == [message_id]
+        occurrences.extend(_occurrences(call))
+    assert len(set(occurrences)) == 2
 
 
 @pytest.mark.parametrize("mode", ["full", "last_agent", "custom"])
@@ -488,11 +535,10 @@ def test_equal_custom_ids_from_different_producers_have_distinct_transport_ident
     calls = [_dispatch(host, executor, message, ledger) for message in deliveries]
     transported = [message for call in calls for message in call["contextMessages"]]
 
-    assert transported == [
-        {**before, "message_id": _external_id(producer, "custom-id")} for producer in ["left", "right"]
-    ]
-    # Distinct wire IDs and fingerprints also reach the entity-side duplicate check.
-    assert len({message_identity(Message.from_dict(message)) for message in transported}) == 2
+    assert transported == [before, before]
+    # Equal application payloads still represent two independently produced events.
+    assert len({identity for call in calls for identity in _occurrences(call)}) == 2
+    assert len({message_identity(Message.from_dict(message)) for message in transported}) == 1
     assert _ids(_dispatch(host, executor, list(reversed(sources)), ledger)) == []
     assert [source.full_conversation[0].to_dict() for source in sources] == [before, before]
     assert _build_context_messages(executor, sources) == [before, before]
@@ -505,25 +551,21 @@ def test_custom_id_scopes_use_unambiguous_producer_and_id_addresses() -> None:
     ]
     call = _dispatch(_RecordingHost(), _agent(), sources, _WorkflowDeliveryLedger())
 
-    assert _ids(call) == [_external_id("left_part", "id"), _external_id("left", "part_id")]
-    assert len(set(_ids(call))) == 2
+    assert _ids(call) == ["id", "part_id"]
+    assert len(set(_occurrences(call))) == 2
 
 
 def test_mixed_custom_and_anonymous_messages_keep_each_producers_identity() -> None:
     custom = Message("assistant", ["approved"], message_id="custom-id")
     anonymous = Message("user", ["same"])
-    # Re-enveloping unscoped originals declares a new source, even for the same objects.
-    sources = [_response([custom, anonymous], producer) for producer in ["left", "right"]]
+    sources = [_response(deepcopy([custom, anonymous]), producer) for producer in ["left", "right"]]
     host = _RecordingHost()
     ledger = _WorkflowDeliveryLedger()
     executor = _agent()
 
-    assert _ids(_dispatch(host, executor, sources, ledger)) == [
-        _external_id("left", "custom-id"),
-        "wf_left_1",
-        _external_id("right", "custom-id"),
-        "wf_right_1",
-    ]
+    first = _dispatch(host, executor, sources, ledger)
+    assert _ids(first) == ["custom-id", None, "custom-id", None]
+    assert len(set(_occurrences(first))) == 4
     assert _ids(_dispatch(host, executor, sources, ledger)) == []
     assert custom.message_id == "custom-id"
     assert anonymous.message_id is None
@@ -536,35 +578,35 @@ def test_custom_source_identity_survives_chained_copies_and_serialization() -> N
     host = _RecordingHost()
     ledger = _WorkflowDeliveryLedger()
     executor = _agent()
-    source_id = _external_id("origin", "custom-id")
 
-    assert _ids(_dispatch(host, executor, upstream, ledger)) == [source_id]
+    first = _dispatch(host, executor, upstream, ledger)
+    assert _ids(first) == ["custom-id"]
     forwarded = build_agent_executor_response("relay", "reply", None, upstream)
     forwarded = deserialize_value(json.loads(json.dumps(serialize_value(forwarded))))
+    ledger.identify(forwarded, upstream)
     assert _ids(_dispatch(host, executor, forwarded, ledger)) == ["wf_relay_1"]
+    assert ledger.identify(forwarded)[0][0] == _occurrences(first)[0]
     next_hop = build_agent_executor_response("next", "reply", None, forwarded)
     assert _ids(_dispatch(host, executor, next_hop, ledger)) == ["wf_next_2"]
-    assert (
-        forwarded.full_conversation[0].to_dict()
-        == next_hop.full_conversation[0].to_dict()
-        == {
-            **before,
-            "message_id": source_id,
-        }
-    )
+    assert forwarded.full_conversation[0].to_dict() == next_hop.full_conversation[0].to_dict() == before
     assert original.to_dict() == upstream.full_conversation[0].to_dict() == before
 
 
 @pytest.mark.parametrize("message_id", ["wf_origin_7", "wf:external:" + "a" * 64, "wf:projection:" + "b" * 64])
-def test_reserved_workflow_identities_are_not_rescoped_by_relays(message_id: str) -> None:
+def test_workflow_shaped_application_ids_do_not_conflate_independent_relay_outputs(message_id: str) -> None:
     original = Message("assistant", ["approved"], message_id=message_id)
     host = _RecordingHost()
     ledger = _WorkflowDeliveryLedger()
     executor = _agent()
 
-    assert _ids(_dispatch(host, executor, _response([original], "left"), ledger)) == [message_id]
+    first = _dispatch(host, executor, _response([original], "left"), ledger)
+    assert _ids(first) == [message_id]
     copied = Message.from_dict(host.calls[-1]["contextMessages"][0])
-    assert _ids(_dispatch(host, executor, _response([copied], "right"), ledger)) == []
+    source = _response([copied], "right")
+    second = _dispatch(host, executor, source, ledger)
+    assert _ids(second) == [message_id]
+    assert set(_occurrences(first)).isdisjoint(_occurrences(second))
+    assert _occurrences(_dispatch(host, executor, source, ledger)) == []
     forwarded = build_agent_executor_response("relay", "reply", None, _response([copied], "right"))
     assert forwarded.full_conversation[0].message_id == message_id
     assert original.message_id == message_id
@@ -577,9 +619,14 @@ def test_anonymous_equal_text_is_identified_by_source_position_without_mutating_
     originals = [Message("user", ["again"]) for _ in range(3)]
     before = [m.to_dict() for m in originals]
 
-    assert _ids(_dispatch(host, executor, _response(originals[:2]), ledger)) == ["wf_source_0", "wf_source_1"]
-    assert _ids(_dispatch(host, executor, _response(originals), ledger)) == ["wf_source_2"]
-    assert _ids(_dispatch(host, executor, _response(deepcopy(originals)), ledger)) == []
+    first = _dispatch(host, executor, _response(originals[:2], latest=[]), ledger)
+    source = _response(originals, latest=[])
+    second = _dispatch(host, executor, source, ledger)
+    assert _ids(first) == [None, None]
+    assert _ids(second) == [None]
+    assert len(set(_occurrences(first) + _occurrences(second))) == 3
+    copied = _agent(context_mode="custom", context_filter=lambda messages: deepcopy(messages))
+    assert _occurrences(_dispatch(host, copied, source, ledger)) == []
     assert [m.to_dict() for m in originals] == before
     assert all(m.message_id is None for m in originals)
 
@@ -599,7 +646,8 @@ def test_detached_anonymous_copies_do_not_guess_positions_from_equal_text() -> N
 
     calls = replay()
     assert [_texts(call) for call in calls] == [["again"], ["again"]]
-    assert _ids(calls[0]) != _ids(calls[1])
+    assert _ids(calls[0]) == _ids(calls[1]) == [None]
+    assert _occurrences(calls[0]) != _occurrences(calls[1])
     assert calls == replay()
     assert all(m.message_id is None for m in originals)
 
@@ -616,8 +664,14 @@ def test_anonymous_projection_reordering_uses_original_positions() -> None:
     ledger = _WorkflowDeliveryLedger()
     originals = [Message("user", [str(i)]) for i in range(4)]
 
-    assert _ids(_dispatch(host, executor, _response(originals[:3]), ledger)) == ["wf_source_2", "wf_source_0"]
-    assert _ids(_dispatch(host, executor, _response(originals), ledger)) == ["wf_source_3", "wf_source_1"]
+    first = _dispatch(host, executor, _response(originals[:3], latest=[]), ledger)
+    source = _response(originals, latest=[])
+    second = _dispatch(host, executor, source, ledger)
+    assert _texts(first) == ["2", "0"]
+    assert _texts(second) == ["3", "1"]
+    assert _ids(first) == _ids(second) == [None, None]
+    assert len(set(_occurrences(first) + _occurrences(second))) == 4
+    assert _occurrences(_dispatch(host, executor, source, ledger)) == []
     assert all(m.message_id is None for m in originals)
 
 
@@ -625,7 +679,8 @@ def test_reused_anonymous_object_at_two_source_positions_keeps_both_occurrences(
     original = Message("user", ["again"])
     call = _dispatch(_RecordingHost(), _agent(), _response([original, original]), _WorkflowDeliveryLedger())
 
-    assert _ids(call) == ["wf_source_0", "wf_source_1"]
+    assert _ids(call) == [None, None]
+    assert len(set(_occurrences(call))) == 2
     assert original.message_id is None
 
 
@@ -635,7 +690,9 @@ def test_anonymous_same_position_in_different_producers_does_not_collide() -> No
     executor = _agent()
     sources = [_response([Message("user", ["same"])], producer) for producer in ["left", "right"]]
 
-    assert _ids(_dispatch(host, executor, sources, ledger)) == ["wf_left_0", "wf_right_0"]
+    first = _dispatch(host, executor, sources, ledger)
+    assert _ids(first) == [None, None]
+    assert len(set(_occurrences(first))) == 2
     assert _ids(_dispatch(host, executor, list(reversed(sources)), ledger)) == []
     assert all(source.full_conversation[0].message_id is None for source in sources)
 
@@ -647,11 +704,13 @@ def test_anonymous_ids_remain_stable_when_forwarded_around_a_cycle() -> None:
     ledger = _WorkflowDeliveryLedger()
     executor = _agent()
 
-    assert _ids(_dispatch(host, executor, upstream, ledger)) == ["wf_origin_0"]
+    first = _dispatch(host, executor, upstream, ledger)
+    assert _ids(first) == [None]
     forwarded = build_agent_executor_response("relay", "reply", None, upstream)
     assert _ids(_dispatch(host, executor, forwarded, ledger)) == ["wf_relay_1"]
+    assert ledger.identify(forwarded)[0][0] == _occurrences(first)[0]
     assert original.message_id is None
-    assert forwarded.full_conversation[0].message_id == "wf_origin_0"
+    assert forwarded.full_conversation[0].message_id is None
 
 
 def test_synthesized_anonymous_messages_are_distinct_per_handoff_and_replay_stable() -> None:
@@ -669,13 +728,13 @@ def test_synthesized_anonymous_messages_are_distinct_per_handoff_and_replay_stab
         return host.calls
 
     first, repeated = replay()
-    assert len(_ids(first)) == len(_ids(repeated)) == 2
-    assert len(set(_ids(first) + _ids(repeated))) == 4
+    assert _ids(first) == _ids(repeated) == [None, None]
+    assert len(set(_occurrences(first) + _occurrences(repeated))) == 4
     assert [first, repeated] == replay()
     assert _texts(first) == _texts(repeated) == ["summary", "summary"]
 
 
-def test_synthesized_message_with_explicit_id_is_deduplicated_until_content_changes() -> None:
+def test_synthesized_message_with_explicit_id_is_a_new_occurrence_each_handoff() -> None:
     executor = _agent(
         context_mode="custom",
         context_filter=lambda messages: [Message("system", [f"summary-{len(messages)}"], message_id="summary")],
@@ -683,9 +742,14 @@ def test_synthesized_message_with_explicit_id_is_deduplicated_until_content_chan
     host = _RecordingHost()
     ledger = _WorkflowDeliveryLedger()
 
-    assert _texts(_dispatch(host, executor, _response([_message(1)]), ledger)) == ["summary-1"]
-    assert _ids(_dispatch(host, executor, _response([_message(1)]), ledger)) == []
-    assert _texts(_dispatch(host, executor, _response([_message(1), _message(2)]), ledger)) == ["summary-2"]
+    source = _response([_message(1)])
+    first = _dispatch(host, executor, source, ledger)
+    repeated = _dispatch(host, executor, source, ledger)
+    changed = _dispatch(host, executor, _response([_message(1), _message(2)]), ledger)
+    assert _texts(first) == _texts(repeated) == ["summary-1"]
+    assert _texts(changed) == ["summary-2"]
+    assert all(_ids(call) == ["summary"] for call in [first, repeated, changed])
+    assert len({identity for call in [first, repeated, changed] for identity in _occurrences(call)}) == 3
 
 
 def test_last_agent_projection_without_original_position_gets_a_stable_handoff_identity() -> None:
@@ -696,7 +760,8 @@ def test_last_agent_projection_without_original_position_gets_a_stable_handoff_i
     first = _dispatch(_RecordingHost(), executor, upstream, _WorkflowDeliveryLedger())
     replay = _dispatch(_RecordingHost(), executor, deepcopy(upstream), _WorkflowDeliveryLedger())
     assert first == replay
-    assert _ids(first)[0] is not None
+    assert len(_occurrences(first)) == 1
+    assert _ids(first) == [None]
     assert latest.message_id is None
 
 
@@ -720,7 +785,7 @@ def test_preparation_failure_does_not_mark_delivery_or_consume_synthetic_ordinal
     assert ledger.handoffs == {"target": 1}
 
 
-@pytest.mark.parametrize("bad_value", [object(), float("nan")])
+@pytest.mark.parametrize("bad_value", [float("inf"), float("nan")])
 def test_serialization_failure_does_not_partially_record_a_batch(bad_value: Any) -> None:
     host = _RecordingHost()
     ledger = _WorkflowDeliveryLedger()
@@ -735,15 +800,15 @@ def test_serialization_failure_does_not_partially_record_a_batch(bad_value: Any)
 
 
 def test_projection_can_exclude_non_json_source_values() -> None:
-    invalid = Message("user", ["bad"], additional_properties={"nested": {"value": object()}})
+    invalid = Message("user", ["bad"], additional_properties={"nested": {"value": float("nan")}})
     selected = Message("user", ["selected"])
     executor = _agent(
         context_mode="custom", context_filter=lambda messages: [Message.from_dict(messages[-1].to_dict())]
     )
 
     call = _dispatch(_RecordingHost(), executor, _response([invalid, selected]), _WorkflowDeliveryLedger())
-    assert len(_ids(call)) == 1
-    assert (_ids(call)[0] or "").startswith("wf:projection:")
+    assert len(_occurrences(call)) == 1
+    assert _ids(call) == [None]
     assert _texts(call) == ["selected"]
 
 
@@ -789,6 +854,7 @@ def test_eight_hundred_turn_payload_contains_only_new_context_and_a_bounded_enve
     projected = _build_context_messages(executor, upstream)
     full_bytes = len(json.dumps(projected).encode("utf-8"))
     assert final_call["contextMessages"] == [latest.to_dict()]
+    assert len(_occurrences(final_call)) == 1
     assert payload_bytes <= latest_bytes + _AGENT_TASK_MESSAGE_PREVIEW_LIMIT + 200
     assert full_bytes > 100 * payload_bytes
     assert "initial prompt" not in json.dumps(final_call)
@@ -799,15 +865,20 @@ def test_eight_hundred_turn_payload_contains_only_new_context_and_a_bounded_enve
     assert len(json.dumps(repeated).encode("utf-8")) < 200
 
 
-def test_generator_shares_delivery_between_parallel_and_sequential_agent_tasks() -> None:
+def test_generator_preserves_independent_events_between_parallel_and_sequential_agent_tasks() -> None:
     projections = [_response([_message(i) for i in positions]) for positions in ([1, 3], [2, 4], [4, 1])]
     workflow = _workflow([_activity("source"), _agent()], [])
     host = _RecordingHost(activities={"source": [_activity_result(projections)]})
 
     assert _run(host, workflow) == []
     assert host.batch_sizes == [1, 1]
-    assert [_ids(call) for call in host.calls] == [["wf_source_1", "wf_source_3"], ["wf_source_2", "wf_source_4"], []]
-    assert host.calls[-1]["message"] == ""
+    assert [_ids(call) for call in host.calls] == [
+        ["wf_source_1", "wf_source_3"],
+        ["wf_source_2", "wf_source_4"],
+        ["wf_source_4", "wf_source_1"],
+    ]
+    assert len({identity for call in host.calls for identity in _occurrences(call)}) == 6
+    assert host.calls[-1]["message"] == "source-1"
 
 
 @pytest.mark.parametrize("representation", ["typed", "serialized", "restored"])
@@ -921,7 +992,9 @@ def test_generator_normal_response_and_recovered_tool_errors_still_flow(serializ
 
     assert _finish(orchestration, orchestration.send([payload])) == []
     assert [call["executorId"] for call in host.calls] == ["delta-A", "delta-B"]
-    assert _texts(host.calls[-1]) == ["start", "approved"]
+    assert host.calls[-1]["contextMessages"] == [Message("user", ["start"]).to_dict(), *before["messages"]]
+    assert _ids(host.calls[-1]) == [None] * (1 + len(messages))
+    assert len(set(_occurrences(host.calls[-1]))) == 1 + len(messages)
     assert response.to_dict() == before
 
 
@@ -976,7 +1049,8 @@ def test_generator_independent_strings_deliver_equal_outputs_as_new_turns(
     consumer_calls = [call for call in live.calls if call["executorId"] == "delta-B"]
     assert [call["message"] for call in producer_calls] == inputs
     assert all(call["contextMessages"] is None for call in producer_calls)
-    assert [_ids(call) for call in consumer_calls] == [["wf_A_1"], ["wf_A_2"]]
+    assert [_ids(call) for call in consumer_calls] == [[None], [None]]
+    assert len({identity for call in consumer_calls for identity in _occurrences(call)}) == 2
     assert [_texts(call) for call in consumer_calls] == [["approved"], ["approved"]]
     assert live.waited_for == replay.waited_for == (["approval"] if pause_between else [])
 
@@ -994,7 +1068,8 @@ def test_generator_output_positions_survive_shorter_and_empty_incoming_conversat
     assert _run(live, workflow) == _run(replay, workflow) == []
     assert live.calls == replay.calls
     consumer_calls = [call for call in live.calls if call["executorId"] == "delta-B"]
-    assert [_ids(call) for call in consumer_calls] == [[f"wf_A_{position}"] for position in [0, 4, 5, 6, 8]]
+    assert [_ids(call) for call in consumer_calls] == [[None]] * len(inputs)
+    assert len({identity for call in consumer_calls for identity in _occurrences(call)}) == len(inputs)
     assert [_texts(call) for call in consumer_calls] == [["approved"]] * len(inputs)
 
 
@@ -1014,12 +1089,12 @@ def test_generator_same_producer_on_independent_branches_assigns_distinct_output
     assert _run(live, workflow) == _run(replay, workflow) == []
     assert live.calls == replay.calls
     producer_calls = [call for call in live.calls if call["executorId"] == "delta-A"]
-    assert [_ids(call) for call in producer_calls] == [
-        ["wf_input_0", "wf_source_1", "wf_left_2"],
-        ["wf_right_2"],
-    ]
+    assert [_ids(call) for call in producer_calls] == [[None, None, None], [None]]
+    assert [_texts(call) for call in producer_calls] == [["start", "approved", "approved"], ["approved"]]
+    assert len({identity for call in producer_calls for identity in _occurrences(call)}) == 4
     consumer_calls = [call for call in live.calls if call["executorId"] == "delta-B"]
-    assert [_ids(call) for call in consumer_calls] == [["wf_A_3"], ["wf_A_4"]]
+    assert [_ids(call) for call in consumer_calls] == [[None], [None]]
+    assert len({identity for call in consumer_calls for identity in _occurrences(call)}) == 2
     assert [_texts(call) for call in consumer_calls] == [["approved"], ["approved"]]
 
 
@@ -1037,7 +1112,8 @@ def test_generator_fanin_keeps_repeated_outputs_from_each_producer_and_replays_i
     assert live.batch_sizes == [1, 2, 1]
     joined = [call for call in live.calls if call["executorId"] == "delta-join"]
     assert len(joined) == 1
-    assert _ids(joined[0]) == ["wf_left_1", "wf_left_2", "wf_right_1", "wf_right_2"]
+    assert _ids(joined[0]) == [None] * 4
+    assert len(set(_occurrences(joined[0]))) == 4
     assert _texts(joined[0]) == ["approved"] * 4
 
 
@@ -1056,9 +1132,10 @@ def test_generator_custom_id_collisions_are_scoped_on_the_wire_and_replay_stable
     assert _run(live, workflow) == _run(replay, workflow) == []
     assert live.calls == replay.calls
     assert [message_id for call in live.calls for message_id in _ids(call)] == [
-        _external_id("left", "custom-id"),
-        _external_id("right", "custom-id"),
+        "custom-id",
+        "custom-id",
     ]
+    assert len({identity for call in live.calls for identity in _occurrences(call)}) == 2
     assert [text for call in live.calls for text in _texts(call)] == ["approved", "approved"]
     assert [source.full_conversation[0].message_id for source in sources] == ["custom-id", "custom-id"]
 
@@ -1080,12 +1157,19 @@ def test_generator_replay_rebuilds_the_same_cycle_delta_sequence() -> None:
     assert _run(live, workflow) == _run(replay, workflow) == []
     assert live.calls == replay.calls
     assert live.calls[0]["contextMessages"] is None
-    assert [_ids(call) for call in live.calls[1:]] == [
-        ["wf_input_0", "wf_A_1"],
-        ["wf_input_0", "wf_A_1", "wf_B_2"],
-        ["wf_B_2", "wf_A_3"],
-        ["wf_A_3", "wf_B_4"],
+    assert [_ids(call) for call in live.calls[1:]] == [[None] * count for count in [2, 3, 2, 2]]
+    assert [_texts(call) for call in live.calls[1:]] == [
+        ["start", "reply-1"],
+        ["start", "reply-1", "reply-2"],
+        ["reply-2", "reply-3"],
+        ["reply-3", "reply-4"],
     ]
+    first_b, first_a, next_b, next_a = [_occurrences(call) for call in live.calls[1:]]
+    assert first_a[:2] == first_b
+    assert next_b[0] == first_a[-1]
+    assert next_a[0] == next_b[-1]
+    assert set(first_b).isdisjoint(next_b)
+    assert set(first_a).isdisjoint(next_a)
     assert live.statuses
     assert replay.statuses == []
 
@@ -1105,6 +1189,9 @@ def test_interleaved_live_runs_do_not_share_delivery_on_retained_executors() -> 
     assert all(call["instanceId"] == "first" for call in first.calls)
     assert all(call["instanceId"] == "second" for call in second.calls)
     assert len(_ids(first.calls[-1])) == len(_ids(second.calls[-1])) == 2
+    assert {identity for call in first.calls[1:] for identity in _occurrences(call)}.isdisjoint(
+        identity for call in second.calls[1:] for identity in _occurrences(call)
+    )
 
 
 def test_generator_fanout_fanin_and_cycle_preserve_producer_identity() -> None:
@@ -1120,15 +1207,19 @@ def test_generator_fanout_fanin_and_cycle_preserve_producer_identity() -> None:
 
     assert _run(host, workflow) == []
     assert host.batch_sizes == [1, 2, 1, 1]
-    assert [_ids(call) for call in host.calls[1:]] == [
-        ["wf_input_0", "wf_source_1"],
-        ["wf_input_0", "wf_source_1"],
-        ["wf_input_0", "wf_source_1", "wf_left_2", "wf_right_2"],
-        ["wf_join_6"],
+    assert [_ids(call) for call in host.calls[1:]] == [[None] * count for count in [2, 2, 4, 1]]
+    assert [_texts(call) for call in host.calls[1:]] == [
+        ["start", "reply-1"],
+        ["start", "reply-1"],
+        ["start", "reply-1", "reply-2", "reply-3"],
+        ["reply-4"],
     ]
+    left, right, joined, repeated = [_occurrences(call) for call in host.calls[1:]]
+    assert left == right == joined[:2]
+    assert len(set(joined + repeated)) == 5
 
 
-def test_generator_hitl_resume_and_replay_keep_the_pre_pause_delivery_ledger() -> None:
+def test_generator_hitl_resume_keeps_independent_activity_events_distinct_on_replay() -> None:
     workflow = _workflow([_activity("gate"), _agent()], [])
     results = [
         _activity_result([_response([_message(1), _message(3)])], request=True),
@@ -1139,7 +1230,11 @@ def test_generator_hitl_resume_and_replay_keep_the_pre_pause_delivery_ledger() -
 
     assert _run(live, workflow) == _run(replay, workflow) == []
     assert live.calls == replay.calls
-    assert [_ids(call) for call in live.calls] == [["wf_source_1", "wf_source_3"], ["wf_source_2", "wf_source_4"]]
+    assert [_ids(call) for call in live.calls] == [
+        ["wf_source_1", "wf_source_3"],
+        ["wf_source_3", "wf_source_2", "wf_source_4", "wf_source_1"],
+    ]
+    assert set(_occurrences(live.calls[0])).isdisjoint(_occurrences(live.calls[1]))
     assert live.waited_for == replay.waited_for == ["approval"]
     assert deserialize_value(live.activity_inputs[1]["message"])["response"] == "approved"
     assert live.activity_inputs[1]["source_executor_ids"] == ["__hitl_response___approval"]

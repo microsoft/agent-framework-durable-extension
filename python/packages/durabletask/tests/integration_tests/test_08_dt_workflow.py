@@ -5,30 +5,22 @@
 Exercises the standalone (non-Azure-Functions) workflow path:
 - ``DurableAIAgentWorker.configure_workflow`` auto-registers the agent entities,
   non-agent executor activities, and the workflow orchestrator.
-- A client starts the workflow by scheduling its ``dafx-{workflow_name}`` orchestration.
+- ``DurableWorkflowClient.start_workflow`` schedules the versioned workflow input.
 - Conditional routing sends spam to a non-agent handler and legitimate email
   through a second agent and a sender executor.
 """
 
 import logging
-from typing import Any, Protocol
 
 import pytest
 from durabletask.client import OrchestrationStatus
 
-from agent_framework_durabletask import DurableAIAgentClient, workflow_orchestrator_name
+from agent_framework_durabletask import DurableWorkflowClient
 
 # Must match the workflow name in samples/08_workflow/worker.py
 WORKFLOW_NAME = "email_triage"
 
 logging.basicConfig(level=logging.WARNING)
-
-
-class AgentClientFactoryProtocol(Protocol):
-    """Protocol for the agent client factory fixture."""
-
-    @classmethod
-    def create(cls, max_poll_retries: int = 90) -> tuple[Any, DurableAIAgentClient]: ...
 
 
 # Module-level markers
@@ -45,15 +37,15 @@ class TestStandaloneWorkflow:
     """Standalone (non-Azure-Functions) workflow execution on a durabletask worker."""
 
     @pytest.fixture(autouse=True)
-    def setup(self, agent_client_factory: type[AgentClientFactoryProtocol], orchestration_helper) -> None:
-        """Provide a DTS client and orchestration helper for each test."""
-        self.dts_client, self.agent_client = agent_client_factory.create()
+    def setup(self, workflow_client: DurableWorkflowClient, orchestration_helper) -> None:
+        """Provide a workflow client and orchestration helper for each test."""
+        self.workflow_client = workflow_client
         self.orch_helper = orchestration_helper
 
     def test_legitimate_email_drafts_response(self) -> None:
         """A legitimate email routes through the email agent and is 'sent'."""
-        instance_id = self.dts_client.schedule_new_orchestration(
-            orchestrator=workflow_orchestrator_name(WORKFLOW_NAME),
+        instance_id = self.workflow_client.start_workflow(
+            workflow_name=WORKFLOW_NAME,
             input=(
                 "Hi team, just a reminder about our sprint planning meeting tomorrow at 10 AM. "
                 "Please review the agenda in Jira."
@@ -77,8 +69,8 @@ class TestStandaloneWorkflow:
         message is legitimate and would not repeat an arbitrary code, whereas a drafted reply to
         the email naturally does.
         """
-        instance_id = self.dts_client.schedule_new_orchestration(
-            orchestrator=workflow_orchestrator_name(WORKFLOW_NAME),
+        instance_id = self.workflow_client.start_workflow(
+            workflow_name=WORKFLOW_NAME,
             input=(
                 "Hi team, please confirm receipt of purchase order PRJ-4417 for the new lab "
                 "hardware, and let me know the expected delivery date."
@@ -96,8 +88,8 @@ class TestStandaloneWorkflow:
 
     def test_spam_email_handled(self) -> None:
         """A spam email routes to the non-agent spam handler."""
-        instance_id = self.dts_client.schedule_new_orchestration(
-            orchestrator=workflow_orchestrator_name(WORKFLOW_NAME),
+        instance_id = self.workflow_client.start_workflow(
+            workflow_name=WORKFLOW_NAME,
             input="URGENT! You've won $1,000,000! Click here now to claim your prize! Limited time offer!",
         )
 

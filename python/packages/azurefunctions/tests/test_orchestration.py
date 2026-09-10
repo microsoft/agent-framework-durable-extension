@@ -129,14 +129,15 @@ def executor_with_context(mock_context_with_uuid: tuple[Mock, str]) -> tuple[Any
 class TestAgentResponseHelpers:
     """Tests for response handling through public AgentTask API."""
 
-    def test_try_set_value_exception_handling(self) -> None:
+    @pytest.mark.parametrize("invalid_result", [{"invalid": "format"}, {}, {"messages": None}, {"messages": ""}])
+    def test_try_set_value_exception_handling(self, invalid_result: dict[str, Any]) -> None:
         """Test try_set_value handles exceptions raised when converting a successful task result to AgentResponse."""
         entity_task = _create_entity_task()
         task = AgentTask(entity_task, None, "correlation-id")
 
         # Simulate successful entity task with invalid result that causes exception
         entity_task.state = TaskState.SUCCEEDED
-        entity_task.result = {"invalid": "format"}  # Missing required fields for AgentResponse
+        entity_task.result = invalid_result
 
         # Clear pending_tasks to simulate that parent has processed the child
         task.pending_tasks.clear()
@@ -146,9 +147,10 @@ class TestAgentResponseHelpers:
 
         # Verify task failed due to conversion exception
         assert task.state == TaskState.FAILED
-        assert isinstance(task.result, Exception)
+        assert isinstance(task.result, (TypeError, ValueError))
 
-    def test_try_set_value_success(self) -> None:
+    @pytest.mark.parametrize("include_type", [False, True])
+    def test_try_set_value_success(self, include_type: bool) -> None:
         """Test try_set_value correctly processes successful task completion."""
         entity_task = _create_entity_task()
         task = AgentTask(entity_task, None, "correlation-id")
@@ -156,6 +158,8 @@ class TestAgentResponseHelpers:
         # Simulate successful entity task completion
         entity_task.state = TaskState.SUCCEEDED
         entity_task.result = AgentResponse(messages=[Message(role="assistant", contents=["Test response"])]).to_dict()
+        if not include_type:
+            entity_task.result.pop("type")
 
         # Clear pending_tasks to simulate that parent has processed the child
         task.pending_tasks.clear()

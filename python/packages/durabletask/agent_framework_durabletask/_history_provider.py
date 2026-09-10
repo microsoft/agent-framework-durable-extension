@@ -28,6 +28,7 @@ from agent_framework import (
     HistoryProvider,
     InMemoryHistoryProvider,
     Message,
+    SessionContext,
     SupportsAgentRun,
     annotate_message_groups,
 )
@@ -45,6 +46,7 @@ from ._durable_agent_state import (
     DurableAgentStateUnknownEntry,
     DurableAgentStateUsage,
 )
+from ._response_utils import is_terminal_agent_response
 
 if TYPE_CHECKING:
     from ._entities import AgentEntityStateProviderMixin
@@ -296,7 +298,12 @@ class DurableHistoryProvider(HistoryProvider):
         state: dict[str, Any] | None,
         response: AgentResponse | None = None,
     ) -> None:
-        """Append one hook batch and expose detached copies to later core compaction hooks."""
+        """Append one hook batch, exposing only nonterminal batches to core compaction.
+
+        Terminal outputs are excluded from this provider's local model history, not from
+        opaque external transcripts. Inputs remain separate accepted receipts, and earlier
+        per-call appends are not rewritten when a later response is terminal.
+        """
         if not messages or binding.service_owns_history:
             return
         if state is not None and WORKING_BUFFER_KEY not in state:
@@ -309,13 +316,18 @@ class DurableHistoryProvider(HistoryProvider):
                 if (message := self._to_message(entry.messages[index])) is not None
             ]
         created_at = datetime.now(tz=timezone.utc)
-        kind = DurableAgentStateEntryJsonType.REQUEST if response is None else DurableAgentStateEntryJsonType.RESPONSE
+        response_type: type[DurableAgentStateResponse] = (
+            DurableAgentStateErrorResponse
+            if response is not None and is_terminal_agent_response(response)
+            else DurableAgentStateResponse
+        )
+        kind = DurableAgentStateEntryJsonType.REQUEST if response is None else response_type.JSON_TYPE
         stored_messages, working_messages = self._copy_append_messages(binding, messages, kind, created_at)
         entry: DurableAgentStateEntry
         if response is None:
             entry = DurableAgentStateRequest(binding.correlation_id, created_at, stored_messages)
         else:
-            entry = DurableAgentStateResponse(
+            entry = response_type(
                 binding.correlation_id,
                 created_at,
                 stored_messages,
@@ -324,7 +336,9 @@ class DurableHistoryProvider(HistoryProvider):
         binding.state_provider.state.data.conversation_history.append(entry)
         if state is not None:
             buffer = cast("list[Message]", state.setdefault(WORKING_BUFFER_KEY, []))
-            buffer.extend(working_messages)
+            if not isinstance(entry, DurableAgentStateErrorResponse):
+                # Otherwise flush would mistake these non-replayable outputs for new summaries.
+                buffer.extend(working_messages)
             state[POSITIONS_KEY] = self._positions(binding)
 
     def _copy_append_messages(
@@ -347,6 +361,15 @@ class DurableHistoryProvider(HistoryProvider):
             # Conversion can retain nested tool payloads, so neither stored content nor the
             # compaction working copy may share those objects with the caller or each other.
             stored = DurableAgentStateMessage.from_chat_message(copy.deepcopy(message))
+            receipt = getattr(message, "_durable_ingestion_receipt", None)
+            if (
+                kind == DurableAgentStateEntryJsonType.REQUEST
+                and isinstance(receipt, tuple)
+                and len(cast("tuple[Any, ...]", receipt)) == 2
+            ):
+                occurrence, fingerprint = cast("tuple[str, str]", receipt)
+                stored.ingestion_occurrence = occurrence
+                stored.ingestion_identity = fingerprint
             if not stored.message_id or stored.message_id in used:
                 prefix = "durable_revision" if stored.message_id else "durable"
                 candidate = f"{prefix}_{kind.value}_{scope}_{ordinal}_{index}"
@@ -376,6 +399,13 @@ class DurableHistoryProvider(HistoryProvider):
                 # Capture only. Core still decides whether the after-run persistence hook runs.
                 binding.pending_inputs = copy.deepcopy(context.input_messages)
         await super().before_run(agent=agent, session=session, context=context, state=state)
+
+    def _get_context_messages_to_store(self, context: SessionContext) -> list[Message]:
+        # Our own contribution is already persisted. Core's in-memory save deduplicates it,
+        # but durable appends allocate new identities, so exclude it even from explicit masks.
+        if not self.store_context_messages:
+            return []
+        return context.get_messages(sources=self.store_context_from, exclude_sources={self.source_id})
 
     async def after_run(
         self,
@@ -455,6 +485,8 @@ class DurableHistoryProvider(HistoryProvider):
         Reconciliation is by ``message_id`` rather than position, so strategies that
         *insert* messages (for example ``ToolResultCompactionStrategy``, which replaces a
         tool-call group with a summary) are handled as well as ones that only annotate.
+        Previously loaded messages removed from the list become exclusions, not implicit
+        permission to physically delete them. Opt-in pruning still applies its atomic-group floor.
 
         These edits affect only cached state. Repeated flushes reconcile annotations without
         repeating appends or strategies. The entity performs the final flush while this operation's
@@ -497,9 +529,10 @@ class DurableHistoryProvider(HistoryProvider):
                 working_payload = working.to_dict() if working is not None else {}
                 original_payload.pop("additional_properties", None)
                 working_payload.pop("additional_properties", None)
-                # Core's summary_{len(messages)} can recur after pruning. A different summary
-                # body is a new message, not an annotation update to the older summary.
-                summary_revision = original_payload != working_payload
+                # Core's summary_{len(messages)} can recur after pruning. Different source
+                # messages identify a new summary even when the generated body is identical.
+                original_ids = self._summary_original_ids(original) if original is not None else None
+                summary_revision = original_payload != working_payload or original_ids != summary_ids
 
             if position is None or summary_revision:
                 if not summary_revision and message.message_id in previous_ids:
@@ -540,6 +573,20 @@ class DurableHistoryProvider(HistoryProvider):
             stored.extension_data = (
                 copy.deepcopy(message.additional_properties) if message.additional_properties else None
             )
+
+        # A strategy may shrink the list without setting _excluded. Compare final identities
+        # after summary revision IDs have been allocated, so replacing a summary does not leave
+        # its old revision active. Preserve stored metadata and backlinks on absent messages.
+        remaining_ids = {message.message_id for message in buffer if message.message_id}
+        for message_id in previous_ids - remaining_ids:
+            position = stored_by_id.get(message_id)
+            if position is not None:
+                entry, index = position
+                stored = entry.messages[index]
+                if self._to_message(stored) is None:
+                    # Empty/non-replayable payloads were never exposed to the strategy.
+                    continue
+                stored.extension_data = {**(stored.extension_data or {}), EXCLUDED_KEY: True}
 
         if self.prune_excluded:
             # Resolve owners after all insertions. Splitting a multi-message entry may have
@@ -661,6 +708,12 @@ class DurableHistoryProvider(HistoryProvider):
             for (entry, stored), group in zip(originals, groups)
             if id(entry) in protected or stored.role == "system"
         }
+        # Eager pruning may delete only exclusions, not the included partners of a tool or
+        # reasoning group. Defer the whole group until all its members are excluded.
+        excluded_messages = {id(stored) for _, stored in pruned}
+        protected_groups.update(
+            group for (_, stored), group in zip(originals, groups) if id(stored) not in excluded_messages
+        )
         protected_messages = {id(stored) for (_, stored), group in zip(originals, groups) if group in protected_groups}
         eligible = [
             (entry, stored)
@@ -774,13 +827,121 @@ def service_stores_history(agent: Any, options: Mapping[str, Any] | None = None)
 
 
 def validate_history_providers(agent: SupportsAgentRun) -> None:
-    """Reject competing primary history providers while allowing store-only sinks."""
+    """Reject competing primaries and shared state namespaces, allowing distinct store-only sinks."""
     providers = getattr(agent, "context_providers", None)
     if not isinstance(providers, (list, tuple)):
         return
     primaries = [p for p in cast("Sequence[Any]", providers) if isinstance(p, HistoryProvider) and p.load_messages]
     if len(primaries) > 1:
         raise ValueError("A durable agent supports only one load-enabled primary history provider.")
+    sources: set[str] = set()
+    for provider in cast("Sequence[Any]", providers):
+        source_id = provider.source_id
+        if source_id in sources:
+            raise ValueError(
+                f"Context providers must have unique source_id values; {source_id!r} is duplicated. "
+                "Assign distinct source_id values to history, audit and other context providers."
+            )
+        sources.add(source_id)
+    if not primaries and InMemoryHistoryProvider.DEFAULT_SOURCE_ID in sources:
+        raise ValueError(
+            "Cannot inject durable history: 'in_memory' is already used by a context provider or store-only sink. "
+            "Set that provider's source_id to a unique value such as 'audit', or explicitly configure a "
+            "DurableHistoryProvider with a distinct source_id and matching compaction history_source_id."
+        )
+
+
+class _ServiceOwnedHistoryProvider(HistoryProvider):
+    """Occupy the primary slot without loading or saving the inactive external branch."""
+
+    def __init__(self, provider: HistoryProvider) -> None:
+        """Borrow the original provider without modifying its configuration or lifecycle."""
+        super().__init__(
+            source_id=provider.source_id,
+            load_messages=provider.load_messages,
+            store_inputs=provider.store_inputs,
+            store_outputs=provider.store_outputs,
+            store_context_messages=provider.store_context_messages,
+            store_context_from=provider.store_context_from,
+        )
+        self.__wrapped__ = provider
+        # Core 1.13 predates this optional hook-cadence hint.
+        if hasattr(provider, "after_run_once_per_turn"):
+            self.after_run_once_per_turn = provider.after_run_once_per_turn
+
+    def __getattr__(self, name: str) -> Any:
+        # Expose the original configuration/resources without copying or taking their ownership.
+        return getattr(self.__wrapped__, name)
+
+    async def get_messages(
+        self, session_id: str | None, *, state: dict[str, Any] | None = None, **kwargs: Any
+    ) -> list[Message]:
+        """Do not load the external transcript into a service-owned invocation."""
+        return []
+
+    async def save_messages(
+        self,
+        session_id: str | None,
+        messages: Sequence[Message],
+        *,
+        state: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Do not append a service-owned turn to the external primary."""
+
+    async def before_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+        """Suppress custom loading hooks as well as the base implementation."""
+        # Do not call custom hooks either: an ordinary primary need not know about ownership.
+
+    async def after_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+        """Suppress custom persistence hooks for the inactive primary."""
+
+
+def prepare_history_owner(agent: SupportsAgentRun, service_owns_history: bool) -> SupportsAgentRun:
+    """Return a per-run view that silences only a service-owned run's external primary.
+
+    Call after registration and ownership resolution. Client-owned runs keep the original
+    provider, including custom hooks and context attribution. Store-only sinks are never wrapped.
+    The view borrows the agent's resources: preparation neither enters nor closes them. Keep the
+    registered agent for lifecycle/reset decisions; wrappers also expose ``__wrapped__``.
+    """
+    providers = getattr(agent, "context_providers", None)
+    if not isinstance(providers, (list, tuple)):
+        return agent
+    updated: list[Any] = []
+    changed = False
+    for provider in cast("Sequence[Any]", providers):
+        original = provider.__wrapped__ if isinstance(provider, _ServiceOwnedHistoryProvider) else provider
+        replacement = original
+        if (
+            service_owns_history
+            and isinstance(original, HistoryProvider)
+            and original.load_messages
+            and not isinstance(original, DurableHistoryProvider)
+            and type(original) is not InMemoryHistoryProvider
+        ):
+            replacement = (
+                provider
+                if isinstance(provider, _ServiceOwnedHistoryProvider)
+                else _ServiceOwnedHistoryProvider(original)
+            )
+        changed |= replacement is not provider
+        updated.append(replacement)
+    if not changed:
+        return agent
+    return _copy_with_history_providers(agent, updated)
+
+
+def _copy_with_history_providers(agent: SupportsAgentRun, providers: list[Any]) -> SupportsAgentRun:
+    try:
+        clone = copy.copy(agent)
+        clone.context_providers = providers  # type: ignore[attr-defined]
+    except Exception as exc:
+        raise ValueError(
+            f"Could not attach durable history to agent {getattr(agent, 'name', type(agent).__name__)}. "
+            "Configure a supported history provider explicitly."
+        ) from exc
+    return clone
 
 
 def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = False) -> SupportsAgentRun:
@@ -790,27 +951,22 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = Fa
     configuration change. The agent is never mutated: when a substitution is needed a shallow
     copy is returned with its own provider list.
 
-    The rules mirror what core would do, so behavior stays predictable:
+        With no load-enabled primary, append a :class:`DurableHistoryProvider` after existing
+        providers using core's default history source. This matches core's automatic injection order,
+        so default compaction resolves that source and its reverse-order after hook sees this turn.
+        Explicit registration order is preserved. Only exact built-in :class:`InMemoryHistoryProvider`
+        instances are replaced, preserving source, storage flags, exclusion policy and once-per-turn
+        hook setting. A hand-configured durable provider keeps explicit ``prune_excluded`` values;
+        otherwise a shallow copy inherits the registration retention policy.
 
-    * **No history provider** - a :class:`DurableHistoryProvider` is added. It uses the same
-      ``source_id`` core's auto-injected provider would have, so a ``CompactionProvider`` left on
-      its defaults still finds it.
-    * **In-memory history** - replaced without changing its source, storage flags or exclusion policy.
-    * **A durable provider the caller wired themselves** - kept as-is when they pinned
-      ``prune_excluded``, since that is an explicit choice. Rebuilt with the retention mode's
-      value when they left it unset, because otherwise ``follow_compaction`` would silently do
-      nothing for anyone who constructs the provider by hand.
-    * **Any other history provider** (Cosmos, Redis, file, custom) - left alone. The user chose
-      where their conversation lives, and durable still provides execution durability. Core does
-      not inject anything when one of these is present, so there is nothing to pre-empt.
-    * **Service-managed history** - a provider is still added. The service owning the conversation
-      is a per-*run* fact, not a per-registration one: a run may pass ``store=False``, and core
-      then injects a history provider of its own whose state is persisted with the entity but is
-      invisible to retention. Claiming the slot up front means those turns land in durable state
-      where retention can reach them. The provider yields no history on runs the service does own,
-      so the model is never sent the transcript twice.
-    * **Agents without the core context pipeline** - left alone, and the entity falls back to
-      replaying its own persisted history.
+        Other primaries, including in-memory subclasses, keep their original hooks and state without
+        an additional durable provider. Their session state may contain a transcript. Such state is
+        part of the non-evictable floor, not managed by durable transcript retention.
+
+        Service ownership is resolved per run. Without a custom primary, durable history remains
+        available for client-owned runs and silent for service-owned runs, preventing core from
+        injecting a separate unmanaged history slice. Agents without the core context pipeline are
+        left alone and the entity falls back to replaying its own persisted history.
 
     Args:
         agent: The agent being registered with the durable runtime.
@@ -835,14 +991,14 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = Fa
     )
 
     if existing is None:
-        # Match the source_id core's auto-injected provider would use so default-wired
-        # compaction keeps resolving.
+        # Match core's source_id and append order. After hooks run in reverse, so automatic
+        # history must save this turn before an earlier compaction provider reads its buffer.
         updated = [
+            *provider_list,
             DurableHistoryProvider(
                 source_id=InMemoryHistoryProvider.DEFAULT_SOURCE_ID,
                 prune_excluded=prune_excluded,
             ),
-            *provider_list,
         ]
     elif isinstance(existing, DurableHistoryProvider):
         # Already durable. If the caller pinned ``prune_excluded`` themselves that decision
@@ -850,17 +1006,12 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = Fa
         # would make the entity's retention mode silently do nothing.
         if existing.prune_excluded is not None:
             return agent
-        replacement = DurableHistoryProvider(
-            source_id=existing.source_id,
-            store_inputs=existing.store_inputs,
-            store_outputs=existing.store_outputs,
-            store_context_messages=existing.store_context_messages,
-            store_context_from=existing.store_context_from,
-            skip_excluded=existing.skip_excluded,
-            prune_excluded=prune_excluded,
-        )
+        replacement = copy.copy(existing)
+        replacement.prune_excluded = prune_excluded
+        if existing.store_context_from is not None:
+            replacement.store_context_from = set(existing.store_context_from)
         updated = [replacement if p is existing else p for p in provider_list]
-    elif isinstance(existing, InMemoryHistoryProvider):
+    elif type(existing) is InMemoryHistoryProvider:
         replacement = DurableHistoryProvider(
             source_id=existing.source_id,
             store_inputs=existing.store_inputs,
@@ -870,18 +1021,11 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = Fa
             skip_excluded=existing.skip_excluded,
             prune_excluded=prune_excluded,
         )
+        if hasattr(existing, "after_run_once_per_turn"):
+            replacement.after_run_once_per_turn = existing.after_run_once_per_turn
         updated = [replacement if p is existing else p for p in provider_list]
     else:
         # A deliberate storage choice (external or custom), so do not override it.
         return agent
 
-    try:
-        clone = copy.copy(agent)
-        clone.context_providers = updated  # type: ignore[attr-defined]
-    except Exception as exc:
-        raise ValueError(
-            f"Could not attach durable history to agent {getattr(agent, 'name', type(agent).__name__)}. "
-            "Configure a supported history provider explicitly."
-        ) from exc
-
-    return clone
+    return _copy_with_history_providers(agent, updated)

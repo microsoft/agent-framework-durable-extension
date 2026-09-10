@@ -12,7 +12,6 @@ from unittest.mock import Mock
 from uuid import UUID
 
 import azure.durable_functions as df
-import pytest
 from agent_framework import AgentExecutor, AgentExecutorResponse, AgentResponse, AgentSession, Content, Message
 from agent_framework_durabletask import DurableAgentStateRequest, RunRequest
 from agent_framework_durabletask._workflows.orchestrator import _prepare_agent_task, _WorkflowDeliveryLedger
@@ -78,6 +77,11 @@ def _dispatch(
     assert wire["orchestrationId"] == context.instance_id
     assert wire["correlationId"] == str(UUID(int=host.call_entity.call_count))
     assert host.new_uuid.call_count == host.call_entity.call_count
+    if "contextMessages" in wire:
+        assert len(wire["contextMessageIds"]) == len(wire["contextMessages"])
+        assert all(isinstance(identity, str) and identity for identity in wire["contextMessageIds"])
+    else:
+        assert "contextMessageIds" not in wire
     host.signal_entity.assert_not_called()
     return task, wire
 
@@ -92,6 +96,7 @@ def test_custom_empty_projection_reaches_the_af_entity_as_an_empty_list() -> Non
 
     assert wire["message"] == ""
     assert wire["contextMessages"] == []
+    assert wire["contextMessageIds"] == []
     assert "unselected secret" not in json.dumps(wire)
     assert DurableAgentStateRequest.from_run_request(RunRequest.from_dict(wire)).messages == []
     assert ledger.sent == {}
@@ -112,9 +117,12 @@ def test_fully_duplicate_projection_reaches_the_af_entity_on_the_second_call() -
 
     _, first = _dispatch(context, host, executor, upstream, ledger)
     assert first["contextMessages"] == expected
+    assert len(set(first["contextMessageIds"])) == 2
+    assert set(first["contextMessageIds"]).isdisjoint(message.message_id for message in messages)
     _, repeated = _dispatch(context, host, executor, upstream, ledger)
 
     assert repeated["contextMessages"] == []
+    assert repeated["contextMessageIds"] == []
     assert repeated["message"] == ""
     assert first["correlationId"] != repeated["correlationId"]
     assert DurableAgentStateRequest.from_run_request(RunRequest.from_dict(repeated)).messages == []
@@ -142,6 +150,8 @@ def test_tool_only_projection_survives_af_dispatch_and_request_parsing() -> None
     assert wire["message"] == ""
     assert wire["contextMessages"] == [expected]
     request = RunRequest.from_json(json.dumps(wire))
+    assert request.context_message_ids == wire["contextMessageIds"]
+    assert request.context_message_ids != [message.message_id]
     entry = DurableAgentStateRequest.from_run_request(request)
     assert len(entry.messages) == 1
     forwarded = entry.messages[0].to_chat_message()
@@ -182,7 +192,9 @@ def test_af_adapter_does_not_preprocess_or_drop_raw_context_type_fields() -> Non
     ]
     before = deepcopy(context_messages)
 
-    task = context.prepare_agent_task("dispatch-revision-target", "", context.instance_id, context_messages)
+    task = context.prepare_agent_task(
+        "dispatch-revision-target", "", context.instance_id, context_messages, context_message_ids=["occurrence-0"]
+    )
 
     assert isinstance(task, AgentTask)
     assert not task.is_completed
@@ -190,7 +202,9 @@ def test_af_adapter_does_not_preprocess_or_drop_raw_context_type_fields() -> Non
     wire = json.loads(json.dumps(host.call_entity.call_args.args[2], allow_nan=False))
     assert wire["message"] == ""
     assert wire["contextMessages"] == before
+    assert wire["contextMessageIds"] == ["occurrence-0"]
     assert RunRequest.from_dict(wire).context_messages == before
+    assert RunRequest.from_dict(wire).context_message_ids == ["occurrence-0"]
     assert context_messages == before
 
 
@@ -210,13 +224,15 @@ def test_standalone_af_input_is_not_truncated_or_deduplicated() -> None:
     assert host.call_entity.call_count == 2
 
 
-def test_empty_standalone_af_input_still_fails_before_scheduling() -> None:
+def test_empty_workflow_input_schedules_an_explicit_empty_user_message() -> None:
     context, host, _ = _context()
     ledger = _WorkflowDeliveryLedger()
 
-    with pytest.raises(ValueError, match="only supports text message inputs"):
-        _prepare_agent_task(context, _agent(), "target", "", "dispatch-revision", ledger)
+    _, wire = _dispatch(context, host, _agent(), "", ledger)
 
-    host.call_entity.assert_not_called()
-    host.new_uuid.assert_not_called()
-    assert ledger == _WorkflowDeliveryLedger()
+    assert wire["message"] == ""
+    assert wire["contextMessages"] == [Message("user", [""]).to_dict()]
+    assert len(wire["contextMessageIds"]) == 1
+    assert RunRequest.from_dict(wire).context_message_ids == wire["contextMessageIds"]
+    host.call_entity.assert_called_once()
+    host.new_uuid.assert_called_once()

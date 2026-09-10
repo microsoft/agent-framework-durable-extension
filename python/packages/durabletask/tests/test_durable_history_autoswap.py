@@ -701,7 +701,13 @@ class TestServiceManagedSessions:
         assert [entry["context_service_session_id"] for entry in observer.before] == [
             value for value in expected_active_ids for _ in attempts
         ]
-        assert [entry["texts"] for entry in observer.before] == [batch for batch in expected_inputs for _ in attempts]
+        # Implicit durable history is appended like Core's automatic provider, after the observer.
+        # Only this before-hook sees raw input; keep the full model-input checks above unchanged.
+        # An explicit external primary still runs before the observer and supplies its history.
+        expected_before_inputs = expected_inputs if external is not None else [[prompt] for prompt in prompts]
+        assert [entry["texts"] for entry in observer.before] == [
+            batch for batch in expected_before_inputs for _ in attempts
+        ]
         assert [entry["service_session_id"] for entry in observer.after] == [
             "service-branch-1",
             None,

@@ -10,6 +10,7 @@ the orchestrator projects that conversation into ``RunRequest.context_messages``
 
 from typing import Any
 
+import pytest
 from agent_framework import (
     AgentExecutor,
     AgentExecutorResponse,
@@ -24,6 +25,7 @@ from agent_framework_durabletask import (
     DurableAgentStateRequest,
     RunRequest,
 )
+from agent_framework_durabletask._message_identity import message_identity
 from agent_framework_durabletask._workflows.orchestrator import (
     _build_context_messages,
     build_agent_executor_response,
@@ -154,9 +156,10 @@ class TestEntityContextIngestion:
         entity = AgentEntity(_stub_agent(), state_provider=provider)
 
         first = [Message(role="user", contents=["hello"], message_id="m0")]
-        entity.state.data.conversation_history.append(
-            DurableAgentStateRequest.from_run_request(self._request(first, "corr-0"))
-        )
+        initial = DurableAgentStateRequest.from_run_request(self._request(first, "corr-0"))
+        initial.messages = entity._drop_already_stored(initial.messages)
+        entity.state.data.conversation_history.append(initial)
+        assert entity.state.data.ingested_messages == {"m0": [message_identity(first[0])]}
 
         repeated = [
             Message(role="user", contents=["hello"], message_id="m0"),
@@ -173,14 +176,37 @@ class TestEntityContextIngestion:
         entity = AgentEntity(_stub_agent(), state_provider=provider)
 
         messages = [Message(role="user", contents=["hello"], message_id="m0")]
-        entity.state.data.conversation_history.append(
-            DurableAgentStateRequest.from_run_request(self._request(messages, "corr-0"))
-        )
+        initial = DurableAgentStateRequest.from_run_request(self._request(messages, "corr-0"))
+        initial.messages = entity._drop_already_stored(initial.messages)
+        entity.state.data.conversation_history.append(initial)
+        assert entity.state.data.ingested_messages == {"m0": [message_identity(messages[0])]}
 
         entry = DurableAgentStateRequest.from_run_request(self._request(messages, "corr-1"))
         entry.messages = entity._drop_already_stored(entry.messages)
 
         assert entry.messages == []
+
+    @pytest.mark.parametrize("message_id", ["m0", "wf_upstream_3"])
+    @pytest.mark.parametrize("transcript_contents", [["hello"], []], ids=["retained", "pruned"])
+    def test_transcript_without_receipt_does_not_suppress_first_delivery(
+        self, message_id: str, transcript_contents: list[str]
+    ) -> None:
+        """A retained transcript alone is not evidence that an input was delivered."""
+        entity = AgentEntity(_stub_agent(), state_provider=_InMemoryStateProvider())
+        transcript = [Message(role="user", contents=transcript_contents, message_id=message_id)]
+        entity.state.data.conversation_history.append(
+            DurableAgentStateRequest.from_run_request(self._request(transcript, "legacy"))
+        )
+        assert entity.state.data.ingested_messages == {}
+
+        incoming = [Message(role="user", contents=["hello"], message_id=message_id)]
+        entry = DurableAgentStateRequest.from_run_request(self._request(incoming, "first-delivery"))
+        entry.messages = entity._drop_already_stored(entry.messages)
+
+        assert [message.to_chat_message().to_dict() for message in entry.messages] == [incoming[0].to_dict()]
+        assert entity.state.data.ingested_messages == {message_id: [message_identity(incoming[0])]}
+        repeated = DurableAgentStateRequest.from_run_request(self._request(incoming, "repeat-delivery"))
+        assert entity._drop_already_stored(repeated.messages) == []
 
     def test_repeated_context_does_not_duplicate_message_ids(self) -> None:
         """A cycle that re-delivers the whole upstream conversation must not collide ids."""
@@ -198,13 +224,47 @@ class TestEntityContextIngestion:
         ]
         assert len(stored_ids) == len(set(stored_ids)), f"duplicate message ids persisted: {stored_ids}"
 
+    @pytest.mark.parametrize("application_id", [None, "opaque", "wf_source_0"])
+    def test_occurrence_ids_keep_equal_new_events_and_drop_only_repeat_delivery(
+        self, application_id: str | None
+    ) -> None:
+        entity = AgentEntity(_stub_agent(), state_provider=_InMemoryStateProvider())
+        original = Message("assistant", ["same"], message_id=application_id)
+        before = original.to_dict()
+        occurrence_ids = ["occurrence-first", "occurrence-second"]
+        request = RunRequest(
+            message="same",
+            correlation_id="first",
+            context_messages=[before, before],
+            context_message_ids=occurrence_ids,
+        )
+        restored = RunRequest.from_dict(request.to_dict())
+        entry = DurableAgentStateRequest.from_run_request(restored)
+        entry.messages = entity._drop_already_stored(entry.messages, occurrence_ids=restored.context_message_ids)
+        entity.state.data.conversation_history.append(entry)
+        assert [message.message_id for message in entry.messages] == [application_id, application_id]
+        assert [message.ingestion_occurrence for message in entry.messages] == occurrence_ids
+        assert [message.to_chat_message().to_dict() for message in entry.messages] == [before, before]
+
+        repeated = DurableAgentStateRequest.from_run_request(restored)
+        assert entity._drop_already_stored(repeated.messages, occurrence_ids=restored.context_message_ids) == []
+        new_request = RunRequest(
+            message="same", correlation_id="new", context_messages=[before], context_message_ids=["occurrence-third"]
+        )
+        new_entry = DurableAgentStateRequest.from_run_request(new_request)
+        kept = entity._drop_already_stored(new_entry.messages, occurrence_ids=new_request.context_message_ids)
+        assert [message.message_id for message in kept] == [application_id]
+        assert entity.state.data.ingested_messages == {
+            identity: [message_identity(original)] for identity in [*occurrence_ids, "occurrence-third"]
+        }
+        assert original.to_dict() == before
+
 
 class TestWorkflowConversationIdentity:
-    """Messages the workflow itself builds must carry ids, or a repeated node cannot spot them.
+    """The legacy text helper still assigns IDs to messages it creates.
 
-    Core leaves ``message_id`` unset, and the entity's duplicate check treats a message without one
-    as new. An unstamped conversation therefore defeats the check entirely, and a node in a cycle
-    re-records the whole conversation on every visit.
+    Production completions preserve application messages and use separate occurrence IDs.
+    These compatibility checks exercise only the helper and the legacy receiver fallback.
     """
 
     def _cycle_ids(self) -> list[str]:
@@ -342,7 +402,7 @@ class TestCoreSessionIdentity:
 
 
 class TestRunRequestRoundTrip:
-    """context_messages survives the entity wire format."""
+    """Context messages and their separate occurrence IDs survive the entity wire format."""
 
     def test_context_messages_round_trip(self) -> None:
         messages = [Message(role="user", contents=["hello"], message_id="m0")]
@@ -350,12 +410,16 @@ class TestRunRequestRoundTrip:
             message="hello",
             correlation_id="corr-0",
             context_messages=[m.to_dict() for m in messages],
+            context_message_ids=["occurrence-0"],
         )
 
         restored = RunRequest.from_dict(request.to_dict())
 
         assert restored.context_messages is not None
         assert len(restored.context_messages) == 1
+        assert restored.context_messages[0]["message_id"] == "m0"
+        assert restored.context_message_ids == ["occurrence-0"]
+        assert request.to_dict()["contextMessageIds"] == ["occurrence-0"]
 
     def test_absent_context_messages_stay_none(self) -> None:
         request = RunRequest(message="hello", correlation_id="corr-0")
@@ -363,4 +427,6 @@ class TestRunRequestRoundTrip:
         restored = RunRequest.from_dict(request.to_dict())
 
         assert restored.context_messages is None
+        assert restored.context_message_ids is None
         assert "contextMessages" not in request.to_dict()
+        assert "contextMessageIds" not in request.to_dict()

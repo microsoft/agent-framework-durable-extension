@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 from agent_framework import (
+    Agent,
     AgentResponse,
     AgentResponseUpdate,
     AgentSession,
@@ -42,11 +43,14 @@ from ._history_provider import (
     DurableHistoryProvider,
     bind_durable_history,
     ensure_durable_history,
+    prepare_history_owner,
     service_stores_history,
     unbind_durable_history,
 )
+from ._invocation_safety import DurableToolGuard, InvocationProgress
 from ._message_identity import message_identity
 from ._models import RunRequest
+from ._response_utils import is_terminal_agent_response, load_agent_response
 from ._retention import (
     DEFAULT_MAX_STATE_BYTES,
     DEFAULT_RETENTION,
@@ -60,6 +64,7 @@ from ._retention import (
     resolve_state_budget,
     validate_retention,
 )
+from ._state_migration import migrate_legacy_state, state_snapshot_digest
 
 logger = logging.getLogger("agent_framework.durabletask")
 
@@ -93,7 +98,7 @@ _REJECTED_ID_BACKOFF_SECONDS = 0.5
 """Multiplied by the attempt number, so the waits are 0.5s, 1s, 1.5s."""
 
 
-def _is_missing_previous_response(exc: BaseException) -> bool:
+def _is_missing_previous_response(exc: BaseException, *, prior_error: BaseException | None = None) -> bool:
     """Return whether the service refused the conversation id from the previous turn.
 
     A service that keeps the conversation can hand back the id of a finished response before that
@@ -107,14 +112,17 @@ def _is_missing_previous_response(exc: BaseException) -> bool:
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
+        if current is prior_error:
+            return False
         seen.add(id(current))
-        if getattr(current, "code", None) == _MISSING_PREVIOUS_RESPONSE_CODE:
-            return True
+        code = getattr(current, "code", None)
+        if code is not None:
+            return code == _MISSING_PREVIOUS_RESPONSE_CODE
         body = getattr(current, "body", None)
-        if isinstance(body, Mapping) and cast("Mapping[str, Any]", body).get("code") == (
-            _MISSING_PREVIOUS_RESPONSE_CODE
-        ):
-            return True
+        if isinstance(body, Mapping):
+            details = cast("Mapping[str, Any]", body)
+            if "code" in details:
+                return details["code"] == _MISSING_PREVIOUS_RESPONSE_CODE
         current = current.__cause__ or current.__context__
     return False
 
@@ -295,6 +303,107 @@ class AgentEntity:
     def persist_state(self) -> None:
         self._state_provider.persist_state()
 
+    def expire_responses(self) -> int:
+        """Remove expired delivery payloads without model execution or deleting receipts.
+
+        Hosts expose this maintenance operation for an application-owned schedule.
+        An idle entity has no timer of its own; availability expires independently.
+
+        Returns:
+            The number of payloads removed by this operation.
+        """
+        original = self.state
+        original.prepare_for_write(delivery_window_seconds=self._response_delivery_window_seconds)
+        staged = deepcopy(original)
+        before = len(staged.data.response_mailbox)
+        staged.expire_responses()
+        removed = before - len(staged.data.response_mailbox)
+        if not removed:
+            return 0
+        self._state_provider.replace_cached_state(staged)
+        try:
+            self._validate_control_budget()
+            self.persist_state()
+        except BaseException:
+            self._state_provider.replace_cached_state(original)
+            raise
+        return removed
+
+    def migrate(self, request: dict[str, Any]) -> dict[str, str]:
+        """Import a quiesced legacy snapshot into an empty, separately addressed entity.
+
+        This privileged backend operation is not exposed through the generated HTTP
+        or MCP routes. The deployment owner must authorize the source export, journal
+        and ownership transfer. No runtime can inspect or fence a legacy deployment.
+        Retries with the exact same request return the recorded migration, even after
+        subsequent runs, without rewriting state or refreshing response grace.
+
+        Args:
+            request: Source snapshot/digest, sourceSessionId, destinationSessionId,
+                migrationId, ownershipTransferId and optional deliveryEvidence.
+
+        Returns:
+            The committed migration ID and destination session identity.
+        """
+        required = {
+            "source",
+            "sourceDigest",
+            "sourceSessionId",
+            "destinationSessionId",
+            "migrationId",
+            "ownershipTransferId",
+        }
+        if (
+            not isinstance(request, dict)
+            or not required <= request.keys()
+            or request.keys() - required - {"deliveryEvidence"}
+        ):
+            raise ValueError("Migration requires a complete explicit source and destination request.")
+        for name in required - {"source"}:
+            if not isinstance(request[name], str) or not request[name].strip():
+                raise ValueError(f"Migration {name} must be a nonblank string.")
+        destination = self._state_provider.core_session_id
+        if request["destinationSessionId"] != destination:
+            raise ValueError("Migration destinationSessionId does not match this entity.")
+        if request["sourceSessionId"] == destination:
+            raise ValueError("Migration requires a separately addressed destination, never an in-place rewrite.")
+        if not isinstance(request["source"], dict):
+            raise ValueError("Migration source must be an exported state object.")
+        digest = state_snapshot_digest(request)
+        original = self.state
+        existing = original.data.unknown_fields.get("migration")
+        if isinstance(existing, dict) and cast("dict[str, Any]", existing).get("requestDigest") == digest:
+            return {"status": "migrated", "migrationId": request["migrationId"], "sessionId": destination}
+        if original.to_dict() != DurableAgentState().to_dict():
+            raise ValueError(
+                "Migration destination must be empty; an existing or different migration cannot be replaced."
+            )
+        staged = migrate_legacy_state(
+            cast("dict[str, Any]", request["source"]),
+            source_digest=request["sourceDigest"],
+            source_session_id=request["sourceSessionId"],
+            migration_id=request["migrationId"],
+            ownership_transfer_id=request["ownershipTransferId"],
+            delivery_window_seconds=self._response_delivery_window_seconds,
+            delivery_evidence=request.get("deliveryEvidence"),
+        )
+        staged.data.unknown_fields["migration"].update({"requestDigest": digest, "destinationSessionId": destination})
+        self._state_provider.replace_cached_state(staged)
+        try:
+            self._validate_control_budget()
+            self.persist_state()
+        except BaseException:
+            self._state_provider.replace_cached_state(original)
+            raise
+        return {"status": "migrated", "migrationId": request["migrationId"], "sessionId": destination}
+
+    def _validate_control_budget(self) -> None:
+        """Reject an oversized maintenance commit, without pruning any protected state."""
+        if self._max_state_bytes is not None:
+            size = len(json.dumps(self.state.to_dict(), allow_nan=False))
+            if size > self._max_state_bytes:
+                raise ValueError("Retained delivery/control state cannot fit within max_state_bytes.")
+
     def reset(self) -> None:
         """Clear local history/session context without erasing execution receipts."""
         if self._has_context_pipeline() and self._find_durable_history_provider() is None:
@@ -306,6 +415,7 @@ class AgentEntity:
             self.state.data.conversation_history.clear()
             self.state.data.session = None
             self.state.expire_responses()
+            self._validate_control_budget()
             self.persist_state()
         except BaseException:
             self._state_provider.replace_cached_state(original)
@@ -327,13 +437,15 @@ class AgentEntity:
         else:
             run_request = request
 
+        # A read-compatible legacy layout is not permission to run a new writer.
+        self.state.prepare_for_write(delivery_window_seconds=self._response_delivery_window_seconds)
         already_answered = self.state.try_get_agent_response(run_request.correlation_id)
         if already_answered is not None:
+            self.expire_responses()
             return already_answered
         original = self.state
         self._state_provider.replace_cached_state(deepcopy(original))
         try:
-            self.state.prepare_for_write(delivery_window_seconds=self._response_delivery_window_seconds)
             self.state.expire_responses()
             response = await self._execute_request(run_request)
             await self._enforce_retention()
@@ -354,8 +466,6 @@ class AgentEntity:
             raise ValueError("Entity State Provider must provide a session_id")
         options: dict[str, Any] = dict(run_request.options)
         options.setdefault("response_format", run_request.response_format)
-        if not run_request.enable_tool_calls:
-            options.setdefault("tools", None)
 
         logger.debug("[AgentEntity.run] Received SessionId %s Message: %s", session_id, run_request)
 
@@ -367,7 +477,9 @@ class AgentEntity:
         prior_receipts = deepcopy(self.state.data.ingested_messages)
         state_request = DurableAgentStateRequest.from_run_request(run_request)
         if run_request.context_messages is not None:
-            state_request.messages = self._drop_already_stored(state_request.messages)
+            state_request.messages = self._drop_already_stored(
+                state_request.messages, occurrence_ids=run_request.context_message_ids
+            )
         if not uses_context_pipeline:
             self.state.data.conversation_history.append(state_request)
 
@@ -392,8 +504,35 @@ class AgentEntity:
         inactive_service_id: Any = None
         succeeded = False
         original_agent = self.agent
+        progress = InvocationProgress()
 
         try:
+            self.agent = prepare_history_owner(self.agent, service_owns_history)
+            if not run_request.enable_tool_calls:
+                invocation_agent = copy(self.agent)
+                # Core merges default, context-provider, MCP and additional tools. A
+                # model option alone cannot disable the local invocation loop.
+                defaults = getattr(invocation_agent, "default_options", None)
+                if isinstance(defaults, Mapping):
+                    invocation_agent.default_options = {  # type: ignore[attr-defined]
+                        **cast("Mapping[str, Any]", defaults),
+                        "tools": [],
+                        "tool_choice": "none",
+                    }
+                client = getattr(invocation_agent, "client", None)
+                invocation_configuration = getattr(client, "function_invocation_configuration", None)
+                if client is not None and isinstance(invocation_configuration, Mapping):
+                    invocation_client = copy(client)
+                    invocation_client.function_invocation_configuration = {
+                        **cast("Mapping[str, Any]", invocation_configuration),
+                        "enabled": False,
+                    }
+                    invocation_agent.client = invocation_client  # type: ignore[attr-defined]
+                if isinstance(getattr(invocation_agent, "mcp_tools", None), list):
+                    invocation_agent.mcp_tools = []  # type: ignore[attr-defined]
+                self.agent = invocation_agent
+                options["tools"] = []
+                options["tool_choice"] = "none"
             if uses_context_pipeline:
                 # The agent's own context providers supply prior turns - durable-backed history,
                 # an external store (Cosmos/Redis/file), or the model service itself. Only the
@@ -416,11 +555,20 @@ class AgentEntity:
                         }
                         self.agent = invocation_agent
                     options.pop("conversation_id", None)
-                chat_messages = [
-                    replayable_message
-                    for m in state_request.messages
-                    if (replayable_message := self._to_current_message(m, run_request)) is not None
-                ]
+                chat_messages: list[Message] = []
+                # Core's operation-local copies retain private attributes, while its
+                # serializers exclude them. This receipt follows the actual appended
+                # input, even when two equal inputs carry different transport IDs.
+                for stored in state_request.messages:
+                    current = self._to_current_message(stored, run_request)
+                    if current is None:
+                        continue
+                    if stored.ingestion_occurrence and stored.ingestion_identity:
+                        current._durable_ingestion_receipt = (  # type: ignore[attr-defined]
+                            stored.ingestion_occurrence,
+                            stored.ingestion_identity,
+                        )
+                    chat_messages.append(current)
                 run_kwargs: dict[str, Any] = {
                     "messages": chat_messages,
                     "session": session,
@@ -433,15 +581,28 @@ class AgentEntity:
                 chat_messages = self._replay_all_messages()
                 run_kwargs = {"messages": chat_messages, "options": options}
 
+            if isinstance(self.agent, Agent):
+                run_kwargs["client_kwargs"] = {
+                    "middleware": [DurableToolGuard(progress, enabled=run_request.enable_tool_calls)]
+                }
+            original_service_id = getattr(session, "service_session_id", None)
             try:
                 agent_run_response: AgentResponse = await self._invoke_agent(
                     run_kwargs=run_kwargs,
                     correlation_id=correlation_id,
                     session_id=session_id,
                     request_message=message,
+                    progress=progress,
                 )
             except Exception as exc:
-                if session is None or not service_owns_history or not _is_missing_previous_response(exc):
+                if (
+                    session is None
+                    or not service_owns_history
+                    or not _is_missing_previous_response(exc)
+                    or progress.stream_started
+                    or progress.function_started
+                    or getattr(session, "service_session_id", None) != original_service_id
+                ):
                     raise
                 retried = await self._retry_rejected_conversation_id(
                     run_kwargs=run_kwargs,
@@ -449,6 +610,8 @@ class AgentEntity:
                     session_id=session_id,
                     request_message=message,
                     cause=exc,
+                    progress=progress,
+                    original_service_id=original_service_id,
                 )
                 if retried is None:
                     raise
@@ -456,10 +619,12 @@ class AgentEntity:
 
             # Resolve structured output inside the runtime-error boundary. A parsing
             # error is a committed error result, not an invisible post-run failure.
-            _ = agent_run_response.value
-            succeeded = True
+            succeeded = not is_terminal_agent_response(agent_run_response)
+            if succeeded and not agent_run_response.user_input_requests:
+                _ = agent_run_response.value
 
         except Exception as exc:
+            succeeded = False
             logger.exception("[AgentEntity.run] Agent execution failed.")
 
             # The entity absorbs failures rather than faulting, so the session survives and the
@@ -499,19 +664,20 @@ class AgentEntity:
             # Retain receipts only for inputs actually staged by durable history;
             # no portable external provider API proves an interrupted append.
             staged_inputs = {
-                stored.ingestion_identity
+                (stored.ingestion_occurrence, stored.ingestion_identity)
                 for entry in self.state.data.conversation_history
                 if isinstance(entry, DurableAgentStateRequest) and entry.correlation_id == correlation_id
                 for stored in entry.messages
             }
             self.state.data.ingested_messages = prior_receipts
             for stored in state_request.messages:
-                if stored.message_id and stored.ingestion_identity in staged_inputs:
-                    fingerprints = self.state.data.ingested_messages.get(stored.message_id, [])
+                identity = stored.ingestion_occurrence or stored.message_id
+                if identity and (identity, stored.ingestion_identity) in staged_inputs:
+                    fingerprints = self.state.data.ingested_messages.get(identity, [])
                     if fingerprints is not None and stored.ingestion_identity:
                         if stored.ingestion_identity not in fingerprints:
                             fingerprints.append(stored.ingestion_identity)
-                        self.state.data.ingested_messages[stored.message_id] = fingerprints
+                        self.state.data.ingested_messages[identity] = fingerprints
         self.state.record_response(
             correlation_id,
             agent_run_response,
@@ -532,6 +698,8 @@ class AgentEntity:
         session_id: str,
         request_message: Any,
         cause: BaseException,
+        progress: InvocationProgress,
+        original_service_id: Any,
     ) -> AgentResponse | None:
         """Re-send an identical request whose conversation id the service refused.
 
@@ -552,6 +720,8 @@ class AgentEntity:
             session_id: Session the request belongs to.
             request_message: The originating message, for logging.
             cause: The refusal that triggered this, so a give-up is reported with its reason.
+            progress: Run-local observations that prohibit restarting after stream or tool progress.
+            original_service_id: Session continuation before the first attempt; retries must not advance it.
 
         Returns:
             The response, or None when every attempt was refused the same way.
@@ -564,9 +734,15 @@ class AgentEntity:
                     correlation_id=correlation_id,
                     session_id=session_id,
                     request_message=request_message,
+                    progress=progress,
                 )
             except Exception as retry_exc:
-                if not _is_missing_previous_response(retry_exc):
+                if (
+                    not _is_missing_previous_response(retry_exc, prior_error=cause)
+                    or progress.stream_started
+                    or progress.function_started
+                    or getattr(run_kwargs.get("session"), "service_session_id", None) != original_service_id
+                ):
                     raise
                 logger.debug(
                     "[AgentEntity.run] Conversation id still not accepted for session %s (attempt %d of %d).",
@@ -646,6 +822,14 @@ class AgentEntity:
             if durable_history.source_id in bag:
                 transient = bag.pop(durable_history.source_id)
                 has_transient = True
+                if isinstance(transient, dict):
+                    persistent = {
+                        key: value
+                        for key, value in cast("dict[str, Any]", transient).items()
+                        if key not in ("messages", "_positions")
+                    }
+                    if persistent:
+                        bag[durable_history.source_id] = persistent
         try:
             payload = cast("dict[str, Any]", to_dict())
         finally:
@@ -653,12 +837,22 @@ class AgentEntity:
                 cast("dict[str, Any]", session_state)[durable_history.source_id] = transient  # type: ignore[union-attr]
 
         try:
-            json.dumps(payload)
+            json.dumps(payload, allow_nan=False)
         except (TypeError, ValueError) as exc:
             raise ValueError("Agent session state is not JSON-compatible; the operation cannot commit.") from exc
+        previous = self.state.data.session
+        if isinstance(previous, dict):
+            opaque = {
+                key: deepcopy(value)
+                for key, value in previous.items()
+                if key not in {"type", "session_id", "service_session_id", "state"} and key not in payload
+            }
+            payload = {**opaque, **payload}
         self.state.data.session = payload
 
-    def _drop_already_stored(self, messages: list[DurableAgentStateMessage]) -> list[DurableAgentStateMessage]:
+    def _drop_already_stored(
+        self, messages: list[DurableAgentStateMessage], *, occurrence_ids: list[str] | None = None
+    ) -> list[DurableAgentStateMessage]:
         """Remember actual identities, including skipped positions and content revisions.
 
         Receipts outlive transcript eviction. Anonymous direct inputs are not content-
@@ -667,20 +861,16 @@ class AgentEntity:
         """
         receipts = self.state.data.ingested_messages
         kept: list[DurableAgentStateMessage] = []
-        for entry in self.state.data.conversation_history:
-            if isinstance(entry, DurableAgentStateRequest):
-                for stored in entry.messages:
-                    if stored.message_id and stored.message_id not in receipts:
-                        fingerprint = stored.ingestion_identity or message_identity(stored.to_chat_message())
-                        receipts[stored.message_id] = [fingerprint] if stored.contents else None
-        for message in messages:
-            if message.message_id:
+        for index, message in enumerate(messages):
+            identity = occurrence_ids[index] if occurrence_ids is not None else message.message_id
+            if identity:
                 fingerprint = message.ingestion_identity or message_identity(message.to_chat_message())
-                known = receipts.get(message.message_id, [])
+                known = receipts.get(identity, [])
                 if known is None or fingerprint in known:
                     continue
                 known.append(fingerprint)
-                receipts[message.message_id] = known
+                receipts[identity] = known
+                message.ingestion_occurrence = identity
             kept.append(message)
         return kept
 
@@ -711,7 +901,14 @@ class AgentEntity:
             raise TypeError(
                 f"Agent {type(self.agent).__name__} exposes context providers but does not support create_session()."
             )
-        session: Any = create_session(session_id=self._state_provider.core_session_id)
+        migration = self.state.data.unknown_fields.get("migration")
+        logical_session_id = self._state_provider.core_session_id
+        if isinstance(migration, dict):
+            source_session_id = cast("dict[str, Any]", migration).get("sourceSessionId")
+            if not isinstance(source_session_id, str) or not source_session_id.strip():
+                raise ValueError("Migration sourceSessionId must preserve the original logical session identity.")
+            logical_session_id = source_session_id
+        session: Any = create_session(session_id=logical_session_id)
         self._restore_session(session)
         return session
 
@@ -756,7 +953,7 @@ class AgentEntity:
         """Preserve core input content metadata rather than round-tripping through legacy types."""
         if request.context_messages is not None and message.ingestion_identity:
             for raw in request.context_messages:
-                original = Message.from_dict(deepcopy(raw))
+                original = load_agent_response({"messages": [raw]}).messages[0]
                 if (
                     original.message_id == message.message_id
                     and message_identity(original) == message.ingestion_identity
@@ -786,6 +983,7 @@ class AgentEntity:
         correlation_id: str,
         session_id: str,
         request_message: str,
+        progress: InvocationProgress | None = None,
     ) -> AgentResponse:
         """Execute the agent, preferring streaming when available."""
         callback_context: AgentCallbackContext | None = None
@@ -822,7 +1020,9 @@ class AgentEntity:
                 direct_response = cast(AgentResponse, stream_candidate)
                 await self._notify_final_response(direct_response, callback_context)
                 return direct_response
-            return await self._consume_stream(stream=stream_candidate, callback_context=callback_context)
+            return await self._consume_stream(
+                stream=stream_candidate, callback_context=callback_context, progress=progress
+            )
         agent_run_response = run_callable(**run_kwargs)
         if inspect.isawaitable(agent_run_response):
             agent_run_response = await agent_run_response
@@ -838,9 +1038,12 @@ class AgentEntity:
         self,
         stream: ResponseStream[AgentResponseUpdate, AgentResponse],
         callback_context: AgentCallbackContext | None = None,
+        progress: InvocationProgress | None = None,
     ) -> AgentResponse:
         """Consume streaming responses and build the final AgentResponse."""
         async for update in stream:
+            if progress is not None:
+                progress.stream_started = True
             await self._notify_stream_update(update, callback_context)
 
         response = await stream.get_final_response()
@@ -858,7 +1061,7 @@ class AgentEntity:
             return
 
         try:
-            callback_result = self.callback.on_streaming_response_update(update, context)
+            callback_result = self.callback.on_streaming_response_update(deepcopy(update), context)
             if inspect.isawaitable(callback_result):
                 await callback_result
         except Exception as exc:
@@ -878,7 +1081,14 @@ class AgentEntity:
             return
 
         try:
-            callback_result = self.callback.on_agent_response(response, context)
+            snapshot = deepcopy(response)
+            # Core deliberately shares opaque SDK representations during deepcopy.
+            # Detach them when possible, otherwise omit only that opaque field.
+            try:
+                snapshot.raw_representation = deepcopy(response.raw_representation)
+            except Exception:
+                snapshot.raw_representation = None
+            callback_result = self.callback.on_agent_response(snapshot, context)
             if inspect.isawaitable(callback_result):
                 await callback_result
         except Exception as exc:

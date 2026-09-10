@@ -1,11 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json",
-  "description": "Durable agent state. Version 2 separates response delivery and completion evidence from the mutable model transcript. Legacy version 1 layouts remain readable. Readers preserve unknown root, data and entry properties when writing state back.",
+  "description": "Durable agent state. Version 2 separates response delivery and completion evidence from the mutable model transcript. Legacy version 1 layouts remain readable. Readers preserve unknown properties, including nested entry, message, content and usage properties, when writing state back.",
   "$defs": {
     "usage": {
       "type": "object",
       "description": "Token usage statistics.",
+      "additionalProperties": true,
       "properties": {
           "inputTokenCount": { "type": "integer" },
           "outputTokenCount": { "type": "integer" },
@@ -68,7 +69,7 @@
         "uri": { "type": "string", "description": "The URI." },
         "mediaType": { "type": "string", "description": "The media type of the URI." }
       },
-      "required": ["$type", "uri", "mediaType"]
+      "required": ["$type", "uri"]
     },
     "usageContent": {
       "type": "object",
@@ -95,7 +96,7 @@
         "$type": { "type": "string", "const": "functionCall" },
         "callId": { "type": "string", "description": "The identifier of the function being called." },
         "name": { "type": "string", "description": "The name of the function being called." },
-        "arguments": { "type": "object", "description": "The arguments provided to the function call." }
+        "arguments": { "type": ["object", "string"], "description": "The arguments provided to the function call, either a mapping or the original core argument string." }
       },
       "required": ["$type", "callId", "name"]
     },
@@ -119,6 +120,21 @@
       "required": ["$type", "content"]
     },
     "chatContentItem": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "extensionData": {
+          "type": "object",
+          "properties": {
+            "coreContent": {
+              "type": "object",
+              "description": "Canonical core fields not represented by this content subtype's existing shared-schema fields. Does not duplicate text, URI, arguments or result. Function results retain canonical nested items here alongside their legacy result representation. Known shared-schema fields remain authoritative when edited.",
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        }
+      },
       "oneOf": [
         { "$ref": "#/$defs/dataContent" },
         { "$ref": "#/$defs/errorContent" },
@@ -130,15 +146,28 @@
         { "$ref": "#/$defs/textContent" },
         { "$ref": "#/$defs/textReasoningContent" },
         { "$ref": "#/$defs/uriContent" },
-        { "$ref": "#/$defs/unknownContent" }
+        { "$ref": "#/$defs/unknownContent" },
+        {
+          "type": "object",
+          "properties": {
+            "$type": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "enum": ["data", "error", "functionCall", "functionResult", "hostedFile", "hostedVectorStore", "usage", "text", "reasoning", "uri", "unknown"] }
+            }
+          },
+          "required": ["$type"],
+          "additionalProperties": true
+        }
       ]
     },
     "chatMessage": {
       "type": "object",
+      "additionalProperties": true,
       "description": "Single chat message exchanged with the agent.",
       "properties": {
         "authorName": { "type": "string", "description": "The name of the author of the message." },
-        "role": { "type": "string", "enum": ["user", "assistant", "system", "tool"] },
+        "role": { "type": "string", "description": "Core message role, including user, assistant, system, developer and tool." },
         "contents": {
           "type": "array",
           "description": "Model transcript content, which may be changed or removed by compaction and retention. Empty content remains valid for legacy records, but version 2 does not require contentless request or response mirrors when another provider owns history. Version 2 delivers responses from responseMailbox, never by reconstructing them from this transcript.",
@@ -267,9 +296,11 @@
     },
     "coreAgentResponse": {
       "type": "object",
-      "description": "An independent, inline JSON snapshot restorable with core AgentResponse.from_dict(), not a transcript entry, JSON-encoded string or storage reference. Preserve all serializable response metadata and structured value as well as messages. Raw SDK representations are not part of core's serialized response contract.",
+      "description": "An independent, inline base-response JSON snapshot restored through the version-aware durable response loader, not a transcript entry, JSON-encoded string or storage reference. Unknown envelope fields remain in storage and are filtered only for the consumer. Raw SDK representations are not persisted.",
       "properties": {
         "type": { "type": "string", "const": "agent_response" },
+        "_durable_response_version": { "type": "integer", "const": 1, "description": "Durable response envelope version. Absent on legacy inline snapshots." },
+        "_durable_value_by_name": { "type": "boolean", "description": "Validate the retained structured value by field name rather than serialization alias when true." },
         "messages": { "type": "array", "items": { "$ref": "#/$defs/coreMessage" } },
         "response_id": { "type": "string" },
         "agent_id": { "type": "string" },

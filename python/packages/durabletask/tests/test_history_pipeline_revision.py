@@ -796,7 +796,7 @@ async def test_failed_inputs_preserve_matched_groups_metadata_and_original_inges
         assert set(state) == {WORKING_BUFFER_KEY, POSITIONS_KEY}
         assert len(transcript(provider)) == 5
         saved = transcript(provider)[-1]
-        assert saved.ingestion_identity == (message_identity(Message.from_dict(original)) if message_id else None)
+        assert saved.ingestion_identity == message_identity(Message.from_dict(original))
         assert saved.message_id and saved.message_id != message_id
         assert result.message_id == message_id
         assert [content.to_dict()["result"] for content in saved.contents] == [
@@ -1149,6 +1149,7 @@ async def test_reused_summary_ids_keep_older_links_and_original_contents(
         assert new_summary.message_id == "repeated-summary"
         history.flush(state)
         assert new_summary.message_id != "repeated-summary"
+        # Removing a summary from the logical buffer does not erase its body or lineage under keep_all.
         assert [message.text for message in transcript(provider)] == [
             "seed question",
             "summary version 1",
@@ -1174,7 +1175,16 @@ async def test_reused_summary_ids_keep_older_links_and_original_contents(
     cold_state: dict[str, Any] = {}
     with bound(cold):
         loaded = await cold_history.get_messages(session.session_id, state=cold_state)
-        assert [message.text for message in loaded] == ["summary version 1", "summary version 2", "current"]
+        assert [message.text for message in loaded] == [
+            *([] if remove_old_summary else ["summary version 1"]),
+            "summary version 2",
+            "current",
+        ]
+        assert [message.message_id for message in loaded] == [
+            *([] if remove_old_summary else ["repeated-summary"]),
+            new_summary.message_id,
+            "current",
+        ]
         cold_history.flush(cold_state)
         assert cold.state.to_dict() == provider.state.to_dict()
         assert_current_positions(cold, cold_state)
