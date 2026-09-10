@@ -764,9 +764,9 @@ Python/.NET read/write round-trips and unknown-data preservation.
 ## Validation Requirements
 
 The following are acceptance requirements for the proposed implementation, not claims about the
-existing prototype's coverage. Published unit, scripted-provider and live text evidence is scoped
-in [Prototype Evidence](#prototype-evidence). It does not establish the missing cancellation, live
-inline-file/multimodal pressure, OpenTelemetry or combined error/commit/poller cases below.
+existing prototype's coverage. This checklist includes requirements already covered by tests, not
+just outstanding work. The coverage table in [Prototype Evidence](#prototype-evidence) separates
+tested behavior, remaining validation, missing instrumentation and explicit follow-up capabilities.
 
 1. **Provider-independent execution.** Test success, errors, polling, repeated correlations and
    cold reloads with durable, external, service-owned and legacy agents. Verify one transcript
@@ -971,7 +971,7 @@ capability does not block their initial integration.
 
 ### Published prototype evidence
 
-The published reference is [Python prototype PR #59][prototype] at [5b872d1][prototype-head]. See
+The published reference is [Python prototype PR #59][prototype] at [9b4550d][prototype-head]. See
 the [test commit 1aac4fd][prototype-tests], [documentation commit 3ad9][prototype-docs] and
 [samples validation record][prototype-validation] for the recorded unit, scripted-provider and
 live text evidence. These evidence classes are distinct, not interchangeable release guarantees.
@@ -979,8 +979,8 @@ live text evidence. These evidence classes are distinct, not interchangeable rel
 The published prototype covers the revised execution/delivery separation, Python ownership and
 workflow delta paths under its isolated-v2 deployment contract. Its documented evidence does not
 establish shared Python/.NET rollout compatibility or make its private APIs and schema the final
-common design. Local follow-up commit `9b4550d` fixes integration child environments and rejects the
-known incompatible completion containers. It is not part of the published reference above.
+common design. The published follow-up `9b4550d` fixes integration child environments and rejects
+the known incompatible completion containers without defining the final shared schema.
 
 That follow-up passed 3,303 unit tests with zero skips in each Python 3.13/core 1.16,
 Python 3.13/core 1.13 and Python 3.10/core 1.16 run. Package-only live suites passed 42 direct and
@@ -989,9 +989,19 @@ pass. Old-code probes fail 31 state cases and all 12 launcher cases, while the v
 control still passes. Lint, typing, offline lock checks and both package builds also passed.
 These are local results, not remote CI or cross-runtime acceptance.
 
-Cancellation boundaries, live inline-file/multimodal pressure, OpenTelemetry and the combined
-provider-error/failed-commit/poller scenario remain acceptance work. The stricter retry and
-observability requirements above are not claims that those cases have already been demonstrated.
+| Area | Evidence and remaining work |
+| --- | --- |
+| Large tool arguments/results and atomic pressure eviction | Existing tests check tool-only byte accounting, the low watermark and the smallest atomic prefix for mixed Unicode/tool payloads. This is covered, not a deferred feature. |
+| Newest exchange or delivery/control data cannot fit | Existing tests assert capacity failure without deleting the protected exchange or prior state, including a mailbox or receipt that alone exceeds the budget. |
+| Media and file content | Schema/JSON cold-round-trip tests preserve inline data, file references and mixed binary/text tool results. Retention pressure followed by cold reload and exact subsequent model-input checks still needs combined coverage. Live suites are text-based. |
+| Failures and result delivery | Existing tests cover provider/model errors, final-flush and write rollback, cached-state restoration, committed error delivery and bounded polling timeout separately. Cancellation/worker-stop scenarios and the combined provider-error, failed error-result commit and poller path remain validation gaps. |
+| Retention observability | Persisted truncation evidence and a Python warning log exist. Retention-specific OpenTelemetry instruments, bounded attributes and planned/staged/confirmed-commit assertions are not implemented or validated. |
+| Explicit follow-up capabilities | Bounded completion bookkeeping, optional retry-safe external writes and provider lifecycle APIs remain follow-ups. .NET eager pruning remains gated on safe exclusion, summary, cadence and decorator support. |
+
+Missing combined tests and instrumentation are work needed for the proposed contract, not evidence
+that those capabilities require a new design or permission to defer them. Completing this ADR does
+not complete their implementation or validation. The local 525-test rerun covering the existing
+retention, fidelity, execution and delivery tests passed without adding new cases.
 Exact Pydantic 2.11 runtime validation remains unverified because artifact downloads were blocked.
 
 ### Historical implementation at c4582a1
@@ -1074,7 +1084,7 @@ transcript as automatic recovery insurance.
 - [#79, workflow context-filter replay][issue79]
 - [ADR PR #88][adr-pr]
 - [Python prototype PR #59][prototype]
-- [Published prototype head 5b872d1][prototype-head]
+- [Published prototype head 9b4550d][prototype-head]
 - [Prototype test commit 1aac4fd][prototype-tests]
 - [Prototype documentation commit 3ad9][prototype-docs]
 - [Prototype samples validation record][prototype-validation]
@@ -1088,7 +1098,7 @@ transcript as automatic recovery insurance.
 [prototype]: https://github.com/microsoft/agent-framework-durable-extension/pull/59
 [adr-pr]: https://github.com/microsoft/agent-framework-durable-extension/pull/88
 [schema-pr]: https://github.com/microsoft/agent-framework-durable-extension/pull/92
-[prototype-head]: https://github.com/microsoft/agent-framework-durable-extension/commit/5b872d1
+[prototype-head]: https://github.com/microsoft/agent-framework-durable-extension/commit/9b4550d
 [prototype-tests]: https://github.com/microsoft/agent-framework-durable-extension/commit/1aac4fd
 [prototype-docs]: https://github.com/microsoft/agent-framework-durable-extension/commit/3ad9
-[prototype-validation]: https://github.com/microsoft/agent-framework-durable-extension/blob/5b872d1/python/samples/README.md#prototype-validation
+[prototype-validation]: https://github.com/microsoft/agent-framework-durable-extension/blob/9b4550d/python/samples/README.md#prototype-validation
