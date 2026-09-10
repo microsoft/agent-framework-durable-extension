@@ -8,28 +8,48 @@ Please install this package via pip:
 pip install agent-framework-azurefunctions --pre
 ```
 
-Requires Python 3.10+ and `agent-framework-core>=1.13.0,<2`. Recorded local validation used
-core 1.13.0 and 1.16.0. The local unit matrix also covers Python 3.10 and 3.13.
+Requires Python 3.10+ and `agent-framework-core>=1.13.0,<2`. The Durable Task dependency requires
+`pydantic>=2.11,<3`. Full unit runs passed on Python 3.13/core 1.16, Python 3.13/core 1.13 and
+Python 3.10/core 1.16. Pydantic 2.11 runtime validation remains blocked by dependency artifact
+downloads. Lock verification passed. See the ADR status below for exact results and deployment limits.
 
 ## Version 2 deployment warning
 
 The settings below describe the local PR #59 implementation, not release readiness or the contents
 of an already published package.
 
-> **Breaking persisted-state change.** New writes use `schemaVersion="2.0.0"`. Python reads legacy
-> `1.x` and revised `2.x` layouts, but the current .NET converter rejects major `2` and has no
-> mailbox response lookup. The cross-runtime release gate is **not satisfied**. Do not deploy these
-> writers where incompatible workers or polling clients can access converted entities. Rollback
-> requires versions that preserve both version-2 response lookup and write behavior.
+> **Breaking deployment and state contract.** `AgentFunctionApp` and standalone `create_agent_entity`
+> require `deployment_mode="isolated_v2"`, or `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2` when the
+> argument is omitted/`None`. This is operator acknowledgement, not a handshake, security boundary
+> or proof of isolation. Use a separate hub/deployment with compatible workers and all clients.
+> Keep old workers and workflow histories on the old engine. The current .NET reader rejects version 2.
 
-Legacy state without scalar ingestion cursors converts at an entity operation boundary. Surviving
-responses receive a fresh delivery grace window, and known custom IDs retain legacy markers.
-Conversion does not recover previously removed or altered original results. Non-empty legacy
-`ingestedPositions` rejects conversion rather than guessing which positions were delivered.
-In-flight legacy workflows using those cursors need a version-specific migration that is not
-implemented. See [ADR-0032](../../../docs/decisions/0032-durable-thread-compaction.md#current-local-implementation-status)
-for the contract, recorded validation and remaining gates. Its latest live DTS/Redis result does
-not establish Azure Functions live-host validation.
+Only `schemaVersion="2.0.0"` is writable. Legacy `1.x.y` and supported later `2.x.y` state can be
+read/round-tripped, but `run`, `reset` and `expire_responses` reject those layouts. No operation
+silently upgrades legacy state. Rollback requires compatible version-2 workers, clients and workflow
+protocol. Names are unchanged. Reusing an old `@name@key` on an empty new hub is not migration.
+
+Generated workflow start routes and internal child dispatch wrap new starts with workflow engine
+version 2. Raw/legacy starts reject before revised actions execute. Native custom scheduling must use
+public `wrap_workflow_input` for new instances. It does not authorize input or migrate old histories.
+
+Both hosts expose privileged backend `AgentEntity.migrate`, supported by the pure
+`migrate_legacy_state` helper. The request requires `source`, `sourceDigest`, `sourceSessionId`,
+`destinationSessionId`, `migrationId` and `ownershipTransferId`, with optional `deliveryEvidence`.
+Use an empty, separately addressed destination after quiescing and authorizing transfer from the
+old owner. Nonempty scalar `ingestedPositions` requires a complete accepted-message journal,
+including evicted inputs. `complete=True` is an operator assertion. Digest/max-position checks do
+not prove authority/completeness or justify inferring a delivered prefix. Without the journal, keep
+the old session on the old engine.
+
+Only recorded responses receive legacy completion backfill and a delivery grace window. Surviving
+payloads may be partial, not original full responses. Whole-request digest idempotency prevents grace
+refresh after an exact retry, cold reload or subsequent run. The original logical session ID is
+retained for external history. Migration does not copy that store or move workflow action histories.
+No generated HTTP/MCP migration endpoint is provided. See
+[ADR-0032](../../../docs/decisions/0032-durable-thread-compaction.md#state-evolution-and-compatibility)
+for evidence fields and [local status](../../../docs/decisions/0032-durable-thread-compaction.md#current-local-implementation-status).
+Live validation results and remaining checks are tracked in that local status section.
 
 ## Durable Agent Extension
 
@@ -43,20 +63,26 @@ from agent_framework.openai import OpenAIChatCompletionClient
 from agent_framework_azurefunctions import AgentFunctionApp
 
 assistant = Agent(client=OpenAIChatCompletionClient(), name="assistant")
-app = AgentFunctionApp(agents=[assistant])
+# Configure the Functions task hub/deployment separately from the old worker
+app = AgentFunctionApp(agents=[assistant], deployment_mode="isolated_v2")
 ```
 
 Post messages using the generated `/api/agents/{agent_name}/run` endpoint.
 
 ### History and retention settings
 
-`AgentFunctionApp` uses the same Python agent entity and history-provider integration as the direct
-Durable Task worker. In-memory primary history is replaced, and durable history is injected when
-no load-enabled primary exists. Substitution preserves `source_id`, `skip_excluded` and core storage
-flags without enabling compaction. External primaries and store-only sinks retain their own policies.
-Multiple load-enabled primaries are rejected. The selected provider owns appends through core's
-hooks, followed by a final durable-provider flush. Only agents without a context pipeline use direct
-entity transcript appends.
+`AgentFunctionApp` uses the same entity/history integration as the direct Durable Task worker.
+Automatic durable history is appended after existing providers to match core's reverse after-hook
+order. Only exact built-in `InMemoryHistoryProvider` instances are replaced, preserving `source_id`,
+`skip_excluded`, storage flags and optional `after_run_once_per_turn` metadata. Core 1.13 does not
+require that hint. Custom in-memory subclasses retain their hooks/session transcripts in the
+protected floor, outside durable transcript eviction. Other custom durable-provider JSON state
+persists except the transient message buffer and position index.
+
+Registration does not enable compaction. External primaries and store-only sinks retain their
+policies, subject to the intentional service-branch restriction below. Multiple primaries or
+duplicate `source_id` values are rejected. Providers append through core hooks, followed by a final
+durable flush. Only agents without a context pipeline use direct entity transcript appends.
 
 Eager pruning and pressure eviction are independent. The matrix assumes no explicit provider
 `prune_excluded` override.
@@ -88,7 +114,7 @@ an inferred Functions backend limit.
 ```python
 from agent_framework_durabletask import INHERIT
 
-app = AgentFunctionApp(max_state_bytes=800_000, workflow_max_state_bytes=None)
+app = AgentFunctionApp(deployment_mode="isolated_v2", max_state_bytes=800_000, workflow_max_state_bytes=None)
 app.add_agent(assistant, retention="follow_compaction", max_state_bytes=INHERIT)
 app.configure_workflow(workflow)
 ```
@@ -96,8 +122,17 @@ app.configure_workflow(workflow)
 `follow_compaction` only prunes exclusions produced by configured compaction. Workflow `full`,
 `last_agent` and `custom` projection runs before per-target delta transport. Custom filters execute
 during orchestration replay and must be synchronous, deterministic and side-effect-free, but need
-not select monotonically increasing positions. Durable owns transport identities and ingestion
-receipts without imposing a new core ID requirement.
+not select monotonically increasing positions. Parallel `contextMessageIds` carry occurrence hashes
+without rewriting public message IDs. Private forwarding provenance stays in internal checkpoints,
+not application metadata. The outgoing logical conversation includes the full selection and all
+response messages, not just the delta. Typed/cache-only requests, agent approval/HITL and
+output-designated agents use the same contract.
+
+Generated agent outputs and intermediate events use portable response snapshots. HTTP workflow
+results retain structured `value`, including null and falsey values, and response metadata.
+External clients do not need the worker's Pydantic class; worker-side conditions and activities
+still receive the locally declared model. Arbitrary activity outputs keep the existing checkpoint
+codec and its importable-type requirements. Parent designations also gate direct child outputs.
 
 ### Service ownership, delivery and reset
 
@@ -108,20 +143,37 @@ and its history hooks. A later service-owned run can reuse the saved service ID 
 the intervening client-owned transcript. Switching branches does not migrate or merge history.
 External and service-owned runs create no local request-message mirror.
 
+Durable deliberately suppresses **both load and store hooks** on the inactive external/custom
+primary during service-owned runs, including per-service-call persistence. Core 1.16 can still save
+to a configured primary on such runs. This branch-isolation restriction is not universal unchanged
+hook semantics. Use a distinct store-only sink with its own `source_id` to audit both branches.
+Its configured storage flags still apply.
+
 HTTP polling uses independent original response snapshots in `responseMailbox`, including
 serializable metadata and structured `value`. Transcript pruning or reset cannot change those
 results. Expiry leaves `completedCorrelations` receipts and returns an already-completed status with
 `response_expired`, never a reconstructed transcript response or another agent invocation.
 
-Local reset clears session and transcript context but preserves live mailbox payloads, completion
-receipts and ingestion evidence. Normal delivery expiry still applies. Reset with an external
-primary raises `NotImplementedError` until a provider-owned clear operation is available.
+Expiry is a logical deadline, not an idle timer. New runs, duplicates and reset remove expired
+payloads. Both hosts also expose backend `expire_responses` without model/tool/provider execution.
+Idle physical cleanup needs an application-owned schedule or explicit backend signal/manual
+operation. No public HTTP/MCP cleanup endpoint is generated. Completion receipts are never removed
+by expiry, cleanup or reset.
 
-Entity-local state commits once per operation. Model/runtime failures are not retried through a
-generic non-streaming fallback. Only an unsupported-stream `TypeError` takes that fallback path.
+Local reset clears session and transcript context but preserves live mailbox payloads, completion
+receipts and ingestion evidence. Normal delivery expiry still applies. Reset with a non-durable
+custom/external primary raises `NotImplementedError` until provider-owned clearing is available.
+
+Entity-local state commits once per operation. Only structured `previous_response_not_found` on a
+service-owned run permits bounded retries, and only before a stream update, function execution or
+service-session advancement. Otherwise fail without restarting the conversation. Provider-hook side
+effects are not guaranteed safe or identical on retry. There is no generic non-streaming retry after
+runtime failure. Only matching unsupported-stream `TypeError` before consumption negotiates fallback.
+Final callbacks receive deep copies preserving Pydantic fields. Opaque SDK `raw_representation`
+detachment is best effort and that field is omitted if it cannot be copied.
 Uncommitted model/tool effects and external appends can repeat after failure. Completion receipts
 last until entity deletion and can exhaust capacity. A bounded receipt protocol and optional
 retry-safe external-history adapters remain deferred, with no mandatory core API changes or
-exactly-once guarantee for uncommitted effects.
+guarantee of a distributed transaction or exactly-once uncommitted effects.
 
 For more details, review the Python [README](https://github.com/microsoft/agent-framework/tree/main/python/README.md) and the samples directory.

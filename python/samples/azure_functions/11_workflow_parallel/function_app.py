@@ -348,7 +348,7 @@ def _create_workflow() -> Workflow:
 
     # Build workflow with parallel patterns
     return (
-        WorkflowBuilder(name="parallel_review", start_executor=input_router)
+        WorkflowBuilder(name="parallel_review", start_executor=input_router, output_from=[final_report_executor])
         # Pattern 1: Fan-out to two executors (run in parallel)
         .add_fan_out_edges(
             source=input_router,

@@ -149,7 +149,7 @@ def create_workflow() -> Workflow:
     email_sender = EmailSenderExecutor(id="email_sender")
 
     return (
-        WorkflowBuilder(name=WORKFLOW_NAME, start_executor=spam_agent)
+        WorkflowBuilder(name=WORKFLOW_NAME, start_executor=spam_agent, output_from=[spam_handler, email_sender])
         .add_switch_case_edge_group(
             spam_agent,
             [

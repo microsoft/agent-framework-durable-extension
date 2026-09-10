@@ -2,13 +2,13 @@
 
 ## Overview
 
-Durable agents extend the standard Microsoft Agent Framework with **durable state management** powered by the Durable Task framework. An ordinary Agent Framework agent runs in-process: its conversation history lives in memory and is lost when the process ends. A durable agent persists conversation history and execution state in external storage so that sessions survive process restarts, failures, and scale-out events.
+Durable agents extend the standard Microsoft Agent Framework with **durable execution state** powered by the Durable Task framework. Ordinary agents can already use in-memory, external-provider or service-owned history. Durable hosting persists execution and session control so that compatible workers can continue sessions across process restarts and scale-out.
 
 | Capability | Ordinary agent | Durable agent |
 | --- | --- | --- |
-| Conversation history | In-memory only | Durably persisted |
-| Failure recovery | State lost on crash | Automatically resumed |
-| Multi-instance scale-out | Not supported | Any worker can resume a session |
+| Conversation history | Selected provider or model service | Selected owner, with durable-backed local history when configured |
+| Failure recovery | Application-owned | Persisted orchestration and entity state; uncommitted external effects can repeat |
+| Multi-instance scale-out | Application-owned coordination | Compatible workers serialize access to each entity |
 | Multi-agent orchestrations | Manual coordination | Deterministic, checkpointed workflows |
 | Human-in-the-loop | Must keep process alive | Can wait days/weeks with zero compute |
 | Hosting | Any process | Console app, Azure Functions, or any Durable Task–compatible host |
@@ -18,12 +18,15 @@ Durable agents extend the standard Microsoft Agent Framework with **durable stat
 
 ## How durable agents work
 
-Durable agents are implemented on top of [Durable Entities](https://learn.microsoft.com/azure/azure-functions/durable/durable-functions-entities) (also called "virtual actors"). Each **agent session** maps to one entity instance whose state contains the full conversation history. When you send a message to a durable agent, the following happens:
+Durable agents are implemented on top of [Durable Entities](https://learn.microsoft.com/azure/azure-functions/durable/durable-functions-entities) (also called "virtual actors"). Each **agent session** maps to one entity instance. Transcript ownership and response storage depend on the runtime version and selected history provider. When you send a message to a durable agent, the following happens:
 
 1. The message is dispatched to the entity identified by an `AgentSessionId` (a composite of the agent name and a unique session key).
-2. The entity loads its persisted `DurableAgentState`, which includes the complete conversation history.
-3. The entity invokes the underlying `AIAgent` with the full conversation history, collects the response, and appends both the request and the response to the state.
-4. The updated state is persisted back to durable storage automatically.
+2. The entity loads its persisted `DurableAgentState` and session control.
+3. The underlying agent obtains context from its configured history path and executes the request.
+4. Entity-local changes are persisted. External provider writes and tool effects are not part of a distributed transaction.
+
+> [!WARNING]
+> The local Python PR #59 implementation uses schema `2.0.0`, independent response/completion storage and an explicit `isolated_v2` deployment gate. It does not require a local mirror of external/service-owned history. Existing .NET readers do not support this layout. Do not mix these writers or replay old workflow histories through the new Python engine. See [ADR-0032](../../decisions/0032-durable-thread-compaction.md#state-evolution-and-compatibility) for migration, rollback and deployment boundaries.
 
 Because the entity framework serializes access to each entity instance, concurrent messages to the same session are processed one at a time, eliminating race conditions.
 
@@ -110,7 +113,7 @@ Alternatively, `ConfigureDurableOptions` configures both from a single delegate 
 **Python example:**
 
 ```python
-app = AgentFunctionApp(agents=[agent])
+app = AgentFunctionApp(agents=[agent], deployment_mode="isolated_v2")
 ```
 
 ### Console apps / generic hosts
@@ -134,7 +137,7 @@ IHost host = Host.CreateDefaultBuilder(args)
 **Python example:**
 
 ```python
-worker = DurableAIAgentWorker(TaskHubGrpcWorker(host_address="localhost:4001"))
+worker = DurableAIAgentWorker(TaskHubGrpcWorker(host_address="localhost:4001"), deployment_mode="isolated_v2")
 worker.add_agent(agent)
 worker.start()
 ```

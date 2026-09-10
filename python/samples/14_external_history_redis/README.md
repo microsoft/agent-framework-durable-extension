@@ -19,9 +19,11 @@ agent = Agent(
 
 Registering that agent with the durable runtime changes nothing about how you configure it:
 
-- **Your provider is left alone.** An `InMemoryHistoryProvider` is swapped for a durable-backed one
-  (see [13_conversation_compaction](../13_conversation_compaction)), but a provider
-  you chose deliberately is never substituted. You picked where the conversation lives.
+- **Your provider stays active for this client-owned run.** The exact built-in
+   `InMemoryHistoryProvider` is swapped for a durable-backed one (see
+   [13_conversation_compaction](../13_conversation_compaction)), but this Redis provider keeps its
+   hooks and storage. On a service-owned run, the inactive primary is wrapped to suppress load/store
+   hooks. Use a distinct store-only sink to audit both branches.
 - **It receives a stable session id.** The durable entity creates a fresh session per operation but
   gives it the entity's own session id, so the provider reads and writes the same key every turn.
   Without that, an externally keyed store would start a new conversation on each turn.

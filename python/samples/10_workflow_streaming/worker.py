@@ -86,7 +86,7 @@ def create_workflow() -> Workflow:
     publish = PublishExecutor(id="publish")
 
     return (
-        WorkflowBuilder(start_executor=writer_agent)
+        WorkflowBuilder(start_executor=writer_agent, output_from=[publish])
         .add_edge(writer_agent, reviewer_agent)
         .add_edge(reviewer_agent, publish)
         .build()

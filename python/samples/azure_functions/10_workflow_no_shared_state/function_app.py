@@ -182,7 +182,7 @@ def _create_workflow() -> Workflow:
 
     # Build workflow
     return (
-        WorkflowBuilder(name="email_triage", start_executor=spam_agent)
+        WorkflowBuilder(name="email_triage", start_executor=spam_agent, output_from=[spam_handler, email_sender])
         .add_switch_case_edge_group(
             spam_agent,
             [

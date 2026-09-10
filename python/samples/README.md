@@ -2,9 +2,34 @@
 
 This directory contains samples for durable agent hosting using the Durable Task Scheduler. These samples demonstrate the worker-client architecture pattern, enabling distributed agent execution with persistent conversation state.
 
+## Local PR #59 deployment contract
+
+The local version-2 runtime requires `deployment_mode="isolated_v2"` on `DurableAIAgentWorker`,
+`AgentFunctionApp` and the standalone Functions entity factory, or
+`DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2` when the argument is omitted/`None`. Configure the sample
+host environment accordingly. This is operator acknowledgement, not proof of isolation. Use a
+separate hub/deployment with compatible workers and clients. Old workers and workflow histories,
+including paused legacy HITL, must stay on the old engine.
+
+Only `2.0.0` entity state is writable. Legacy and supported future-minor state is read-only.
+Names are unchanged, so using an old `@name@key` on an empty new hub is not migration. Explicit
+backend migration needs an empty, separately addressed destination and authorized ownership transfer.
+Scalar legacy ingestion cursors require a complete accepted-message journal, including evicted
+inputs. If that journal is unavailable, keep the session on the old engine. Migration does not move
+workflow history or reconstruct missing original responses.
+
+The workflow client, generated start routes and child dispatch wrap new starts with protocol version
+2. Native custom schedulers must use public `wrap_workflow_input` for new instances. Old/raw starts
+reject before revised actions execute. Rewrapping old starts is not history migration.
+
+The full unit matrix has passed on current/minimum core and Python 3.10. Both final live-host suites
+and dead-code cleanup checks passed. Exact results are recorded in
+[ADR-0032](../../docs/decisions/0032-durable-thread-compaction.md#current-local-implementation-status).
+That status also identifies blocked dependency checks and unsupported mixed-runtime rollout.
+
 ## Import convention
 
-These samples import the durable hosting types **directly from the extension packages** —
+These samples import the durable hosting types **directly from the extension packages**,
 `agent_framework_durabletask` and `agent_framework_azurefunctions`:
 
 ```python
@@ -15,7 +40,7 @@ from agent_framework_azurefunctions import AgentFunctionApp
 For backward compatibility these entry-point types are also re-exported from
 `agent_framework.azure` in the core `agent-framework` package, so existing
 `from agent_framework.azure import ...` code keeps working. **New and updated samples should use
-the direct package imports shown above** — the canonical, self-contained path for this repo —
+the direct package imports shown above**, the self-contained path for this repo,
 rather than routing through the `agent_framework.azure` shim.
 
 ## Quick Prerequisites Checklist
@@ -70,6 +95,14 @@ az account show
 - **[11_subworkflow](11_subworkflow/)**: Compose workflows by embedding an inner `Workflow` as a node via `WorkflowExecutor`. On the durable host the inner workflow runs as its own child orchestration, and a single `configure_workflow` call registers both.
 - **[12_subworkflow_hitl](12_subworkflow_hitl/)**: A human-in-the-loop pause that lives **inside a sub-workflow**. The nested request surfaces to the client with a qualified request id (`{executor}~{ordinal}~{requestId}`) behind a single top-level addressing surface.
 
+These workflow samples and their Azure Functions counterparts explicitly set
+`WorkflowBuilder(output_from=[...])` to the executors that produce their final results.
+For composed workflows, the inner workflow selects the result forwarded to its parent,
+and the outer workflow selects its final report or publication message. Agent responses
+still travel along the graph edges but are not additional results in these samples.
+For a workflow intended to return agent responses, include those agents in `output_from`
+or use `output_from="all"`.
+
 ### Conversation History
 
 History providers own transcript writes according to their storage flags. External and
@@ -77,6 +110,23 @@ service-managed history do not get a local transcript mirror. The entity keeps r
 payloads and completion receipts separately from model history. Retention defaults to `keep_all`
 with `max_state_bytes=None`. Eager pruning and pressure eviction are separate opt-ins, not a promise
 of unlimited capacity.
+
+Only exact built-in in-memory providers are substituted. Subclasses retain custom hooks and session
+transcripts in the protected floor, outside durable transcript eviction. Service-owned runs
+intentionally suppress both load and store hooks on the inactive primary, including per-call hooks.
+That differs from core 1.16 behavior. Use a distinct store-only sink to audit both service/client
+branches. Do not assume universal unchanged-hook semantics or retry-safe external effects.
+
+Workflow delta transport uses parallel occurrence IDs, not public `Message.message_id` rewrites.
+The full selected logical conversation and all response messages remain available for downstream
+projection. Private forwarding provenance is internal checkpoint data, not application metadata.
+Typed/cache-only requests, agent approval/HITL and output-designated agents are supported locally.
+
+Delivery expires logically even while an idle entity retains its payload. New runs, duplicate runs,
+reset and backend `expire_responses` clean expired payloads without erasing completion receipts.
+Idle physical cleanup needs an application-owned schedule or explicit backend signal/manual
+operation. No public HTTP/MCP cleanup endpoint is generated. Receipts can exhaust capacity, and
+entity commits do not provide a distributed transaction or exactly-once external tool execution.
 
 - **[13_conversation_compaction](13_conversation_compaction/)**: Compact client-owned history with `InMemoryHistoryProvider` and `CompactionProvider`. Keep excluded history by default and choose transcript pruning or a state budget independently.
 - **[14_external_history_redis](14_external_history_redis/)**: Use an ordinary Redis history provider with a stable session id and no local transcript mirror. The minimal blind-append provider documents interrupted-retry duplicates and unsupported portable reset.
@@ -108,7 +158,7 @@ These samples are designed to be run locally in a cloned repository.
 
 The following prerequisites are required to run the samples:
 
-- [Python 3.9 or later](https://www.python.org/downloads/)
+- [Python 3.10 or later](https://www.python.org/downloads/), `agent-framework-core>=1.13.0,<2` and `pydantic>=2.11,<3`
 - [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) installed and authenticated (`az login`)
 - [Microsoft Foundry project](https://learn.microsoft.com/azure/foundry/how-to/create-projects) with a deployed model, configured through `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL` (gpt-4o-mini or better is recommended)
 - [Durable Task Scheduler](https://learn.microsoft.com/azure/azure-functions/durable/durable-task-scheduler/develop-with-durable-task-scheduler) (local emulator or Azure-hosted)
