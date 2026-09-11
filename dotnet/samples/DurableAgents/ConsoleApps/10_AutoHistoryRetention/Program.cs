@@ -23,14 +23,8 @@ string dtsConnectionString = Environment.GetEnvironmentVariable("DURABLE_TASK_SC
 // credentials deliberately, such as ManagedIdentityCredential when hosted in Azure.
 AzureOpenAIClient client = new(new Uri(endpoint), new DefaultAzureCredential());
 
-const string AgentInstructions =
-    """
-    You help users maintain concise project notes.
-    Acknowledge each numbered note in one short sentence and keep every response under 20 words.
-    When asked for a marker that is not in the conversation history, answer UNKNOWN instead of guessing.
-    """;
-
-AIAgent agent = client.GetChatClient(deploymentName).AsAIAgent(AgentInstructions, AgentName);
+AIAgent agent = client.GetChatClient(deploymentName).AsAIAgent(
+    HistoryRetentionDemo.CreateAgentOptions());
 
 using IHost host = Host.CreateDefaultBuilder(args)
     .ConfigureLogging(logging => logging.SetMinimumLevel(LogLevel.Warning))
@@ -47,7 +41,7 @@ AIAgent durableAgent = host.Services.GetRequiredKeyedService<AIAgent>(AgentName)
 AgentSession session = await durableAgent.CreateSessionAsync();
 
 Console.ForegroundColor = ConsoleColor.Cyan;
-Console.WriteLine("=== Automatic Durable History Retention Sample ===");
+Console.WriteLine("=== Opt-in Durable Transcript Pressure Retention Sample ===");
 Console.ResetColor();
 Console.WriteLine("Enter a project topic:");
 Console.WriteLine();
@@ -86,6 +80,8 @@ Console.WriteLine(
 Console.WriteLine(
     "The filler creates pressure but is not printed, so the scenario remains readable.");
 Console.WriteLine(
+    "KeepAll is the default. This sample explicitly enables mailbox writes and selects Auto to bound the model transcript.");
+Console.WriteLine(
     "Watch the OpenTelemetry console exporter for durable.agent.history.* retention metrics.");
 Console.WriteLine();
 
@@ -98,17 +94,6 @@ HistoryRetentionScenarioResult result = await scenario.RunAsync(
     topic,
     firstMarker,
     session,
-    beforeEligibilityWait: () =>
-    {
-        Console.WriteLine("Durable requests use a signal plus polling.");
-        Console.WriteLine(
-            "Successful responses are normally protected for 60 seconds so a caller can retrieve them.");
-        Console.WriteLine(
-            "Waiting 61 seconds makes the old exchanges normally eligible for Auto retention.");
-        Console.WriteLine(
-            "The budget can override protection under hard pressure, but this scenario avoids that forced path.");
-        Console.WriteLine();
-    },
     beforeNote: turn =>
     {
         Console.ForegroundColor = ConsoleColor.Yellow;
@@ -124,7 +109,9 @@ Console.WriteLine(
 Console.WriteLine(
     "These are attempt-level operational measurements recorded before entity commit, not durable committed truth.");
 Console.WriteLine(
-    "The marker question is a human-readable demonstration; product tests cover internal retention mechanics.");
+    "Auto removes old model transcript while mailbox results, completion receipts, binding, session, and bookkeeping stay protected.");
+Console.WriteLine(
+    "The marker question is illustrative; deterministic tests prove transcript eviction, result retrieval, and idempotent redelivery.");
 Console.WriteLine();
 Console.WriteLine($"Original marker: {firstMarker}");
 Console.WriteLine($"Diagnostic question: {HistoryRetentionDemo.DiagnosticQuestion}");
@@ -155,6 +142,8 @@ switch (result.Observation)
 Console.ResetColor();
 Console.WriteLine(
     "This is durable entity pressure retention, not MAF stateful compaction or FollowCompaction.");
+Console.WriteLine(
+    "Auto cannot make an oversized protected newest inline payload or tool result fit; that operation fails instead.");
 Console.WriteLine(
     "Stopping and disposing the host gives the OpenTelemetry console exporter a final flush opportunity.");
 
