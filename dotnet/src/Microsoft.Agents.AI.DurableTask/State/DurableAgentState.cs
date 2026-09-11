@@ -29,8 +29,8 @@ internal sealed class DurableAgentState
     /// <remarks>
     /// New states default to <see cref="CurrentSchemaVersion"/>. Deserialization assigns the
     /// persisted value through this init-only property, and <see cref="Clone"/> constructs a new
-    /// state when an older compatible version must be promoted for a write. Future compatible
-    /// versions are preserved rather than rewritten.
+    /// state when an older declared version must be promoted for a legacy write. Only exact schema
+    /// snapshots reviewed by the shared contract are accepted; later versions fail closed.
     /// </remarks>
     [JsonPropertyName("schemaVersion")]
     public string SchemaVersion { get; init; } = CurrentSchemaVersion;

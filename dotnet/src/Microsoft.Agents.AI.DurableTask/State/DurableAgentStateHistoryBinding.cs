@@ -6,8 +6,12 @@ using System.Text.Json.Serialization;
 namespace Microsoft.Agents.AI.DurableTask.State;
 
 /// <summary>
-/// Binds a durable session to one logical history owner for its lifetime.
+/// Describes an optional configured history facility.
 /// </summary>
+/// <remarks>
+/// This provisional shared shape is configuration metadata, not proof of the effective owner for every run.
+/// Runtime-specific policy and supported ownership transitions are validated outside this DTO.
+/// </remarks>
 internal sealed class DurableAgentStateHistoryBinding
 {
     public const int CurrentVersion = 1;
@@ -41,7 +45,7 @@ internal sealed class DurableAgentStateHistoryBinding
             not ModelServiceOwner)
         {
             throw new InvalidOperationException(
-                $"The durable agent state history owner kind '{this.OwnerKind}' is not supported.");
+                $"The durable agent state configured history owner kind '{this.OwnerKind}' is not supported.");
         }
 
         DurableAgentStateContract.ValidateIdentifier(this.ProviderKey, "historyBinding.providerKey");

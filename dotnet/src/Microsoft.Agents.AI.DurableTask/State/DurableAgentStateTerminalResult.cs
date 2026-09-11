@@ -9,6 +9,11 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 /// <summary>
 /// Immutable terminal result envelope detached from evictable conversation history.
 /// </summary>
+/// <remarks>
+/// A later runtime layer must commit this result and its matching receipt in the same durable entity
+/// operation as session continuation, ingestion bookkeeping, entity-local transcript, TTL, optional
+/// binding, and other local control state. This DTO performs no commit or delivery behavior.
+/// </remarks>
 internal sealed class DurableAgentStateTerminalResult
 {
     [JsonPropertyName("correlationId")]
@@ -40,6 +45,7 @@ internal sealed class DurableAgentStateTerminalResult
         AgentResponse response,
         DateTimeOffset completedAt,
         DateTimeOffset? resultExpiresAt = null,
+        JsonElement structuredValue = default,
         ILogger? logger = null)
     {
         DurableAgentStateContract.ValidateIdentifier(correlationId, "terminalResults.correlationId");
@@ -53,6 +59,7 @@ internal sealed class DurableAgentStateTerminalResult
                 response,
                 correlationId,
                 completedAt,
+                structuredValue,
                 logger),
         };
     }

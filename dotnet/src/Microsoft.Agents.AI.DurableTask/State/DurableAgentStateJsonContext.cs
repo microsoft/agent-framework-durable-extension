@@ -22,6 +22,7 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 [JsonSerializable(typeof(DurableAgentStateTerminalError))]
 // Function call and result content
 [JsonSerializable(typeof(Dictionary<string, object>))]
+[JsonSerializable(typeof(Dictionary<string, JsonElement>))]
 [JsonSerializable(typeof(IDictionary<string, object?>))]
 [JsonSerializable(typeof(object))]
 [JsonSerializable(typeof(JsonDocument))]

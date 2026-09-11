@@ -29,6 +29,21 @@ internal sealed class DurableAgentStateTerminalResponse
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public DateTimeOffset? CreatedAt { get; init; }
 
+    /// <summary>
+    /// Gets an optional caller-visible JSON result independent of the response messages.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="JsonValueKind.Undefined"/> means the wire property was absent. All other JSON values,
+    /// including explicit null, false, zero, empty strings, arrays, and objects, are present values.
+    /// </remarks>
+    [JsonPropertyName("value")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public JsonElement Value
+    {
+        get;
+        init => field = value.ValueKind == JsonValueKind.Undefined ? default : value.Clone();
+    }
+
     [JsonPropertyName("responseId")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ResponseId { get; init; }
@@ -65,6 +80,7 @@ internal sealed class DurableAgentStateTerminalResponse
         AgentResponse response,
         string correlationId,
         DateTimeOffset completedAt,
+        JsonElement structuredValue = default,
         ILogger? logger = null)
     {
         Dictionary<string, JsonElement>? additionalProperties = null;
@@ -87,6 +103,7 @@ internal sealed class DurableAgentStateTerminalResponse
                 .ToList(),
             Usage = DurableAgentStateUsage.FromUsage(response.Usage),
             CreatedAt = response.CreatedAt,
+            Value = structuredValue,
             ResponseId = response.ResponseId,
             AgentId = response.AgentId,
             FinishReason = response.FinishReason?.Value,
@@ -135,17 +152,7 @@ internal sealed class DurableAgentStateTerminalResponse
                     "A durable agent terminal response cannot contain null messages or content collections.");
             }
 
-            if (message.Role is not "user" and not "assistant" and not "system" and not "tool")
-            {
-                throw new InvalidOperationException(
-                    $"The durable agent terminal response message role '{message.Role}' is not supported.");
-            }
-
-            if (message.Contents.Any(static content => content is null))
-            {
-                throw new InvalidOperationException(
-                    "A durable agent terminal response cannot contain null content entries.");
-            }
+            message.ValidateV2();
         }
 
         ValidateOptionalIdentifier(this.ResponseId, "terminalResults.response.responseId");

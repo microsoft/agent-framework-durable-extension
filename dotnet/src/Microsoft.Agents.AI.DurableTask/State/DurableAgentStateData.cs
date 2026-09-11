@@ -32,8 +32,12 @@ internal sealed class DurableAgentStateData
     public IDictionary<string, DurableAgentStateCompletionReceipt>? CompletionReceipts { get; init; }
 
     /// <summary>
-    /// Gets the fixed logical history ownership binding for this durable session.
+    /// Gets an optional, provisional descriptor for the configured history facility.
     /// </summary>
+    /// <remarks>
+    /// This shared DTO does not establish effective per-run ownership or prohibit ownership transitions.
+    /// A C# hosting profile may apply stricter policy in a later layer.
+    /// </remarks>
     [JsonPropertyName("historyBinding")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public DurableAgentStateHistoryBinding? HistoryBinding { get; init; }
@@ -80,14 +84,14 @@ internal sealed class DurableAgentStateData
     }
 
     /// <summary>
-    /// Gets or sets the highest legacy scalar conversation position ingested from each workflow producer.
+    /// Gets or sets the highest legacy scalar conversation position seen from each workflow producer.
     /// </summary>
     /// <remarks>
-    /// This field records the legacy scalar-watermark design for workflow producers: a compatible producer
-    /// can use the highest known contiguous position to avoid redelivering messages it already incorporated.
-    /// It is distinct from the exact completion-receipt design used for terminal delivery. The current .NET
-    /// and Python production paths do not produce or consume these values; .NET preserves and round-trips
-    /// them so state written by a compatible workflow implementation is not discarded.
+    /// This field records only the greatest observed position. It does not prove a contiguous delivered
+    /// prefix: after seeing positions 1 and 3, the scalar value 3 does not establish that position 2 was
+    /// delivered. It is distinct from the exact completion-receipt design used for terminal delivery.
+    /// The current .NET and Python production paths do not produce or consume these values; .NET preserves
+    /// and round-trips them so state written by a compatible workflow implementation is not discarded.
     /// </remarks>
     [JsonPropertyName("ingestedPositions")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -137,6 +141,14 @@ internal sealed class DurableAgentStateData
     {
         DurableAgentStateSchemaVersion version =
             DurableAgentStateSchemaVersion.ParseSupported(schemaVersion);
+        if (this.IngestedPositions?.Values.Any(static position => position < 0) == true)
+        {
+            throw new InvalidOperationException(
+                "Durable agent ingestion positions must be non-negative.");
+        }
+
+        this.Truncation?.Validate();
+
         if (version.Major == DurableAgentState.RevisedSchemaMajorVersion)
         {
             if (this.ConversationHistory is null)
@@ -145,19 +157,42 @@ internal sealed class DurableAgentStateData
                     "A revised durable agent state requires a conversation history collection.");
             }
 
-            if (this.HistoryBinding is null ||
-                this.TerminalResults is null ||
+            if (this.TerminalResults is null ||
                 this.CompletionReceipts is null)
             {
                 throw new InvalidOperationException(
-                    "A revised durable agent state requires history binding, terminal results, and completion receipts.");
+                    "A revised durable agent state requires terminal results and completion receipts.");
             }
 
-            this.HistoryBinding.Validate();
+            this.HistoryBinding?.Validate();
+            Dictionary<string, DurableAgentStateTerminalResult> terminalResults =
+                this.TerminalResults.ToDictionary(
+                    pair => pair.Key,
+                    pair => pair.Value,
+                    StringComparer.Ordinal);
+            Dictionary<string, DurableAgentStateCompletionReceipt> completionReceipts =
+                this.CompletionReceipts.ToDictionary(
+                    pair => pair.Key,
+                    pair => pair.Value,
+                    StringComparer.Ordinal);
+
+            foreach (DurableAgentStateEntry? entry in this.ConversationHistory)
+            {
+                if (entry is null)
+                {
+                    throw new InvalidOperationException(
+                        "A revised durable agent state cannot contain null conversation entries.");
+                }
+
+                entry.ValidateV2();
+            }
+
             foreach ((string correlationId, DurableAgentStateTerminalResult result) in this.TerminalResults)
             {
                 result.Validate(correlationId);
-                if (!this.CompletionReceipts.TryGetValue(correlationId, out DurableAgentStateCompletionReceipt? receipt))
+                if (!completionReceipts.TryGetValue(
+                    correlationId,
+                    out DurableAgentStateCompletionReceipt? receipt))
                 {
                     throw new InvalidOperationException(
                         $"Durable agent terminal result '{correlationId}' has no completion receipt.");
@@ -176,7 +211,7 @@ internal sealed class DurableAgentStateData
             foreach ((string correlationId, DurableAgentStateCompletionReceipt receipt) in this.CompletionReceipts)
             {
                 receipt.Validate(correlationId);
-                bool hasResult = this.TerminalResults.ContainsKey(correlationId);
+                bool hasResult = terminalResults.ContainsKey(correlationId);
                 if (receipt.ResultState == DurableAgentStateCompletionReceipt.AvailableResult != hasResult)
                 {
                     throw new InvalidOperationException(
@@ -189,7 +224,7 @@ internal sealed class DurableAgentStateData
                  this.HistoryBinding is not null)
         {
             throw new InvalidOperationException(
-                "Mailbox and fixed-history binding fields require durable agent state schema version 2.x.");
+                "Mailbox and provisional history-binding fields require durable agent state schema version 2.0.0.");
         }
     }
 }

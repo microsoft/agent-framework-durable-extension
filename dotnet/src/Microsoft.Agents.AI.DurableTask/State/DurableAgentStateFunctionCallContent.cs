@@ -1,6 +1,5 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
-using System.Collections.Immutable;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
@@ -13,19 +12,14 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 internal sealed class DurableAgentStateFunctionCallContent : DurableAgentStateContent
 {
     /// <summary>
-    /// The function call arguments, each encoded as JSON.
+    /// Gets the original function-call arguments as an object or verbatim string.
     /// </summary>
     /// <remarks>
-    /// Arguments produced by a chat client from a model response are already <see cref="JsonElement"/>
-    /// values, but callers can supply <see cref="FunctionCallContent"/> containing arbitrary objects (for
-    /// example when replaying history or resuming an approval). Those are encoded here using
-    /// <see cref="AIJsonUtilities.DefaultOptions"/> so that persisting the state cannot fail on a type the
-    /// state serializer has no metadata for.
+    /// String form is preserved without parsing or normalization, including incomplete or non-JSON text.
     /// </remarks>
-    /// TODO: Consider ensuring that empty dictionaries are omitted from serialization.
     [JsonPropertyName("arguments")]
-    public required IReadOnlyDictionary<string, JsonElement> Arguments { get; init; } =
-        ImmutableDictionary<string, JsonElement>.Empty;
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public JsonElement Arguments { get; init; }
 
     /// <summary>
     /// Gets the function call identifier.
@@ -52,13 +46,24 @@ internal sealed class DurableAgentStateFunctionCallContent : DurableAgentStateCo
     /// </returns>
     public static DurableAgentStateFunctionCallContent FromFunctionCallContent(FunctionCallContent content)
     {
-        Dictionary<string, JsonElement> arguments = [];
-        if (content.Arguments is not null)
+        JsonElement arguments = default;
+        if (content.RawRepresentation is string encodedArguments)
         {
+            arguments = JsonSerializer.SerializeToElement(
+                encodedArguments,
+                DurableAgentStateJsonContext.Default.String);
+        }
+        else if (content.Arguments is not null)
+        {
+            Dictionary<string, JsonElement> argumentValues = [];
             foreach (KeyValuePair<string, object?> argument in content.Arguments)
             {
-                arguments[argument.Key] = ToJsonElement(argument.Value);
+                argumentValues[argument.Key] = ToJsonElement(argument.Value);
             }
+
+            arguments = JsonSerializer.SerializeToElement(
+                argumentValues,
+                DurableAgentStateJsonContext.Default.DictionaryStringJsonElement);
         }
 
         return new DurableAgentStateFunctionCallContent()
@@ -72,12 +77,38 @@ internal sealed class DurableAgentStateFunctionCallContent : DurableAgentStateCo
     /// <inheritdoc/>
     public override AIContent ToAIContent()
     {
-        Dictionary<string, object?> arguments = new(this.Arguments.Count);
-        foreach (KeyValuePair<string, JsonElement> argument in this.Arguments)
+        if (this.Arguments.ValueKind == JsonValueKind.String)
         {
-            arguments[argument.Key] = argument.Value;
+            string encodedArguments = this.Arguments.GetString()!;
+            return new FunctionCallContent(this.CallId, this.Name)
+            {
+                RawRepresentation = encodedArguments,
+            };
+        }
+
+        Dictionary<string, object?>? arguments =
+            this.Arguments.ValueKind == JsonValueKind.Undefined ? [] : null;
+        if (this.Arguments.ValueKind == JsonValueKind.Object)
+        {
+            arguments = [];
+            foreach (JsonProperty argument in this.Arguments.EnumerateObject())
+            {
+                arguments[argument.Name] = argument.Value.Clone();
+            }
         }
 
         return new FunctionCallContent(this.CallId, this.Name, arguments);
+    }
+
+    /// <inheritdoc/>
+    public override void ValidateV2()
+    {
+        if (this.Arguments.ValueKind is not JsonValueKind.Undefined and
+            not JsonValueKind.Object and
+            not JsonValueKind.String)
+        {
+            throw new InvalidOperationException(
+                "Durable agent function-call arguments must be an object, a verbatim string, or absent.");
+        }
     }
 }
