@@ -146,8 +146,9 @@ internal static class DurableAgentSamples
             Inputs = ["automatic retention sample"],
             ExpectedOutputDescription =
             [
-                "The output should explain why successful responses are normally protected for 60 seconds and why the sample waits 61 seconds.",
+                "The output should explain that KeepAll is the default and this sample explicitly opts into Auto transcript pressure retention with mailbox writes enabled.",
                 "The output should print the original random marker, the diagnostic question, the model response, and an honest observation.",
+                "The output should explain that old model transcript can be removed while durable mailbox, completion, binding, session, and bookkeeping evidence stays protected.",
                 "The output should explain that OpenTelemetry metrics are attempt-level operational evidence rather than durable committed truth.",
                 "The output should identify the scenario as durable pressure retention rather than stateful Agent Framework compaction.",
                 "The output should not contain error messages or stack traces.",

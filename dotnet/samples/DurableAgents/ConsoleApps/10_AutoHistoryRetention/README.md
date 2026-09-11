@@ -1,35 +1,56 @@
-# Automatic History Retention Sample
+# Opt-in Pressure Retention Sample
 
-This sample demonstrates a durable Azure OpenAI agent configured with
-`DurableAgentHistoryRetentionMode.Auto` and a deliberately small `MaxStateBytes` budget.
+This sample demonstrates a durable Azure OpenAI agent that explicitly selects
+`DurableAgentHistoryRetentionMode.Auto` with a deliberately small `MaxStateBytes` budget.
+It also explicitly sets `EnableMailboxWrites = true`, activating schema 2 terminal results and
+completion receipts through the supported public registration API. `KeepAll` is the default and
+does not proactively delete model transcript under pressure.
 
 ## Scenario
 
-The sample generates a random ASCII marker in its first project note, adds several moderate turns
-without printing their filler text, and then asks the model to recall the exact marker after
-automatic retention has applied pressure to durable state.
+The sample generates a random ASCII marker in its first project note, adds seven moderate turns
+without printing their filler text, and asks the model to recall the exact marker after pressure
+retention. Agent instructions keep every response under 20 words and `MaxOutputTokens = 64`
+enforces a service-request bound so protected result mailboxes do not dominate the state floor.
 
-The durable-state budget is exactly 32 KiB (32,768 bytes). Seven turns each include 4 KiB of ASCII
-filler, so the filler alone reaches 28,672 bytes (87.5% of the budget), deterministically crossing
-the 85% high watermark. The first four turns become eligible before the final three are added,
-providing enough removable content to target the 70% low watermark.
+The 32 KiB budget was checked against schema 2 state containing seven bounded terminal results,
+completion receipts, the fixed history binding, serialized agent session, and bookkeeping.
+Seven 4 KiB inputs plus their state envelopes cross the 85% high watermark, while the protected
+mailbox and session floor still fits below it. `Auto` can therefore remove old model-transcript
+groups and return state below the pressure threshold without deleting durable completion evidence.
+The sample does not wait for wall-clock expiry and does not depend on a soft delivery window.
 
-Successful durable responses are delivered through a signal plus polling and are normally protected
-for 60 seconds so the caller can retrieve them. The sample waits 61 seconds after its first four
-turns so those old exchanges become normally eligible for eviction. A hard state budget can override
-the delivery window as a fallback, which can require callers still polling an evicted response to
-retry, but this scenario provides enough old eligible history to exercise normal `Auto` eviction.
+The random-marker answer is illustrative only:
 
-Automatic retention starts when serialized extension state crosses the 85% high watermark and
-targets the 70% low watermark. It preserves system messages and the newest exchange. Choose
-`KeepAll` when retaining every exchange is more important than bounded durable state, understanding
-that state can then grow until a backend limit is reached.
+- An exact marker match is classified as `Present`.
+- Only `UNKNOWN` with optional final punctuation is classified as `Unavailable`.
+- Every other response is `Inconclusive`.
+
+Deterministic tests provide the correctness proof. They capture later model input, inspect
+persisted and reloaded entity state, retrieve the original completed result from the mailbox, and
+redeliver the original correlation while checking that the model is not executed again.
+
+## What Auto retains
+
+Pressure retention removes eligible model transcript. It does not remove authoritative terminal
+results, completion receipts, the history-owner binding, serialized session continuation, or other
+durable bookkeeping. Receipt-bearing mailbox entities are not TTL-deleted under the current public
+policy. Entries connected by correlation and tool-call identity are treated as one atomic transcript
+group, so retention does not leave half of an exchange behind.
 
 This is durable entity **pressure retention**, not Microsoft Agent Framework stateful context
-compaction or `FollowCompaction`. It does not summarize old messages. It removes eligible exchanges
-from durable state. Automatic retention also cannot make a single oversized protected newest
-`DataContent` item or tool result fit within the configured budget; that operation fails instead of
-persisting unsafe oversized state.
+compaction or `FollowCompaction`. It does not summarize old messages. It removes old transcript
+from later model input while durable execution and delivery evidence remains available.
+
+Choose `KeepAll` when preserving the complete transcript is more important than proactive state
+bounding. With `KeepAll`, `MaxStateBytes` is inactive and state can continue growing toward backend
+limits.
+
+`Auto` cannot make every payload fit. A single oversized protected newest inline `DataContent`,
+tool result, terminal result, or other protected state can still exceed the high watermark. The
+operation then fails rather than persisting oversized state. That protected-state failure is
+different from cumulative transcript pressure, and application-level payload references or
+transport limits remain separate concerns.
 
 ## OpenTelemetry metrics
 
@@ -42,15 +63,15 @@ services.AddOpenTelemetry()
         .AddConsoleExporter(...));
 ```
 
-The meter is `Microsoft.Agents.AI.DurableTask`. It reports retention operations, evicted entries and
-messages, reclaimed bytes, and state size before and after a pressure-retention attempt. Reasons
-distinguish normal `pressure` from `delivery_protection_override`; outcomes distinguish `no_action`,
-`evicted`, `forced_delivery_eviction`, and `failed_protected_state`.
+The meter is `Microsoft.Agents.AI.DurableTask`. It reports retention operations, evicted transcript
+entries and messages, reclaimed bytes, and state size before and after a pressure-retention
+attempt. The eviction reason is `transcript_pressure`. Outcomes are `no_action`,
+`transcript_evicted`, and `protected_state_capacity_failure`.
 
 These measurements are emitted for attempts before entity commit. A later persistence failure or
 retry can roll back or duplicate what telemetry observed. Metrics are operational evidence, not
-durable committed truth or an exact-once state query. The model's answer is only a human-readable
-illustration of the effect. Product-layer tests cover the internal retention mechanics.
+durable committed truth or an exact-once state query. Pair them with durable state and application
+behavior when correctness matters.
 
 ## Run the sample
 
@@ -62,30 +83,27 @@ cd dotnet/samples/DurableAgents/ConsoleApps/10_AutoHistoryRetention
 dotnet run --framework net10.0
 ```
 
-Enter a project topic of 80 characters or fewer. The sample prints:
-
-- The original random marker.
-- Why it waits 61 seconds.
-- The diagnostic question and model response.
-- An honest `Present`, `Unavailable`, or `Inconclusive` observation.
-- Standard OpenTelemetry console-exporter output when metrics flush.
-
-The diagnostic prompt tells the model to answer only `UNKNOWN` when the marker is absent. An exact
-marker match means the marker is present. Only `UNKNOWN` with optional final punctuation is classified
-as unavailable. Every other response is inconclusive.
+Enter a project topic of 80 characters or fewer. The sample prints the original random marker,
+concise progress for each turn, the diagnostic question and response, an honest observation, and
+standard OpenTelemetry console-exporter output when metrics flush.
 
 ## Tests
 
-```bash
-dotnet test --project tests/10_AutoHistoryRetention.Tests.csproj
+```powershell
+dotnet test --project tests\10_AutoHistoryRetention.Tests.csproj -c Release -f net10.0
 ```
 
-The sample-local tests stay on supported public boundaries. They verify that public durable options
-select `Auto` with an exact 32 KiB (32,768-byte) budget, a public fake `AIAgent` receives the marker-first scenario,
-moderate turns, an injected 61-second delay, and the diagnostic question, and the marker
-classification avoids false passes. They also emit a real measurement and prove that the registered
-meter and exporter collect it, including the production console-exporter path.
+The sample-local tests use the same entity execution seam as the durable-agent product tests, with
+an in-memory fake model and opaque state persisted and reloaded between operations. They do not use
+credentials, a DTS service, private reflection, or the private retention algorithm. The tests prove
+that:
 
-Internal eviction, watermarks, delivery protection, truncation metadata, and retention telemetry are
-covered by the product-layer retention tests. The repository sample verifier runs this real sample
-only when its Azure OpenAI and Durable Task Scheduler environment variables are available.
+- `Auto` is explicitly configured while `KeepAll` remains the default.
+- The first marker and connected tool group leave model transcript, while the newest transcript
+  remains.
+- The original mailbox result and completion receipt remain available after eviction.
+- Redelivery of the completed correlation returns the original result without another model call.
+- The same pressure under `KeepAll` does not proactively delete transcript.
+- An oversized protected newest payload fails without committing state.
+- Real product retention metrics are exported alongside the persisted-state assertions.
+- The production OpenTelemetry console registration observes the durable meter.
