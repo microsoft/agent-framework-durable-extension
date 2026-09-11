@@ -22,8 +22,16 @@ included for compatibility discussion, not claimed as released Python output.
 Legacy transcript entries retain the existing permissive entry shape. The
 three mailbox/binding fields are forbidden in 1.x, even if empty. Version 2.0
 requires `terminalResults`, `completionReceipts`, and `conversationHistory`
-(which can be empty). `historyBinding` is optional and provisional, not a
-requirement for session-fixed effective ownership.
+(which can be empty). `historyBinding` is an optional runtime extension/profile,
+not a shared requirement for session-fixed effective ownership.
+
+Historical `1.0.0`, `1.1.0`, and `1.2.0` message/content validation is unchanged
+from the pre-widening proposal at `efed11f7786332d8bb0447ddbfc1727ddd7de09b`:
+roles exclude `developer`, function arguments are objects when present, and
+URI content requires `mediaType`. The root version selects historical
+`conversationEntry` definitions or the v2 definitions. Only v2 transcript entries
+and terminal responses use the expanded lossless shapes. This is not a
+historical-contract correction, and no persisted legacy bytes are rewritten.
 
 Major 2 is proposed because the authority for completion and replay changes,
 not merely because new optional properties appear. **Is a major version the
@@ -48,7 +56,7 @@ protect deployments whose existing readers do not enforce it.
 | `terminalResults[correlationId]` | Immutable terminal response/error envelope, detached from transcript retention. |
 | `completionReceipts[correlationId]` | Independent completion evidence, retained after payload expiry and transcript pruning. |
 | Receipt `resultState` | `available` with a matching payload, or `unavailable` with a removal timestamp. |
-| `historyBinding` | Optional, provisional version 1 configuration descriptor; not a session-fixed effective owner. Representation remains under discussion. |
+| `historyBinding` | Optional, separately versioned runtime extension/profile; preserved without imposing shared effective-owner semantics. |
 | `conversationHistory` | Evictable transcript, never the authoritative completion index in 2.0. |
 
 The schema validates local shape, not all cross-object or temporal invariants.
@@ -90,12 +98,20 @@ Any future implementation must additionally enforce:
   is specified here. Whole-entity TTL/deletion and receipt storage growth must
   be resolved before deployment, not silently treated as transcript retention.
 
-**Expired lookup outcome is pending agreement.** The proposed caller-visible
-behavior is completed-but-result-unavailable plus the retained `succeeded` or
-`failed` outcome, with no expired payload. This would require explicit ADR
-wording and a Python receipt/lookup update; it is not a claim about current
-Python behavior. The schema already preserves outcome after expiry, but this
-proposal does not settle the lookup API's shape or enable any runtime behavior.
+Expired lookup reports completed-but-result-unavailable plus the retained
+`succeeded` or `failed` outcome, with no expired payload and no reopening of
+execution. This agreed contract behavior still requires aligned ADR wording
+and a Python receipt/lookup update; it is not a claim about current Python
+behavior or authorization to emit 2.0.
+
+An older receipt without an authoritative outcome must **not** be assigned
+`succeeded` or `failed` from absence of an error, a pruned transcript, expiry,
+or a default. Preserve its known completion/unavailability facts without
+inventing an outcome or rerunning the work. The required v2 receipt `outcome`
+may be populated only from authoritative evidence; absent that evidence, the
+legacy receipt cannot be promoted to this v2 shape. A separately agreed legacy
+lookup/migration representation must retain the distinction. This proposal
+does not add a fabricated `unknown` outcome to the v2 enum.
 
 The proposed envelope requires `response.messages` for success and failure
 (an empty list is allowed). Failure additionally requires `error.code` and
@@ -113,27 +129,36 @@ serialize arbitrary model/runtime objects. Unknown nested properties remain
 part of the value. The same JSON preservation rule applies if a failed response
 carries a diagnostic value; its outcome remains failed.
 
-### Provisional configuration binding
+### Optional runtime extension/profile
 
 Stable provider/configuration identity is distinct from effective per-run
 history ownership. The shared contract **does not require session-fixed
 effective ownership** and must not prohibit Python's supported per-run
 transitions. C# may separately enforce a fixed-owner policy/profile.
 
-For now, `historyBinding` is optional and keeps the existing review shape
-(`version`, `ownerKind`, `providerKey`) without defining an effective-owner
-transition protocol. If supplied, `ownerKind` describes the configured facility:
-`durableState`, `historyProvider`, or `modelService`; it does not say that
-facility owns every run. The non-secret `providerKey` identifies configuration,
-not credentials, endpoints, runtime types, or opaque session properties.
-Absence does not imply a default owner or authorize inference from session data.
-This descriptor is not an authorization grant.
+`historyBinding` now denotes an optional, separately versioned runtime
+extension/profile rather than a standardized shared binding object. The existing
+spelling is retained to avoid moving stored data; there is no new shared
+`providerBinding` or `configurationBinding` definition. Compatible writers must
+preserve the original JSON value and all nested fields, even when they do not
+understand or use that profile. The shared schema intentionally does not validate
+its internal shape, version, owner kinds, or provider keys.
 
-The exact representation remains pending Ahmed's feedback: an optional shared
-`providerBinding`/`configurationBinding`, or an optional runtime extension/profile.
-No rename, new profile format, migration rule, or transition restriction is
-introduced here. Trusted hosting configuration must still recognize any
-descriptor it processes and separately validate supported per-run transitions.
+A runtime that relies on the profile for restoration must validate the profile
+identity, supported version, required fields, and applicable policy before use,
+using trusted configuration rather than dynamically activating types from JSON.
+Unsupported or malformed profiles must fail that runtime's restoration path;
+they must not be silently ignored when the runtime depends on them. Other
+consumers preserve the data without treating shared-schema validation as profile
+approval. Even null or a malformed profile can be preserved as opaque JSON;
+that does not make it usable by a relying runtime.
+
+The `version`, `ownerKind`, and non-secret logical `providerKey` in existing
+synthetic fixtures illustrate one runtime profile, not a shared mandatory shape.
+Profile-specific fixed ownership remains runtime policy. Absence implies neither
+a default owner nor permission to infer one from opaque session state. No profile
+is an authorization grant. A shared descriptor can be proposed later when there
+is a concrete common consumer; no effective-owner transition protocol is imposed.
 
 ## Existing state, extension data, and trust boundaries
 
@@ -164,12 +189,14 @@ model context. Optional `messageId` is message identity, not request identity.
 
 ### Lossless messages and JSON content
 
-Message roles include `developer`. Function-call `arguments` accepts the
+For schema 2.0 only, message roles include `developer`. Function-call `arguments` accepts the
 original object or string; preserve the entire string, including whitespace
 and incomplete/non-JSON text, without parsing it into an object. URI content
 requires a URI but not a media type; absence stays absent rather than being
-filled with guessed metadata. These are additive shared message shapes for
-review, not evidence that existing 1.x consumers can handle them.
+filled with guessed metadata. Versioned message/content definitions keep these
+expansions out of historical 1.x validation, including when the same message is
+placed in a request, response, error response, or compaction transcript entry.
+The terminal-response message path also uses the v2 definitions.
 
 For supported content not represented by a typed definition, a producer may
 use the explicit `{"$type":"unknown","content":...}` wrapper with the complete
@@ -179,6 +206,10 @@ Only a safe, explicit JSON representation qualifies; no arbitrary object
 reflection, `repr` fallback, or executable serialization is implied. If a
 supported value cannot be preserved safely, report the incompatibility rather
 than silently dropping it or claiming a lossless terminal result was persisted.
+The v2 lossless producer-mapping requirement does not widen the old explicit
+`unknown.content` JSON shape: arbitrary JSON inside that wrapper was already
+valid historically and remains valid. Historical consumers are not newly
+required to understand v2 producer mappings.
 
 Lossless here means JSON value preservation, including array order, exact
 string contents, numeric fidelity, and absent versus null fields. It does not
@@ -198,10 +229,12 @@ Unknown properties are not unknown discriminators: 2.0 accepts only transcript
 Compaction has no `correlationId`. Content `$type` values are `data`, `error`,
 `functionCall`, `functionResult`, `hostedFile`, `hostedVectorStore`, `usage`,
 `text`, `reasoning`, `uri`, and the explicit `unknown` wrapper. Unsupported
-versions, owner kinds, binding versions, outcomes, availability values, roles,
+versions, outcomes, availability values, roles,
 or discriminators must be rejected for processing, not silently converted to
 success or to an empty unknown-content wrapper. Opaque `unknown.content` itself
 can be any JSON value, including null; `$runtimeType` inside it is just data.
+Runtime-profile discriminators and versions are different: validate them only
+when relying on that profile, and otherwise preserve them without interpretation.
 
 Persisted JSON is untrusted data. Never dynamically load types, follow URIs,
 execute tool calls, or log opaque session/error/token contents merely by reading
@@ -231,11 +264,11 @@ handling. This PR contains neither a migration nor code to enable revised writes
 Feedback requested from Ahmed/Python maintainers and .NET/Durable Task maintainers:
 
 1. Schema shape, correlation scope, major 2 versus an enforceable same-major gate.
-2. Optional configuration binding representation versus a runtime extension/profile,
-   without imposing session-fixed ownership as a shared rule.
+2. Runtime-specific profile definitions and restoration validation, without
+   imposing session-fixed ownership as a shared rule.
 3. Success/error envelope, cancellation, and continuation-byte interoperability.
-4. Proposed exposed outcome after expiry (pending agreement), receipt lifetime, entity TTL,
-   storage growth, and late duplicates after session deletion/recreation.
+4. Legacy receipt representation when authoritative outcome is absent, receipt
+   lifetime, entity TTL, storage growth, and late duplicates after session deletion/recreation.
 5. Numeric/Unicode/timestamp limits, unknown-field preservation, and discriminator policy.
 6. Compatible reader/consumer rollout floor, safe 1.2-to-2.0 migration, and rollback.
 

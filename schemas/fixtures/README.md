@@ -18,10 +18,13 @@ deliberately excluded. The corrected `python-shape` filename identifies
 provenance, not a promise of current serializer behavior. There is no fixture
 generator or test-project integration in this PR.
 
-The two reproduced source fixtures are unchanged as JSON values. Their bindings
-are now interpreted as provisional optional configuration descriptors, not proof
-of session-fixed effective ownership. They do not settle the pending choice of
-shared binding name/shape versus a runtime extension/profile.
+The two reproduced source fixtures are unchanged as JSON values. The example
+bindings are optional runtime-profile data, not a shared binding shape or proof
+of session-fixed effective ownership. Compatible writers preserve them; only a
+runtime relying on a profile validates its identity, version, shape, and policy.
+The original legacy fixture stays valid under the unchanged historical message
+definitions. The expanded lossless fixture is v2-only; its persisted bytes are
+unchanged too.
 
 For `shared-durable-agent-state-2.0.json`, interpret the example at
 `2026-09-10T05:00:05Z`: `corr-2` has an available result and `corr-expired`
@@ -46,9 +49,12 @@ The lossless fixture's scalar `ingestedPositions["legacy-producer"] = 3` records
 only highest-seen position. It does not say whether `2` was delivered. None of
 these fixtures defines or infers a gap-preserving workflow receipt set.
 
-The expired receipts retain `outcome`; exposing that outcome with a
-completed-but-result-unavailable lookup remains proposed pending agreement and
-the corresponding ADR/Python lookup changes. No expired payload is restored.
+The expired receipts retain `outcome`; lookup reports that retained outcome with
+completed-but-result-unavailable, without restoring a payload or reopening
+execution. This contract still requires the corresponding ADR/Python updates.
+No fixture claims that a legacy receipt without authoritative outcome can be
+converted by inventing success or failure. Such a receipt cannot satisfy the
+v2 required-outcome shape without authoritative evidence.
 
 For an identity absent from the receipt maps, the examples show only the
 absence of recorded completion: a separately accepted request may be pending,

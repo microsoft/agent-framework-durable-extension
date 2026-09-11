@@ -94,14 +94,14 @@
         "valid": false
       },
       {
-        "description": "A supplied binding must still be valid",
+        "description": "Shared validation preserves opaque profile data without approving it for restoration",
         "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": {}, "completionReceipts": {}, "historyBinding": {} } },
-        "valid": false
+        "valid": true
       },
       {
-        "description": "Null binding is not omission",
+        "description": "Opaque null profile is preserved, not interpreted as a usable profile",
         "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": {}, "completionReceipts": {}, "historyBinding": null } },
-        "valid": false
+        "valid": true
       },
       {
         "description": "Binding remains forbidden in legacy state",
@@ -111,8 +111,8 @@
     ]
   },
   {
-    "description": "Lossless shared message content",
-    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/chatMessage" },
+    "description": "Schema 2.0 lossless message content",
+    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/v2ChatMessage" },
     "tests": [
       { "description": "Developer role", "data": { "role": "developer", "contents": [] }, "valid": true },
       { "description": "Unknown role remains invalid", "data": { "role": "future" }, "valid": false },
