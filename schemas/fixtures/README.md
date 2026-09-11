@@ -10,12 +10,18 @@ evidence of Python/.NET 2.0 support.
 | `shared-durable-agent-state-1.2-python-shape.json` | Reproduced from proposal commit `247bbdd60944d5ac93e79079803aa23e992d0369`. Modeled on parallel Python-shaped 1.2 work, with synthetic future fields and content for preservation review. **Not byte-for-byte output from the current Python serializer.** |
 | `shared-durable-agent-state-2.0.json` | Reproduced from the same proposal commit. Synthetic available success and expired failure receipt, detached from transcript responses; includes unknown mailbox/binding fields. |
 | `shared-durable-agent-state-2.0-pruned.json` | Authored for this contract-only proposal. Empty transcript with available failure, unavailable success, opaque session data, truncation evidence, and whole-entity TTL. Not a migration output. |
+| `shared-durable-agent-state-2.0-lossless.json` | Authored for review feedback. Synthetic developer-role request, verbatim string-form function arguments, URI without invented media type, complete opaque JSON content, explicit structured `false` value, and no binding. |
 
 The source proposal builds on `5de13e8d5dd4b4b76e7360e89ceeb3968a103781`;
 its runtime DTOs, converters, tests, and test-project fixture links are
 deliberately excluded. The corrected `python-shape` filename identifies
 provenance, not a promise of current serializer behavior. There is no fixture
 generator or test-project integration in this PR.
+
+The two reproduced source fixtures are unchanged as JSON values. Their bindings
+are now interpreted as provisional optional configuration descriptors, not proof
+of session-fixed effective ownership. They do not settle the pending choice of
+shared binding name/shape versus a runtime extension/profile.
 
 For `shared-durable-agent-state-2.0.json`, interpret the example at
 `2026-09-10T05:00:05Z`: `corr-2` has an available result and `corr-expired`
@@ -28,7 +34,23 @@ For `shared-durable-agent-state-2.0-pruned.json`, interpret the example at
 erase either completion. `expirationTimeUtc` is a separate whole-entity deadline,
 not a proposed resolution of tombstone lifetime after entity deletion.
 
-For an identity absent from the receipt maps, both examples show only the
+The lossless fixture intentionally contains incomplete function-argument text.
+The exact string must survive; parsing it, completing the JSON, or replacing it
+with an object would lose information. The URI has no `mediaType` to infer. The
+opaque content's nested `$type` and `$runtimeType` are inert JSON, including all
+metadata, not type-activation instructions. `response.value: false` is a present
+structured result; the earlier fixtures omit `value`. Null, zero, and empty
+values have separate [validation cases](../tests/README.md).
+
+The lossless fixture's scalar `ingestedPositions["legacy-producer"] = 3` records
+only highest-seen position. It does not say whether `2` was delivered. None of
+these fixtures defines or infers a gap-preserving workflow receipt set.
+
+The expired receipts retain `outcome`; exposing that outcome with a
+completed-but-result-unavailable lookup remains proposed pending agreement and
+the corresponding ADR/Python lookup changes. No expired payload is restored.
+
+For an identity absent from the receipt maps, the examples show only the
 absence of recorded completion: a separately accepted request may be pending,
 whereas an unrecognized identity remains unknown. No fixture invents an
 admission registry, claims exactly-once external side effects, or authorizes

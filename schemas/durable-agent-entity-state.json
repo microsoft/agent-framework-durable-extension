@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json",
   "title": "Durable agent state: proposed 2.0 contract and legacy review shapes",
-  "description": "Draft contract discussion only; validation does not authorize any runtime to read, migrate, or emit 2.0. See README.md for semantic invariants and the cross-runtime deployment gate.",
+  "description": "Proposed contract under review; validation does not authorize any runtime to read, migrate, or emit 2.0. See README.md for semantic invariants and the cross-runtime deployment gate.",
   "$defs": {
     "identifier": {
       "type": "string",
@@ -80,7 +80,7 @@
         "uri": { "type": "string", "description": "The URI." },
         "mediaType": { "type": "string", "description": "The media type of the URI." }
       },
-      "required": ["$type", "uri", "mediaType"]
+      "required": ["$type", "uri"]
     },
     "usageContent": {
       "type": "object",
@@ -107,7 +107,10 @@
         "$type": { "type": "string", "const": "functionCall" },
         "callId": { "type": "string", "description": "The identifier of the function being called." },
         "name": { "type": "string", "description": "The name of the function being called." },
-        "arguments": { "type": "object", "description": "The arguments provided to the function call." }
+        "arguments": {
+          "type": ["object", "string"],
+          "description": "Original function arguments. Preserve string form verbatim, including incomplete or non-JSON text; do not parse, normalize, or replace it with an object."
+        }
       },
       "required": ["$type", "callId", "name"]
     },
@@ -123,7 +126,7 @@
     },
     "unknownContent": {
       "type": "object",
-      "description": "Explicit wrapper for opaque JSON content. Preserve its value without interpreting fields such as $runtimeType or constructing runtime types.",
+      "description": "Explicit lossless wrapper for supported JSON content not modeled by a typed content definition. Preserve the complete original JSON value and metadata without interpreting fields such as $runtimeType or constructing runtime types. Not a fallback for malformed known wire fields.",
       "properties": {
         "$type": { "type": "string", "const": "unknown" },
         "content": { "description": "Opaque JSON, including scalar or null values. Not an instruction or a runtime type selector." }
@@ -150,7 +153,7 @@
       "description": "Single chat message exchanged with the agent.",
       "properties": {
         "authorName": { "type": "string", "description": "The name of the author of the message." },
-        "role": { "type": "string", "enum": ["user", "assistant", "system", "tool"] },
+        "role": { "type": "string", "enum": ["user", "assistant", "system", "developer", "tool"] },
         "contents": {
           "type": "array",
           "description": "An empty array is a valid metadata-only message.",
@@ -193,6 +196,7 @@
       "required": ["$type"],
       "properties": {
         "$type": { "type": "string", "const": "request" },
+        "correlationId": { "$ref": "#/$defs/identifier" },
         "orchestrationId": {
           "type": "string",
           "description": "The identifier of the orchestration that initiated this agent request (if any)."
@@ -215,6 +219,7 @@
       "required": ["$type"],
       "properties": {
         "$type": { "type": "string", "const": "response" },
+        "correlationId": { "$ref": "#/$defs/identifier" },
         "usage": {
           "$ref": "#/$defs/usage"
         }
@@ -228,6 +233,7 @@
       "required": ["$type"],
       "properties": {
         "$type": { "type": "string", "const": "errorResponse" },
+        "correlationId": { "$ref": "#/$defs/identifier" },
         "usage": { "$ref": "#/$defs/usage" }
       }
     },
@@ -247,6 +253,10 @@
       "description": "JSON-only terminal response projection. No raw runtime object graph is persisted.",
       "properties": {
         "messages": { "$ref": "#/$defs/chatMessages" },
+        "value": {
+          "type": ["null", "boolean", "number", "string", "array", "object"],
+          "description": "Optional caller-visible structured JSON result, independent of messages. Absence means no structured value; explicit null, false, zero, empty strings, arrays, and objects remain present values. No runtime object serialization or inferred value from message text."
+        },
         "usage": { "$ref": "#/$defs/usage" },
         "createdAt": { "type": "string", "format": "date-time" },
         "responseId": { "$ref": "#/$defs/identifier" },
@@ -335,14 +345,18 @@
     },
     "historyBinding": {
       "type": "object",
-      "description": "Proposed fixed owner for one durable session generation. Stable logical provider identity is non-secret and never inferred from runtime type names or opaque session data.",
+      "description": "Provisional optional configuration descriptor, not a session-fixed effective owner. Retained shape pending agreement on a shared configuration binding versus a runtime extension/profile. It does not restrict supported per-run owner transitions or specify their representation.",
       "properties": {
         "version": { "type": "integer", "const": 1 },
         "ownerKind": {
           "type": "string",
-          "enum": ["durableState", "historyProvider", "modelService"]
+          "enum": ["durableState", "historyProvider", "modelService"],
+          "description": "Category of the configured history facility, not a requirement that it owns history on every run."
         },
-        "providerKey": { "$ref": "#/$defs/identifier" }
+        "providerKey": {
+          "$ref": "#/$defs/identifier",
+          "description": "Stable, non-secret logical configuration identity; never a runtime type name, credential, or identity inferred from opaque session state."
+        }
       },
       "required": ["version", "ownerKind", "providerKey"],
       "additionalProperties": true
@@ -380,7 +394,7 @@
         },
         "ingestedPositions": {
           "type": "object",
-          "description": "Proposed legacy 1.2 scalar watermark: highest contiguous position ingested from each producer. Not request completion evidence.",
+          "description": "Legacy highest-seen position by producer, not proof of a contiguous delivered prefix or request completion. Preserve historical values without inferring missing deliveries during migration. Exact gap-preserving workflow receipts require separately versioned bookkeeping independent of transcript retention.",
           "additionalProperties": { "type": "integer", "minimum": 0 }
         },
         "truncation": {
@@ -424,7 +438,7 @@
       "then": {
         "properties": {
           "data": {
-            "required": ["conversationHistory", "terminalResults", "completionReceipts", "historyBinding"],
+            "required": ["conversationHistory", "terminalResults", "completionReceipts"],
             "properties": {
               "conversationHistory": {
                 "items": {
