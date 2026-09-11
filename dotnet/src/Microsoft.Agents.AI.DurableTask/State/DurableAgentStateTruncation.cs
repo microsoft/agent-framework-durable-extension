@@ -1,5 +1,6 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Microsoft.Agents.AI.DurableTask.State;
@@ -30,4 +31,22 @@ internal sealed class DurableAgentStateTruncation
     /// </summary>
     [JsonPropertyName("lastEvictedAt")]
     public DateTimeOffset LastEvictedAt { get; set; }
+
+    /// <summary>
+    /// Gets undeclared future truncation evidence fields.
+    /// </summary>
+    [JsonExtensionData]
+    public IDictionary<string, JsonElement>? UnknownProperties { get; set; }
+
+    public void Validate()
+    {
+        if (this.EvictedMessageCount < 1 ||
+            this.FirstEvictedAt == default ||
+            this.LastEvictedAt == default ||
+            this.LastEvictedAt < this.FirstEvictedAt)
+        {
+            throw new InvalidOperationException(
+                "Durable agent truncation evidence requires a positive count and ordered first/latest timestamps.");
+        }
+    }
 }

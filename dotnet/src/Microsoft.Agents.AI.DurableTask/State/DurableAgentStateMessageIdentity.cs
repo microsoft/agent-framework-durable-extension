@@ -28,7 +28,11 @@ internal static class DurableAgentStateMessageIdentity
                 DurableAgentStateMessage message = entry.Messages[index];
                 if (message.MessageId is null)
                 {
-                    message.MessageId = Create(entryType, entry.CorrelationId, entry.CreatedAt, index);
+                    message.MessageId = Create(
+                        entryType,
+                        entry.CorrelationId,
+                        entry.CreatedAt ?? default,
+                        index);
                 }
             }
         }

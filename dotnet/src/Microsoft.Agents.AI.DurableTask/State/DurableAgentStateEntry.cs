@@ -31,13 +31,18 @@ internal abstract class DurableAgentStateEntry
     /// Gets the timestamp when this entry was created.
     /// </summary>
     [JsonPropertyName("createdAt")]
-    public required DateTimeOffset CreatedAt { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DateTimeOffset? CreatedAt { get; init; }
 
     /// <summary>
     /// Gets the list of messages associated with this entry, in chronological order.
     /// </summary>
     [JsonPropertyName("messages")]
-    public IReadOnlyList<DurableAgentStateMessage> Messages { get; init; } = [];
+    public IReadOnlyList<DurableAgentStateMessage> Messages
+    {
+        get;
+        init => field = value ?? [];
+    } = [];
 
     /// <summary>
     /// Gets application-defined entry metadata from the schema's <c>extensionData</c> property.
@@ -51,4 +56,33 @@ internal abstract class DurableAgentStateEntry
     /// </summary>
     [JsonExtensionData]
     public IDictionary<string, JsonElement>? UnknownProperties { get; set; }
+
+    public void ValidateV2()
+    {
+        if (this is DurableAgentStateCompaction)
+        {
+            if (this.CorrelationId is not null)
+            {
+                throw new InvalidOperationException(
+                    "A durable agent compaction entry cannot have a correlation ID.");
+            }
+        }
+        else if (this.CorrelationId is not null)
+        {
+            DurableAgentStateContract.ValidateIdentifier(
+                this.CorrelationId,
+                "conversationHistory.correlationId");
+        }
+
+        foreach (DurableAgentStateMessage? message in this.Messages)
+        {
+            if (message is null)
+            {
+                throw new InvalidOperationException(
+                    "A revised durable agent state cannot contain null messages.");
+            }
+
+            message.ValidateV2();
+        }
+    }
 }

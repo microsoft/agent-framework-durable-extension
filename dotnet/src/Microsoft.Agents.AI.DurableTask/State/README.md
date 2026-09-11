@@ -25,8 +25,9 @@ Some versioning considerations:
 Schema version 1.2 adds optional message identity and extension metadata, opaque session state, workflow
 `ingestedPositions`, and bounded truncation evidence. The .NET workflow path preserves but does not currently
 populate `ingestedPositions`. Older 1.x state remains readable. `DurableAgentState.Clone()` promotes older
-supported versions to 1.2 when a caller uses that write-clone path, while later same-major versions remain
-unchanged. Wiring that path into entity execution is deferred. Major versions remain fail-closed. New
+supported versions to 1.2 when a caller uses that write-clone path. Versions outside the exact contract
+snapshots are rejected until compatibility is explicitly reviewed. Wiring that path into entity execution is
+deferred. New
 `DurableAgentState` instances default to the current version, while deserialization preserves the persisted
 version through an init-only property.
 
@@ -47,21 +48,29 @@ replay filtering, compaction, retention, and provider behavior is deferred to la
 
 ## Revised execution-state foundation
 
-The mailbox and fixed-history binding contracts use schema `2.0.0`. This is intentionally a fail-closed major
+The mailbox and provisional history-binding contracts use schema `2.0.0`. This is intentionally a fail-closed major
 version: a 1.x worker preserves unknown fields but does not understand completion receipts, so allowing it to
-process revised state could rerun work whose transcript result was already removed. The .NET reader accepts
-legacy 1.x state and revised 2.x state, but new state continues to default to `1.2.0`; this schema-only layer
-does not activate revised writes. A later execution layer must opt into `2.0.0` only when it writes the complete
-mailbox and binding layout.
+process revised state could rerun work whose transcript result was already removed. The production .NET reader
+and writer reject 2.0 until mailbox-aware behavior is activated, and new state continues to default to `1.2.0`.
+An explicit internal passive contract path exists only for serializer/fixture tests and later deliberate
+activation. A later execution layer must opt into `2.0.0` only when it implements the complete mailbox layout.
 
 In revised state, `terminalResults` stores immutable result envelopes by correlation ID outside
 `conversationHistory`, while `completionReceipts` retains completion evidence after a result payload expires.
-No receipt means pending; an `available` receipt requires a matching result; an `unavailable` receipt proves
-completion without a result payload. `historyBinding` records a versioned owner kind and stable logical provider
-key. The key is explicit wire identity and must not be inferred from CLR type names or opaque session keys.
+An `available` receipt requires a matching result; an `unavailable` receipt proves completion without a result
+payload while retaining its outcome. Absence of a receipt means only that no terminal completion is recorded;
+it does not distinguish an accepted pending request from an unknown identity. Optional `historyBinding` records
+a provisional configured facility kind and stable logical provider key. It does not establish effective
+per-run ownership, and the key must not be inferred from CLR type names or opaque session keys.
 
 These DTOs and converters are passive contracts. Delivery lookup and polling, binding selection and enforcement,
 result expiry, and transcript retention are implemented by later stack layers.
+
+When those layers activate schema 2.0, one successful durable entity operation must atomically commit the
+terminal result and receipt together with that operation's session continuation, ingestion bookkeeping,
+entity-local transcript, whole-entity TTL, optional binding, and other local control state. External provider
+writes and tool side effects are outside that entity-local transaction. This layer validates persisted shape
+and consistency but performs no commit or lookup behavior.
 
 Schema 2.0 must not be activated as a cross-language write format until every participating runtime either
 implements the mailbox/binding contract or explicitly rejects the new major version. The current C# reader is

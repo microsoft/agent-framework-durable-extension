@@ -20,7 +20,8 @@ internal sealed class DurableAgentStateUriContent : DurableAgentStateContent
     /// Gets the media type of the content.
     /// </summary>
     [JsonPropertyName("mediaType")]
-    public required string MediaType { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? MediaType { get; init; }
 
     /// <summary>
     /// Creates a <see cref="DurableAgentStateUriContent"/> from a <see cref="UriContent"/>.
@@ -39,6 +40,12 @@ internal sealed class DurableAgentStateUriContent : DurableAgentStateContent
     /// <inheritdoc/>
     public override AIContent ToAIContent()
     {
+        if (this.MediaType is null)
+        {
+            throw new InvalidOperationException(
+                "The current .NET UriContent contract cannot represent a URI without a media type.");
+        }
+
         return new UriContent(this.Uri, this.MediaType);
     }
 }

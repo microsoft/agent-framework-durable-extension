@@ -35,14 +35,9 @@ public sealed class DurableAgentStateTests
 
     [Theory]
     [InlineData("1.0.0")]
-    [InlineData("1.1.9")]
+    [InlineData("1.1.0")]
     [InlineData("1.2.0")]
-    [InlineData("1.2.7")]
-    [InlineData("1.3.0")]
-    [InlineData("1.9.2")]
-    [InlineData("1.2147483648.0")]
-    [InlineData("1.2.2147483648")]
-    public void StrictNumericSemVerIsAccepted(string version)
+    public void DeclaredSchemaVersionsAreAccepted(string version)
     {
         string json = $$"""
             {
@@ -74,7 +69,15 @@ public sealed class DurableAgentStateTests
     [InlineData("1.2.0-alpha")]
     [InlineData("1.2.0+build")]
     [InlineData("1.2.0-alpha+build")]
-    public void InvalidSchemaVersionGrammarIsRejected(string version)
+    [InlineData("1.0.7")]
+    [InlineData("1.1.9")]
+    [InlineData("1.2.7")]
+    [InlineData("1.3.0")]
+    [InlineData("2.0.1")]
+    [InlineData("2.1.0")]
+    [InlineData("1.2147483648.0")]
+    [InlineData("1.2.2147483648")]
+    public void InvalidOrUndeclaredSchemaVersionIsRejected(string version)
     {
         string json = $$"""
             {
@@ -402,9 +405,7 @@ public sealed class DurableAgentStateTests
 
     [Theory]
     [InlineData("1.0.0")]
-    [InlineData("1.0.7")]
     [InlineData("1.1.0")]
-    [InlineData("1.1.9")]
     public void CloneForWritePromotesOlderCompatibleStateToCurrentVersion(string version)
     {
         string json = $$"""
@@ -429,16 +430,13 @@ public sealed class DurableAgentStateTests
         Assert.Contains("\"schemaVersion\":\"1.2.0\"", roundTrip, StringComparison.Ordinal);
     }
 
-    [Theory]
-    [InlineData("1.2.0")]
-    [InlineData("1.2.7")]
-    [InlineData("1.3.0")]
-    [InlineData("1.9.2")]
-    public void CloneForWritePreservesCurrentAndFutureCompatibleVersions(string version)
+    [Fact]
+    public void CloneForWritePreservesCurrentVersion()
     {
+        const string Version = "1.2.0";
         string json = $$"""
             {
-              "schemaVersion": "{{version}}",
+              "schemaVersion": "{{Version}}",
               "data": {
                 "conversationHistory": []
               }
@@ -452,16 +450,16 @@ public sealed class DurableAgentStateTests
             clone,
             DurableAgentStateJsonContext.Default.DurableAgentState);
 
-        Assert.Equal(version, clone.SchemaVersion);
-        Assert.Contains($"\"schemaVersion\":\"{version}\"", roundTrip, StringComparison.Ordinal);
+        Assert.Equal(Version, clone.SchemaVersion);
+        Assert.Contains($"\"schemaVersion\":\"{Version}\"", roundTrip, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void FutureCompatibleVersionAndUnknownFieldsSurviveMutationAndRoundTrip()
+    public void CurrentVersionUnknownFieldsSurviveMutationAndRoundTrip()
     {
         const string JsonText = """
             {
-              "schemaVersion": "1.3.0",
+              "schemaVersion": "1.2.0",
               "data": {
                 "conversationHistory": [
                   {
@@ -493,7 +491,7 @@ public sealed class DurableAgentStateTests
             DurableAgentStateJsonContext.Default.DurableAgentState);
         using JsonDocument document = JsonDocument.Parse(roundTrip);
 
-        Assert.Equal("1.3.0", document.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.Equal("1.2.0", document.RootElement.GetProperty("schemaVersion").GetString());
         Assert.Equal(42, document.RootElement.GetProperty("futureRoot").GetInt32());
         JsonElement data = document.RootElement.GetProperty("data");
         Assert.Equal("preserve", data.GetProperty("futureData").GetString());

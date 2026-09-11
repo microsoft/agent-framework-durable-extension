@@ -142,4 +142,28 @@ internal sealed class DurableAgentStateMessage
             Role = new(this.Role)
         };
     }
+
+    public void ValidateV2()
+    {
+        if (this.Role is not "user" and
+            not "assistant" and
+            not "system" and
+            not "developer" and
+            not "tool")
+        {
+            throw new InvalidOperationException(
+                $"The durable agent state message role '{this.Role}' is not supported.");
+        }
+
+        if (this.Contents.Any(static content => content is null))
+        {
+            throw new InvalidOperationException(
+                "A durable agent state message cannot contain null content entries.");
+        }
+
+        foreach (DurableAgentStateContent content in this.Contents)
+        {
+            content.ValidateV2();
+        }
+    }
 }
