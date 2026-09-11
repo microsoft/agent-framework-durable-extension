@@ -29,8 +29,12 @@ internal sealed class DurableAgentStateErrorContent : DurableAgentStateContent
     /// Gets the error details.
     /// </summary>
     [JsonPropertyName("details")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public JsonElement? Details { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public JsonElement Details
+    {
+        get;
+        init => field = value.ValueKind == JsonValueKind.Undefined ? default : value.Clone();
+    }
 
     /// <summary>
     /// Creates a <see cref="DurableAgentStateErrorContent"/> from an <see cref="ErrorContent"/>.
@@ -43,7 +47,7 @@ internal sealed class DurableAgentStateErrorContent : DurableAgentStateContent
         return new DurableAgentStateErrorContent()
         {
             Details = content.Details is null
-                ? null
+                ? default
                 : JsonSerializer.SerializeToElement(
                     content.Details,
                     DurableAgentStateJsonContext.Default.String),
@@ -57,11 +61,12 @@ internal sealed class DurableAgentStateErrorContent : DurableAgentStateContent
     {
         return new ErrorContent(this.Message)
         {
-            Details = this.Details is JsonElement details
-                ? details.ValueKind == JsonValueKind.String
-                    ? details.GetString()
-                    : details.GetRawText()
-                : null,
+            Details = this.Details.ValueKind switch
+            {
+                JsonValueKind.Undefined => null,
+                JsonValueKind.String => this.Details.GetString(),
+                _ => this.Details.GetRawText(),
+            },
             ErrorCode = this.ErrorCode
         };
     }

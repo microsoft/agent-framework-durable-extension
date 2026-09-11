@@ -55,6 +55,13 @@ internal abstract class DurableAgentStateContent
     public abstract AIContent ToAIContent();
 
     /// <summary>
+    /// Validates semantic constraints introduced by the schema 2.0 contract.
+    /// </summary>
+    public virtual void ValidateV2()
+    {
+    }
+
+    /// <summary>
     /// Creates a <see cref="DurableAgentStateContent"/> from an <see cref="AIContent"/>.
     /// </summary>
     /// <param name="content">The <see cref="AIContent"/> to convert.</param>

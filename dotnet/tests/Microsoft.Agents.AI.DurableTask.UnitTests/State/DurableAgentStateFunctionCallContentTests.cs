@@ -110,5 +110,26 @@ public sealed class DurableAgentStateFunctionCallContentTests
         Assert.Equal(3, Assert.IsType<JsonElement>(result.Arguments["days"]).GetInt32());
     }
 
+    [Fact]
+    public void StringArgumentsRoundTripVerbatimWithoutParsing()
+    {
+        const string Json =
+            """{"$type":"functionCall","arguments":" { \"partial\": ","callId":"call-7","name":"incomplete"}""";
+
+        DurableAgentStateContent? deserialized =
+            (DurableAgentStateContent?)JsonSerializer.Deserialize(Json, s_stateContentTypeInfo);
+        DurableAgentStateFunctionCallContent durable =
+            Assert.IsType<DurableAgentStateFunctionCallContent>(deserialized);
+        string roundTrip = JsonSerializer.Serialize(durable, s_stateContentTypeInfo);
+        using JsonDocument roundTripDocument = JsonDocument.Parse(roundTrip);
+        FunctionCallContent runtime = Assert.IsType<FunctionCallContent>(durable.ToAIContent());
+
+        Assert.Equal(" { \"partial\": ", durable.Arguments.GetString());
+        Assert.Equal(" { \"partial\": ", runtime.RawRepresentation);
+        Assert.Equal(
+            " { \"partial\": ",
+            roundTripDocument.RootElement.GetProperty("arguments").GetString());
+    }
+
     private sealed record Location(string City, string State);
 }

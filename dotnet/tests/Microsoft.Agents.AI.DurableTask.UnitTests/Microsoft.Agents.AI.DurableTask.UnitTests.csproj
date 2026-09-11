@@ -17,6 +17,12 @@
     <None Include="..\..\..\schemas\fixtures\shared-durable-agent-state-2.0.json"
           Link="Fixtures\shared-durable-agent-state-2.0.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\schemas\fixtures\shared-durable-agent-state-2.0-lossless.json"
+          Link="Fixtures\shared-durable-agent-state-2.0-lossless.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\schemas\fixtures\shared-durable-agent-state-2.0-pruned.json"
+          Link="Fixtures\shared-durable-agent-state-2.0-pruned.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

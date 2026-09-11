@@ -17,8 +17,12 @@ internal sealed class DurableAgentStateTerminalError
     public required string Message { get; init; }
 
     [JsonPropertyName("details")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public JsonElement? Details { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public JsonElement Details
+    {
+        get;
+        init => field = value.ValueKind == JsonValueKind.Undefined ? default : value.Clone();
+    }
 
     [JsonExtensionData]
     public IDictionary<string, JsonElement>? UnknownProperties { get; set; }
