@@ -18,7 +18,8 @@ delivery independent of transcript ownership.
 ### Shared correctness invariants
 
 - The entity owns request correlation, completion, original result delivery and duplicate-request
-  suppression for every history configuration.
+  suppression for every history configuration. Revised completion receipts retain the invocation
+  outcome after delivery payload expiry.
 - The selected history owner supplies the transcript. Durable-owned history remains entity-local.
   External and service-owned history does not require an entity-side message mirror.
 - The outgoing workflow conversation preserves the full logical selection, separately from the
@@ -42,7 +43,7 @@ Shared invariants do not require identical core APIs or the prototype's private 
 | Ownership policy | Per-run `store`, including `True -> False -> True` | Initially session-stable proposal, not a core API limit. Honor supported overrides, reject unsupported transitions. |
 | Eager pruning | `follow_compaction` on supported `DurableHistoryProvider`, not external stores | Defer `FollowCompaction` pending safe exclusion, summary, cadence and decorator handling. |
 | Pressure retention | Independent of compaction | Independent of compaction. `Auto` denotes pressure behavior, not automatic core compaction. |
-| Defaults and budget | `keep_all` and `None` by default; an explicit positive byte budget enables pressure eviction | Require aligned non-deleting defaults and equivalent explicit-budget semantics. Do not assume they have shipped. |
+| Defaults and budget | `keep_all` and `None` by default. An explicit positive byte budget enables pressure eviction. | Require aligned non-deleting defaults and equivalent explicit-budget semantics. Do not assume they have shipped. |
 
 Architectural decisions remain in [ADR PR #88][adr-pr]. Coverage and limitations of the published
 Python prototype are recorded in [Prototype Evidence](#prototype-evidence), separately from the
@@ -196,7 +197,7 @@ relocating `conversationHistory`.
 ```mermaid
 flowchart LR
   ENTITY["One entity / one session<br/>One total size budget"]
-  ENTITY --> EXEC["Execution and delivery, every owner<br/>Request-level bookkeeping<br/>responseMailbox + completedCorrelations"]
+  ENTITY --> EXEC["Execution and delivery, every owner<br/>responseMailbox + completedCorrelations<br/>Outcome retained after payload expiry"]
   ENTITY --> CONTROL["Session and workflow control, as needed<br/>session + ingestion receipts<br/>Occurrence and revision bookkeeping"]
   ENTITY --> HISTORY["Local transcript, when used<br/>conversationHistory<br/>Messages, IDs, annotations + truncation"]
 ```
@@ -204,7 +205,7 @@ flowchart LR
 History providers own transcript read, append and reconciliation behavior. The entity runtime
 physically commits all entity-local slices at the operation boundary. One owner must append each
 transcript input and output, preserving provider storage choices without competing writers. This
-does not guarantee a single external append across retries; see
+does not guarantee a single external append across retries. See
 [failure boundaries](#commit-and-failure-boundaries). The prototype's append ownership is described
 in [Prototype Evidence](#prototype-evidence).
 
@@ -237,7 +238,7 @@ list. Implicit history follows core's provider ordering. Preserve custom durable
 state while excluding only its derived message buffer and position index. A custom in-memory
 subclass's session transcript remains part of the protected state budget, not the durable
 transcript's eviction policy. Substitution does not import content accumulated in an in-memory
-provider before registration; that import scenario is outside the persisted-state upgrade contract.
+provider before registration. That import scenario is outside the persisted-state upgrade contract.
 
 ```mermaid
 flowchart TB
@@ -286,10 +287,23 @@ core's effective choice. Reject unsupported overrides or transitions explicitly 
 rather than silently forcing the saved owner over that choice. Do not infer Python's injection or
 inactive-primary storage behavior from this policy.
 
+### Configuration identity
+
+Stable provider/configuration identity is distinct from effective per-run ownership. An optional,
+runtime-owned versioned profile is the proposed initial representation, not a mandatory shared
+binding object. The exact representation remains under review in [schema PR #92][schema-pr].
+Compatible writers must preserve such state. A host must validate any profile it relies on for
+restoration or execution, rather than guessing an owner from opaque session data. A configuration
+descriptor does not require its facility to own every run or change a runtime's supported transitions.
+
 ## Execution, Delivery and Session Lifecycle
 
 The execution path is the same for every history owner. Workflow projection and delta selection
 occur before the entity receives the request.
+
+The outcome-bearing contract below applies to revised receipts. Older timestamp-only receipts
+still suppress duplicate execution and follow the
+[transition policy](#conversion-requirements-within-the-chosen-mode) when their outcome is unknown.
 
 ```mermaid
 sequenceDiagram
@@ -298,7 +312,7 @@ sequenceDiagram
   participant A as Agent + selected history owner
   C->>E: Request and correlation ID
   alt Completion already recorded
-    E-->>C: Original result or already-completed status
+    E-->>C: Original result, or unavailable + recorded outcome
   else New request
     E->>E: Restore session and ingestion state
     E->>A: Current input and session
@@ -331,37 +345,46 @@ so expiry bounds payload retention. An acknowledgement operation is a possible l
 | --- | --- |
 | Committed success | Return the original result, including an explicit null, falsey or non-text value. Completion does not depend on nonempty text. |
 | Committed error | Return the recorded error and completion evidence. Do not reinterpret it as a successful empty response. |
-| Expired delivery | Return already-completed/expired status from the receipt. Do not invoke again or resurrect a transcript response. |
+| Expired delivery | Return completed-but-result-unavailable with the retained `succeeded` or `failed` outcome. Do not return the expired payload, invoke again or resurrect a transcript response. |
 | No result | Absence alone establishes neither acceptance, completion nor failure. Poll within the caller's deadline or report unresolved status. |
 | Accepted | Report only actual acceptance/dispatch evidence. Acceptance is not final completion. |
 | Pending approval | Deliver the approval request and persist pending state. This does not mean the guarded tool action executed successfully. |
+
+For revised writes, record the invocation outcome and completion timestamp in the receipt at the
+same local commit as the original result. Those facts are immutable and survive payload expiry.
+Expiry changes result availability, not the outcome of the correlated invocation. That outcome
+does not imply completion of an enclosing workflow or execution of a pending approval-gated action.
+Older receipts without an outcome require the explicit
+[transition policy](#conversion-requirements-within-the-chosen-mode).
 
 Define a JSON projection of the supported response fields, including messages/content, message and
 response IDs, author/agent metadata, original creation time, usage, finish reason, provider
 continuation and additional properties. Preserve structured values separately from text, including
 the distinction between an absent value and explicit `null`, `false`, `0` or an empty container.
-Property presence or an explicit marker can encode that distinction; this ADR does not mandate a
+Property presence or an explicit marker can encode that distinction. This ADR does not mandate a
 new flag. Do not persist opaque SDK objects or Python/.NET response-format classes as the contract.
 Preserve supported tool and multimodal content without flattening it. Exact field names and
 discriminators belong to schema review, not the prototype's private shape.
 
 Preserve unknown optional JSON data safely for round-trips, without dynamically loading types or
 executing content merely by reading it. Opaque SDK representations are outside this guarantee.
-The original payload and its metadata need not remain available after delivery expiry. Referenced
-resource lifetime is separate from result lifetime; a retained URI does not guarantee the resource
-still exists. Failure to read an offloaded delivery payload must not become a successful empty
-result. An approval response may complete one request's delivery while the pending action still
+The original payload and its detailed response metadata need not remain available after delivery
+expiry. The completion timestamp and invocation outcome remain in the receipt. Referenced resource
+lifetime is separate from result lifetime. A retained URI does not guarantee the resource still
+exists. Failure to read an offloaded delivery payload must not become a successful empty result.
+An approval response may complete one request's delivery while the pending action still
 needs an explicit resume under a new correlation. A recovered tool-role error is not automatically
 a terminal invocation failure.
 
 At delivery expiry, stop returning the payload even if physical cleanup is lazy. Remove the
-payload or reference during a subsequent operation or explicit maintenance, but retain a
-`completedCorrelations` tombstone until the entity is deleted. Idle physical cleanup requires a
-host/application-owned schedule. The Python prototype exposes an `expire_responses` entity operation
-rather than an implicit idle timer. A duplicate correlation returns its retained result or an
-already-completed status, not another agent invocation. Transcript compaction and clearing must not
-alter results, remove live mailbox obligations, or erase completion receipts. Runtime-error results
-and receipts are not model context.
+payload or reference during a subsequent operation or explicit maintenance, but retain the
+completion timestamp and outcome in a `completedCorrelations` tombstone until the entity is deleted.
+Idle physical cleanup requires a host/application-owned schedule. The Python prototype exposes an
+`expire_responses` entity operation rather than an implicit idle timer. A duplicate correlation
+returns its retained result or the completed-but-unavailable status and recorded outcome, not
+another agent invocation. Transcript compaction and clearing must not alter results, remove live
+mailbox obligations, or erase completion receipts. Runtime-error results and receipts are not model
+context.
 
 An indefinitely active entity accumulates tombstones without a fixed bound. They can eventually fill
 the non-evictable floor even after transcript pruning. This long-session limitation requires
@@ -403,7 +426,7 @@ retry may repeat those calls and side effects. The design does not checkpoint be
 | --- | --- |
 | Caller stops waiting or cancels polling | Stop that wait only. This is not execution cancellation, and the entity may still commit. |
 | Worker shutdown or execution cancellation before commit | Discard uncommitted local changes. Do not invent completion. External writes, model calls or tools may already have succeeded. |
-| Cancellation after confirmed commit | The request is already completed. Return its recorded outcome rather than undoing it or invoking again. |
+| Cancellation after confirmed commit | The request is already completed. Return its retained result, or unavailable status with the recorded outcome after expiry. Do not undo it or invoke again. |
 | Provider failure during load, invocation or store | Stage a runtime-error outcome if possible, with actual accepted-input receipts and resulting session state. Do not fabricate acceptance for rejected input. |
 | Final reconciliation, session serialization or a known pre-commit failure | Leave the last committed local state intact. Do not return staged completion as a committed outcome. |
 | Error outcome cannot be persisted | Use the direct operation failure channel where available. State-polling callers may time out without a durable error result. |
@@ -435,7 +458,7 @@ been no streaming progress, tool execution or session/continuation advance. Stop
 different error or any such progress. If matching refusals continue, fail the turn.
 
 Never replay a partially consumed stream or restart a tool loop after progress. Retrying a whole
-invocation before observable progress can still repeat provider hooks; a matching refusal does not
+invocation before observable progress can still repeat provider hooks. A matching refusal does not
 prove those hooks were side-effect-free. Preserve configured cadence and do not claim external
 writes are retry-safe without the provider's own guarantee.
 
@@ -649,8 +672,8 @@ major version. The evaluated legacy readers accept only `request` and `response`
 polymorphic deserialization rejects unknown `$type` values, and Python's fallback uses the same
 limited enum. New entry kinds or delivery state therefore need explicit deployment gates.
 
-[Schema PR #92][schema-pr] is a separate review draft, not final format agreement or a replacement
-for the architectural decisions in PR #88.
+[Schema PR #92][schema-pr] is a separate contract proposal under review, not final format agreement
+or a replacement for the architectural decisions in PR #88.
 
 ### Mode 1. Shared deployment, conditional reader-first rollout
 
@@ -715,8 +738,15 @@ that transition, not just a version gate. Do not infer a fully delivered prefix 
 receipts solely from the pruned transcript. In isolated mode, apply these checks at explicit import,
 not as implicit permission for the new engine to resume an old orchestration.
 
-Only recorded outcomes justify backfilled completion receipts. If old retention already removed an
-outcome, migration cannot reconstruct it or claim that duplicate suppression covered that request.
+Only authoritative recorded evidence justifies backfilling a completion receipt or invocation
+outcome. An older timestamp-only receipt still proves completion and must continue to suppress
+duplicate execution. If no retained result or other trusted evidence establishes its outcome,
+migration must not assign `succeeded` or `failed`, erase the receipt or rerun the request to recover
+that fact. Keep such state on a compatible deployment or use an explicitly agreed legacy handling
+policy that preserves completion without inventing an outcome. A target format requiring a known
+outcome must reject an import that lacks this evidence. Where both result and completion evidence
+are gone, migration cannot reconstruct either or claim prior duplicate suppression.
+
 An existing response may itself have been partially pruned or annotated. Preserve its available
 payload and completion evidence, without claiming to reconstruct the original full response.
 Immutable original-result guarantees apply to revised writes, not retroactively to changed data.
@@ -744,7 +774,8 @@ Python/.NET read/write round-trips and unknown-data preservation.
   durable, external and service-owned history, without a required external message mirror.
 - Eager pruning and pressure eviction can be enabled separately. Both remain non-deleting by
   default, so an unconfigured session can still reach its backend limit.
-- Pruning cannot change an original result or erase completion evidence. Completion tombstones
+- Pruning cannot change an original result or erase completion evidence. Revised receipts retain
+  the invocation outcome after delivery expiry without retaining the payload. Completion tombstones
   accumulate throughout an active entity's lifetime and can prevent further writes even when
   transcript retention is enabled. Bounded completion bookkeeping remains a durable follow-up.
 - Custom selection can require growing sets of ingestion receipts. That control-state cost belongs
@@ -771,14 +802,17 @@ tested behavior, remaining validation, missing instrumentation and explicit foll
 1. **Provider-independent execution.** Test success, errors, polling, repeated correlations and
    cold reloads with durable, external, service-owned and legacy agents. Verify one transcript
    append path, provider storage choices, stable IDs, annotation round-trips and summary ordering.
-    Separate Python's inactive-external-primary load/store suppression, including per-call hooks,
+  Separate Python's inactive-external-primary load/store suppression, including per-call hooks,
    from ordinary core behavior. Verify store-only sinks and .NET's separate ownership policy.
 2. **Delivery lifetime.** Original mailbox responses and references must survive transcript
    annotation, summary insertion, pruning and clearing. Test delivery expiry, completion receipts,
-   and a duplicate request after its transcript response was removed. Cover every outcome in the
+  and a duplicate request after its transcript response was removed. Verify both success and
+  failure at expiry before physical cleanup, after cleanup and after cold reload. The completion
+  timestamp must remain unchanged. Lookup must expose the retained outcome without returning
+  payloads or invoking again. Cover every outcome in the
    delivery table, explicit null/falsey/non-text values, typed JSON metadata, unknown optional raw
-    data and pending approvals. Missing offloaded delivery data must not become a successful empty
-    result.
+  data and pending approvals. Missing offloaded delivery data must not become a successful empty
+  result.
 3. **Retention matrix.** Exercise all four combinations of eager pruning and pressure budget,
    supported runtime-specific provider overrides, Python's optional `"backend_limit"`, custom
    watermarks and unresolved host limits. Require aligned non-deleting defaults in both runtimes.
@@ -790,7 +824,7 @@ tested behavior, remaining validation, missing instrumentation and explicit foll
 4. **Session continuity.** Restore provider types, pending approvals and service conversation IDs
    on committed success/error paths. In Python, cold-reload through `store=True -> False -> True`
    with a valid saved service ID. The client-owned run must ignore it in model calls and history
-   hooks; the later service-owned invocation must receive the preserved ID. Neither transcript may
+  hooks. The later service-owned invocation must receive the preserved ID. Neither transcript may
    be synthesized from mailbox results or merged with the other. Also cover transitions without a
    service ID, current-input preservation and contentless legacy records. Exercise bounded
    matching-error retries only before streaming/tool/session progress, and immediate failure on
@@ -808,18 +842,22 @@ tested behavior, remaining validation, missing instrumentation and explicit foll
    with payload availability after pruning or allow transport IDs to rewrite application IDs.
 6. **Python registration.** Verify no-primary and sink-only injection, exact built-in in-memory
   replacement, custom subclass preservation, `source_id`/`skip_excluded`, explicit
-  `prune_excluded` precedence, external-provider preservation
-   and rejection of multiple load-enabled primaries. Audit sinks need nonempty unique IDs and
-   store-only configuration. Separately test .NET's singular history provider, `AIContextProviders`
+  `prune_excluded` precedence, external-provider preservation and rejection of multiple load-enabled
+  primaries. Audit sinks need nonempty unique IDs and store-only configuration. Separately test
+  .NET's singular history provider, `AIContextProviders`
    and decorated providers without imposing Python's registration model.
 7. **State transition.** Test both explicit deployment modes. Shared rollout must prove readers,
    writers, SDK/HTTP polling, tooling, paused HITL replay and rollback against orchestration history.
-    Isolated rollout must validate deployment/routing separation and reject old recorded workflow
-    starts in the new engine. An acknowledgement setting alone cannot detect mixed peers.
-    Test legacy read-only handling, protocol-2 new starts, destination-bound trusted imports,
+  Isolated rollout must validate deployment/routing separation and reject old recorded workflow
+  starts in the new engine. An acknowledgement setting alone cannot detect mixed peers.
+  Test legacy read-only handling, protocol-2 new starts, destination-bound trusted imports,
    idempotent conversion and full journals for scalar gaps. Include partially altered legacy results,
    expiry grace, Python/.NET rewrites and unknown-data preservation. Version equality alone is not
-   a compatibility test.
+  a compatibility test. Include timestamp-only receipts with no recoverable outcome and verify
+  that migration neither invents an outcome nor loses completion evidence. A known-outcome target
+  must reject such imports without authoritative evidence. Agreed legacy-compatible handling must
+  preserve duplicate suppression after cold reload. Readers and rollback writers must preserve
+  the agreed outcome and lookup contract before revised writes are enabled.
 8. **Failure boundaries.** Inject failures around local commit and external writes. Uncommitted
    effects must not become protected completed operations. Cover caller wait cancellation, execution
    cancellation and worker shutdown before/after commit, provider failures at each stage, actual
@@ -933,7 +971,7 @@ Evaluate acknowledgement plus a defined redelivery window, compact sequence wate
 request protocol permits them, or offloaded completion receipts. Any bound must define what happens
 to a duplicate request after its receipt expires without silently allowing completed work to run
 again. Idle-session TTL does not bound an entity kept active by new requests. This work does not
-block the initial implementation; until a replacement protocol is defined, tombstones remain until
+block the initial implementation. Until a replacement protocol is defined, tombstones remain until
 entity deletion and their growth remains an explicit capacity limitation.
 
 ### 8. Retry-safe external history writes
@@ -952,7 +990,7 @@ duplicate-free writes. Preserve provider callback cadence, including multiple ap
 An entity-only receipt, activity or outbox does not alone close the external-write/acknowledgement
 gap. The stronger guarantee requires backing-store cooperation, but not a universal core API change
 or an entity-side transcript mirror. It protects history appends, not repeated model calls or tool
-effects. Existing providers remain supported with the documented possible-duplicate behavior; this
+effects. Existing providers remain supported with the documented possible-duplicate behavior. This
 capability does not block their initial integration.
 
 ### Release gates and excluded scope
@@ -991,6 +1029,7 @@ These are local results, not remote CI or cross-runtime acceptance.
 
 | Area | Evidence and remaining work |
 | --- | --- |
+| Outcome after payload expiry | At `9b4550d`, Python receipts retain completion time but not the original success/failure outcome. Expired lookup returns a generic completed/expired status. The revised outcome-retention contract above requires a Python receipt/lookup update and tests, including handling of older receipts. |
 | Large tool arguments/results and atomic pressure eviction | Existing tests check tool-only byte accounting, the low watermark and the smallest atomic prefix for mixed Unicode/tool payloads. This is covered, not a deferred feature. |
 | Newest exchange or delivery/control data cannot fit | Existing tests assert capacity failure without deleting the protected exchange or prior state, including a mailbox or receipt that alone exceeds the budget. |
 | Media and file content | Schema/JSON cold-round-trip tests preserve inline data, file references and mixed binary/text tool results. Retention pressure followed by cold reload and exact subsequent model-input checks still needs combined coverage. Live suites are text-based. |
