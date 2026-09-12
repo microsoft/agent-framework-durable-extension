@@ -486,6 +486,8 @@ supported, not identical API names in both runtimes.
 `None` and a positive integer are the portable budget choices. A known direct DTS limit is
 1,048,576 bytes, but serialized entity bytes exclude transport framing and other host overhead.
 `"backend_limit"` is not a universal backend-discovery API or a guarantee that a write will fit.
+The current local choice keeps it as a non-normative Python-only convenience, not part of the
+portable contract or an assumption of shared-reviewer concurrence.
 
 Neither control enables the other. In Python, an explicitly pinned provider `prune_excluded` value
 takes precedence over registration retention. The matrix assumes a supported local pruning path
@@ -1027,21 +1029,42 @@ pass. Old-code probes fail 31 state cases and all 12 launcher cases, while the v
 control still passes. Lint, typing, offline lock checks and both package builds also passed.
 These are local results, not remote CI or cross-runtime acceptance.
 
+### Local follow-up, 2026-09-11
+
+The following evidence covers the local follow-up after `9b4550d`, not that published baseline.
+This ADR update follows published ADR commit `2517bc2`. Each Python 3.13/core 1.16,
+Python 3.13/real cached core 1.13 and Python 3.10/core 1.16 unit run passed 3,427 tests with zero skips.
+Direct live tests passed 45 in 354.65 seconds, and Functions passed 45 in 649.44 seconds.
+The initial Functions run had 36 failures
+and seven passes from Azurite rejecting Storage API `2026-02-06`. The rerun passed after setting
+`--skipApiVersionCheck` on the local test emulator, without product changes for that failure.
+
 | Area | Evidence and remaining work |
 | --- | --- |
-| Outcome after payload expiry | At `9b4550d`, Python receipts retain completion time but not the original success/failure outcome. Expired lookup returns a generic completed/expired status. The revised outcome-retention contract above requires a Python receipt/lookup update and tests, including handling of older receipts. |
+| Outcome after payload expiry | Local revised receipts retain `succeeded`/`failed` and completion time. Expired lookup exposes `durable_outcome`, including `unknown` for older receipts without trustworthy evidence, without rerunning completed work or changing original payloads. All 52 outcome cases pass, including formatted and unformatted acceptance-only regressions, plus eight added existing consumer parameterizations. The standalone SDK API is unchanged. Functions expired JSON exposes `outcome` and `agent_response.additional_properties.durable_outcome`, text uses `x-ms-durable-outcome`, and MCP errors include the outcome. |
+| Legacy outcome transition | Independent original mailbox evidence can backfill outcomes before payload removal. A missing receipt uses mailbox `createdAt` for `completedAt`, not migration time. A possibly pruned transcript without an error cannot prove success. Entity `requireKnownOutcomes` and helper `require_known_outcomes` reject imports without known evidence when enabled. The default legacy-compatible path preserves unknown receipts and duplicate suppression. Fresh unknown-outcome completion recording raises before either delivery map changes. Legacy and fire-and-forget acceptance behavior remain intact. These are prototype semantics, not an agreed wire format. |
 | Large tool arguments/results and atomic pressure eviction | Existing tests check tool-only byte accounting, the low watermark and the smallest atomic prefix for mixed Unicode/tool payloads. This is covered, not a deferred feature. |
 | Newest exchange or delivery/control data cannot fit | Existing tests assert capacity failure without deleting the protected exchange or prior state, including a mailbox or receipt that alone exceeds the budget. |
-| Media and file content | Schema/JSON cold-round-trip tests preserve inline data, file references and mixed binary/text tool results. Retention pressure followed by cold reload and exact subsequent model-input checks still needs combined coverage. Live suites are text-based. |
-| Failures and result delivery | Existing tests cover provider/model errors, final-flush and write rollback, cached-state restoration, committed error delivery and bounded polling timeout separately. Cancellation/worker-stop scenarios and the combined provider-error, failed error-result commit and poller path remain validation gaps. |
-| Retention observability | Persisted truncation evidence and a Python warning log exist. Retention-specific OpenTelemetry instruments, bounded attributes and planned/staged/confirmed-commit assertions are not implemented or validated. |
+| Media and file content | All 30 local units pass, covering inline PNG, inline text files, image URIs, hosted files, mixed binary/text tool results and large tool payloads across four retention/budget policies, plus six protected-floor cases. They combine JSON reload, exact next model input, atomic groups and truncation/metric counts. Two live DTS cases and two live Functions/Azure Storage cases verify binary-heavy PNG/inline-file pressure, persisted readback and process restart at a reduced budget. Hosted-model media acceptance and actual scheduler-limit/offload behavior are not established by these tests. |
+| Failures and result delivery | All 11 local cancellation/failure units and three Functions consumer units pass, including warm rollback, uncertain write acknowledgement, caller wait cancellation and combined provider failure, rejected error persistence and bounded polling. A third new live DTS case hard-kills before commit, observes repeated simulated external effects on retry, then kills after authoritative completion readback and verifies duplicates do not reinvoke. Graceful-shutdown-specific host behavior is not established by task cancellation or hard-kill evidence. |
+| Retention observability | Nine API-only instruments under `agent_framework.durabletask` measure evaluations, budget/state bytes, staged message/entry removals, reclaimed bytes, capacity failures, write attempts and operations. All 20 local OTel units pass, including bounded attributes, exact counts, plan/staging separation and rollback. No payloads or IDs are metric dimensions. Host `set_state` returns and failures both leave commit status `unknown`. Live media tests pair staged counts with separate persisted readback and next model input, not host-confirmed commit metrics. The SDK is a dev dependency, with application-owned provider/exporter configuration. |
 | Explicit follow-up capabilities | Bounded completion bookkeeping, optional retry-safe external writes and provider lifecycle APIs remain follow-ups. .NET eager pruning remains gated on safe exclusion, summary, cadence and decorator support. |
 
-Missing combined tests and instrumentation are work needed for the proposed contract, not evidence
-that those capabilities require a new design or permission to defer them. Completing this ADR does
-not complete their implementation or validation. The local 525-test rerun covering the existing
-retention, fidelity, execution and delivery tests passed without adding new cases.
-Exact Pydantic 2.11 runtime validation remains unverified because artifact downloads were blocked.
+The focused unit counts are included in each 3,427-test total. The five new live tests use a
+deterministic `BaseChatClient`, not Foundry. The existing 42 direct and 43 Functions tests remain
+text-based and include Foundry-backed scenarios. Lint, format, both source analyzers, both test type
+checks, the offline lock and both package builds passed. Mutation checks reject disabled retention,
+metadata loss, missing rollback and missing telemetry. Live mutations fail on backend state checks,
+and restored runs pass. Exact Pydantic 2.11 runtime validation is still blocked by artifact
+downloads. No new coverage percentage, compiled C# or cross-runtime schema release acceptance is
+claimed. Required validation above remains in force, including shared rollout and rollback gates.
+[Schema PR #92][schema-pr] at `eff12f4` now treats `historyBinding` as an optional runtime profile,
+keeps message widening scoped to v2 and retains known invocation outcomes after expiry. Its 96
+structural cases and four fixtures pass locally. Those three review threads are resolved, not a
+claim of serializer interoperability or runtime activation. Exact profile definitions, legacy
+transition representations and release compatibility still need implementation review.
+The Python-only backend convenience and media discussion still need published evidence and reviewer
+confirmation. No merge is implied by these validation results.
 
 ### Historical implementation at c4582a1
 
