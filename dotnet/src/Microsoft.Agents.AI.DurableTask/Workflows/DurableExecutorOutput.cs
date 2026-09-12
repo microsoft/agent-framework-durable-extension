@@ -60,7 +60,8 @@ internal sealed class DurableExecutorOutput
                     DurableExecutorOutput? output = document.RootElement.Deserialize(
                         DurableWorkflowJsonContext.Default.DurableExecutorOutput);
 
-                    if (output is not null && HasValidCollections(output, presentProperties) && HasMeaningfulContent(output))
+                    if (output is not null && HasValidCollections(output, presentProperties) && HasMeaningfulContent(output) &&
+                        (output.SentMessages is null || HasValidTypedMessages(output.SentMessages)))
                     {
                         bool validMessages = true;
                         foreach (JsonProperty property in document.RootElement.EnumerateObject())
@@ -121,19 +122,20 @@ internal sealed class DurableExecutorOutput
 
     private static bool HasValidTypedMessage(JsonElement message)
     {
-        if (!HasUnambiguousProperties(message, s_messageProperties, out HashSet<string> presentProperties) ||
-            !presentProperties.Contains(nameof(TypedPayload.TypeName)) ||
-            !presentProperties.Contains(nameof(TypedPayload.Data)))
-        {
-            return false;
-        }
+        return HasUnambiguousProperties(message, s_messageProperties, out HashSet<string> presentProperties) &&
+            presentProperties.Contains(nameof(TypedPayload.TypeName)) &&
+            presentProperties.Contains(nameof(TypedPayload.Data));
+    }
 
+    /// <summary>
+    /// Validates the entire typed collection before activity or sub-workflow controls are accepted.
+    /// </summary>
+    internal static bool HasValidTypedMessages(List<TypedPayload> messages)
+    {
         // Both fields are CLR strings. JSON null/false/0/"" payloads are serialized *inside*
         // Data, not supplied as null/scalar envelope fields. Do not parse or reinterpret that text.
-        return message.EnumerateObject()
-            .Where(property => s_messageProperties.Contains(property.Name, StringComparer.OrdinalIgnoreCase))
-            .All(property => property.Value.ValueKind == JsonValueKind.String &&
-                !string.IsNullOrWhiteSpace(property.Value.GetString()));
+        return messages.All(message => message is not null &&
+            !string.IsNullOrWhiteSpace(message.TypeName) && !string.IsNullOrWhiteSpace(message.Data));
     }
 
     private static bool HasValidCollections(DurableExecutorOutput output, HashSet<string> presentProperties)
