@@ -17,6 +17,7 @@ internal sealed class DurableAgentStateUnknownContent : DurableAgentStateContent
 {
     private const string DurableEnvelopePropertyName = "$microsoftAgentFrameworkDurableTask";
     private const string KindPropertyName = "kind";
+    private const string MarkerPropertyName = "marker";
     private const string VersionPropertyName = "version";
     private const string AnnotationsPropertyName = "annotations";
     private const string AdditionalPropertiesPropertyName = "additionalProperties";
@@ -24,6 +25,8 @@ internal sealed class DurableAgentStateUnknownContent : DurableAgentStateContent
     private const string AnnotatedRegionsPropertyName = "annotatedRegions";
     private const string OmittedPropertyName = "omitted";
     private const string UnknownContentKind = "unknownAIContent";
+    private const string DurableEnvelopeMarker =
+        "Microsoft.Agents.AI.DurableTask.UnknownContent/9d3df45a-6345-4b0e-88c6-972497582abc";
     private const int DurableEnvelopeVersion = 1;
 
     private static readonly JsonElement s_minimalUnknownContent = CreateMinimalUnknownContent();
@@ -87,6 +90,7 @@ internal sealed class DurableAgentStateUnknownContent : DurableAgentStateContent
         return new JsonObject
         {
             [KindPropertyName] = kind,
+            [MarkerPropertyName] = DurableEnvelopeMarker,
             [VersionPropertyName] = DurableEnvelopeVersion,
         };
     }
@@ -417,6 +421,9 @@ internal sealed class DurableAgentStateUnknownContent : DurableAgentStateContent
             envelope.ValueKind != JsonValueKind.Object ||
             !envelope.TryGetProperty(KindPropertyName, out JsonElement kindElement) ||
             kindElement.ValueKind != JsonValueKind.String ||
+            !envelope.TryGetProperty(MarkerPropertyName, out JsonElement markerElement) ||
+            markerElement.ValueKind != JsonValueKind.String ||
+            markerElement.GetString() != DurableEnvelopeMarker ||
             !envelope.TryGetProperty(VersionPropertyName, out JsonElement versionElement) ||
             versionElement.ValueKind != JsonValueKind.Number ||
             !versionElement.TryGetInt32(out int version) ||
@@ -437,6 +444,7 @@ internal sealed class DurableAgentStateUnknownContent : DurableAgentStateContent
         if (!HasOnlyProperties(
                 envelope,
                 KindPropertyName,
+                MarkerPropertyName,
                 VersionPropertyName,
                 AnnotationsPropertyName,
                 AdditionalPropertiesPropertyName,
