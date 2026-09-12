@@ -139,6 +139,9 @@ class _Host:
         self.url = f"http://127.0.0.1:{port}/api"
         self.deadline = deadline
         self.log = (app / f"{epoch}-host.log").open("w", encoding="utf-8")
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
         try:
             self.process = subprocess.Popen(
                 ["func", "start", "--port", str(port)],
@@ -148,7 +151,7 @@ class _Host:
                 stdout=self.log,
                 stderr=subprocess.STDOUT,
                 shell=sys.platform == "win32",  # Core Tools can be a .cmd shim.
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+                creationflags=creationflags,
                 start_new_session=sys.platform != "win32",
             )
         except BaseException:
