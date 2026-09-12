@@ -22,6 +22,9 @@
     <Project Path="samples/DurableAgents/ConsoleApps/05_AgentOrchestration_HITL/05_AgentOrchestration_HITL.csproj" />
     <Project Path="samples/DurableAgents/ConsoleApps/06_LongRunningTools/06_LongRunningTools.csproj" />
     <Project Path="samples/DurableAgents/ConsoleApps/07_ReliableStreaming/07_ReliableStreaming.csproj" />
+    <Project Path="samples/DurableAgents/ConsoleApps/08_FoundryManagedAgent/08_FoundryManagedAgent.csproj" />
+    <Project Path="samples/DurableAgents/ConsoleApps/09_CustomHistoryProvider/09_CustomHistoryProvider.csproj" />
+    <Project Path="samples/DurableAgents/ConsoleApps/09_CustomHistoryProvider/tests/09_CustomHistoryProvider.Tests.csproj" />
   </Folder>
   <Folder Name="/samples/DurableAgents/AzureFunctions/">
     <Project Path="samples/DurableAgents/AzureFunctions/01_SingleAgent/01_SingleAgent.csproj" />
