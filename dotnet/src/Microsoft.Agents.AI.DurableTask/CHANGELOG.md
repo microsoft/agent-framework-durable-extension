@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Hardened durable-agent mailbox delivery, duplicate correlation handling, working-state rollback, durable result expiry, and stale-safe TTL deletion scheduling; preserved historical message boundaries, opaque schema-2 history/state profiles, and committed failure metadata; isolated untrusted response text and malformed activity payloads from workflow controls ([#94](https://github.com/microsoft/agent-framework-durable-extension/pull/94))
 - Added passive .NET DTO, version-aware validation, converter, and source-generation support for the durable agent state 2.0 contract ([#93](https://github.com/microsoft/agent-framework-durable-extension/pull/93))
 - Hardened durable agent executor output handling so control-shaped JSON returned by an agent remains a raw result instead of populating executor control fields ([#101](https://github.com/microsoft/agent-framework-durable-extension/pull/101))
 - Fail durable workflows with a `MaxSuperstepsExceededException` when they reach the configurable `MaxSupersteps` limit with work still queued, instead of returning a successful partial result ([#84](https://github.com/microsoft/agent-framework-durable-extension/pull/84))

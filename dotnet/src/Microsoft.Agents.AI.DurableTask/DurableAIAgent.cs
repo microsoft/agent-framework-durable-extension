@@ -142,6 +142,10 @@ public sealed class DurableAIAgent : AIAgent
         {
             throw new AgentNotRegisteredException(this._agentName, e);
         }
+        catch (Exception e) when (DurableAgentFailure.TryRestore(e, out Exception? failure))
+        {
+            throw failure;
+        }
     }
 
     /// <summary>
@@ -291,6 +295,8 @@ public sealed class DurableAIAgent : AIAgent
         // the orchestration.
         AgentResponse response = await this.RunAsync(messages, session, options, cancellationToken);
 
-        return new AgentResponse<T>(response, serializerOptions) { IsWrappedInObject = isWrappedInObject };
+        AgentResponse<T> typedResponse = new(response, serializerOptions) { IsWrappedInObject = isWrappedInObject };
+        DurableAgentJsonUtilities.CopyRetainedResult(response, typedResponse);
+        return typedResponse;
     }
 }

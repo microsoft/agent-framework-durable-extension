@@ -141,7 +141,7 @@ public sealed class DurableAgentFunctionMetadataTransformerTests
                     Assert.Single(metadataList, m => m.Name == $"mcptool-{agentName}") as DefaultFunctionMetadata;
                 Assert.NotNull(mcpToolMeta);
                 Assert.NotNull(mcpToolMeta.RawBindings);
-                Assert.Equal(4, mcpToolMeta.RawBindings.Count);
+                Assert.Equal(5, mcpToolMeta.RawBindings.Count);
                 Assert.Contains("mcpToolTrigger", mcpToolMeta.RawBindings[0]);
 
                 // Only the canonical "sessionId" property is advertised; the deprecated "threadId"
@@ -155,7 +155,7 @@ public sealed class DurableAgentFunctionMetadataTransformerTests
                 string[] advertisedNames = [.. toolProperties.RootElement.EnumerateArray()
                     .Select(p => p.GetProperty("propertyName").GetString()!)];
 
-                Assert.Equal(["query", "sessionId"], advertisedNames);
+                Assert.Equal(["query", "sessionId", "responseFormat"], advertisedNames);
 
                 Assert.Single(mcpToolMeta.RawBindings, b => b.Contains("\"propertyName\":\"sessionId\""));
                 Assert.DoesNotContain(mcpToolMeta.RawBindings, b => b.Contains("threadId"));

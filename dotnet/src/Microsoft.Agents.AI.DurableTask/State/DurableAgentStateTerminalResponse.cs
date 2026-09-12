@@ -205,7 +205,14 @@ internal sealed class DurableAgentStateTerminalResponse
 
     public AgentResponse ToResponse() => this.ToResult().Response;
 
+    internal AgentResponse ToResponse(Func<DurableAgentStateMessage, ChatMessage> messageConverter)
+        => this.ToResult(messageConverter).Response;
+
     public (AgentResponse Response, JsonElement Value) ToResult()
+        => this.ToResult(static message => message.ToChatMessage());
+
+    internal (AgentResponse Response, JsonElement Value) ToResult(
+        Func<DurableAgentStateMessage, ChatMessage> messageConverter)
     {
         AdditionalPropertiesDictionary? additionalProperties = this.AdditionalProperties is null
             ? null
@@ -214,7 +221,7 @@ internal sealed class DurableAgentStateTerminalResponse
 
         AgentResponse response = new()
         {
-            Messages = this.Messages.Select(message => message.ToChatMessage()).ToList(),
+            Messages = this.Messages.Select(messageConverter).ToList(),
             Usage = this.Usage?.ToUsageDetails(),
             CreatedAt = this.CreatedAt,
             ResponseId = this.ResponseId,
