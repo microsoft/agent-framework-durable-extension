@@ -24,7 +24,8 @@ namespace Microsoft.Agents.AI.DurableTask.Workflows;
 /// backed by Durable Entities), a request port (human-in-the-loop, backed by external events),
 /// a sub-workflow (dispatched as a sub-orchestration), or a regular activity, and invokes the
 /// appropriate Durable Task API.
-/// The serialised string result is returned to the runner for the routing phase.
+/// Framework-owned output is returned to the runner for the routing phase. Only the
+/// regular activity boundary interprets serialized executor control fields.
 /// </remarks>
 internal static class DurableExecutorDispatcher
 {
@@ -38,7 +39,7 @@ internal static class DurableExecutorDispatcher
     /// <param name="liveStatus">The live workflow status used to publish events and pending request port state.</param>
     /// <param name="logger">The logger for tracing.</param>
     /// <returns>The result from the executor.</returns>
-    internal static async Task<string> DispatchAsync(
+    internal static async Task<DurableExecutorOutput> DispatchAsync(
         TaskOrchestrationContext context,
         WorkflowExecutorInfo executorInfo,
         DurableMessageEnvelope envelope,
@@ -66,7 +67,7 @@ internal static class DurableExecutorDispatcher
         return await ExecuteActivityAsync(context, executorInfo, envelope.Message, envelope.InputTypeName, sharedState).ConfigureAwait(true);
     }
 
-    private static async Task<string> ExecuteActivityAsync(
+    private static async Task<DurableExecutorOutput> ExecuteActivityAsync(
         TaskOrchestrationContext context,
         WorkflowExecutorInfo executorInfo,
         string input,
@@ -85,7 +86,8 @@ internal static class DurableExecutorDispatcher
 
         string serializedInput = JsonSerializer.Serialize(activityInput, DurableWorkflowJsonContext.Default.DurableActivityInput);
 
-        return await context.CallActivityAsync<string>(activityName, serializedInput).ConfigureAwait(true);
+        string result = await context.CallActivityAsync<string>(activityName, serializedInput).ConfigureAwait(true);
+        return DurableExecutorOutput.FromActivityResult(result);
     }
 
     /// <summary>
@@ -101,7 +103,7 @@ internal static class DurableExecutorDispatcher
     /// The wait has no built-in timeout; for time-limited approvals, callers can combine
     /// <c>context.CreateTimer</c> with <c>Task.WhenAny</c> in a wrapper executor.
     /// </remarks>
-    private static async Task<string> ExecuteRequestPortAsync(
+    private static async Task<DurableExecutorOutput> ExecuteRequestPortAsync(
         TaskOrchestrationContext context,
         WorkflowExecutorInfo executorInfo,
         string input,
@@ -129,26 +131,7 @@ internal static class DurableExecutorDispatcher
 
         logger.LogReceivedExternalEvent(eventName);
 
-        return CreateExecutorOutputEnvelope(response);
-    }
-
-    /// <summary>
-    /// Instead of blindly taking the incoming JSON to produce the output of the executor,
-    /// builds a <see cref="DurableExecutorOutput"/>-compatible JSON envelope where only
-    /// the <c>result</c> property is set from the response value.
-    /// Other properties are serialized with their defaults (empty collections).
-    /// This prevents the incoming JSON payload from inadvertently populating other properties
-    /// of <see cref="DurableExecutorOutput"/> during deserialization.
-    /// </summary>
-    /// <example>
-    /// For input <c>{"Approved":true,"Comments":"ok"}</c>, produces:
-    /// <c>{"result":"{\"Approved\":true,\"Comments\":\"ok\"}","stateUpdates":{},"clearedScopes":[],"events":[],"sentMessages":[]}</c>
-    /// </example>
-    internal static string CreateExecutorOutputEnvelope(string response)
-    {
-        return JsonSerializer.Serialize(
-            new DurableExecutorOutput { Result = response },
-            DurableWorkflowJsonContext.Default.DurableExecutorOutput);
+        return new DurableExecutorOutput { Result = response };
     }
 
     /// <summary>
@@ -158,7 +141,7 @@ internal static class DurableExecutorDispatcher
     /// AI agents are stateful and maintain conversation history. They use Durable Entities
     /// to persist state across orchestration replays.
     /// </remarks>
-    private static async Task<string> ExecuteAgentAsync(
+    private static async Task<DurableExecutorOutput> ExecuteAgentAsync(
         TaskOrchestrationContext context,
         WorkflowExecutorInfo executorInfo,
         ILogger logger,
@@ -170,13 +153,13 @@ internal static class DurableExecutorDispatcher
         if (agent is null)
         {
             logger.LogAgentNotFound(agentName);
-            return $"Agent '{agentName}' not found";
+            return new DurableExecutorOutput { Result = $"Agent '{agentName}' not found" };
         }
 
         AgentSession session = await agent.CreateSessionAsync().ConfigureAwait(true);
         AgentResponse response = await agent.RunAsync(input, session).ConfigureAwait(true);
 
-        return response.Text;
+        return new DurableExecutorOutput { Result = response.Text };
     }
 
     /// <summary>
@@ -191,7 +174,7 @@ internal static class DurableExecutorDispatcher
     /// which this method converts to a <see cref="DurableExecutorOutput"/> so the parent
     /// workflow's result processing picks up both the result and any accumulated events.
     /// </remarks>
-    private static async Task<string> ExecuteSubWorkflowAsync(
+    private static async Task<DurableExecutorOutput> ExecuteSubWorkflowAsync(
         TaskOrchestrationContext context,
         WorkflowExecutorInfo executorInfo,
         string input)
@@ -209,15 +192,15 @@ internal static class DurableExecutorDispatcher
 
     /// <summary>
     /// Converts a <see cref="DurableWorkflowResult"/> from a sub-orchestration
-    /// into a <see cref="DurableExecutorOutput"/> JSON string. This bridges the sub-workflow's
+    /// into a <see cref="DurableExecutorOutput"/>. This bridges the sub-workflow's
     /// output format to the parent workflow's result processing, preserving both the result
     /// and any accumulated events from the sub-workflow.
     /// </summary>
-    private static string ConvertWorkflowResultToExecutorOutput(DurableWorkflowResult? workflowResult)
+    private static DurableExecutorOutput ConvertWorkflowResultToExecutorOutput(DurableWorkflowResult? workflowResult)
     {
         if (workflowResult is null)
         {
-            return string.Empty;
+            return new DurableExecutorOutput { Result = string.Empty };
         }
 
         // Propagate the result, events, and sent messages from the sub-workflow.
@@ -225,14 +208,12 @@ internal static class DurableExecutorDispatcher
         // matching the in-process WorkflowHostExecutor behavior.
         // Shared state is not included because each workflow instance maintains its own
         // independent shared state; it is not shared between parent and sub-workflows.
-        DurableExecutorOutput executorOutput = new()
+        return new DurableExecutorOutput
         {
             Result = workflowResult.Result,
             Events = workflowResult.Events ?? [],
             SentMessages = workflowResult.SentMessages ?? [],
             HaltRequested = workflowResult.HaltRequested,
         };
-
-        return JsonSerializer.Serialize(executorOutput, DurableWorkflowJsonContext.Default.DurableExecutorOutput);
     }
 }
