@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Agents.AI.DurableTask.Workflows;
 using Microsoft.Agents.AI.Workflows;
 using Microsoft.DurableTask;
@@ -18,7 +19,7 @@ public sealed class SubWorkflowTypedRoutingTests
             TheoryData<string, string> cases = new();
             foreach (string boundary in new[] { "activity", "agent", "request-port" })
             {
-                foreach (string text in new[] { "", "ordinary text", "null", "false", "0", "\"\"", "{}", WorkflowExecutionTestHelper.ControlEnvelope })
+                foreach (string text in new[] { "", " \t\r\n ", "ordinary text", "null", "false", "0", "\"\"", "{}", WorkflowExecutionTestHelper.ControlEnvelope })
                 {
                     cases.Add(boundary, text);
                 }
@@ -26,6 +27,211 @@ public sealed class SubWorkflowTypedRoutingTests
 
             return cases;
         }
+    }
+
+    public static TheoryData<string, int, bool> InvalidChildMessages
+    {
+        get
+        {
+            TheoryData<string, int, bool> cases = new();
+            string[] messages =
+            [
+                "null",
+                        "{}",
+                        """{"data":"{}"}""",
+                        """{"typeName":null,"data":"{}"}""",
+                        """{"typeName":"","data":"{}"}""",
+                        """{"typeName":" \t\r\n ","data":"{}"}""",
+                        """{"typeName":"System.String"}""",
+                        """{"typeName":"System.String","data":null}""",
+                        """{"typeName":"System.String","data":""}""",
+                        """{"typeName":"System.String","data":" \t\r\n "}""",
+                    ];
+            foreach (string message in messages)
+            {
+                // Invalid alone, first, middle and last: no valid subset may escape.
+                foreach (int position in new[] { -1, 0, 1, 2 })
+                {
+                    cases.Add(message, position, false);
+                    cases.Add(message, position, true);
+                }
+            }
+
+            return cases;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidChildMessages))]
+    public async Task InvalidChildCollectionRejectsAllMessagesAndControlsAfterColdReplayAsync(
+        string invalidMessage, int position, bool halt)
+    {
+        JsonArray messages = position < 0
+            ? []
+            : new JsonArray(Message(typeof(string), "must-not-route-first"), Message(typeof(string), "must-not-route-last"));
+        messages.Insert(Math.Max(position, 0), JsonNode.Parse(invalidMessage));
+        string wire = ChildResult(messages, WorkflowExecutionTestHelper.ControlEnvelope, halt);
+
+        await AssertOpaqueChildAndReplayAsync(wire, WorkflowExecutionTestHelper.ControlEnvelope);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" \t\r\n ")]
+    [InlineData("ordinary text")]
+    [InlineData("null")]
+    [InlineData("{}")]
+    public async Task InvalidChildCollectionPreservesExactResultAndEmptySemanticsAsync(string? text)
+    {
+        await AssertOpaqueChildAndReplayAsync(ChildResult(new JsonArray((JsonNode?)null), text, halt: true), text ?? "");
+    }
+
+    [Theory]
+    [InlineData("missing", false)]
+    [InlineData("missing", true)]
+    [InlineData("null", false)]
+    [InlineData("null", true)]
+    [InlineData("empty", false)]
+    [InlineData("empty", true)]
+    public async Task LegacyChildResultOnlyRetainsStringProvenanceAndTrustedControlsAsync(string collection, bool halt)
+    {
+        JsonObject result = JsonNode.Parse(ChildResult([], WorkflowExecutionTestHelper.ControlEnvelope, halt))!.AsObject();
+        if (collection == "missing")
+        {
+            result.Remove("sentMessages");
+        }
+        else if (collection == "null")
+        {
+            result["sentMessages"] = null;
+        }
+
+        await AssertOpaqueChildAndReplayAsync(result.ToJsonString(), WorkflowExecutionTestHelper.ControlEnvelope, preserveEvent: true, halt);
+    }
+
+    [Fact]
+    public async Task NullChildResultRemainsEmptyAfterColdReplayAsync()
+    {
+        await AssertOpaqueChildAndReplayAsync("null", "");
+    }
+
+    [Fact]
+    public async Task ValidChildCollectionRoutesEveryTypedValueInOrderAfterColdReplayAsync()
+    {
+        string[] jsonValues = ["null", "false", "0", "\"\"", "\" \"", """{"nested":[null,false,0,""]}"""];
+        JsonArray messages =
+        [
+            Message(typeof(Dictionary<string, JsonElement>), "{}"),
+                    Message(typeof(int), "0"),
+                    Message(typeof(string), WorkflowExecutionTestHelper.ControlEnvelope),
+                ];
+        foreach (string value in jsonValues)
+        {
+            messages.Add(Message(typeof(JsonElement), value));
+        }
+
+        RoutingHarness original = new("activity", "seed", maxSupersteps: messages.Count + 1,
+            childOutputWire: ChildResult(messages, "must-not-route-result", halt: false));
+        DurableWorkflowResult result = await original.RunAsync();
+        Assert.Equal([typeof(Dictionary<string, JsonElement>), typeof(int), typeof(string), .. jsonValues.Select(_ => typeof(JsonElement))],
+            original.Successor.HandledTypes);
+        Assert.Equal(1, original.Successor.ObjectCalls);
+        Assert.Equal([0], original.Successor.IntegerInputs);
+        Assert.Equal([WorkflowExecutionTestHelper.ControlEnvelope], original.Successor.StringInputs);
+        Assert.Equal(jsonValues, original.Successor.JsonInputs);
+        Assert.Equal(jsonValues[^1], result.Result);
+        Assert.Contains("child-event", result.Events);
+        Assert.DoesNotContain("event", result.Events);
+        Assert.False(result.HaltRequested);
+        Assert.Equal(messages.Count, original.SuccessorInputs.Count);
+        for (int i = 0; i < messages.Count; i++)
+        {
+            Assert.Equal(messages[i]!["typeName"]!.GetValue<string>(), original.SuccessorInputs[i].InputTypeName);
+            Assert.Equal(messages[i]!["data"]!.GetValue<string>(), original.SuccessorInputs[i].Input);
+            Assert.Empty(original.SuccessorInputs[i].State);
+        }
+
+        RoutingHarness replay = new("activity", "seed", maxSupersteps: messages.Count + 1, replayCalls: ColdHistory(original));
+        Assert.Equal(Serialize(result), Serialize(await replay.RunAsync()));
+        Assert.Empty(replay.Successor.HandledTypes);
+        Assert.Equal(0, replay.ExecutedActivities);
+        replay.AssertHistoryConsumed();
+    }
+
+    [Theory]
+    [InlineData("Future.Message")]
+    [InlineData("Future.Message, Future.Assembly, Version=99.0.0.0, Culture=neutral, PublicKeyToken=null")]
+    [InlineData(" Future.Message ")]
+    public async Task UnknownChildTypeFailsAtTargetWithoutChoosingFirstHandlerAfterColdReplayAsync(string typeName)
+    {
+        JsonArray messages = [new JsonObject { ["typeName"] = typeName, ["data"] = "{}" }];
+        RoutingHarness original = new("activity", "seed", childOutputWire: ChildResult(messages, "not a fallback", halt: false));
+        TaskFailedException failure = await Assert.ThrowsAsync<TaskFailedException>(() => original.RunAsync());
+        Assert.Equal(typeof(InvalidOperationException).FullName, failure.FailureDetails.ErrorType);
+        Assert.Contains(typeName, failure.FailureDetails.ErrorMessage, StringComparison.Ordinal);
+        Assert.Empty(original.Successor.HandledTypes);
+        DurableActivityInput input = Assert.Single(original.SuccessorInputs);
+        Assert.Equal(typeName, input.InputTypeName);
+        Assert.Equal("{}", input.Input);
+
+        RoutingHarness replay = new("activity", "seed", replayCalls: ColdHistory(original));
+        TaskFailedException repeated = await Assert.ThrowsAsync<TaskFailedException>(() => replay.RunAsync());
+        Assert.Equal(JsonSerializer.Serialize(failure.FailureDetails), JsonSerializer.Serialize(repeated.FailureDetails));
+        Assert.Empty(replay.Successor.HandledTypes);
+        Assert.Equal(0, replay.ExecutedActivities);
+        replay.AssertHistoryConsumed();
+    }
+
+    [Theory]
+    [InlineData("""{"sentMessages":[42]}""")]
+    [InlineData("""{"sentMessages":[{"typeName":42,"data":"{}"}]}""")]
+    [InlineData("""{"sentMessages":[{"typeName":"System.String","data":{}}]}""")]
+    public async Task InvalidSdkJsonStillPropagatesSerializationFailureAsync(string wire)
+    {
+        RoutingHarness harness = new("activity", "seed", childOutputWire: wire);
+        await Assert.ThrowsAsync<JsonException>(() => harness.RunAsync());
+        Assert.Empty(harness.Successor.HandledTypes);
+        Assert.Empty(harness.SuccessorInputs);
+    }
+
+    private static JsonObject Message(Type type, string data) => new() { ["typeName"] = type.AssemblyQualifiedName, ["data"] = data };
+
+    private static string ChildResult(JsonArray messages, string? text, bool halt) => new JsonObject
+    {
+        ["result"] = text,
+        ["sentMessages"] = messages,
+        ["events"] = new JsonArray("child-event"),
+        ["haltRequested"] = halt,
+        ["stateUpdates"] = new JsonObject { ["scope:key"] = "must-not-escape" },
+        ["clearedScopes"] = new JsonArray("scope"),
+    }.ToJsonString();
+
+    private static Dictionary<string, List<RecordedCall>> ColdHistory(RoutingHarness harness) =>
+        JsonSerializer.Deserialize<Dictionary<string, List<RecordedCall>>>(JsonSerializer.Serialize(harness.Calls))!;
+
+    private static async Task AssertOpaqueChildAndReplayAsync(string wire, string text, bool preserveEvent = false, bool halt = false)
+    {
+        RoutingHarness original = new("activity", "seed", childOutputWire: wire);
+        DurableWorkflowResult result = await original.RunAsync();
+        AssertResult(result, text, halt);
+        bool routed = text.Length > 0 && !halt;
+        Assert.Equal(routed ? new[] { text } : [], original.Successor.StringInputs);
+        Assert.Equal(routed ? new[] { typeof(string) } : [], original.Successor.HandledTypes);
+        Assert.Equal(preserveEvent, result.Events.Contains("child-event"));
+        Assert.DoesNotContain("event", result.Events);
+        Assert.All(original.SuccessorInputs, input =>
+        {
+            Assert.Equal(typeof(string).AssemblyQualifiedName, input.InputTypeName);
+            Assert.Equal(text, input.Input);
+            Assert.Empty(input.State);
+        });
+        Assert.Equal(routed ? 1 : 0, original.SuccessorInputs.Count);
+
+        RoutingHarness replay = new("activity", "seed", replayCalls: ColdHistory(original));
+        Assert.Equal(Serialize(result), Serialize(await replay.RunAsync()));
+        Assert.Empty(replay.Successor.HandledTypes);
+        Assert.Equal(0, replay.ExecutedActivities);
+        replay.AssertHistoryConsumed();
     }
 
     [Theory]
@@ -114,20 +320,22 @@ public sealed class SubWorkflowTypedRoutingTests
     private static string Serialize(DurableWorkflowResult result) =>
         JsonSerializer.Serialize(result, DurableWorkflowJsonContext.Default.DurableWorkflowResult);
 
-    public sealed record RecordedCall(string Name, string Input, string Output);
+    public sealed record RecordedCall(string Name, string Input, string? Output, TaskFailureDetails? Failure = null);
 
     private sealed class RoutingHarness
     {
         private readonly Workflow _parent;
         private readonly Workflow _child;
         private readonly string _text;
+        private readonly string? _childOutputWire;
         private readonly DurableOptions _options = new();
         private readonly Dictionary<string, Queue<RecordedCall>>? _replay;
 
         public RoutingHarness(string boundary, string text, bool halt = false, int maxSupersteps = 2,
-            Dictionary<string, List<RecordedCall>>? replayCalls = null)
+            Dictionary<string, List<RecordedCall>>? replayCalls = null, string? childOutputWire = null)
         {
             this._text = text;
+            this._childOutputWire = childOutputWire;
             this._replay = replayCalls?.ToDictionary(pair => pair.Key, pair => new Queue<RecordedCall>(pair.Value));
             ExecutorBinding childStart;
             if (boundary == "agent")
@@ -160,7 +368,7 @@ public sealed class SubWorkflowTypedRoutingTests
             this._parent = new WorkflowBuilder(childHost).WithName("routing-parent")
                 .AddEdge(childHost, this.Successor).Build();
             Assert.Equal(typeof(Dictionary<string, JsonElement>), this.Successor.InputTypes.First());
-            Assert.Contains(typeof(string), this.Successor.InputTypes);
+            Assert.Equal([typeof(Dictionary<string, JsonElement>), typeof(int), typeof(string), typeof(JsonElement)], this.Successor.InputTypes);
             this._options.Workflows.AddWorkflow(this._parent);
             this._options.Workflows.AddWorkflow(this._child);
             this._options.Workflows.MaxSupersteps = maxSupersteps;
@@ -183,6 +391,29 @@ public sealed class SubWorkflowTypedRoutingTests
         {
             Assert.NotNull(this._replay);
             Assert.All(this._replay.Values, queue => Assert.Empty(queue));
+        }
+
+        private RecordedCall ReplayCall(string workflowName, string name, string input)
+        {
+            RecordedCall recorded = this._replay![workflowName].Dequeue();
+            Assert.Equal(recorded.Name, name);
+            Assert.Equal(recorded.Input, input);
+            if (recorded.Failure is not null)
+            {
+                throw new TaskFailedException(name, 0, recorded.Failure);
+            }
+
+            return recorded;
+        }
+
+        private void RecordCall(string workflowName, RecordedCall call)
+        {
+            if (!this.Calls.TryGetValue(workflowName, out List<RecordedCall>? calls))
+            {
+                this.Calls[workflowName] = calls = [];
+            }
+
+            calls.Add(call);
         }
 
         private async Task<DurableWorkflowResult> RunAsync(Workflow workflow, DurableWorkflowInput<object> input)
@@ -208,21 +439,22 @@ public sealed class SubWorkflowTypedRoutingTests
 
                     if (this._replay is not null)
                     {
-                        RecordedCall recorded = this._replay[workflow.Name!].Dequeue();
-                        Assert.Equal(recorded.Name, name.ToString());
-                        Assert.Equal(recorded.Input, wire);
-                        return recorded.Output;
+                        return this.ReplayCall(workflow.Name!, name.ToString(), wire).Output!;
                     }
 
                     this.ExecutedActivities++;
-                    string output = await DurableActivityExecutor.ExecuteAsync(binding, wire);
-                    if (!this.Calls.TryGetValue(workflow.Name!, out List<RecordedCall>? calls))
+                    try
                     {
-                        this.Calls[workflow.Name!] = calls = [];
+                        string output = await DurableActivityExecutor.ExecuteAsync(binding, wire);
+                        this.RecordCall(workflow.Name!, new RecordedCall(name.ToString(), wire, output));
+                        return output;
                     }
-
-                    calls.Add(new RecordedCall(name.ToString(), wire, output));
-                    return output;
+                    catch (InvalidOperationException exception)
+                    {
+                        TaskFailureDetails failure = TaskFailureDetails.FromException(exception);
+                        this.RecordCall(workflow.Name!, new RecordedCall(name.ToString(), wire, null, failure));
+                        throw new TaskFailedException(name.ToString(), 0, failure);
+                    }
                 });
             context.Setup(value => value.CallSubOrchestratorAsync<DurableWorkflowResult?>(
                 It.IsAny<TaskName>(), It.IsAny<object?>(), It.IsAny<TaskOptions?>()))
@@ -231,15 +463,36 @@ public sealed class SubWorkflowTypedRoutingTests
                     Assert.Equal(WorkflowNamingHelper.ToOrchestrationFunctionName(this._child.Name!), name.ToString());
                     this.ChildRuns++;
                     DurableDataConverter converter = new();
+                    string inputWire = converter.Serialize(childInput)!;
                     DurableWorkflowInput<object> restoredInput = Assert.IsType<DurableWorkflowInput<object>>(
-                        converter.Deserialize(converter.Serialize(childInput), typeof(DurableWorkflowInput<object>)));
+                        converter.Deserialize(inputWire, typeof(DurableWorkflowInput<object>)));
                     DurableWorkflowResult childResult = await this.RunAsync(this._child, restoredInput);
-                    return Assert.IsType<DurableWorkflowResult>(converter.Deserialize(
-                        converter.Serialize(childResult), typeof(DurableWorkflowResult)));
+                    string outputWire;
+                    if (this._replay is not null)
+                    {
+                        outputWire = this.ReplayCall(workflow.Name!, name.ToString(), inputWire).Output!;
+                    }
+                    else
+                    {
+                        outputWire = this._childOutputWire ?? converter.Serialize(childResult);
+                        this.RecordCall(workflow.Name!, new RecordedCall(name.ToString(), inputWire, outputWire));
+                    }
+
+                    return (DurableWorkflowResult?)converter.Deserialize(outputWire, typeof(DurableWorkflowResult));
                 });
             DurableWorkflowResult result = await new DurableWorkflowRunner(this._options).RunWorkflowOrchestrationAsync(
                 context.Object, input, NullLogger.Instance);
-            return JsonSerializer.Deserialize(Serialize(result), DurableWorkflowJsonContext.Default.DurableWorkflowResult)!;
+            string resultWire = Serialize(result);
+            if (this._replay is not null)
+            {
+                Assert.Equal(this.ReplayCall(workflow.Name!, "$result", "").Output, resultWire);
+            }
+            else
+            {
+                this.RecordCall(workflow.Name!, new RecordedCall("$result", "", resultWire));
+            }
+
+            return JsonSerializer.Deserialize(resultWire, DurableWorkflowJsonContext.Default.DurableWorkflowResult)!;
         }
     }
 
@@ -249,17 +502,37 @@ public sealed class SubWorkflowTypedRoutingTests
 
         public int ObjectCalls { get; private set; }
 
+        public List<int> IntegerInputs { get; } = [];
+
+        public List<string> JsonInputs { get; } = [];
+
+        public List<Type> HandledTypes { get; } = [];
+
         protected override ProtocolBuilder ConfigureProtocol(ProtocolBuilder protocolBuilder) =>
             protocolBuilder.ConfigureRoutes(routes => routes
                 .AddHandler<Dictionary<string, JsonElement>, string>((_, _) =>
                 {
                     this.ObjectCalls++;
+                    this.HandledTypes.Add(typeof(Dictionary<string, JsonElement>));
                     return "incorrectly decoded";
+                })
+                .AddHandler<int, string>((number, _) =>
+                {
+                    this.HandledTypes.Add(typeof(int));
+                    this.IntegerInputs.Add(number);
+                    return JsonSerializer.Serialize(number);
                 })
                 .AddHandler<string, string>((text, _) =>
                 {
+                    this.HandledTypes.Add(typeof(string));
                     this.StringInputs.Add(text);
                     return text;
+                })
+                .AddHandler<JsonElement, string>((json, _) =>
+                {
+                    this.HandledTypes.Add(typeof(JsonElement));
+                    this.JsonInputs.Add(json.GetRawText());
+                    return json.GetRawText();
                 }));
     }
 }
