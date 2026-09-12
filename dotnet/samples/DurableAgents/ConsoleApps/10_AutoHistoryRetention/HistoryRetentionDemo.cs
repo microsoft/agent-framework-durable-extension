@@ -72,7 +72,6 @@ public static class HistoryRetentionHost
         services.ConfigureDurableAgents(
             options =>
             {
-                options.EnableMailboxWrites = true;
                 options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
                 options.MaxStateBytes = HistoryRetentionDemo.MaxStateBytes;
                 options.AddAIAgent(agent);

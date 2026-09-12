@@ -21,7 +21,7 @@ namespace AutoHistoryRetentionTests;
 public sealed class RetentionProbeTests
 {
     [Fact]
-    public void PublicConfigurationExplicitlySelectsAutoWhileKeepAllRemainsDefault()
+    public void PublicConfigurationSelectsAutoWithoutActivatingMailboxWrites()
     {
         RecordingMetricExporter exporter = new();
         using IHost host = Host.CreateDefaultBuilder()
@@ -44,7 +44,7 @@ public sealed class RetentionProbeTests
             defaultProvider.GetRequiredService<DurableAgentsOptions>();
 
         Assert.Equal(DurableAgentHistoryRetentionMode.Auto, configured.HistoryRetentionMode);
-        Assert.True(configured.EnableMailboxWrites);
+        Assert.False(configured.EnableMailboxWrites);
         Assert.Equal(HistoryRetentionDemo.MaxStateBytes, configured.MaxStateBytes);
         Assert.Equal(DurableAgentHistoryRetentionMode.KeepAll, defaults.HistoryRetentionMode);
         Assert.NotNull(host.Services.GetService<MeterProvider>());
@@ -118,6 +118,8 @@ public sealed class RetentionProbeTests
             exporter.Measurements,
             measurement =>
                 measurement.InstrumentName == "durable.agent.history.retention.operations" &&
+                measurement.Tags.TryGetValue("agent.name", out object? operationAgentName) &&
+                string.Equals(operationAgentName as string, agent.Name, StringComparison.OrdinalIgnoreCase) &&
                 measurement.Tags.TryGetValue("outcome", out object? outcome) &&
                 string.Equals(outcome as string, "transcript_evicted", StringComparison.Ordinal));
         Assert.Contains(
@@ -125,13 +127,23 @@ public sealed class RetentionProbeTests
             measurement =>
                 measurement.InstrumentName == "durable.agent.history.evicted.entries" &&
                 measurement.Value > 0 &&
+                measurement.Tags.TryGetValue("agent.name", out object? evictionAgentName) &&
+                string.Equals(evictionAgentName as string, agent.Name, StringComparison.OrdinalIgnoreCase) &&
                 measurement.Tags.TryGetValue("reason", out object? reason) &&
                 string.Equals(reason as string, "transcript_pressure", StringComparison.Ordinal));
-        Assert.Contains(
+        ExportedMeasurement before = Assert.Single(
+            exporter.Measurements,
+            measurement =>
+                measurement.InstrumentName == "durable.agent.history.state.size.before" &&
+                measurement.Tags.TryGetValue("agent.name", out object? beforeAgentName) &&
+                string.Equals(beforeAgentName as string, agent.Name, StringComparison.OrdinalIgnoreCase));
+        ExportedMeasurement after = Assert.Single(
             exporter.Measurements,
             measurement =>
                 measurement.InstrumentName == "durable.agent.history.state.size.after" &&
-                measurement.Value < HistoryRetentionDemo.HighWatermarkBytes);
+                measurement.Tags.TryGetValue("agent.name", out object? afterAgentName) &&
+                string.Equals(afterAgentName as string, agent.Name, StringComparison.OrdinalIgnoreCase));
+        Assert.True(after.Value < before.Value);
     }
 
     [Fact]
@@ -418,6 +430,7 @@ public sealed class RetentionProbeTests
             DurableAgentsOptions options = new()
             {
                 DefaultTimeToLive = null,
+                EnableMailboxWrites = true,
                 HistoryRetentionMode = mode,
                 MaxStateBytes = maxStateBytes,
             };
