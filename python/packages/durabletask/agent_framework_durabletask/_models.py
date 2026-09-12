@@ -109,6 +109,11 @@ class RunRequest:
         created_at: Optional timestamp when the request was created
         orchestration_id: Optional ID of the orchestration that initiated this request
         options: Optional options dictionary forwarded to the agent
+        context_messages: Optional upstream conversation (serialized ``Message`` dicts) that should
+            be delivered to the agent as the request's messages. Workflows use this to give a
+            downstream agent the conversation produced by upstream nodes, matching the in-process
+            ``AgentExecutor`` context behavior. When set, it replaces ``message`` as the
+            request payload; ``message`` still carries the latest text for logging.
     """
 
     message: str
@@ -121,6 +126,8 @@ class RunRequest:
     created_at: datetime | None = None
     orchestration_id: str | None = None
     options: dict[str, Any] = field(default_factory=lambda: {})
+    context_messages: list[dict[str, Any]] | None = None
+    context_message_ids: list[str] | None = None
 
     def __init__(
         self,
@@ -134,7 +141,11 @@ class RunRequest:
         created_at: datetime | None = None,
         orchestration_id: str | None = None,
         options: dict[str, Any] | None = None,
+        context_messages: list[dict[str, Any]] | None = None,
+        context_message_ids: list[str] | None = None,
     ) -> None:
+        if not isinstance(correlation_id, str) or not correlation_id.strip():
+            raise ValueError("correlationId must be a non-empty string.")
         self.message = message
         self.correlation_id = correlation_id
         self.role = self.coerce_role(role)
@@ -145,6 +156,19 @@ class RunRequest:
         self.created_at = created_at if created_at is not None else datetime.now(tz=timezone.utc)
         self.orchestration_id = orchestration_id
         self.options = options if options is not None else {}
+        if context_messages is not None and (
+            not isinstance(context_messages, list) or any(not isinstance(message, dict) for message in context_messages)
+        ):
+            raise ValueError("contextMessages must be a list of message objects.")
+        self.context_messages = context_messages
+        if context_message_ids is not None and (
+            context_messages is None
+            or not isinstance(context_message_ids, list)
+            or len(context_message_ids) != len(context_messages)
+            or any(not isinstance(identity, str) or not identity for identity in context_message_ids)
+        ):
+            raise ValueError("contextMessageIds must contain one non-empty occurrence ID per context message.")
+        self.context_message_ids = context_message_ids
 
     @staticmethod
     def coerce_role(value: str | None) -> str:
@@ -158,7 +182,7 @@ class RunRequest:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
-        result = {
+        result: dict[str, Any] = {
             "message": self.message,
             "enable_tool_calls": self.enable_tool_calls,
             "wait_for_response": self.wait_for_response,
@@ -173,6 +197,10 @@ class RunRequest:
             result["created_at"] = self.created_at.isoformat()
         if self.orchestration_id:
             result["orchestrationId"] = self.orchestration_id
+        if self.context_messages is not None:
+            result["contextMessages"] = self.context_messages
+        if self.context_message_ids is not None:
+            result["contextMessageIds"] = self.context_message_ids
         return result
 
     @classmethod
@@ -183,7 +211,9 @@ class RunRequest:
         except json.JSONDecodeError as e:
             raise ValueError("The durable agent state is not valid JSON.") from e
 
-        return cls.from_dict(dict_data)
+        if not isinstance(dict_data, dict):
+            raise ValueError("RunRequest must be a JSON object.")
+        return cls.from_dict(cast("dict[str, Any]", dict_data))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RunRequest:
@@ -200,6 +230,13 @@ class RunRequest:
             raise ValueError("correlationId is required in RunRequest data")
 
         options = data.get("options")
+        raw_context = data.get("contextMessages")
+        if raw_context is not None and (
+            not isinstance(raw_context, list)
+            or any(not isinstance(message, dict) for message in cast("list[Any]", raw_context))
+        ):
+            raise ValueError("contextMessages must be a list of message objects.")
+        context_messages = cast("list[dict[str, Any]] | None", raw_context)
 
         return cls(
             message=data.get("message", ""),
@@ -212,6 +249,8 @@ class RunRequest:
             created_at=created_at,
             orchestration_id=data.get("orchestrationId"),
             options=cast(dict[str, Any], options) if isinstance(options, dict) else {},
+            context_messages=context_messages,
+            context_message_ids=data.get("contextMessageIds"),
         )
 
 

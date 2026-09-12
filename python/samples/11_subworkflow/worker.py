@@ -134,7 +134,7 @@ def create_inner_workflow(chat_client: FoundryChatClient) -> Workflow:
     sentiment_formatter = SentimentFormatterExecutor(id="sentiment_formatter")
 
     return (
-        WorkflowBuilder(name=INNER_WORKFLOW_NAME, start_executor=sentiment_agent)
+        WorkflowBuilder(name=INNER_WORKFLOW_NAME, start_executor=sentiment_agent, output_from=[sentiment_formatter])
         .add_edge(sentiment_agent, sentiment_formatter)
         .build()
     )
@@ -152,7 +152,7 @@ def create_workflow() -> Workflow:
     reporter = ReporterExecutor(id="reporter")
 
     return (
-        WorkflowBuilder(name=OUTER_WORKFLOW_NAME, start_executor=intake)
+        WorkflowBuilder(name=OUTER_WORKFLOW_NAME, start_executor=intake, output_from=[reporter])
         .add_edge(intake, sentiment_sub)
         .add_edge(sentiment_sub, reporter)
         .build()

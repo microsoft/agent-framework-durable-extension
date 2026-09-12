@@ -2,9 +2,94 @@
 
 This directory contains samples for durable agent hosting using the Durable Task Scheduler. These samples demonstrate the worker-client architecture pattern, enabling distributed agent execution with persistent conversation state.
 
+## PR #59 prototype scope
+
+This is an integrated reference for [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88),
+not the final implementation PR. After ADR approval, the agreed changes will be split into stacked
+implementation PRs. [PR #59](https://github.com/microsoft/agent-framework-durable-extension/pull/59)
+remains the prototype until that stack lands. Its APIs and deployment choices are provisional.
+
+The prototype's version-2 runtime requires `deployment_mode="isolated_v2"` on `DurableAIAgentWorker`,
+`AgentFunctionApp` and the standalone Functions entity factory, or
+`DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2` when the argument is omitted/`None`. Configure the sample
+host environment accordingly. This is operator acknowledgement, not proof of isolation. Use a
+separate hub/deployment with compatible workers and clients. Old workers and workflow histories,
+including paused legacy HITL, must stay on the old engine.
+
+Only `2.0.0` entity state is writable. Legacy and supported future-minor state is read-only.
+Names are unchanged, so using an old `@name@key` on an empty new hub is not migration. Explicit
+backend migration needs an empty, separately addressed destination and authorized ownership transfer.
+Scalar legacy ingestion cursors require a complete accepted-message journal, including evicted
+inputs. If that journal is unavailable, keep the session on the old engine. Migration does not move
+workflow history or reconstruct missing original responses.
+
+The workflow client, generated start routes and child dispatch wrap new starts with protocol version
+2. Native custom schedulers must use public `wrap_workflow_input` for new instances. Old/raw starts
+reject before revised actions execute. Rewrapping old starts is not history migration.
+
+## Prototype validation
+
+The published baseline is
+[prototype commit 9b4550d](https://github.com/microsoft/agent-framework-durable-extension/commit/9b4550d).
+The results below were recorded locally for the outcome, media, failure-boundary and telemetry
+follow-up. They are not the current remote CI status or a claim of release readiness. See
+[PR #59 checks](https://github.com/microsoft/agent-framework-durable-extension/pull/59/checks)
+for remote results.
+
+| Local check | Result |
+| --- | --- |
+| Python 3.13 / core 1.16 | 3,427 passed, zero skipped |
+| Python 3.13 / real cached core 1.13 | 3,427 passed, zero skipped |
+| Python 3.10 / core 1.16 | 3,427 passed, zero skipped |
+| Media retention units | 30 passed, six content kinds across four policies plus six protected-floor cases |
+| Cancellation/failure units and Functions consumers | 11 + 3 passed |
+| Retention OTel units | 20 passed |
+| Completion-outcome units | 52 passed, including formatted and unformatted acceptance-only regressions |
+| Existing consumer parameterizations | Eight additional cases passed |
+| Direct DTS integration suite | 45 passed in 354.65 seconds, prior 42 plus three new cases |
+| Azure Functions integration suite | 45 passed in 649.44 seconds, prior 43 plus two media cases |
+| Ruff lint/format, Pyright, MyPy, offline lock and both package builds | Passed |
+
+The focused unit counts are subsets of each 3,427-test run, not additional tests. Media cases cover
+inline PNG, inline text files, image URIs, hosted files, mixed binary/text tool results and large
+tool payloads. They check all retention/budget combinations, JSON cold reload, exact subsequent
+model input, atomic tool groups, protected floors and staged deletion measurements. Failure cases
+cover cancellation at provider/model/retention boundaries, warm rollback, lost write acknowledgement
+and provider failure combined with rejected error persistence and bounded polling. Caller polling
+cancellation does not cancel the entity. Outcome tests cover retained success/failure, unknown
+legacy receipts, strict migration and rejection of fresh acceptance-only completion records.
+
+The three new direct tests use real DTS persistence and process restarts with a deterministic
+`BaseChatClient`, not Foundry. Two exercise PNG and inline-file pressure with persisted-state
+readback, exact next model input and matching truncation/OTel counts. The third hard-kills a worker
+before commit, observes repeated simulated external effects on retry, then kills after confirmed
+scheduler readback and verifies duplicate suppression. These are not live graceful execution
+cancellation tests. The two new Functions cases use the production entity handler and actual
+`DurableEntityContext` with Azure Storage via Azurite. They verify PNG/inline-file pressure,
+persisted JSON, a restarted host, exact subsequent model input and staged OTel measurements.
+Inline media bytes dominate the live pressure cases, rather than text padding alone. The existing
+42 direct tests and 43 Functions tests remain text-based and include Foundry-backed scenarios.
+
+The Functions rerun required the local test Azurite setting `--skipApiVersionCheck`. The initial
+36 failures and seven passes were caused by unsupported Storage API `2026-02-06`, not product
+changes. The corrected final run passed all 45 tests. Coverage percentage was not remeasured here.
+
+Mutation checks reject disabled pressure/eager pruning, lost content metadata, missing rollback,
+missing binding cleanup and missing telemetry. Live DTS cases fail when pressure is disabled.
+Functions cases fail on actual stored byte size when the configured budget is deliberately inflated.
+Restored runs pass. Mutation changes stayed in fresh process memory or generated temporary test apps.
+
+Graceful-shutdown-specific host behavior and hosted-model media acceptance are not established by
+these tests. Remaining release validation includes actual scheduler-limit/offload behavior as those
+capabilities are enabled, exact Pydantic 2.11 runtime validation (artifact downloads
+remain blocked), and shared reader/writer, client, replay and rollback compatibility. The reduced
+live budget is not a scheduler-limit test. No compiled C# or cross-runtime schema acceptance is
+claimed. Existing .NET readers and legacy workflow histories remain incompatible with the revised
+contract. These gaps do not replace or defer the ADR's required validation.
+
 ## Import convention
 
-These samples import the durable hosting types **directly from the extension packages** —
+These samples import the durable hosting types **directly from the extension packages**,
 `agent_framework_durabletask` and `agent_framework_azurefunctions`:
 
 ```python
@@ -15,7 +100,7 @@ from agent_framework_azurefunctions import AgentFunctionApp
 For backward compatibility these entry-point types are also re-exported from
 `agent_framework.azure` in the core `agent-framework` package, so existing
 `from agent_framework.azure import ...` code keeps working. **New and updated samples should use
-the direct package imports shown above** — the canonical, self-contained path for this repo —
+the direct package imports shown above**, the self-contained path for this repo,
 rather than routing through the `agent_framework.azure` shim.
 
 ## Quick Prerequisites Checklist
@@ -70,6 +155,55 @@ az account show
 - **[11_subworkflow](11_subworkflow/)**: Compose workflows by embedding an inner `Workflow` as a node via `WorkflowExecutor`. On the durable host the inner workflow runs as its own child orchestration, and a single `configure_workflow` call registers both.
 - **[12_subworkflow_hitl](12_subworkflow_hitl/)**: A human-in-the-loop pause that lives **inside a sub-workflow**. The nested request surfaces to the client with a qualified request id (`{executor}~{ordinal}~{requestId}`) behind a single top-level addressing surface.
 
+These workflow samples and their Azure Functions counterparts explicitly set
+`WorkflowBuilder(output_from=[...])` to the executors that produce their final results.
+For composed workflows, the inner workflow selects the result forwarded to its parent,
+and the outer workflow selects its final report or publication message. Agent responses
+still travel along the graph edges but are not additional results in these samples.
+For a workflow intended to return agent responses, include those agents in `output_from`
+or use `output_from="all"`.
+
+### Conversation History
+
+History providers own transcript writes according to their storage flags. External and
+service-managed history do not get a local transcript mirror. The entity keeps response delivery
+payloads and completion receipts separately from model history. Retention defaults to `keep_all`
+with `max_state_bytes=None`. Eager pruning and pressure eviction are separate opt-ins, not a promise
+of unlimited capacity.
+
+Only exact built-in in-memory providers are substituted. Subclasses retain custom hooks and session
+transcripts in the protected floor, outside durable transcript eviction. Service-owned runs
+intentionally suppress both load and store hooks on the inactive primary, including per-call hooks.
+That differs from core 1.16 behavior. Use a distinct store-only sink to audit both service/client
+branches. Do not assume universal unchanged-hook semantics or retry-safe external effects.
+
+Workflow delta transport uses parallel occurrence IDs, not public `Message.message_id` rewrites.
+The full selected logical conversation and all response messages remain available for downstream
+projection. Private forwarding provenance is internal checkpoint data, not application metadata.
+Typed/cache-only requests, agent approval/HITL and output-designated agents are supported locally.
+
+Delivery expires logically even while an idle entity retains its payload. New runs, duplicate runs,
+reset and backend `expire_responses` clean expired payloads without erasing completion receipts.
+Idle physical cleanup needs an application-owned schedule or explicit backend signal/manual
+operation. No public HTTP/MCP cleanup endpoint is generated. Receipts can exhaust capacity, and
+entity commits do not provide a distributed transaction or exactly-once external tool execution.
+
+New receipts retain invocation success/failure after payload expiry. Expired lookup exposes
+`durable_outcome` as `succeeded`, `failed` or `unknown`, without changing original response payloads.
+An older unknown receipt still prevents reruns. Strict migration can require trustworthy outcomes,
+but a possibly pruned legacy transcript without an error is not proof of success. The default
+legacy-compatible path retains duplicate protection. Fresh acceptance-only responses do not record
+completion, and fire-and-forget acceptance remains distinct from completion.
+
+The shared [retention telemetry](../packages/durabletask/README.md#retention-telemetry) measures staged
+deletion, not committed deletion. A `set_state` return or failure leaves commit status unknown.
+Pair separate persisted readback with subsequent model input. Applications own SDK/exporter setup.
+`"backend_limit"` remains a non-normative Python-only Scheduler convenience, outside the portable
+`None` or positive-integer budget contract and without assumed shared-review agreement.
+
+- **[13_conversation_compaction](13_conversation_compaction/)**: Compact client-owned history with `InMemoryHistoryProvider` and `CompactionProvider`. Keep excluded history by default and choose transcript pruning or a state budget independently.
+- **[14_external_history_redis](14_external_history_redis/)**: Use an ordinary Redis history provider with a stable session id and no local transcript mirror. The minimal blind-append provider documents interrupted-retry duplicates and unsupported portable reset.
+
 ### Azure Functions Hosting
 
 These samples host workflows and agents on Azure Durable Functions (`func start`) instead of the worker-client model above. Each has its own setup steps in its README, and shared environment setup lives in [azure_functions/README.md](azure_functions/README.md).
@@ -87,6 +221,7 @@ These samples host workflows and agents on Azure Durable Functions (`func start`
 - **[azure_functions/11_workflow_parallel](azure_functions/11_workflow_parallel/)**: Parallel execution of executors and agents in an Azure Durable Functions workflow.
 - **[azure_functions/12_workflow_hitl](azure_functions/12_workflow_hitl/)**: The workflow human-in-the-loop pattern on Azure Durable Functions, with the reviewer notified from inside the workflow via `WorkflowHitlContext`.
 - **[azure_functions/13_subworkflow_hitl](azure_functions/13_subworkflow_hitl/)**: A human-in-the-loop pause inside a sub-workflow on Azure Durable Functions, exposed through a single top-level respond surface.
+- **[azure_functions/14_conversation_compaction](azure_functions/14_conversation_compaction/)**: Compact client-owned history on Azure Functions with independent retention and explicit byte-budget options. The Functions counterpart to [13_conversation_compaction](13_conversation_compaction/).
 
 ## Running the Samples
 
@@ -96,7 +231,7 @@ These samples are designed to be run locally in a cloned repository.
 
 The following prerequisites are required to run the samples:
 
-- [Python 3.9 or later](https://www.python.org/downloads/)
+- [Python 3.10 or later](https://www.python.org/downloads/), `agent-framework-core>=1.13.0,<2` and `pydantic>=2.11,<3`
 - [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) installed and authenticated (`az login`)
 - [Microsoft Foundry project](https://learn.microsoft.com/azure/foundry/how-to/create-projects) with a deployed model, configured through `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL` (gpt-4o-mini or better is recommended)
 - [Durable Task Scheduler](https://learn.microsoft.com/azure/azure-functions/durable/durable-task-scheduler/develop-with-durable-task-scheduler) (local emulator or Azure-hosted)

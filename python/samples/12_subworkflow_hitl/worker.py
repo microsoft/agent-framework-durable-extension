@@ -161,7 +161,7 @@ class ReviewGateExecutor(Executor):
 def create_inner_workflow() -> Workflow:
     """Build the inner ``human_review`` workflow (a single HITL gate)."""
     review_gate = ReviewGateExecutor()
-    return WorkflowBuilder(name=INNER_WORKFLOW_NAME, start_executor=review_gate).build()
+    return WorkflowBuilder(name=INNER_WORKFLOW_NAME, start_executor=review_gate, output_from=[review_gate]).build()
 
 
 # ============================================================================
@@ -212,7 +212,7 @@ def create_workflow() -> Workflow:
     publish = PublishExecutor()
 
     return (
-        WorkflowBuilder(name=OUTER_WORKFLOW_NAME, start_executor=intake)
+        WorkflowBuilder(name=OUTER_WORKFLOW_NAME, start_executor=intake, output_from=[publish])
         .add_edge(intake, review_sub)
         .add_edge(review_sub, publish)
         .build()

@@ -87,12 +87,11 @@ class DurableAgentTask(CompositeTask[AgentResponse], CompletableTask[AgentRespon
         try:
             response = load_agent_response(raw_result)
 
-            if self._response_format is not None:
-                ensure_response_format(
-                    self._response_format,
-                    self._correlation_id,
-                    response,
-                )
+            ensure_response_format(
+                self._response_format,
+                self._correlation_id,
+                response,
+            )
 
             # Set the typed AgentResponse as this task's result
             self.complete(response)
@@ -155,11 +154,21 @@ class DurableAgentExecutor(ABC, Generic[TaskT]):
         """Generate a new Unique ID."""
         return uuid.uuid4().hex
 
+    def _orchestration_id(self) -> str | None:
+        """Return the orchestration instance that issued this request.
+
+        Overridden by executors that run inside an orchestration. Client-side executors
+        have no orchestration, so the default is ``None``.
+        """
+        return None
+
     def get_run_request(
         self,
         message: str,
         *,
         options: dict[str, Any] | None = None,
+        context_messages: list[dict[str, Any]] | None = None,
+        context_message_ids: list[str] | None = None,
     ) -> RunRequest:
         """Create a RunRequest from message and options."""
         correlation_id = self.generate_unique_id()
@@ -179,6 +188,9 @@ class DurableAgentExecutor(ABC, Generic[TaskT]):
             wait_for_response=wait_for_response,
             correlation_id=correlation_id,
             options=opts,
+            context_messages=context_messages,
+            context_message_ids=context_message_ids,
+            orchestration_id=self._orchestration_id(),
         )
 
     def _create_acceptance_response(self, correlation_id: str) -> AgentResponse:
@@ -203,6 +215,7 @@ class DurableAgentExecutor(ABC, Generic[TaskT]):
         return AgentResponse(
             messages=[acceptance_message],
             created_at=datetime.now(timezone.utc).isoformat(),
+            additional_properties={"durable_status": "accepted", "correlation_id": correlation_id},
         )
 
 
@@ -357,12 +370,11 @@ class ClientAgentExecutor(DurableAgentExecutor[AgentResponse]):
         if agent_response is not None:
             try:
                 # Validate response format if specified
-                if response_format is not None:
-                    ensure_response_format(
-                        response_format,
-                        correlation_id,
-                        agent_response,
-                    )
+                ensure_response_format(
+                    response_format,
+                    correlation_id,
+                    agent_response,
+                )
 
                 return agent_response
 
@@ -449,23 +461,8 @@ class OrchestrationAgentExecutor(DurableAgentExecutor[DurableAgentTask]):
         """Create a new UUID that is safe for replay within an orchestration or operation."""
         return self._context.new_uuid()
 
-    def get_run_request(
-        self,
-        message: str,
-        *,
-        options: dict[str, Any] | None = None,
-    ) -> RunRequest:
-        """Get the current run request from the orchestration context.
-
-        Returns:
-            RunRequest: The current run request
-        """
-        request = super().get_run_request(
-            message,
-            options=options,
-        )
-        request.orchestration_id = self._context.instance_id
-        return request
+    def _orchestration_id(self) -> str | None:
+        return self._context.instance_id
 
     def run_durable_agent(
         self,

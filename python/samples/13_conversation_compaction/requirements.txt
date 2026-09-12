@@ -1,0 +1,13 @@
+# Agent Framework packages
+# To use the deployed version, uncomment the lines below and comment out the local installation lines
+# agent-framework-foundry
+# agent-framework-durabletask
+
+# Local installation (for development and testing)
+# Each package must be listed explicitly because pip doesn't resolve uv workspace sources.
+# Without explicit entries, pip would fetch transitive dependencies from PyPI instead of local source.
+agent-framework-foundry>=1.10.1,<2  # Foundry support from PyPI
+-e ../../packages/durabletask  # Local Durable Task package under development
+
+# Azure authentication
+azure-identity

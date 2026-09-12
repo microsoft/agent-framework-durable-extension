@@ -237,7 +237,11 @@ def create_inner_workflow() -> Workflow:
     notify = NotifyExecutor()
     # Side-branch: review_gate -> notify builds the qualified respond URL in the same
     # superstep that raises the request, before the inner workflow pauses.
-    return WorkflowBuilder(name=INNER_WORKFLOW_NAME, start_executor=review_gate).add_edge(review_gate, notify).build()
+    return (
+        WorkflowBuilder(name=INNER_WORKFLOW_NAME, start_executor=review_gate, output_from=[review_gate])
+        .add_edge(review_gate, notify)
+        .build()
+    )
 
 
 # ============================================================================
@@ -288,7 +292,7 @@ def _create_workflow() -> Workflow:
     publish = PublishExecutor()
 
     return (
-        WorkflowBuilder(name=OUTER_WORKFLOW_NAME, start_executor=intake)
+        WorkflowBuilder(name=OUTER_WORKFLOW_NAME, start_executor=intake, output_from=[publish])
         .add_edge(intake, review_sub)
         .add_edge(review_sub, publish)
         .build()

@@ -2,7 +2,7 @@
 
 """Unit tests for multi-agent support in AgentFunctionApp."""
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -40,17 +40,18 @@ class TestMultiAgentInit:
         assert len(app.agents) == 0
 
     def test_init_with_duplicate_agent_names(self) -> None:
-        """Test initialization with duplicate agent names deduplicates with warning."""
+        """Different agents with the same name fail before any registration."""
         agent1 = Mock()
         agent1.name = "TestAgent"
         agent2 = Mock()
         agent2.name = "TestAgent"
 
-        app = AgentFunctionApp(agents=[agent1, agent2])
-
-        # Duplicate is skipped, only the first agent is registered
-        assert len(app.agents) == 1
-        assert "TestAgent" in app.agents
+        with (
+            patch.object(AgentFunctionApp, "_setup_agent_functions") as setup,
+            pytest.raises(ValueError, match="collides"),
+        ):
+            AgentFunctionApp(agents=[agent1, agent2])
+        setup.assert_not_called()
 
     def test_init_with_agent_without_name(self) -> None:
         """Test initialization with agent missing name attribute raises error."""
@@ -58,7 +59,7 @@ class TestMultiAgentInit:
         agent1.name = "Agent1"
         agent2 = Mock(spec=[])  # Mock without name attribute
 
-        with pytest.raises(ValueError, match="does not have a 'name' attribute"):
+        with pytest.raises(ValueError, match="Agent must have a name"):
             AgentFunctionApp(agents=[agent1, agent2])
 
 
@@ -94,8 +95,8 @@ class TestAddAgentMethod:
         assert "Agent1" in app.agents
         assert "Agent2" in app.agents
 
-    def test_add_agent_with_duplicate_name_skips(self) -> None:
-        """Test that adding agent with duplicate name logs warning and skips."""
+    def test_add_agent_with_duplicate_name_raises(self) -> None:
+        """A different agent cannot replace or reuse an existing registration."""
         agent1 = Mock()
         agent1.name = "MyAgent"
         agent2 = Mock()
@@ -103,11 +104,14 @@ class TestAddAgentMethod:
 
         app = AgentFunctionApp(agents=[agent1])
 
-        # Duplicate is silently skipped with a warning
-        app.add_agent(agent2)
+        with (
+            patch.object(app, "_setup_agent_functions") as setup,
+            pytest.raises(ValueError, match="collides"),
+        ):
+            app.add_agent(agent2)
 
-        # Only the original agent remains
-        assert len(app.agents) == 1
+        setup.assert_not_called()
+        assert app.agents == {"MyAgent": agent1}
 
     def test_add_agent_to_app_with_existing_agents(self) -> None:
         """Test adding agent to app that already has agents."""

@@ -286,7 +286,7 @@ def create_workflow() -> Workflow:
     publish_executor = PublishExecutor()
 
     return (
-        WorkflowBuilder(name=WORKFLOW_NAME, start_executor=input_router)
+        WorkflowBuilder(name=WORKFLOW_NAME, start_executor=input_router, output_from=[publish_executor])
         .add_edge(input_router, content_analyzer_agent)
         .add_edge(content_analyzer_agent, content_analyzer_executor)
         .add_edge(content_analyzer_executor, human_review_executor)

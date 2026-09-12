@@ -31,12 +31,15 @@ __all__ = [
     "DURABLE_NAME_PREFIX",
     "MAX_EXECUTOR_ID_LENGTH",
     "SUBWORKFLOW_REQUEST_SEPARATOR",
+    "WORKFLOW_INPUT_EXECUTOR_ID",
     "is_auto_generated_workflow_name",
+    "parse_workflow_message_id",
     "qualify_subworkflow_request_id",
     "split_subworkflow_request_id",
     "validate_executor_id",
     "validate_workflow_name",
     "workflow_executor_activity_name",
+    "workflow_message_id",
     "workflow_name_from_orchestrator",
     "workflow_orchestrator_name",
     "workflow_scoped_executor_id",
@@ -46,6 +49,50 @@ __all__ = [
 # .NET's ``WorkflowNamingHelper.OrchestrationFunctionPrefix`` and the existing
 # ``AgentSessionId.ENTITY_NAME_PREFIX``.
 DURABLE_NAME_PREFIX = "dafx-"
+
+# Identifies the workflow's own input in the conversation chained between agent nodes. It has no
+# producing executor, so it carries a reserved id in that position.
+WORKFLOW_INPUT_EXECUTOR_ID = "input"
+
+_WORKFLOW_MESSAGE_ID_PREFIX = "wf_"
+_WORKFLOW_MESSAGE_ID_RE = re.compile(rf"^{_WORKFLOW_MESSAGE_ID_PREFIX}(?P<executor>.+)_(?P<position>\d+)$")
+
+
+def workflow_message_id(executor_id: str, position: int) -> str:
+    """Build the id for a message the workflow itself puts in the chained conversation.
+
+    Core leaves ``message_id`` unset, so without this an agent node cannot tell context it has
+    already recorded from genuinely new input. The position is the message's index in the chained
+    conversation, which is fixed once the message joins it and is reproduced identically when the
+    orchestrator replays.
+
+    Args:
+        executor_id: The node that produced the message, or ``WORKFLOW_INPUT_EXECUTOR_ID``.
+        position: The message's index in the chained conversation.
+
+    Returns:
+        An id unique within one workflow run.
+    """
+    return f"{_WORKFLOW_MESSAGE_ID_PREFIX}{executor_id}_{position}"
+
+
+def parse_workflow_message_id(message_id: str | None) -> tuple[str, int] | None:
+    """Recover the producing executor and conversation position from a message id.
+
+    Args:
+        message_id: The id to parse, if the message has one.
+
+    Returns:
+        The executor id and position, or None when the id was not produced by
+        :func:`workflow_message_id`.
+    """
+    if not message_id:
+        return None
+    match = _WORKFLOW_MESSAGE_ID_RE.match(message_id)
+    if match is None:
+        return None
+    return match.group("executor"), int(match.group("position"))
+
 
 # Separator used to qualify a nested sub-workflow's pending HITL request when it is
 # bubbled up to the top-level instance (one top-level addressing surface). A qualified id

@@ -47,6 +47,8 @@ dev = [
 ]
 test = [
     "azure-monitor-opentelemetry",
+    # Validates that persisted entity state matches the shared cross-language schema.
+    "jsonschema",
     "mcp[ws]",
     "redis",
     # Model provider packages used by the sample workers that the integration

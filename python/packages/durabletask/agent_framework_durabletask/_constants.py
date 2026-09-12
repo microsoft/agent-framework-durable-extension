@@ -131,6 +131,31 @@ class DurableStateFields:
     # History field
     CONVERSATION_HISTORY: Final[str] = "conversationHistory"
 
+    # Stable per-message identity (used for compaction reconciliation and idempotency)
+    MESSAGE_ID: Final[str] = "messageId"
+
+    # Serialized AgentSession: the provider state bag plus any service-issued conversation id
+    SESSION: Final[str] = "session"
+
+    # Legacy scalar cursors are read for migration, never inferred to be exact receipts.
+    INGESTED_POSITIONS: Final[str] = "ingestedPositions"
+    INGESTED_MESSAGES: Final[str] = "ingestedMessages"
+
+    # Result delivery is independent from the model transcript.
+    RESPONSE_MAILBOX: Final[str] = "responseMailbox"
+    COMPLETED_CORRELATIONS: Final[str] = "completedCorrelations"
+    RESPONSE: Final[str] = "response"
+    EXPIRES_AT: Final[str] = "expiresAt"
+    COMPLETED_AT: Final[str] = "completedAt"
+    OUTCOME: Final[str] = "outcome"
+
+    # What retention has removed from this conversation. Present only once something has been
+    # evicted, so its absence means the record is complete.
+    TRUNCATION: Final[str] = "truncation"
+    EVICTED_MESSAGE_COUNT: Final[str] = "evictedMessageCount"
+    FIRST_EVICTED_AT: Final[str] = "firstEvictedAt"
+    LAST_EVICTED_AT: Final[str] = "lastEvictedAt"
+
 
 class ContentTypes:
     """Content type discriminator values for the $type field.

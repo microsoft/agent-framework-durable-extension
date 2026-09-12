@@ -9,6 +9,7 @@ from typing import Any, TypeVar
 from unittest.mock import AsyncMock, Mock, patch
 
 from agent_framework import Executor, Workflow, WorkflowBuilder, WorkflowContext, handler
+from agent_framework_durabletask import unwrap_workflow_input, wrap_workflow_input
 
 from agent_framework_azurefunctions import AgentFunctionApp
 
@@ -71,4 +72,7 @@ async def test_workflow_run_route_neutralizes_reserved_marker_shaped_input() -> 
 
     await handler(request, client)
 
-    assert client.start_new.await_args.kwargs["client_input"] is None
+    client.start_new.assert_awaited_once_with(
+        "dafx-input_boundary", instance_id=None, client_input=wrap_workflow_input(None)
+    )
+    assert unwrap_workflow_input(client.start_new.await_args.kwargs["client_input"]) is None

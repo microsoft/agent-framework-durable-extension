@@ -445,3 +445,7 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Local environment files with credentials (templates use .env.example and stay tracked).
+# Must come after the '!python/packages/**' negation above so it wins for test .env files.
+**/.env

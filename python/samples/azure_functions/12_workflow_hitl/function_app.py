@@ -477,7 +477,7 @@ def _create_workflow() -> Workflow:
     # Side-branch: human_review_executor -> notify_executor emails the reviewer a respond
     # link (built from WorkflowHitlContext) in the same superstep, before the pause.
     return (
-        WorkflowBuilder(name="content_moderation", start_executor=input_router)
+        WorkflowBuilder(name="content_moderation", start_executor=input_router, output_from=[publish_executor])
         .add_edge(input_router, content_analyzer_agent)
         .add_edge(content_analyzer_agent, content_analyzer_executor)
         .add_edge(content_analyzer_executor, human_review_executor)

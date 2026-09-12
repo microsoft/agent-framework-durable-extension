@@ -340,7 +340,10 @@ class TestAgentEntityRunAgent:
         # Validate callback arguments
         stream_calls = callback.stream_mock.await_args_list
         for expected_update, recorded_call in zip(updates, stream_calls, strict=True):
-            assert recorded_call.args[0] is expected_update
+            recorded_update = recorded_call.args[0]
+            assert recorded_update is not expected_update
+            assert recorded_update.to_dict() == expected_update.to_dict()
+            assert recorded_update.contents[0] is not expected_update.contents[0]
             context = recorded_call.args[1]
             assert context.agent_name == "StreamingAgent"
             assert context.correlation_id == "corr-stream-1"
@@ -350,6 +353,9 @@ class TestAgentEntityRunAgent:
         final_call = callback.response_mock.await_args
         assert final_call is not None
         final_response, final_context = final_call.args
+        assert final_response is not result
+        assert final_response.to_dict() == result.to_dict()
+        assert final_response.messages[0] is not result.messages[0]
         assert final_context.agent_name == "StreamingAgent"
         assert final_context.correlation_id == "corr-stream-1"
         assert final_context.session_id == "session-1"
@@ -380,7 +386,12 @@ class TestAgentEntityRunAgent:
 
         final_call = callback.response_mock.await_args
         assert final_call is not None
-        assert final_call.args[0] is agent_response
+        final_response = final_call.args[0]
+        assert final_response is not agent_response and final_response is not result
+        assert final_response.to_dict() == agent_response.to_dict() == result.to_dict()
+        assert final_response.messages[0] is not agent_response.messages[0]
+        final_response.messages[0].contents[0].text = "callback mutation"
+        assert agent_response.text == result.text == "Final response"
         final_context = final_call.args[1]
         assert final_context.agent_name == "NonStreamingAgent"
         assert final_context.correlation_id == "corr-final-1"
@@ -641,6 +652,38 @@ class TestErrorHandling:
         content = result.messages[0].contents[0]
         assert isinstance(content, Content)
 
+    async def test_failed_run_reports_the_reason_in_the_reply_text(self) -> None:
+        """A failure must not read as the agent having nothing to say.
+
+        The entity absorbs exceptions so the session survives, but error content alone leaves
+        ``text`` empty, so a caller reading the reply the normal way sees silence and has to go
+        digging to find out that anything went wrong at all.
+        """
+        mock_agent = Mock()
+        mock_agent.run = _create_mock_run(side_effect=ValueError("no such deployment"))
+
+        entity = _make_entity(mock_agent)
+
+        result = await entity.run({"message": "Message", "correlationId": "corr-entity-error-5"})
+
+        assert "no such deployment" in result.text
+        assert "ValueError" in result.text
+        # The typed error content is still first, so callers inspecting contents are unaffected.
+        assert result.messages[0].contents[0].type == "error"
+
+    async def test_failed_turns_are_not_replayed_to_the_model(self) -> None:
+        """The error text is for the caller, not for the model's context."""
+        mock_agent = Mock()
+        mock_agent.run = _create_mock_run(side_effect=ValueError("boom"))
+
+        entity = _make_entity(mock_agent)
+        await entity.run({"message": "first", "correlationId": "corr-entity-error-6"})
+
+        replayed = [message.text for message in entity._replay_all_messages()]
+
+        assert "first" in replayed
+        assert not any("boom" in text for text in replayed)
+
 
 class TestConversationHistory:
     """Test suite for conversation history tracking."""
@@ -740,7 +783,7 @@ class TestRunRequestSupport:
 
     async def test_run_agent_with_dict_request(self) -> None:
         """Test run_agent with a dictionary request."""
-        mock_agent = Mock()
+        mock_agent = Mock(default_options={})
         mock_agent.run = _create_mock_run(response=_agent_response("Response"))
 
         entity = _make_entity(mock_agent)
@@ -810,7 +853,7 @@ class TestRunRequestSupport:
 
     async def test_run_agent_disable_tool_calls(self) -> None:
         """Test run_agent with tool calls disabled."""
-        mock_agent = Mock()
+        mock_agent = Mock(default_options={})
         mock_agent.run = _create_mock_run(response=_agent_response("Response"))
 
         entity = _make_entity(mock_agent)

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from agent_framework import AgentResponse, Message
+from agent_framework_durabletask import DurableAgentState, migrate_legacy_state, state_snapshot_digest
 
 from agent_framework_azurefunctions._entities import create_agent_entity
 
@@ -66,11 +67,11 @@ class TestCreateAgentEntity:
 
         entity_function = create_agent_entity(mock_agent)
 
-        # Mock context with existing state
+        # Reset an admitted v2 target, not a legacy session.
         mock_context = Mock()
         mock_context.operation_name = "reset"
         mock_context.get_state.return_value = {
-            "schemaVersion": "1.0.0",
+            "schemaVersion": DurableAgentState.SCHEMA_VERSION,
             "data": {
                 "conversationHistory": [
                     {
@@ -147,7 +148,7 @@ class TestCreateAgentEntity:
 
         entity_function = create_agent_entity(mock_agent)
 
-        existing_state = {
+        existing_state: dict[str, Any] = {
             "schemaVersion": "1.0.0",
             "data": {
                 "conversationHistory": [
@@ -188,17 +189,33 @@ class TestCreateAgentEntity:
         }
 
         mock_context = Mock()
+        mock_context.entity_name = "dafx-restore"
+        mock_context.entity_key = "destination"
         mock_context.operation_name = "reset"
-        mock_context.get_state.return_value = existing_state
+        # Import the legacy history explicitly before the normal reset operation.
+        migrated = migrate_legacy_state(
+            existing_state,
+            source_digest=state_snapshot_digest(existing_state),
+            source_session_id="@dafx-restore@legacy-source",
+            migration_id="restore-migration-1",
+            ownership_transfer_id="restore-transfer-1",
+            delivery_window_seconds=3600,
+        ).to_dict()
+        mock_context.get_state.return_value = migrated
 
         entity_function(mock_context)
 
         assert mock_context.set_result.called
+        assert mock_context.set_result.call_args[0][0] == {"status": "reset"}
 
         # Reset should clear history and persist via set_state
         assert mock_context.set_state.called
         persisted_state = mock_context.set_state.call_args[0][0]
         assert persisted_state["data"]["conversationHistory"] == []
+        assert persisted_state["data"]["completedCorrelations"] == migrated["data"]["completedCorrelations"]
+        assert persisted_state["data"]["responseMailbox"] == migrated["data"]["responseMailbox"]
+        assert persisted_state["data"]["migration"] == migrated["data"]["migration"]
+        assert existing_state["schemaVersion"] == "1.0.0"
 
     def test_entity_function_handles_string_input(self) -> None:
         """Test that the entity function handles non-dict input by converting to string."""

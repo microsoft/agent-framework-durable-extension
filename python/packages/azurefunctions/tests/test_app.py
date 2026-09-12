@@ -14,6 +14,7 @@ import azure.functions as func
 import pytest
 from agent_framework import AgentResponse, Message
 from agent_framework_durabletask import (
+    DEFAULT_MAX_STATE_BYTES,
     MIMETYPE_APPLICATION_JSON,
     MIMETYPE_TEXT_PLAIN,
     SESSION_ID_HEADER,
@@ -23,6 +24,7 @@ from agent_framework_durabletask import (
     AgentEntityStateProviderMixin,
     DurableAgentState,
     workflow_orchestrator_name,
+    wrap_workflow_input,
 )
 
 from agent_framework_azurefunctions import AgentFunctionApp
@@ -273,7 +275,16 @@ class TestAgentFunctionAppSetup:
             app.add_agent(mock_agent, enable_http_endpoint=True)
 
         http_route_mock.assert_called_once_with("OverrideAgent")
-        agent_entity_mock.assert_called_once_with(mock_agent, "OverrideAgent", ANY)
+        agent_entity_mock.assert_called_once_with(
+            mock_agent,
+            "OverrideAgent",
+            None,
+            retention="keep_all",
+            max_state_bytes=DEFAULT_MAX_STATE_BYTES,
+            high_watermark=0.85,
+            low_watermark=0.70,
+            response_delivery_window_seconds=60,
+        )
         assert app._agent_metadata["OverrideAgent"].http_endpoint_enabled is True
 
     def test_agent_override_disables_http_route_when_app_enabled(self) -> None:
@@ -290,8 +301,51 @@ class TestAgentFunctionAppSetup:
             app.add_agent(mock_agent, enable_http_endpoint=False)
 
         http_route_mock.assert_not_called()
-        agent_entity_mock.assert_called_once_with(mock_agent, "DisabledOverride", ANY)
+        agent_entity_mock.assert_called_once_with(
+            mock_agent,
+            "DisabledOverride",
+            None,
+            retention="keep_all",
+            max_state_bytes=DEFAULT_MAX_STATE_BYTES,
+            high_watermark=0.85,
+            low_watermark=0.70,
+            response_delivery_window_seconds=60,
+        )
         assert app._agent_metadata["DisabledOverride"].http_endpoint_enabled is False
+
+    def test_configured_state_budget_reaches_the_entity(self) -> None:
+        """A budget set on the app has to bound the entity, not just sit on the app.
+
+        Asserting that ``_setup_agent_entity`` was called is not enough, because the value can
+        still be dropped below that point and the agent would silently keep the default budget.
+        So the registered entity function is invoked and the factory call is inspected.
+        """
+        mock_agent = Mock()
+        mock_agent.name = "BudgetAgent"
+        registered: list[Callable[[Any], None]] = []
+
+        def _capture_entity_trigger(**kwargs: Any) -> Callable[[FuncT], FuncT]:
+            def decorator(entity_function: FuncT) -> FuncT:
+                registered.append(entity_function)
+                return entity_function
+
+            return decorator
+
+        with (
+            patch.object(AgentFunctionApp, "entity_trigger", side_effect=_capture_entity_trigger),
+            patch("agent_framework_azurefunctions._app.create_agent_entity") as create_entity_mock,
+        ):
+            app = AgentFunctionApp(
+                enable_health_check=False,
+                enable_http_endpoints=False,
+                max_state_bytes=4096,
+            )
+            app.add_agent(mock_agent)
+
+            assert registered, "no entity function was registered"
+            registered[0](Mock())
+
+        assert create_entity_mock.call_args.kwargs["max_state_bytes"] == 4096
 
     def test_multiple_apps_independent(self) -> None:
         """Test that multiple AgentFunctionApp instances are independent."""
@@ -585,11 +639,11 @@ class TestAgentEntityFactory:
         mock_agent = Mock()
         entity_function = create_agent_entity(mock_agent)
 
-        # Mock context
+        # Reset an admitted v2 target, not a legacy session.
         mock_context = Mock()
         mock_context.operation_name = "reset"
         mock_context.get_state.return_value = {
-            "schemaVersion": "1.0.0",
+            "schemaVersion": DurableAgentState.SCHEMA_VERSION,
             "data": {
                 "conversationHistory": [
                     {
@@ -1042,6 +1096,7 @@ class TestWorkflowRunRoute:
 
         workflow = Mock()
         workflow.name = workflow_name
+        workflow.executors = {}
         app = AgentFunctionApp(enable_health_check=False)
 
         with (
@@ -1089,7 +1144,7 @@ class TestWorkflowRunRoute:
         client.start_new.assert_awaited_once_with(
             "dafx-test_workflow",
             instance_id="custom-run",
-            client_input={"message": "hello"},
+            client_input=wrap_workflow_input({"message": "hello"}),
         )
 
     async def test_wait_for_response_header_waits_with_default_timeout(self) -> None:
@@ -2236,9 +2291,8 @@ class TestAgentFunctionAppSubworkflow:
     def test_cross_registration_nested_collision_is_atomic(self) -> None:
         """A later top-level workflow whose nested child collides aborts before committing it.
 
-        Hosting ``[first, second]`` where ``second``'s nested sub-workflow reuses
-        ``first``'s child name must raise *before* ``second`` registers any primitives,
-        so the app is never left with ``second`` half-configured.
+        Configuring ``second`` after ``first`` must preserve the first registration
+        when the second workflow's nested child has a conflicting identity.
         """
         shared_a, _ = self._inner_agent_wf("shared", "agent_node")
         shared_b, _ = self._inner_agent_wf("shared", "other_node")  # different instance, same name
@@ -2248,15 +2302,43 @@ class TestAgentFunctionAppSubworkflow:
         with (
             patch.object(AgentFunctionApp, "_setup_executor_activity"),
             patch.object(AgentFunctionApp, "_setup_workflow_orchestration") as setup_orch,
-            pytest.raises(ValueError, match="collides"),
         ):
-            AgentFunctionApp(workflows=[first, second])
+            app = AgentFunctionApp(workflow=first)
+            identities = dict(app._registration_identities)
+            agents = app.agents
+            with pytest.raises(ValueError, match="collides"):
+                app.configure_workflow(second)
 
         # Only 'first' and its child 'shared' committed primitives; the collision aborted
         # before 'second' (or its colliding child) registered anything.
         registered = {call.args[0].name for call in setup_orch.call_args_list}
         assert registered == {"first", "shared"}
-        assert "second" not in registered
+        assert setup_orch.call_count == 2
+        assert app._registered_orchestrations == {"first": first, "shared": shared_a}
+        assert app._registration_identities == identities
+        assert app.agents == agents
+        assert app.workflows == {"first": first}
+        assert app.workflow is first
+
+    def test_constructor_nested_collision_is_preflighted_before_any_setup(self) -> None:
+        """Constructor validation covers every workflow before installing any triggers."""
+        shared_a, _ = self._inner_agent_wf("shared", "agent_node")
+        shared_b, _ = self._inner_agent_wf("shared", "other_node")
+        first = self._outer_wf("first", shared_a)
+        second = self._outer_wf("second", shared_b)
+
+        with (
+            patch.object(AgentFunctionApp, "_setup_agent_functions") as setup_agent,
+            patch.object(AgentFunctionApp, "_setup_executor_activity") as setup_activity,
+            patch.object(AgentFunctionApp, "_setup_workflow_orchestration") as setup_orch,
+            patch.object(AgentFunctionApp, "_register_workflow_routes") as setup_routes,
+            patch.object(AgentFunctionApp, "_setup_health_route") as setup_health,
+            pytest.raises(ValueError, match="collides"),
+        ):
+            AgentFunctionApp(workflows=[first, second])
+
+        for setup in (setup_agent, setup_activity, setup_orch, setup_routes, setup_health):
+            setup.assert_not_called()
 
     def test_executor_id_with_reserved_separator_is_rejected(self) -> None:
         """An executor id containing the nested-HITL separator is rejected at registration."""
