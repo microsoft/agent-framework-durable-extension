@@ -1,14 +1,27 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json",
+  "title": "Durable agent state: proposed 2.0 contract and legacy review shapes",
+  "description": "Proposed contract under review; validation does not authorize any runtime to read, migrate, or emit 2.0. See README.md for semantic invariants and the cross-runtime deployment gate.",
   "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "\\S",
+      "not": { "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]" }
+    },
     "usage": {
       "type": "object",
       "description": "Token usage statistics.",
       "properties": {
           "inputTokenCount": { "type": "integer" },
           "outputTokenCount": { "type": "integer" },
-          "totalTokenCount": { "type": "integer" }
+          "totalTokenCount": { "type": "integer" },
+          "extensionData": {
+            "type": "object",
+            "description": "Opaque provider-specific usage metadata, preserved even when values cannot be projected to runtime numeric counts."
+          }
       }
     },
     "dataContent": {
@@ -110,10 +123,10 @@
     },
     "unknownContent": {
       "type": "object",
-      "description": "The unknown content of a message exchanged with the agent.",
+      "description": "Explicit wrapper for opaque JSON content. Preserve its value without interpreting fields such as $runtimeType or constructing runtime types.",
       "properties": {
         "$type": { "type": "string", "const": "unknown" },
-        "content": { "description": "The unknown message content serialized as JSON." }
+        "content": { "description": "Opaque JSON, including scalar or null values. Not an instruction or a runtime type selector." }
       },
       "required": ["$type", "content"]
     },
@@ -140,9 +153,18 @@
         "role": { "type": "string", "enum": ["user", "assistant", "system", "tool"] },
         "contents": {
           "type": "array",
+          "description": "An empty array is a valid metadata-only message.",
           "items": { "$ref": "#/$defs/chatContentItem" }
         },
-        "createdAt": { "type": "string", "format": "date-time", "description": "When this message was created (RFC 3339)." }
+        "createdAt": { "type": "string", "format": "date-time", "description": "When this message was created (RFC 3339)." },
+        "messageId": {
+          "type": "string",
+          "description": "Producer message identity; distinct from a terminal request's correlationId."
+        },
+        "extensionData": {
+          "type": "object",
+          "description": "Explicit message metadata, distinct from unknown sibling properties."
+        }
       },
       "required": ["role"]
     },
@@ -156,16 +178,105 @@
       "properties": {
         "createdAt": { "type": "string", "format": "date-time", "description": "When this exchange was created (RFC 3339)." },
         "correlationId": { "type": "string", "description": "An optional correlation ID to group related exchanges." },
-        "messages": { "$ref": "#/$defs/chatMessages" }
+        "messages": { "$ref": "#/$defs/chatMessages" },
+        "extensionData": {
+          "type": "object",
+          "description": "Explicit entry metadata, distinct from unknown sibling properties."
+        }
+      }
+    },
+    "v2FunctionCallContent": {
+      "type": "object",
+      "description": "Schema 2.0 function call with lossless original argument form.",
+      "properties": {
+        "$type": { "type": "string", "const": "functionCall" },
+        "callId": { "type": "string", "description": "The identifier of the function being called." },
+        "name": { "type": "string", "description": "The name of the function being called." },
+        "arguments": {
+          "type": ["object", "string"],
+          "description": "Original function arguments. Preserve string form verbatim, including incomplete or non-JSON text; do not parse, normalize, or replace it with an object."
+        }
+      },
+      "required": ["$type", "callId", "name"]
+    },
+    "v2UriContent": {
+      "type": "object",
+      "description": "Schema 2.0 URI content; absent media type remains absent.",
+      "properties": {
+        "$type": { "type": "string", "const": "uri" },
+        "uri": { "type": "string", "description": "The URI." },
+        "mediaType": { "type": "string", "description": "The media type of the URI, if supplied." }
+      },
+      "required": ["$type", "uri"]
+    },
+    "v2UnknownContent": {
+      "$ref": "#/$defs/unknownContent",
+      "description": "Schema 2.0 lossless producer mapping for supported unmodeled JSON content. Preserve the complete original JSON value and metadata without interpreting fields such as $runtimeType or constructing runtime types. Not a fallback for malformed known wire fields. The existing opaque wrapper's accepted JSON shapes are unchanged."
+    },
+    "v2ChatContentItem": {
+      "oneOf": [
+        { "$ref": "#/$defs/dataContent" },
+        { "$ref": "#/$defs/errorContent" },
+        { "$ref": "#/$defs/v2FunctionCallContent" },
+        { "$ref": "#/$defs/functionResultContent" },
+        { "$ref": "#/$defs/hostedFileContent" },
+        { "$ref": "#/$defs/hostedVectorStoreContent" },
+        { "$ref": "#/$defs/usageContent" },
+        { "$ref": "#/$defs/textContent" },
+        { "$ref": "#/$defs/textReasoningContent" },
+        { "$ref": "#/$defs/v2UriContent" },
+        { "$ref": "#/$defs/v2UnknownContent" }
+      ]
+    },
+    "v2ChatMessage": {
+      "type": "object",
+      "description": "Schema 2.0 chat message. Historical versions continue to use chatMessage.",
+      "properties": {
+        "authorName": { "type": "string", "description": "The name of the author of the message." },
+        "role": { "type": "string", "enum": ["user", "assistant", "system", "developer", "tool"] },
+        "contents": {
+          "type": "array",
+          "description": "An empty array is a valid metadata-only message.",
+          "items": { "$ref": "#/$defs/v2ChatContentItem" }
+        },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When this message was created (RFC 3339)." },
+        "messageId": {
+          "type": "string",
+          "description": "Producer message identity; distinct from a terminal request's correlationId."
+        },
+        "extensionData": {
+          "type": "object",
+          "description": "Explicit message metadata, distinct from unknown sibling properties."
+        }
+      },
+      "required": ["role"]
+    },
+    "v2ChatMessages": {
+      "type": "array",
+      "description": "Ordered list of schema 2.0 chat messages.",
+      "items": { "$ref": "#/$defs/v2ChatMessage" }
+    },
+    "v2ConversationEntry": {
+      "type": "object",
+      "properties": {
+        "createdAt": { "type": "string", "format": "date-time", "description": "When this exchange was created (RFC 3339)." },
+        "correlationId": { "type": "string", "description": "An optional correlation ID to group related exchanges." },
+        "messages": { "$ref": "#/$defs/v2ChatMessages" },
+        "extensionData": {
+          "type": "object",
+          "description": "Explicit entry metadata, distinct from unknown sibling properties."
+        }
       }
     },
     "agentRequest": {
       "allOf": [
-        { "$ref": "#/$defs/conversationEntry" }
+        { "$ref": "#/$defs/v2ConversationEntry" }
       ],
       "description": "The request (i.e. prompt) sent to the agent.",
+      "required": ["$type"],
       "properties": {
         "$type": { "type": "string", "const": "request" },
+        "correlationId": { "$ref": "#/$defs/identifier" },
         "orchestrationId": {
           "type": "string",
           "description": "The identifier of the orchestration that initiated this agent request (if any)."
@@ -182,15 +293,138 @@
     },
     "agentResponse": {
       "allOf": [
-        { "$ref": "#/$defs/conversationEntry" }
+        { "$ref": "#/$defs/v2ConversationEntry" }
       ],
       "description": "The response received from the agent.",
+      "required": ["$type"],
       "properties": {
         "$type": { "type": "string", "const": "response" },
+        "correlationId": { "$ref": "#/$defs/identifier" },
         "usage": {
           "$ref": "#/$defs/usage"
         }
       }
+    },
+    "agentErrorResponse": {
+      "allOf": [
+        { "$ref": "#/$defs/v2ConversationEntry" }
+      ],
+      "description": "Diagnostic record of a failed turn, not model replay context or authoritative completion evidence.",
+      "required": ["$type"],
+      "properties": {
+        "$type": { "type": "string", "const": "errorResponse" },
+        "correlationId": { "$ref": "#/$defs/identifier" },
+        "usage": { "$ref": "#/$defs/usage" }
+      }
+    },
+    "compaction": {
+      "allOf": [
+        { "$ref": "#/$defs/v2ConversationEntry" }
+      ],
+      "description": "Compacted model context; it answers no request and has no correlationId.",
+      "required": ["$type"],
+      "properties": {
+        "$type": { "type": "string", "const": "compaction" },
+        "correlationId": false
+      }
+    },
+    "terminalResponse": {
+      "type": "object",
+      "description": "JSON-only terminal response projection. No raw runtime object graph is persisted.",
+      "properties": {
+        "messages": { "$ref": "#/$defs/v2ChatMessages" },
+        "value": {
+          "type": ["null", "boolean", "number", "string", "array", "object"],
+          "description": "Optional caller-visible structured JSON result, independent of messages. Absence means no structured value; explicit null, false, zero, empty strings, arrays, and objects remain present values. No runtime object serialization or inferred value from message text."
+        },
+        "usage": { "$ref": "#/$defs/usage" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "responseId": { "$ref": "#/$defs/identifier" },
+        "agentId": { "$ref": "#/$defs/identifier" },
+        "finishReason": { "$ref": "#/$defs/identifier" },
+        "continuationToken": {
+          "type": "string",
+          "maxLength": 16384,
+          "contentEncoding": "base64",
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+          "not": { "pattern": "[^A-Za-z0-9+/=]" },
+          "description": "Opaque base64-encoded continuation bytes. Encoding alone does not imply that another runtime or provider can resume them."
+        },
+        "extensionData": {
+          "type": "object",
+          "description": "Explicit JSON response metadata; preserve separately from unknown sibling properties.",
+          "propertyNames": { "$ref": "#/$defs/identifier" }
+        }
+      },
+      "required": ["messages"],
+      "additionalProperties": true
+    },
+    "terminalError": {
+      "type": "object",
+      "description": "Sanitized JSON terminal failure metadata, not a serialized exception or executable type.",
+      "properties": {
+        "code": { "$ref": "#/$defs/identifier" },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384,
+          "pattern": "\\S"
+        },
+        "details": { "description": "Optional JSON failure details; subject to privacy and storage limits." }
+      },
+      "required": ["code", "message"],
+      "additionalProperties": true
+    },
+    "terminalResult": {
+      "type": "object",
+      "description": "Immutable terminal result detached from conversationHistory. Map-key equality and receipt consistency require semantic validation.",
+      "properties": {
+        "correlationId": { "$ref": "#/$defs/identifier" },
+        "outcome": { "type": "string", "enum": ["succeeded", "failed"] },
+        "completedAt": { "type": "string", "format": "date-time" },
+        "resultExpiresAt": { "type": "string", "format": "date-time" },
+        "response": { "$ref": "#/$defs/terminalResponse" },
+        "error": { "$ref": "#/$defs/terminalError" }
+      },
+      "required": ["correlationId", "outcome", "completedAt", "response"],
+      "allOf": [
+        {
+          "if": { "properties": { "outcome": { "const": "succeeded" } } },
+          "then": { "not": { "required": ["error"] } }
+        },
+        {
+          "if": { "properties": { "outcome": { "const": "failed" } } },
+          "then": { "required": ["error"] }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "completionReceipt": {
+      "type": "object",
+      "description": "Completion evidence surviving result expiry. Identity, authoritative outcome, completion time, and expiry policy are immutable; availability may transition once from available to unavailable. Expired lookup retains outcome without a payload. An older receipt lacking authoritative outcome cannot be promoted to this shape by inventing succeeded or failed.",
+      "properties": {
+        "correlationId": { "$ref": "#/$defs/identifier" },
+        "outcome": { "type": "string", "enum": ["succeeded", "failed"] },
+        "completedAt": { "type": "string", "format": "date-time" },
+        "resultState": { "type": "string", "enum": ["available", "unavailable"] },
+        "resultExpiresAt": { "type": "string", "format": "date-time" },
+        "resultUnavailableAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["correlationId", "outcome", "completedAt", "resultState"],
+      "allOf": [
+        {
+          "if": { "properties": { "resultState": { "const": "available" } } },
+          "then": { "not": { "required": ["resultUnavailableAt"] } }
+        },
+        {
+          "if": { "properties": { "resultState": { "const": "unavailable" } } },
+          "then": { "required": ["resultUnavailableAt"] }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "historyBinding": {
+      "description": "Optional separately versioned runtime extension/profile, not a shared binding object or effective-owner policy. The existing field name is retained for preservation. Compatible writers preserve the original JSON value; only a runtime relying on it validates its recognized profile and version before use. Shared shape validation does not imply the value is a usable profile."
     },
     "data": {
       "type": "object",
@@ -198,20 +432,106 @@
       "properties": {
         "conversationHistory": {
           "type": "array",
-          "description": "Ordered list of conversation entries.",
-          "items": { "$ref": "#/$defs/conversationEntry" }
+          "description": "Ordered, evictable transcript. The root schemaVersion selects historical conversationEntry items or the known schema 2.0 entry definitions."
+        },
+        "terminalResults": {
+          "type": "object",
+          "description": "Immutable results keyed by exact, case-sensitive request correlationId within this entity/session generation.",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/terminalResult" }
+        },
+        "completionReceipts": {
+          "type": "object",
+          "description": "Terminal evidence keyed by correlationId; independent of transcript and result-payload retention.",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/completionReceipt" }
+        },
+        "historyBinding": { "$ref": "#/$defs/historyBinding" },
+        "session": {
+          "type": "object",
+          "description": "Opaque JSON session continuation and provider state. Preserve without using its fields to select or construct runtime types."
+        },
+        "expirationTimeUtc": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Existing whole-entity idle TTL deadline, not result expiry. Absent or null means no stored deadline. Whole-entity deletion removes receipts too; a separate deduplication-lifetime agreement is required."
+        },
+        "ingestedPositions": {
+          "type": "object",
+          "description": "Legacy highest-seen position by producer, not proof of a contiguous delivered prefix or request completion. Preserve historical values without inferring missing deliveries during migration. Exact gap-preserving workflow receipts require separately versioned bookkeeping independent of transcript retention.",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "truncation": {
+          "type": "object",
+          "description": "Diagnostic evidence of transcript removal; not model context or terminal completion evidence.",
+          "properties": {
+            "evictedMessageCount": { "type": "integer", "minimum": 1 },
+            "firstEvictedAt": { "type": "string", "format": "date-time" },
+            "lastEvictedAt": { "type": "string", "format": "date-time" }
+          },
+          "required": ["evictedMessageCount", "firstEvictedAt", "lastEvictedAt"]
+        },
+        "extensionData": {
+          "type": "object",
+          "description": "Explicit data metadata; preserve separately from unknown sibling properties."
         }
-      }
+      },
+      "additionalProperties": true
     }
   },
   "type": "object",
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Semantic version of this state schema. By convention, this should be the first property.",
-      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+      "description": "Exact review snapshots, not a runtime acceptance list. 1.2.0 and 2.0.0 are proposals; future versions require an explicit compatibility decision. By convention this is the first property.",
+      "enum": ["1.0.0", "1.1.0", "1.2.0", "2.0.0"]
     },
-    "data": { "$ref": "#/$defs/data" }
+    "data": { "$ref": "#/$defs/data" },
+    "extensionData": {
+      "type": "object",
+      "description": "Explicit root metadata; preserve separately from unknown sibling properties."
+    }
   },
-  "required": ["schemaVersion", "data"]
+  "required": ["schemaVersion", "data"],
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": { "schemaVersion": { "const": "2.0.0" } }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "required": ["conversationHistory", "terminalResults", "completionReceipts"],
+            "properties": {
+              "conversationHistory": {
+                "items": {
+                  "oneOf": [
+                    { "$ref": "#/$defs/agentRequest" },
+                    { "$ref": "#/$defs/agentResponse" },
+                    { "$ref": "#/$defs/agentErrorResponse" },
+                    { "$ref": "#/$defs/compaction" }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "data": {
+            "properties": {
+              "conversationHistory": {
+                "items": { "$ref": "#/$defs/conversationEntry" }
+              },
+              "terminalResults": false,
+              "completionReceipts": false,
+              "historyBinding": false
+            }
+          }
+        }
+      }
+    }
+  ]
 }
