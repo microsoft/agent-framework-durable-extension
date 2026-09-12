@@ -328,8 +328,10 @@ internal static class DurableAgentStateOutcomeResolver
             Messages = response.Messages,
             Usage = response.Usage,
             CreatedAt = response.CreatedAt,
+            AdditionalProperties = response.ExtensionData,
+            UnknownProperties = response.UnknownProperties,
         };
-        // Preserve opaque legacy message/usage metadata rather than round-tripping it through
+        // Preserve opaque legacy response/message/usage metadata rather than round-tripping it through
         // the lossy runtime projection. The mailbox must not alias the evictable transcript.
         snapshot = JsonSerializer.Deserialize(
             JsonSerializer.SerializeToUtf8Bytes(snapshot, DurableAgentStateJsonContext.Default.DurableAgentStateTerminalResponse),
