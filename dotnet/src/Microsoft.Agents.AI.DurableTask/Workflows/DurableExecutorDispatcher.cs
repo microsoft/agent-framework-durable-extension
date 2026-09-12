@@ -203,6 +203,18 @@ internal static class DurableExecutorDispatcher
             return new DurableExecutorOutput { Result = string.Empty };
         }
 
+        if (workflowResult.SentMessages is not null &&
+            !DurableExecutorOutput.HasValidTypedMessages(workflowResult.SentMessages))
+        {
+            // Match activity-envelope rejection: no partial messages, events or halt controls.
+            // Result is already text; never parse it again as an executor control envelope.
+            return new DurableExecutorOutput
+            {
+                Result = workflowResult.Result,
+                SentMessages = CreateResultMessages(workflowResult.Result),
+            };
+        }
+
         // Propagate the result, events, and sent messages from the sub-workflow.
         // SentMessages carry the sub-workflow's output for typed routing in the parent,
         // matching the in-process WorkflowHostExecutor behavior.
@@ -212,8 +224,17 @@ internal static class DurableExecutorDispatcher
         {
             Result = workflowResult.Result,
             Events = workflowResult.Events ?? [],
-            SentMessages = workflowResult.SentMessages ?? [],
+            SentMessages = workflowResult.SentMessages is { Count: > 0 }
+                ? workflowResult.SentMessages
+                : CreateResultMessages(workflowResult.Result),
             HaltRequested = workflowResult.HaltRequested,
         };
     }
+
+    private static List<TypedPayload> CreateResultMessages(string? result) =>
+        // Result-only fallback retains exact string provenance, including whitespace text.
+        // Unlike a received typed payload, it is not an envelope field to validate or deserialize.
+        !string.IsNullOrEmpty(result)
+            ? [new TypedPayload { TypeName = typeof(string).AssemblyQualifiedName, Data = result }]
+            : [];
 }

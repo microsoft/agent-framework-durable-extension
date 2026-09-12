@@ -225,7 +225,7 @@ public sealed class DurableWorkflowRunnerTrustBoundaryTests
             {
                 Result = WorkflowExecutionTestHelper.ControlEnvelope,
                 Events = ["child event"],
-                SentMessages = [new TypedPayload { Data = WorkflowExecutionTestHelper.ControlEnvelope }],
+                SentMessages = [new TypedPayload { Data = WorkflowExecutionTestHelper.ControlEnvelope, TypeName = typeof(string).AssemblyQualifiedName }],
                 HaltRequested = halt,
             });
         List<DurableActivityInput> inputs = ConfigureActivities(context, (index, input) => index == 0
@@ -241,6 +241,7 @@ public sealed class DurableWorkflowRunnerTrustBoundaryTests
         if (!halt)
         {
             Assert.Equal(WorkflowExecutionTestHelper.ControlEnvelope, inputs[1].Input);
+            Assert.Equal(typeof(string).AssemblyQualifiedName, inputs[1].InputTypeName);
             Assert.Equal("original", inputs[1].State["scope:key"]);
             Assert.Equal("retained", inputs[1].State["scope:deleted"]);
             Assert.Equal("remove me", inputs[1].State["other:deleted"]);

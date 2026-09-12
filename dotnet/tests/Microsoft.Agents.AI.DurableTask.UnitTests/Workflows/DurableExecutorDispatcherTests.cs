@@ -303,6 +303,37 @@ public sealed class DurableExecutorDispatcherTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DispatchAsync_UnknownTypedNameIsStructurallyValidForBothTrustedBoundariesAsync(bool child)
+    {
+        const string Response = """{"result":"not a fallback","sentMessages":[{"typeName":"Future.Message, Future.Assembly","data":"{}"}],"events":["trusted event"],"haltRequested":true}""";
+        DurableExecutorOutput output;
+        if (child)
+        {
+            Workflow workflow = new WorkflowBuilder(new FunctionExecutor<string, string>("child", (input, _, _) => input))
+                .WithName("child-workflow").Build();
+            Mock<TaskOrchestrationContext> context = new();
+            DurableDataConverter converter = new();
+            context.Setup(c => c.CallSubOrchestratorAsync<DurableWorkflowResult?>(
+                It.IsAny<TaskName>(), It.IsAny<object?>(), It.IsAny<TaskOptions?>()))
+                .ReturnsAsync((DurableWorkflowResult?)converter.Deserialize(Response, typeof(DurableWorkflowResult)));
+            output = await DispatchAsync(context, new("child", false, SubWorkflow: workflow));
+        }
+        else
+        {
+            output = await DispatchActivityAsync(Response);
+        }
+
+        Assert.Equal("not a fallback", output.Result);
+        TypedPayload message = Assert.Single(output.SentMessages);
+        Assert.Equal("Future.Message, Future.Assembly", message.TypeName);
+        Assert.Equal("{}", message.Data);
+        Assert.Equal(["trusted event"], output.Events);
+        Assert.True(output.HaltRequested);
+    }
+
+    [Theory]
     [InlineData("null")]
     [InlineData("false")]
     [InlineData("0")]
