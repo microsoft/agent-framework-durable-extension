@@ -154,6 +154,10 @@ represent. An absent value remains absent, not explicit null. The registered `Du
 transports this JSON-only snapshot in additive namespaced response metadata, preserving native response
 fields and plain legacy response reads. Direct native serialization does not preserve this association.
 The metadata is result data, never a workflow control envelope or a runtime type selector.
+When complete legacy history is independently authorized for promotion, the retained mailbox snapshot
+also preserves declared response extension data and unknown response fields independently of the
+transcript. First delivery, cold polling, and repeated duplicates retain that canonical metadata;
+JSON-looking response text never supplies a missing canonical `value`.
 
 ## Workflow output trust boundary
 
@@ -167,6 +171,10 @@ Each trusted activity `sentMessages` entry must explicitly contain a nonblank st
 These are CLR string fields: serialized JSON payloads such as `null`, `false`, `0`, and `""` remain valid
 inside the `data` string. Payload text is not recursively interpreted as controls or required to resolve
 a runtime type during envelope validation. Unknown fields cannot override known controls.
+The child runner tags its non-empty final result as a CLR string when routing it to parent successors,
+so an executor supporting several input types receives the original text through its string handler
+even when another supported type is listed first. Empty final results retain the existing behavior:
+they do not enqueue a successor message. Typed child halt requests and superstep limits are unchanged.
 
 This is a structural provenance boundary, not a signing/authenticity mechanism. No new discriminator or
 entity-state schema field is needed. The C# workflow output format is not asserted to match Python's
