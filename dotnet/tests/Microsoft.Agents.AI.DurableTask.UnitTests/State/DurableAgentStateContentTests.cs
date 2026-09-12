@@ -500,6 +500,34 @@ public sealed class DurableAgentStateContentTests
     }
 
     [Fact]
+    public void MarkerShapedProducerContentWithoutEnvelopeMarkerRemainsOpaque()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """
+            {
+              "$microsoftAgentFrameworkDurableTask": {
+                "kind": "unknownAIContent",
+                "version": 1
+              }
+            }
+            """);
+        JsonElement original = document.RootElement.Clone();
+        DurableAgentStateUnknownContent stored = new() { Content = original };
+
+        AIContent restored = Assert.IsType<AIContent>(stored.ToAIContent());
+        DurableAgentStateUnknownContent roundTripped = Assert.IsType<DurableAgentStateUnknownContent>(
+            DurableAgentStateContent.FromAIContent(restored));
+
+        Assert.True(JsonElement.DeepEquals(original, roundTripped.Content));
+        Assert.Equal(
+            "unknownAIContent",
+            roundTripped.Content
+                .GetProperty("$microsoftAgentFrameworkDurableTask")
+                .GetProperty("kind")
+                .GetString());
+    }
+
+    [Fact]
     public void UnregisteredAIContentSubtypePersistsCommonContractAsUnknown()
     {
         FutureContent original = new()
@@ -533,6 +561,10 @@ public sealed class DurableAgentStateContentTests
         JsonElement envelope =
             persistedContent.GetProperty("$microsoftAgentFrameworkDurableTask");
         Assert.Equal("unknownAIContent", envelope.GetProperty("kind").GetString());
+        Assert.StartsWith(
+            "Microsoft.Agents.AI.DurableTask.UnknownContent/",
+            envelope.GetProperty("marker").GetString(),
+            StringComparison.Ordinal);
         Assert.Equal(1, envelope.GetProperty("version").GetInt32());
         Assert.False(persistedContent.TryGetProperty("$runtimeType", out _));
         Assert.DoesNotContain(typeof(FutureContent).FullName!, json, StringComparison.Ordinal);

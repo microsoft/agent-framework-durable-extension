@@ -36,7 +36,7 @@ internal sealed class DurableAgentStateTerminalError
                 .Count() > DurableAgentStateContract.MaxMetadataStringLength)
         {
             throw new InvalidOperationException(
-                $"The durable agent terminal error message must be non-empty, at most {DurableAgentStateContract.MaxMetadataStringLength} characters, and contain no control characters.");
+                $"The durable agent terminal error message must contain a non-whitespace character and be at most {DurableAgentStateContract.MaxMetadataStringLength} Unicode characters.");
         }
     }
 }
