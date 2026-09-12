@@ -1,5 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 using System.Text.Json;
 using Microsoft.Agents.AI.Compaction;
 using Microsoft.Agents.AI.DurableTask.State;
@@ -1561,6 +1563,361 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
+    public async Task AutoRetentionRunsOnCompletedEntityExecutionAsync()
+    {
+        RecordingChatClient client = new();
+        ChatClientAgent agent = new(client, name: "agent");
+        DurableAgentState initialState = CreateLargeState();
+        ConcurrentQueue<string> measuredInstruments = new();
+        using MeterListener listener = new();
+        listener.InstrumentPublished = static (instrument, meterListener) =>
+        {
+            if (instrument.Meter.Name == DurableAgentTelemetry.MeterName)
+            {
+                meterListener.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>(
+            (instrument, _, tags, _) =>
+            {
+                foreach (KeyValuePair<string, object?> tag in tags)
+                {
+                    if (tag.Key == DurableAgentTelemetry.AgentNameTagName &&
+                        string.Equals(tag.Value as string, "agent", StringComparison.Ordinal))
+                    {
+                        measuredInstruments.Enqueue(instrument.Name);
+                        break;
+                    }
+                }
+            });
+        listener.Start();
+
+        DurableAgentState persisted = await RunEntityAsync(
+            agent,
+            initialState,
+            new RunRequest(new string('n', 500)) { CorrelationId = "new" },
+            options =>
+            {
+                options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+                options.MaxStateBytes = 5_000;
+            });
+
+        Assert.NotNull(persisted.Data.Truncation);
+        Assert.DoesNotContain(persisted.Data.ConversationHistory, entry => entry.CorrelationId == "oldest");
+        Assert.Contains(persisted.Data.ConversationHistory, entry => entry.CorrelationId == "new");
+        Assert.Contains("oldest", persisted.Data.TerminalResults!.Keys);
+        Assert.Contains("oldest", persisted.Data.CompletionReceipts!.Keys);
+        Assert.Contains(
+            DurableAgentTelemetry.RetentionOperationsInstrumentName,
+            measuredInstruments);
+
+        DurableAgentState reloaded = DeserializeState(SerializeState(persisted));
+        DurableAgentRunOutcome retainedOutcome =
+            DurableAgentStateOutcomeResolver.Resolve(
+                reloaded,
+                "oldest",
+                DateTimeOffset.UtcNow);
+        Assert.Equal(DurableAgentRunOutcomeKind.Succeeded, retainedOutcome.Kind);
+        Assert.Equal(new string('b', 600), retainedOutcome.Response?.Text);
+
+        RecordingChatClient duplicateClient = new();
+        AgentResponse duplicate = await CreateHarness(
+            new ChatClientAgent(duplicateClient, name: "agent"),
+            reloaded).RunAsync(
+                new RunRequest("different request") { CorrelationId = "oldest" });
+        Assert.Equal(new string('b', 600), duplicate.Text);
+        Assert.Equal(0, duplicateClient.InvocationCount);
+
+        RecordingChatClient nextClient = new();
+        _ = await RunEntityAsync(
+            new ChatClientAgent(nextClient, name: "agent"),
+            DeserializeState(SerializeState(persisted)),
+            new RunRequest("next request") { CorrelationId = "next" });
+        Assert.DoesNotContain(
+            nextClient.LastMessages,
+            message => message.Text == new string('a', 600) ||
+                message.Text == new string('b', 600));
+    }
+
+    [Fact]
+    public async Task AutoRetentionRemovesMixedMediaToolGroupFromReloadedModelInputAsync()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CopyState(
+            DurableAgentStateOutcomeResolver.PrepareRevisedWorkingState(
+                new DurableAgentState(),
+                hasAuthoritativeLegacyHistory: true),
+            session: null,
+            historyBinding: DurableAgentHistoryBinding.Create(
+                DurableAgentHistoryOwnership.Entity,
+                configuredProviderKey: null));
+        using JsonDocument opaqueDocument = JsonDocument.Parse(
+            """{"$runtimeType":"future-opaque","payload":{"value":42}}""");
+        state.Data.ConversationHistory.Add(
+            new DurableAgentStateRequest
+            {
+                CorrelationId = "old-call",
+                CreatedAt = now.AddMinutes(-10),
+                Messages =
+                [
+                    DurableAgentStateMessage.FromChatMessage(
+                        new ChatMessage(ChatRole.User, "invoke old tool")),
+                ],
+            });
+        state.Data.ConversationHistory.Add(
+            new DurableAgentStateResponse
+            {
+                CorrelationId = "old-call",
+                CreatedAt = now.AddMinutes(-10),
+                Messages =
+                [
+                    new DurableAgentStateMessage
+                    {
+                        Role = ChatRole.Assistant.Value,
+                        Contents =
+                        [
+                            new DurableAgentStateFunctionCallContent
+                            {
+                                CallId = "large-call",
+                                Name = "tool",
+                                Arguments = JsonSerializer.SerializeToElement(
+                                    new { payload = new string('a', 4_000) }),
+                            },
+                            new DurableAgentStateUriContent
+                            {
+                                Uri = new Uri("https://example.test/media"),
+                                MediaType = null,
+                            },
+                            new DurableAgentStateUnknownContent
+                            {
+                                Content = opaqueDocument.RootElement.Clone(),
+                            },
+                        ],
+                    },
+                ],
+            });
+        state.Data.ConversationHistory.Add(
+            new DurableAgentStateRequest
+            {
+                CorrelationId = "old-result",
+                CreatedAt = now.AddMinutes(-9),
+                Messages =
+                [
+                    new DurableAgentStateMessage
+                    {
+                        Role = ChatRole.Tool.Value,
+                        Contents =
+                        [
+                            new DurableAgentStateFunctionResultContent
+                            {
+                                CallId = "large-call",
+                                Result = JsonSerializer.SerializeToElement(new string('r', 8_000)),
+                            },
+                        ],
+                    },
+                ],
+            });
+        state.Data.ConversationHistory.Add(
+            new DurableAgentStateResponse
+            {
+                CorrelationId = "old-result",
+                CreatedAt = now.AddMinutes(-9),
+                Messages =
+                [
+                    DurableAgentStateMessage.FromChatMessage(
+                        new ChatMessage(ChatRole.Assistant, "old tool complete")),
+                ],
+            });
+        AddExchange(state, "recent", "recent request", "recent response", now.AddMinutes(-1));
+
+        DurableAgentState persisted = await RunEntityAsync(
+            new ChatClientAgent(new RecordingChatClient(), name: "agent"),
+            state,
+            new RunRequest("first new request") { CorrelationId = "first-new" },
+            options =>
+            {
+                options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+                options.MaxStateBytes = 7_000;
+            });
+
+        Assert.DoesNotContain(
+            persisted.Data.ConversationHistory,
+            entry => entry.CorrelationId is "old-call" or "old-result");
+        DurableAgentState reloaded = DeserializeState(SerializeState(persisted));
+        RecordingChatClient nextClient = new();
+        _ = await RunEntityAsync(
+            new ChatClientAgent(nextClient, name: "agent"),
+            reloaded,
+            new RunRequest("second new request") { CorrelationId = "second-new" });
+
+        Assert.Contains(nextClient.LastMessages, message => message.Text == "recent request");
+        Assert.Contains(nextClient.LastMessages, message => message.Text == "first new request");
+        Assert.DoesNotContain(
+            nextClient.LastMessages.SelectMany(message => message.Contents),
+            content =>
+                content is FunctionCallContent { CallId: "large-call" } ||
+                content is FunctionResultContent { CallId: "large-call" } ||
+                content is UriContent uri &&
+                    uri.Uri == new Uri("https://example.test/media") ||
+                content.RawRepresentation is JsonElement element &&
+                    element.ValueKind == JsonValueKind.Object &&
+                    element.TryGetProperty("$runtimeType", out _));
+    }
+
+    [Fact]
+    public async Task DefaultKeepAllDoesNotEvictTranscriptUnderConfiguredPressureAsync()
+    {
+        RecordingChatClient client = new();
+        DurableAgentState initialState = CreateLargeState();
+
+        DurableAgentState persisted = await RunEntityAsync(
+            new ChatClientAgent(client, name: "agent"),
+            initialState,
+            new RunRequest("new request") { CorrelationId = "new" },
+            options => options.MaxStateBytes = 500);
+
+        Assert.Null(persisted.Data.Truncation);
+        Assert.Contains(
+            persisted.Data.ConversationHistory,
+            entry => entry.CorrelationId == "oldest");
+    }
+
+    [Fact]
+    public async Task LegacyAutoWithoutAuthorizedMigrationFailsBeforeModelExecutionAsync()
+    {
+        RecordingChatClient client = new();
+        DurableAgentState initialState =
+            CreateStateWithExchange("old", "old request", "old response");
+        EntityHarness harness = CreateHarness(
+            new ChatClientAgent(client, name: "agent"),
+            initialState,
+            options =>
+            {
+                options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+                options.MaxStateBytes = 500;
+                options.AuthorizeLegacyMigration = null;
+            });
+
+        DurableAgentStateCorruptionException exception =
+            await Assert.ThrowsAsync<DurableAgentStateCorruptionException>(
+                () => harness.RunAsync(
+                    new RunRequest("new request") { CorrelationId = "new" }));
+
+        Assert.Contains(
+            "independently authoritative complete history",
+            exception.Message,
+            StringComparison.Ordinal);
+        Assert.Equal(0, client.InvocationCount);
+        Assert.False(harness.StateWasPersisted);
+        Assert.Equal(DurableAgentState.CurrentSchemaVersion, initialState.SchemaVersion);
+    }
+
+    [Fact]
+    public async Task DuplicateLegacyAutoMigrationStillEnforcesStateBudgetAsync()
+    {
+        RecordingChatClient client = new();
+        DurableAgentState initialState = CreateStateWithExchange(
+            "duplicate",
+            new string('q', 1_000),
+            new string('a', 2_000));
+        EntityHarness harness = CreateHarness(
+            new ChatClientAgent(client, name: "agent"),
+            initialState,
+            options =>
+            {
+                options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+                options.MaxStateBytes = 500;
+            });
+
+        _ = await Assert.ThrowsAsync<DurableAgentStateSizeLimitExceededException>(
+            () => harness.RunAsync(
+                new RunRequest("different request") { CorrelationId = "duplicate" }));
+
+        Assert.Equal(0, client.InvocationCount);
+        Assert.False(harness.StateWasPersisted);
+        Assert.Equal(DurableAgentState.CurrentSchemaVersion, initialState.SchemaVersion);
+    }
+
+    [Fact]
+    public async Task DuplicateLegacyAutoWithoutAuthorizedMigrationFailsClosedAsync()
+    {
+        RecordingChatClient client = new();
+        DurableAgentState initialState =
+            CreateStateWithExchange("duplicate", "request", "response");
+        EntityHarness harness = CreateHarness(
+            new ChatClientAgent(client, name: "agent"),
+            initialState,
+            options =>
+            {
+                options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+                options.MaxStateBytes = 10_000;
+                options.AuthorizeLegacyMigration = null;
+            });
+
+        DurableAgentStateCorruptionException exception =
+            await Assert.ThrowsAsync<DurableAgentStateCorruptionException>(
+                () => harness.RunAsync(
+                    new RunRequest("different request") { CorrelationId = "duplicate" }));
+
+        Assert.Contains(
+            "independently authoritative complete history",
+            exception.Message,
+            StringComparison.Ordinal);
+        Assert.Equal(0, client.InvocationCount);
+        Assert.False(harness.StateWasPersisted);
+    }
+
+    [Fact]
+    public void AutoDoesNotInitializeMailboxStateWithoutInternalGate()
+    {
+        DurableAgentsOptions options = new()
+        {
+            EnableMailboxWrites = false,
+            HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto,
+        };
+        Dictionary<Type, object> services = new()
+        {
+            [typeof(DurableTaskClient)] = new Mock<DurableTaskClient>("test").Object,
+            [typeof(ILoggerFactory)] = new ListLoggerFactory(new ListLoggerProvider()),
+            [typeof(DurableAgentsOptions)] = options,
+        };
+        TestableAgentEntity entity = new(new DictionaryServiceProvider(services));
+        Mock<TaskEntityOperation> operation = new();
+        operation.SetupGet(value => value.Name).Returns(nameof(AgentEntity.Run));
+
+        DurableAgentState initialized = entity.Initialize(operation.Object);
+
+        Assert.Equal(DurableAgentState.CurrentSchemaVersion, initialized.SchemaVersion);
+        Assert.False(initialized.MailboxWritesAuthorized);
+        Assert.Null(initialized.Data.TerminalResults);
+        Assert.Null(initialized.Data.CompletionReceipts);
+    }
+
+    [Fact]
+    public async Task OversizedProtectedStateFailsWithoutPersistenceAsync()
+    {
+        RecordingChatClient client = new();
+        ChatClientAgent agent = new(client, name: "agent");
+        DurableAgentState initialState = new();
+        string originalState = SerializeState(initialState);
+        EntityHarness harness = CreateHarness(
+            agent,
+            initialState,
+            options =>
+            {
+                options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+                options.MaxStateBytes = 500;
+            });
+
+        await Assert.ThrowsAsync<DurableAgentStateSizeLimitExceededException>(
+            () => harness.RunAsync(
+                new RunRequest(new string('x', 2_000)) { CorrelationId = "new" }));
+
+        Assert.False(harness.StateWasPersisted);
+        Assert.Equal(originalState, SerializeState(initialState));
+    }
+
+    [Fact]
     public async Task ProviderLoadFailureDoesNotInvokeModelOrCommitWorkingStateAsync()
     {
         InvalidOperationException expected = new("provider load failed");
@@ -1920,6 +2277,15 @@ public sealed class AgentEntityHistoryTests
         return state;
     }
 
+    private static DurableAgentState CreateLargeState()
+    {
+        DurableAgentState state = new();
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        AddExchange(state, "oldest", new string('a', 600), new string('b', 600), now.AddMinutes(-10));
+        AddExchange(state, "middle", new string('c', 600), new string('d', 600), now.AddMinutes(-5));
+        return state;
+    }
+
     private static void AddExchange(
         DurableAgentState state,
         string correlationId,
@@ -2030,6 +2396,12 @@ public sealed class AgentEntityHistoryTests
         }
 
         private sealed class RecordingSession : AgentSession;
+    }
+
+    private sealed class TestableAgentEntity(IServiceProvider services) : AgentEntity(services)
+    {
+        public DurableAgentState Initialize(TaskEntityOperation operation) =>
+            this.InitializeState(operation);
     }
 
     private sealed class FailingSerializationAgent(string name) : AIAgent

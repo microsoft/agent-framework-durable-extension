@@ -86,9 +86,14 @@ and defaults to no payload expiry. Result-payload retention and whole-entity TTL
 there is no implicit 60-second mailbox expiry. Deleting the entity also deletes its
 idempotency evidence. Keep schema 2.0 writes disabled until the shared rollout gates are agreed and every
 participating reader/worker is mailbox-aware or explicitly rejects the new major version.
-Producer activation and receipt-deleting entity TTL are internal test gates only, disabled by default;
-this draft exposes no public schema-2 activation API. Legacy TTL behavior is preserved, but old deadlines
-cannot delete schema-2 receipts without a separately agreed deletion policy. Unknown-field
+Producer activation and receipt-deleting entity TTL are internal test gates only, disabled by default.
+`HistoryRetentionMode.Auto` does not activate schema 2 production writes. Automatic transcript retention
+requires a mailbox-aware state writer, but that rollout remains internal until Python, dashboards, pollers,
+and every other participating reader can safely consume or reject schema 2. Auto therefore fails closed when
+the internal writer gate is disabled or legacy migration is not explicitly authorized from independently
+authoritative complete history.
+Legacy TTL behavior is preserved, but old deadlines cannot delete schema-2 receipts without a separately agreed
+deletion policy. Unknown-field
 preservation by an older worker is not sufficient. See [state compatibility](State/README.md).
 
 Under the internal mailbox-writer gate, a successful new run also removes already-expired mailbox
@@ -237,6 +242,81 @@ The pinned Agent Framework API cannot universally inspect builder-installed or p
 decorators. Hidden stateful-compaction pipelines are unsupported but cannot be reliably rejected before
 side effects without an upstream public discovery hook; this implementation does not use reflection,
 type-name scanning, guessed session keys, or factory double invocation.
+
+Pressure retention is opt-in. `KeepAll` is the default and performs no proactive history eviction; backend or
+provider size limits can still reject a write. Select `Auto` and configure its positive serialized-state budget
+when bounded transcript storage is preferred:
+
+```csharp
+services.ConfigureDurableAgents(options =>
+{
+    options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+    options.MaxStateBytes = 1_048_576;
+    options.AddAIAgent(agent);
+});
+```
+
+`MaxStateBytes` is active only in `Auto`. The 85% high watermark starts a retention attempt, which removes the
+oldest eligible transcript groups toward the 70% low watermark. The measured payload is the complete JSON state
+produced by this extension, including terminal-result mailboxes, completion receipts, fixed history binding,
+opaque provider or agent continuation, TTL, ingestion and workflow bookkeeping, truncation evidence, media, and
+metadata. Durable Task backends can add envelope bytes outside this measurement.
+
+Selecting `Auto` configures retention policy only; it does not activate mailbox-aware schema 2 writes.
+When the internal rollout gate is enabled, existing legacy sessions are migrated only when the configured
+migration authorization confirms independently authoritative complete history. Otherwise the operation fails
+before model or provider side effects.
+
+Only `conversationHistory` transcript entries are eligible for pressure eviction. Mailbox result envelopes,
+completion receipts, fixed history binding, serialized continuation, TTL, and other execution controls are
+protected. Correlation IDs connect transcript request/response entries, and stable tool-call IDs connect calls
+with results even across entries or correlations. Duplicate non-empty tool IDs are conservatively connected;
+missing or empty IDs create no cross-entry edge. System-message groups and the newest transcript exchange are
+also protected.
+
+Schema 2 mailbox results remain authoritative after their transcript copies are removed, so duplicate execution
+and polling return the same retained result. Legacy state is converted to schema 2 before entity retention once
+history ownership can be resolved. Retention itself fails closed if legacy transcript terminals are still the
+only completion evidence.
+
+If all eligible transcript is removed and the protected floor still reaches the high watermark,
+`DurableAgentStateSizeLimitExceededException` fails the operation without committing the working state. Auto
+does not expire mailbox payloads; delivery expiry is a separate mailbox policy. Large inline image and
+tool-result offload is not part of this implementation.
+
+Retention is separate from model-context compaction: retention destructively removes durable history only under
+storage pressure, while compaction changes the context supplied to the model. `Auto` is not
+`FollowCompaction`, and stateful compaction remains unsupported.
+
+### Retention metrics
+
+The package emits automatic-retention metrics through the
+`Microsoft.Agents.AI.DurableTask` meter, with the package assembly version as its instrumentation scope version.
+Applications can subscribe by using the public `DurableAgentTelemetry.MeterName` constant. The OpenTelemetry SDK
+and exporter remain application choices; the product package depends only on `System.Diagnostics.Metrics`.
+
+| Instrument | Type | Unit | Tags | Meaning |
+| --- | --- | --- | --- | --- |
+| `durable.agent.history.evicted.entries` | Counter | `{entry}` | `agent.name`, `reason` | Transcript entries removed, including entries that contain no messages. |
+| `durable.agent.history.evicted.messages` | Counter | `{message}` | `agent.name`, `reason` | Transcript messages removed. |
+| `durable.agent.history.reclaimed.bytes` | Counter | `By` | `agent.name`, `reason` | Positive net serialized state bytes reclaimed by transcript eviction. |
+| `durable.agent.history.state.size.before` | Histogram | `By` | `agent.name`, `outcome` | Exact serialized state size when an `Auto` check reaches the high watermark. |
+| `durable.agent.history.state.size.after` | Histogram | `By` | `agent.name`, `outcome` | Exact serialized state size after that pressure-retention attempt. |
+| `durable.agent.history.retention.operations` | Counter | `{operation}` | `agent.name`, `outcome` | Automatic retention checks by final outcome. |
+
+The bounded `outcome` values are `no_action`, `transcript_evicted`, and
+`protected_state_capacity_failure`; the bounded `reason` value is `transcript_pressure`.
+Removing a zero-message entry increments the entry counter without incrementing the message counter, and
+reclaimed bytes are emitted only for a positive net reduction so truncation metadata never creates a negative
+measurement. `KeepAll` emits no retention metrics. Session IDs, correlation IDs, message IDs, content,
+exception text, and provider paths are never tags.
+
+These are **attempt-level operational metrics**, not durable-state truth. Retention is evaluated before the
+entity operation commits, so a later scheduling, persistence, or retry failure can leave measurements for state
+that was not committed; retries can also record an attempt more than once. Exporters can buffer or drop
+telemetry. Reload persisted state and inspect model input or mailbox outcomes when validating committed behavior;
+do not rely on emitted counters alone or exact-once metric delivery. A metric observation is never evidence that
+the corresponding retained state committed.
 
 ## Feedback & Contributing
 

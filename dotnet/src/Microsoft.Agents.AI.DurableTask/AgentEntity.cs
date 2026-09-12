@@ -70,7 +70,7 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
 
     protected override DurableAgentState InitializeState(TaskEntityOperation entityOperation)
     {
-        return this._options.EnableMailboxWrites &&
+        return this.MailboxWritesEnabled &&
             entityOperation.Name is nameof(Run) or nameof(RunAgentAsync)
             ? new DurableAgentState
             {
@@ -135,16 +135,33 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             // without comparing request content, so callers must not reuse it for another request.
             // Surface failures before optional migration so failed delivery never writes state.
             AgentResponse committedResponse = existingOutcome.GetResponse(correlationId);
-            if (this._options.EnableMailboxWrites &&
+            bool legacyMailboxMigrationRequested =
+                this.MailboxWritesEnabled &&
+                this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion;
+            bool migrationAuthorized =
+                legacyMailboxMigrationRequested &&
+                this._options.AuthorizeLegacyMigration?.Invoke(this.State) == true;
+            if (this._options.HistoryRetentionMode == DurableAgentHistoryRetentionMode.Auto &&
                 this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
-                this._options.AuthorizeLegacyMigration?.Invoke(this.State) == true &&
+                !migrationAuthorized)
+            {
+                throw new DurableAgentStateCorruptionException(
+                    "Automatic history retention requires schema 2 mailbox state. Legacy terminal transcript " +
+                    "entries must be converted from independently authoritative complete history before delivery.");
+            }
+
+            if (legacyMailboxMigrationRequested &&
+                migrationAuthorized &&
                 existingOutcome.Kind != DurableAgentRunOutcomeKind.CompletedResultUnavailable)
             {
                 // Legacy evidence is converted without constructing or invoking the agent.
                 DurableAgentState migrated = DurableAgentStateOutcomeResolver.PrepareRevisedWorkingState(
                     this.State, hasAuthoritativeLegacyHistory: true);
-                ValidateForCommit(migrated);
-                this.State = migrated;
+                this.ApplyRetentionAndCommit(
+                    migrated,
+                    sessionId,
+                    logger,
+                    deletionCheckExpiration: null);
             }
 
             return committedResponse;
@@ -157,12 +174,12 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
                 nameof(request));
         }
 
-        if (this._options.EnableMailboxWrites)
+        if (this.MailboxWritesEnabled)
         {
             DurableAgentStateContract.ValidateIdentifier(correlationId, "correlationId");
         }
 
-        if (!this._options.EnableMailboxWrites &&
+        if (!this.MailboxWritesEnabled &&
             this.State.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
         {
             throw new InvalidOperationException("New mailbox requests require EnableMailboxWrites to be enabled.");
@@ -171,13 +188,22 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
         this._cancellationToken.ThrowIfCancellationRequested();
         // TaskEntity hydrates State with the backend-owned object. Mutate an independent copy so
         // an exception leaves the hydrated state unchanged.
-        bool migrateLegacy = this._options.EnableMailboxWrites &&
+        bool migrateLegacy = this.MailboxWritesEnabled &&
             this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
             this._options.AuthorizeLegacyMigration?.Invoke(this.State) == true;
+        if (this._options.HistoryRetentionMode == DurableAgentHistoryRetentionMode.Auto &&
+            this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
+            !migrateLegacy)
+        {
+            throw new DurableAgentStateCorruptionException(
+                "Automatic history retention requires schema 2 mailbox state. Legacy terminal transcript " +
+                "entries must be converted from independently authoritative complete history before execution.");
+        }
+
         DurableAgentState workingState = migrateLegacy
             ? DurableAgentStateOutcomeResolver.PrepareRevisedWorkingState(this.State, hasAuthoritativeLegacyHistory: true)
             : this.State.Clone();
-        if (this._options.EnableMailboxWrites &&
+        if (this.MailboxWritesEnabled &&
             workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
         {
             workingState.MailboxWritesAuthorized = true;
@@ -502,10 +528,13 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
                     response.Usage?.TotalTokenCount);
             }
 
-            DateTime? deletionCheckExpiration = this.UpdateExpiration(workingState, sessionId, logger);
-            this._cancellationToken.ThrowIfCancellationRequested();
-            this.CommitWorkingState(workingState, sessionId, logger, deletionCheckExpiration);
-
+            DateTime? deletionCheckExpiration =
+                this.UpdateExpiration(workingState, sessionId, logger);
+            this.ApplyRetentionAndCommit(
+                workingState,
+                sessionId,
+                logger,
+                deletionCheckExpiration);
             return response;
         }
         catch (InvalidOperationException exception) when (
@@ -578,7 +607,7 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             DurableAgentState workingState = DurableAgentStateJsonConverter.DeserializeRevisedContract(
                 DurableAgentStateJsonConverter.SerializeRevisedContract(this.State));
             workingState.MailboxWritesAuthorized = true;
-            this.CommitWorkingState(workingState, sessionId, logger, deletionCheckExpiration: null,
+            this.ApplyRetentionAndCommit(workingState, sessionId, logger, deletionCheckExpiration: null,
                 previousResultCheckTime: scheduledCheck?.ScheduledTime);
         }
         catch (Exception exception)
@@ -627,10 +656,37 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             if (expirationTime.HasValue)
             {
                 logger.LogTTLExpirationTimeCleared(sessionId);
-                DurableAgentState workingState = this.State.Clone();
+                bool migrateLegacy =
+                    this.MailboxWritesEnabled &&
+                    this._options.HistoryRetentionMode == DurableAgentHistoryRetentionMode.Auto &&
+                    this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
+                    this._options.AuthorizeLegacyMigration?.Invoke(this.State) == true;
+                if (this._options.HistoryRetentionMode == DurableAgentHistoryRetentionMode.Auto &&
+                    this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
+                    !migrateLegacy)
+                {
+                    throw new DurableAgentStateCorruptionException(
+                        "Automatic history retention requires schema 2 mailbox state. Legacy terminal transcript " +
+                        "entries must be converted from independently authoritative complete history before TTL mutation.");
+                }
+
+                DurableAgentState workingState = migrateLegacy
+                    ? DurableAgentStateOutcomeResolver.PrepareRevisedWorkingState(
+                        this.State,
+                        hasAuthoritativeLegacyHistory: true)
+                    : this.State.Clone();
+                if (this.MailboxWritesEnabled &&
+                    workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
+                {
+                    workingState.MailboxWritesAuthorized = true;
+                }
+
                 workingState.Data.ExpirationTimeUtc = null;
-                ValidateForCommit(workingState);
-                this.State = workingState;
+                this.ApplyRetentionAndCommit(
+                    workingState,
+                    sessionId,
+                    logger,
+                    deletionCheckExpiration: null);
             }
 
             return;
@@ -672,6 +728,9 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             state.ExtensionData is null &&
             state.UnknownProperties is null;
     }
+
+    private bool MailboxWritesEnabled =>
+        this._options.EnableMailboxWrites;
 
     private static bool IsPostResponseServiceHistoryFailure(
         InvalidOperationException exception,
@@ -838,7 +897,7 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
                 : null;
     }
 
-    private void CommitWorkingState(
+    private void ApplyRetentionAndCommit(
         DurableAgentState workingState,
         AgentSessionId sessionId,
         ILogger logger,
@@ -897,8 +956,17 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             workingState = AgentEntityResultExpirySchedule.Write(workingState, entityId, schedule, pending);
         }
 
+        _ = DurableAgentStateRetention.Enforce(
+            workingState,
+            this._options.HistoryRetentionMode,
+            this._options.MaxStateBytes,
+            currentTime,
+            logger,
+            sessionId);
+
         this._cancellationToken.ThrowIfCancellationRequested();
         ValidateForCommit(workingState);
+
         if (deletionCheckExpiration.HasValue)
         {
             // Pass the working-copy value explicitly: this.State still refers to the original state
