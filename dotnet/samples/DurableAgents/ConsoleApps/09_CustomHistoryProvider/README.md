@@ -17,9 +17,12 @@ stored by a custom JSON-file `ChatHistoryProvider`.
 - Growing external history beyond 1 MiB with many simulated 4 KiB records.
 - Projecting only the newest 12 records, capped at 32 KiB of UTF-8 text, into model history.
 
-The sample does not send one message larger than 1 MiB. A single oversized request or tool result
-can exceed the Durable Task Scheduler message boundary before the provider can process it. The
-seeded records represent ordinary conversation accumulated over time.
+The sample limits the user-provided marker to 1,024 UTF-8 bytes before it creates a durable session
+or sends a request. The 1 KiB marker limit is intentionally smaller than each simulated 4 KiB
+history record and leaves conservative space for prompt and serialization overhead, so the sample
+does not send one message larger than 1 MiB. A single oversized request or tool result can exceed
+the Durable Task Scheduler message boundary before the provider can process it. The seeded records
+represent ordinary conversation accumulated over time.
 
 The durable entity retains execution/delivery records, the fixed provider binding, and the opaque
 provider continuation/reference. It does not keep a second external-owned request/response transcript
@@ -63,12 +66,13 @@ draft-gate message and exits before performing those operations.
 dotnet test --project tests/09_CustomHistoryProvider.Tests.csproj
 ```
 
-The sample-local tests cover the stable logical key, external storage above 1 MiB, bounded
-model-history projection, provider-reference restoration, framework-filtered persistence, unsupported
-content failure, and cancellation without requiring Foundry or DTS. The durable runtime registration
-tests exercise the configured keyed proxy across a cold host restart, verify schema 2 mailbox and
-completion state without a transcript mirror through the internal test hook, and verify a missing
-mailbox activation fails before provider or model callbacks. Additional durable runtime tests
+The sample-local tests cover marker validation at the 1,024-byte boundary (including oversized
+ASCII and multibyte input), the stable logical key, external storage above 1 MiB, bounded model-history
+projection, provider-reference restoration, framework-filtered persistence, unsupported content
+failure, and cancellation without requiring Foundry or DTS. The durable runtime registration tests
+exercise the configured keyed proxy across a cold host restart, verify schema 2 mailbox and completion
+state without a transcript mirror through the internal test hook, and verify a missing mailbox
+activation fails before provider or model callbacks. Additional durable runtime tests
 `AgentEntityHistoryTests.RecreatedExternalProviderWithSameLogicalKeyContinuesWithoutTranscriptMirrorAsync`,
 `AgentEntityHistoryTests.ChangedExternalProviderKeyRejectsBeforeProviderOrModelCallbacksAsync`,
 `AgentEntityHistoryTests.CustomProviderOwnsTranscriptAndEntityStoresOnlyMailboxAndContinuationAsync`,
