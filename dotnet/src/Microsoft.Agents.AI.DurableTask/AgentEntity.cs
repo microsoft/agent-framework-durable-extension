@@ -11,7 +11,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Agents.AI.DurableTask;
 
-internal class AgentEntity(IServiceProvider services, CancellationToken cancellationToken = default) : TaskEntity<DurableAgentState>
+internal class AgentEntity(IServiceProvider services, CancellationToken cancellationToken = default) : TaskEntity<DurableAgentState>, ITaskEntity
 {
     private static readonly TimeSpan s_minimumResultExpirationSignalDelay = TimeSpan.FromMinutes(1);
     private readonly IServiceProvider _services = services;
@@ -25,6 +25,42 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
     private readonly CancellationToken _cancellationToken = cancellationToken != default
         ? cancellationToken
         : services.GetService<IHostApplicationLifetime>()?.ApplicationStopping ?? CancellationToken.None;
+
+    ValueTask<object?> ITaskEntity.RunAsync(TaskEntityOperation operation)
+    {
+        if (string.Equals(operation.Name, nameof(CheckAndExpireResults), StringComparison.OrdinalIgnoreCase) &&
+            operation.HasInput)
+        {
+            this._cancellationToken.ThrowIfCancellationRequested();
+            AgentEntityResultExpirationCheck? check =
+                (AgentEntityResultExpirationCheck?)operation.GetInput(typeof(AgentEntityResultExpirationCheck));
+            // TaskEntity writes State back on every successful dispatch. Bypass it for stale
+            // signals so a duplicate cannot even rewrite state or initialize a missing entity.
+            DurableAgentState? state = (DurableAgentState?)operation.State.GetState(typeof(DurableAgentState));
+            if (state is null)
+            {
+                return new ValueTask<object?>((object?)null);
+            }
+
+            _ = DurableAgentStateSchemaVersion.ParseSupported(state.SchemaVersion);
+            if (state.SchemaVersion != DurableAgentState.RevisedSchemaVersion)
+            {
+                // Preserve legacy validation without dispatching a successful void operation,
+                // which would call the SDK state setter even though cleanup has no work to do.
+                ValidateForCommit(state);
+                return new ValueTask<object?>((object?)null);
+            }
+
+            AgentEntityResultExpirySchedule? schedule =
+                AgentEntityResultExpirySchedule.Read(state, operation.Context.Id.ToString());
+            if (schedule?.Pending is null || schedule.Pending != check)
+            {
+                return new ValueTask<object?>((object?)null);
+            }
+        }
+
+        return this.RunAsync(operation);
+    }
 
     protected override DurableAgentState InitializeState(TaskEntityOperation entityOperation)
     {
@@ -138,6 +174,8 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
         {
             workingState.MailboxWritesAuthorized = true;
+            // A future/invalid runtime profile cannot be silently replaced after invoking the model.
+            _ = AgentEntityResultExpirySchedule.Read(workingState, this.Context.Id.ToString());
         }
 
         workingState.Data.ConversationHistory.Add(
@@ -311,6 +349,14 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
                 return;
             }
 
+            AgentEntityResultExpirySchedule? schedule =
+                AgentEntityResultExpirySchedule.Read(this.State, this.Context.Id.ToString());
+            if (scheduledCheck is not null && (schedule?.Pending is null || schedule.Pending != scheduledCheck))
+            {
+                // Includes old timestamp-only signals, duplicate deliveries and deleted generations.
+                return;
+            }
+
             if (!this._options.EnableMailboxWrites)
             {
                 throw new InvalidOperationException("Result expiration requires EnableMailboxWrites to be enabled.");
@@ -477,8 +523,11 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
     {
         DateTimeOffset currentTime = this._timeProvider.GetUtcNow();
         DateTimeOffset? nextResultExpiration = null;
+        AgentEntityResultExpirationCheck? nextSignal = null;
         if (workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
         {
+            string entityId = this.Context.Id.ToString();
+            AgentEntityResultExpirySchedule? schedule = AgentEntityResultExpirySchedule.Read(workingState, entityId);
             foreach (DurableAgentStateTerminalResult result in workingState.Data.TerminalResults!.Values.ToArray())
             {
                 if (result.ResultExpiresAt is DateTimeOffset expiresAt)
@@ -494,6 +543,34 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
                     }
                 }
             }
+
+            AgentEntityResultExpirationCheck? pending = schedule?.Pending;
+            // Consuming a matching signal rotates its token even if the clock has moved backwards.
+            // An explicit recovery or successful new run also replaces an overdue/stuck schedule.
+            if (previousResultCheckTime.HasValue || pending?.ScheduledTime <= currentTime)
+            {
+                pending = null;
+            }
+
+            if (nextResultExpiration is DateTimeOffset resultExpiration)
+            {
+                DateTimeOffset schedulingBase = previousResultCheckTime > currentTime
+                    ? previousResultCheckTime.Value
+                    : currentTime;
+                DateTimeOffset minimumScheduledTime = schedulingBase.Add(s_minimumResultExpirationSignalDelay);
+                DateTimeOffset scheduledTime = resultExpiration > minimumScheduledTime ? resultExpiration : minimumScheduledTime;
+                if (pending is null || pending.ScheduledTime > scheduledTime)
+                {
+                    pending = nextSignal = new AgentEntityResultExpirationCheck(
+                        scheduledTime.ToUniversalTime(), Guid.NewGuid().ToString("N"), entityId);
+                }
+            }
+            else
+            {
+                pending = null;
+            }
+
+            workingState = AgentEntityResultExpirySchedule.Write(workingState, entityId, schedule, pending);
         }
 
         this._cancellationToken.ThrowIfCancellationRequested();
@@ -504,20 +581,13 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             this.ScheduleDeletionCheck(sessionId, logger, deletionCheckExpiration.Value);
         }
 
-        if (nextResultExpiration is DateTimeOffset resultExpiration)
+        if (nextSignal is not null)
         {
-            // A delayed/early signal and a backward-moving worker clock must not repeatedly
-            // schedule the same timestamp. The prior schedule is a lower bound, never expiry authority.
-            DateTimeOffset schedulingBase = previousResultCheckTime > currentTime
-                ? previousResultCheckTime.Value
-                : currentTime;
-            DateTimeOffset minimumScheduledTime = schedulingBase.Add(s_minimumResultExpirationSignalDelay);
-            DateTimeOffset scheduledTime = resultExpiration > minimumScheduledTime ? resultExpiration : minimumScheduledTime;
             this.Context.SignalEntity(
                 this.Context.Id,
                 nameof(CheckAndExpireResults),
-                new AgentEntityResultExpirationCheck(scheduledTime),
-                options: new SignalEntityOptions { SignalTime = scheduledTime });
+                nextSignal,
+                options: new SignalEntityOptions { SignalTime = nextSignal.ScheduledTime });
         }
 
         this._cancellationToken.ThrowIfCancellationRequested();
@@ -553,4 +623,4 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
 
 internal sealed record AgentEntityDeletionCheck(DateTime ExpectedExpirationTimeUtc);
 
-internal sealed record AgentEntityResultExpirationCheck(DateTimeOffset ScheduledTime);
+internal sealed record AgentEntityResultExpirationCheck(DateTimeOffset ScheduledTime, string? Token = null, string? EntityId = null);
