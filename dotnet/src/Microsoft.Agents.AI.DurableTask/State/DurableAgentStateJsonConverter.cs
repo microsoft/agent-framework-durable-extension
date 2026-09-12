@@ -93,6 +93,7 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         else
         {
             RejectLegacyRevisedFields(dataElement);
+            ValidateLegacyTranscript(dataElement);
         }
 
         DurableAgentStateData? data = dataElement.Deserialize(
@@ -225,13 +226,6 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
 
         ValidateUniqueObjectKeys(dataElement.GetProperty("terminalResults"), "terminalResults");
         ValidateUniqueObjectKeys(dataElement.GetProperty("completionReceipts"), "completionReceipts");
-        if (dataElement.TryGetProperty("historyBinding", out JsonElement historyBinding) &&
-            historyBinding.ValueKind != JsonValueKind.Object)
-        {
-            throw new JsonException(
-                "The revised durable agent state 'data.historyBinding' property must be an object when present.");
-        }
-
         ValidateIngestionAndTruncation(dataElement);
         ValidateTranscript(dataElement.GetProperty("conversationHistory"));
         ValidateTerminalMessages(dataElement.GetProperty("terminalResults"));
@@ -270,6 +264,112 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         }
 
         ValidateIngestionAndTruncation(dataElement);
+    }
+
+    private static void ValidateLegacyTranscript(JsonElement dataElement)
+    {
+        if (!dataElement.TryGetProperty("conversationHistory", out JsonElement history))
+        {
+            return;
+        }
+
+        if (history.ValueKind != JsonValueKind.Array)
+        {
+            throw new JsonException(
+                "The legacy durable agent state 'data.conversationHistory' property must be an array.");
+        }
+
+        foreach (JsonElement entry in history.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidOperationException(
+                    "Legacy durable agent conversation history cannot contain non-object entries.");
+            }
+
+            if (!entry.TryGetProperty("messages", out JsonElement messages))
+            {
+                continue;
+            }
+
+            if (messages.ValueKind != JsonValueKind.Array)
+            {
+                throw new InvalidOperationException(
+                    "Legacy durable agent entry messages must be an array when present.");
+            }
+
+            foreach (JsonElement message in messages.EnumerateArray())
+            {
+                if (message.ValueKind != JsonValueKind.Object)
+                {
+                    throw new InvalidOperationException(
+                        "Legacy durable agent entry messages cannot contain non-object values.");
+                }
+
+                string? roleText =
+                    message.TryGetProperty("role", out JsonElement role) &&
+                    role.ValueKind == JsonValueKind.String
+                        ? role.GetString()
+                        : null;
+                if (roleText is not ("user" or "assistant" or "system" or "tool"))
+                {
+                    throw new InvalidOperationException(
+                        $"The legacy durable agent state message role '{roleText}' is not supported.");
+                }
+
+                if (!message.TryGetProperty("contents", out JsonElement contents))
+                {
+                    continue;
+                }
+
+                if (contents.ValueKind != JsonValueKind.Array)
+                {
+                    throw new InvalidOperationException(
+                        "Legacy durable agent message contents must be an array when present.");
+                }
+
+                foreach (JsonElement content in contents.EnumerateArray())
+                {
+                    if (content.ValueKind != JsonValueKind.Object ||
+                        !content.TryGetProperty("$type", out JsonElement contentType) ||
+                        contentType.ValueKind != JsonValueKind.String)
+                    {
+                        throw new InvalidOperationException(
+                            "Legacy durable agent message contents require object values with string discriminators.");
+                    }
+
+                    if (contentType.ValueEquals("functionCall") &&
+                        content.TryGetProperty("arguments", out JsonElement arguments) &&
+                        arguments.ValueKind != JsonValueKind.Object)
+                    {
+                        throw new InvalidOperationException(
+                            "Legacy durable agent function-call arguments must be an object when present.");
+                    }
+
+                    if (contentType.ValueEquals("uri") &&
+                        (!content.TryGetProperty("mediaType", out JsonElement mediaType) ||
+                         mediaType.ValueKind != JsonValueKind.String))
+                    {
+                        throw new InvalidOperationException(
+                            "Legacy durable agent URI content requires a string mediaType.");
+                    }
+
+                    if (contentType.ValueEquals("usage") &&
+                        content.TryGetProperty("usage", out JsonElement contentUsage))
+                    {
+                        if (contentUsage.ValueKind != JsonValueKind.Object)
+                        {
+                            throw new InvalidOperationException(
+                                "Legacy durable agent usage content requires an object-valued usage property.");
+                        }
+
+                        ValidateUsageObject(contentUsage, "message.contents.usage");
+                    }
+
+                    ValidateKnownContentFields(content, contentType.GetString()!);
+                }
+            }
+        }
     }
 
     private static void ValidateIngestionAndTruncation(JsonElement dataElement)
@@ -716,6 +816,11 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
                 throw new InvalidOperationException(
                     $"Durable agent {location} contains a non-object message.");
             }
+
+            RequireStringWhenPresent(message, "authorName", $"{location}.authorName");
+            RequireDateTimeWhenPresent(message, "createdAt", $"{location}.createdAt");
+            RequireStringWhenPresent(message, "messageId", $"{location}.messageId");
+            RequireObjectWhenPresent(message, ExtensionDataPropertyName, $"{location}.extensionData");
 
             if (!message.TryGetProperty("contents", out JsonElement contents))
             {

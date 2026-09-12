@@ -15,7 +15,6 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 [JsonSerializable(typeof(DurableAgentStateCompaction))]
 [JsonSerializable(typeof(DurableAgentStateMessage))]
 [JsonSerializable(typeof(DurableAgentStateTruncation))]
-[JsonSerializable(typeof(DurableAgentStateHistoryBinding))]
 [JsonSerializable(typeof(DurableAgentStateCompletionReceipt))]
 [JsonSerializable(typeof(DurableAgentStateTerminalResult))]
 [JsonSerializable(typeof(DurableAgentStateTerminalResponse))]

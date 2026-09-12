@@ -9,6 +9,19 @@ namespace Microsoft.Agents.AI.DurableTask.Tests.Unit.State;
 public sealed class DurableAgentStateMessageTests
 {
     [Fact]
+    public void ProductionMappingRejectsV2OnlyDeveloperRole()
+    {
+        ChatMessage message = new(new ChatRole("developer"), "instruction");
+
+        Assert.Throws<InvalidOperationException>(
+            () => DurableAgentStateMessage.FromChatMessage(message));
+
+        DurableAgentStateMessage revised =
+            DurableAgentStateMessage.FromTerminalChatMessage(message);
+        Assert.Equal("developer", revised.Role);
+    }
+
+    [Fact]
     public void MessageSerializationDeserialization()
     {
         // Arrange

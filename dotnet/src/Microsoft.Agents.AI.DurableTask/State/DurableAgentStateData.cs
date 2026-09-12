@@ -32,15 +32,23 @@ internal sealed class DurableAgentStateData
     public IDictionary<string, DurableAgentStateCompletionReceipt>? CompletionReceipts { get; init; }
 
     /// <summary>
-    /// Gets an optional, provisional descriptor for the configured history facility.
+    /// Gets an optional, separately versioned runtime history profile.
     /// </summary>
     /// <remarks>
-    /// This shared DTO does not establish effective per-run ownership or prohibit ownership transitions.
-    /// A C# hosting profile may apply stricter policy in a later layer.
+    /// The shared contract treats this object as opaque. This layer preserves its complete JSON shape
+    /// without interpreting owner fields, inferring defaults, or constraining per-run ownership transitions.
+    /// A relying C# profile may apply stricter validation in a later layer.
     /// </remarks>
     [JsonPropertyName("historyBinding")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public DurableAgentStateHistoryBinding? HistoryBinding { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public JsonElement HistoryBinding
+    {
+        get;
+        init
+        {
+            field = value.ValueKind == JsonValueKind.Undefined ? default : value.Clone();
+        }
+    }
 
     /// <summary>
     /// Gets or sets the opaque state produced by the configured agent's session serialization contract.
@@ -164,7 +172,6 @@ internal sealed class DurableAgentStateData
                     "A revised durable agent state requires terminal results and completion receipts.");
             }
 
-            this.HistoryBinding?.Validate();
             Dictionary<string, DurableAgentStateTerminalResult> terminalResults =
                 this.TerminalResults.ToDictionary(
                     pair => pair.Key,
@@ -221,7 +228,7 @@ internal sealed class DurableAgentStateData
         }
         else if (this.TerminalResults is not null ||
                  this.CompletionReceipts is not null ||
-                 this.HistoryBinding is not null)
+                 this.HistoryBinding.ValueKind != JsonValueKind.Undefined)
         {
             throw new InvalidOperationException(
                 "Mailbox and provisional history-binding fields require durable agent state schema version 2.0.0.");
