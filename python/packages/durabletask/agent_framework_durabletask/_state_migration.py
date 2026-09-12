@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
+from ._constants import DurableStateFields
 from ._durable_agent_state import (
     DurableAgentState,
     DurableAgentStateRequest,
@@ -213,6 +214,7 @@ def migrate_legacy_state(
     delivery_window_seconds: int,
     max_state_bytes: int | None = None,
     delivery_evidence: dict[str, Any] | None = None,
+    require_known_outcomes: bool = False,
     now: datetime | None = None,
 ) -> DurableAgentState:
     """Stage a detached legacy migration for an explicit entity migrate operation.
@@ -251,6 +253,8 @@ def migrate_legacy_state(
         delivery_evidence: Exactly sourceDigest, nonblank evidenceId, complete=True and
             messages, a list of complete canonical Message.to_dict() inputs. Unsupported
             or lossy canonical inputs and duplicate ID/fingerprint pairs are rejected.
+        require_known_outcomes: Reject imports with unknown invocation outcomes instead
+            of using legacy-compatible receipts. Neither mode discards completion evidence.
         now: Offset-aware timestamp for this staging call, defaulting to UTC now.
 
     Returns:
@@ -264,6 +268,8 @@ def migrate_legacy_state(
     _nonblank(migration_id, "migration_id")
     _nonblank(ownership_transfer_id, "ownership_transfer_id")
     _positive_int(delivery_window_seconds, "delivery_window_seconds")
+    if not isinstance(require_known_outcomes, bool):
+        raise ValueError("require_known_outcomes must be a boolean.")
     if max_state_bytes is not None:
         _positive_int(max_state_bytes, "max_state_bytes")
     if not isinstance(source_digest, str) or _SHA256.fullmatch(source_digest) is None:
@@ -304,10 +310,16 @@ def migrate_legacy_state(
 
     # A mailbox is itself a recorded response. Do not replace it from a transcript
     # or refresh its expiry, even if its matching completion receipt was absent.
-    for correlation_id in state.data.response_mailbox:
+    for correlation_id, mailbox in state.data.response_mailbox.items():
+        # An original mailbox establishes its completion time, unlike a legacy
+        # transcript's created_at. Backfill before marking new receipts as legacy.
         state.data.completed_correlations.setdefault(
-            correlation_id, {"completedAt": timestamp.isoformat(), "legacy": True}
+            correlation_id, {DurableStateFields.COMPLETED_AT: mailbox[DurableStateFields.CREATED_AT]}
         )
+    state._backfill_completion_outcomes(require_known=False)  # pyright: ignore[reportPrivateUsage]
+    for correlation_id in state.data.response_mailbox:
+        if correlation_id not in cast(dict[str, Any], raw_data).get(DurableStateFields.COMPLETED_CORRELATIONS, {}):
+            state.data.completed_correlations[correlation_id]["legacy"] = True
     for entry in state.data.conversation_history:
         if isinstance(entry, DurableAgentStateResponse) and entry.correlation_id is not None:
             correlation_id = _nonblank(entry.correlation_id, "Legacy response correlation ID")
@@ -320,6 +332,7 @@ def migrate_legacy_state(
                     legacy=True,
                 )
 
+    state._backfill_completion_outcomes(require_known=require_known_outcomes)  # pyright: ignore[reportPrivateUsage]
     state.schema_version = DurableAgentState.SCHEMA_VERSION
     state.data.unknown_fields["migration"] = {
         "id": migration_id,

@@ -11,7 +11,8 @@ pip install agent-framework-azurefunctions --pre
 Requires Python 3.10+ and `agent-framework-core>=1.13.0,<2`. The Durable Task dependency requires
 `pydantic>=2.11,<3`. Full unit runs passed on Python 3.13/core 1.16, Python 3.13/core 1.13 and
 Python 3.10/core 1.16. Pydantic 2.11 runtime validation remains blocked by dependency artifact
-downloads. Lock verification passed. See [prototype validation](../../samples/README.md#prototype-validation)
+downloads. The offline lock, lint, typing and both package builds passed for this follow-up.
+See [prototype validation](../../samples/README.md#prototype-validation)
 for recorded results and limitations.
 
 ## Version 2 deployment warning
@@ -19,6 +20,8 @@ for recorded results and limitations.
 The settings below describe the [PR #59 prototype](https://github.com/microsoft/agent-framework-durable-extension/pull/59),
 not an approved design or the contents of a published package. Design review belongs in
 [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88).
+The outcome, retention telemetry and validation follow-up builds on prototype baseline `9b4550d`.
+It does not establish shared-schema acceptance or a released package contract.
 After ADR approval, the agreed implementation will be submitted as stacked PRs rather than merged
 from this prototype as-is.
 
@@ -44,7 +47,8 @@ public `wrap_workflow_input` for new instances. It does not authorize input or m
 
 Both hosts expose privileged backend `AgentEntity.migrate`, supported by the pure
 `migrate_legacy_state` helper. The request requires `source`, `sourceDigest`, `sourceSessionId`,
-`destinationSessionId`, `migrationId` and `ownershipTransferId`, with optional `deliveryEvidence`.
+`destinationSessionId`, `migrationId` and `ownershipTransferId`, with optional `deliveryEvidence`
+and `requireKnownOutcomes`.
 Use an empty, separately addressed destination after quiescing and authorizing transfer from the
 old owner. Nonempty scalar `ingestedPositions` requires a complete accepted-message journal,
 including evicted inputs. `complete=True` is an operator assertion. Digest/max-position checks do
@@ -52,9 +56,15 @@ not prove authority/completeness or justify inferring a delivered prefix. Withou
 the old session on the old engine.
 
 Only recorded responses receive legacy completion backfill and a delivery grace window. Surviving
-payloads may be partial, not original full responses. Whole-request digest idempotency prevents grace
-refresh after an exact retry, cold reload or subsequent run. The original logical session ID is
-retained for external history. Migration does not copy that store or move workflow action histories.
+transcript payloads may be partial, so absence of error content does not prove success. Existing
+original mailbox records keep their payload and expiry. A missing matching receipt gets its
+`completedAt` from the mailbox's `createdAt`, not migration time. `requireKnownOutcomes=True` on
+the entity request, or `require_known_outcomes=True` on the helper, rejects imports without
+trustworthy known outcomes. The default legacy-compatible path preserves unknown completion
+evidence and duplicate suppression rather than inventing an outcome or rerunning completed work.
+Whole-request digest idempotency prevents grace refresh after an exact retry, cold reload or
+subsequent run. The original logical session ID is retained for external history. Migration does
+not copy that store or move workflow action histories.
 No generated HTTP/MCP migration endpoint is provided. These are prototype constraints, not an agreed
 cross-runtime migration contract. See [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88)
 for the design discussion and [prototype validation](../../samples/README.md#prototype-validation)
@@ -105,6 +115,8 @@ Eager pruning and pressure eviction are independent. The matrix assumes no expli
   so `"backend_limit"` is rejected at registration. Use an explicit positive integer to enable
   pressure eviction. A budget does not enable blob offload or raise a backend limit. `"auto"` is
   no longer a retention mode.
+- The direct Scheduler host's `"backend_limit"` remains a non-normative Python-only convenience,
+  not part of the portable `None` or positive-integer contract or an agreed shared API.
 - Watermarks default to `high_watermark=0.85` and `low_watermark=0.70`, with
   `0 < low_watermark < high_watermark <= 1`. The whole serialized entity counts, including mailbox,
   completion, session and ingestion state. Protected data can prevent a commit even after pruning.
@@ -139,7 +151,7 @@ output-designated agents use the same contract.
 
 Generated agent outputs and intermediate events use portable response snapshots. HTTP workflow
 results retain structured `value`, including null and falsey values, and response metadata.
-External clients do not need the worker's Pydantic class; worker-side conditions and activities
+External clients do not need the worker's Pydantic class. Worker-side conditions and activities
 still receive the locally declared model. Arbitrary activity outputs keep the existing checkpoint
 codec and its importable-type requirements. Parent designations also gate direct child outputs.
 
@@ -160,8 +172,19 @@ Its configured storage flags still apply.
 
 HTTP polling uses independent original response snapshots in `responseMailbox`, including
 serializable metadata and structured `value`. Transcript pruning or reset cannot change those
-results. Expiry leaves `completedCorrelations` receipts and returns an already-completed status with
-`response_expired`, never a reconstructed transcript response or another agent invocation.
+results. New `completedCorrelations` receipts retain `completedAt` and `outcome` (`succeeded` or
+`failed`) after payload expiry. Expired lookup returns `response_expired` with
+`durable_status="already_completed"` and `durable_outcome` set to `succeeded`, `failed` or `unknown`.
+Older timestamp-only receipts still suppress duplicates when the outcome is unknown. Cleanup can
+backfill known outcomes from independent original mailboxes before removing them, even after the
+delivery deadline. A possibly pruned legacy transcript without error content is not success evidence.
+
+For expired delivery, HTTP returns 410. JSON includes top-level `outcome` and
+`agent_response.additional_properties.durable_outcome`. Plain text carries `x-ms-durable-outcome`,
+and the MCP error includes the invocation outcome. These additions do not modify retained original
+response payloads or the standalone SDK API. Acceptance alone cannot create a new completion
+receipt. A fresh response with no known invocation outcome raises before either delivery map
+changes, while legacy-compatible receipts and fire-and-forget acceptance remain supported.
 
 Expiry is a logical deadline, not an idle timer. New runs, duplicates and reset remove expired
 payloads. Both hosts also expose backend `expire_responses` without model/tool/provider execution.
@@ -184,5 +207,17 @@ Uncommitted model/tool effects and external appends can repeat after failure. Co
 last until entity deletion and can exhaust capacity. A bounded receipt protocol and optional
 retry-safe external-history adapters remain deferred, with no mandatory core API changes or
 guarantee of a distributed transaction or exactly-once uncommitted effects.
+
+### Retention telemetry
+
+The shared runtime emits the [retention instruments and bounded attributes](../durabletask/README.md#retention-telemetry)
+under scope `agent_framework.durabletask`. Only the OpenTelemetry API is a direct runtime dependency
+for this instrumentation. The SDK remains a development dependency, with application-owned meter
+providers and exporters. Metrics contain no payloads or session, request or message IDs.
+
+Removal counts describe staged changes, not confirmed deletion. Host `set_state` returns and
+failures both leave commit status `unknown`. Separate persisted-state readback and subsequent model
+input are needed to validate retention. Telemetry does not change warm-state rollback or protect
+uncommitted external effects from repetition.
 
 For more details, review the Python [README](https://github.com/microsoft/agent-framework/tree/main/python/README.md) and the samples directory.

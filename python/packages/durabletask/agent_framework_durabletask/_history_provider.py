@@ -47,6 +47,7 @@ from ._durable_agent_state import (
     DurableAgentStateUsage,
 )
 from ._response_utils import is_terminal_agent_response
+from ._retention_telemetry import eager_state_size, record_retention
 
 if TYPE_CHECKING:
     from ._entities import AgentEntityStateProviderMixin
@@ -721,10 +722,21 @@ class DurableHistoryProvider(HistoryProvider):
             if id(entry) not in protected and stored.role != "system" and id(stored) not in protected_messages
         ]
         before = sum(len(entry.messages) for entry in history)
+        before_entries = len(history)
+        before_bytes = eager_state_size(state) if eligible else None
         prune_messages(history, eligible)
         removed = before - sum(len(entry.messages) for entry in history)
         if removed:
             record_truncation(state, removed)
+        record_retention(
+            state,
+            mechanism="eager",
+            outcome="staged" if removed else "protected",
+            before_bytes=before_bytes,
+            after_bytes=eager_state_size(state) if before_bytes is not None else None,
+            removed_messages=removed,
+            removed_entries=before_entries - len(history),
+        )
 
 
 def replayable_entries(

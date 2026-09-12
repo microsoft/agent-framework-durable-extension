@@ -108,10 +108,11 @@ def _task(
     return task
 
 
-def _assert_expired(response: AgentResponse[Any]) -> None:
+def _assert_expired(response: AgentResponse[Any], outcome: str = "succeeded") -> None:
     assert response.additional_properties == {
         "durable_status": "already_completed",
         "correlation_id": CORRELATION_ID,
+        "durable_outcome": outcome,
     }
     content = response.messages[0].contents[0]
     assert content.type == "error"
@@ -237,16 +238,20 @@ def test_client_retains_legacy_lookup_and_does_not_reparse_legacy_errors(
 
 @pytest.mark.parametrize("response_format", [None, Answer])
 @pytest.mark.parametrize("cleanup", [False, True])
+@pytest.mark.parametrize("failed", [False, True])
 def test_expired_client_delivery_is_terminal_on_the_first_read(
-    response_format: type[BaseModel] | None, cleanup: bool, sleep: Mock
+    response_format: type[BaseModel] | None, cleanup: bool, failed: bool, sleep: Mock
 ) -> None:
-    executor, client = _client(_mailbox_state(_response(value={"answer": 42}), expired=True, cleanup=cleanup))
+    original = _response(value={"answer": 42})
+    if failed:
+        original.additional_properties["durable_status"] = "error"
+    executor, client = _client(_mailbox_state(original, expired=True, cleanup=cleanup))
 
     result = executor.run_durable_agent(
         "consumer", RunRequest(message="question", correlation_id=CORRELATION_ID, response_format=response_format)
     )
 
-    _assert_expired(result)
+    _assert_expired(result, "failed" if failed else "succeeded")
     client.signal_entity.assert_called_once()
     client.get_entity.assert_called_once()
     sleep.assert_called_once_with(0.01)

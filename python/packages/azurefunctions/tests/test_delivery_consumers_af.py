@@ -92,7 +92,9 @@ def _runtime_error(*, include_text: bool = True) -> AgentResponse[Any]:
     return response
 
 
-def _mailbox_state(response: AgentResponse[Any], *, expired: bool = False, cleanup: bool = False) -> dict[str, Any]:
+def _mailbox_state(
+    response: AgentResponse[Any], *, expired: bool = False, cleanup: bool = False, legacy: bool = False
+) -> dict[str, Any]:
     state = DurableAgentState()
     state.data.conversation_history.append(DurableAgentStateResponse.from_run_response(CORRELATION_ID, response))
     state.record_response(
@@ -100,6 +102,7 @@ def _mailbox_state(response: AgentResponse[Any], *, expired: bool = False, clean
         response,
         delivery_window_seconds=3600,
         now=HISTORICAL_TIME if expired else None,
+        legacy=legacy,
     )
     if not expired:
         state.data.conversation_history.clear()
@@ -255,10 +258,12 @@ async def test_http_keeps_legacy_transcript_lookup(version: str, http_handler: H
 
 @pytest.mark.parametrize("cleanup", [False, True])
 @pytest.mark.parametrize("plain_text", [False, True])
+@pytest.mark.parametrize("failed", [False, True])
 async def test_http_expired_delivery_returns_410_without_waiting_for_more_polls(
-    cleanup: bool, plain_text: bool, http_handler: HttpHandler, sleep: AsyncMock
+    cleanup: bool, plain_text: bool, failed: bool, http_handler: HttpHandler, sleep: AsyncMock
 ) -> None:
-    client = _client(_mailbox_state(_response(value={"answer": 42}), expired=True, cleanup=cleanup))
+    original = _runtime_error() if failed else _response(value={"answer": 42})
+    client = _client(_mailbox_state(original, expired=True, cleanup=cleanup))
 
     response = await http_handler(_request(plain_text=plain_text), client)
 
@@ -267,6 +272,7 @@ async def test_http_expired_delivery_returns_410_without_waiting_for_more_polls(
         assert response.mimetype == MIMETYPE_TEXT_PLAIN
         assert response.get_body().decode() == EXPIRED_MESSAGE
         assert response.headers[SESSION_ID_HEADER] == SESSION_ID
+        assert response.headers["x-ms-durable-outcome"] == ("failed" if failed else "succeeded")
     else:
         payload = json.loads(response.get_body())
         assert payload["status"] == "already_completed"
@@ -274,9 +280,11 @@ async def test_http_expired_delivery_returns_410_without_waiting_for_more_polls(
         assert payload["error"] == EXPIRED_MESSAGE
         assert payload["response"] is None
         assert payload["message_count"] == 1
+        assert payload["outcome"] == ("failed" if failed else "succeeded")
         assert payload["agent_response"]["additional_properties"] == {
             "durable_status": "already_completed",
             "correlation_id": CORRELATION_ID,
+            "durable_outcome": "failed" if failed else "succeeded",
         }
         error = payload["agent_response"]["messages"][0]["contents"][0]
         assert error["error_code"] == "response_expired"
@@ -296,7 +304,9 @@ async def test_http_accepts_either_terminal_expiry_marker(
         ]
     else:
         original.additional_properties["durable_status"] = "already_completed"
-    client = _client(_mailbox_state(original))
+    # An older result can itself be unavailable. Revised writers require a known
+    # invocation outcome, but readers must keep suppressing that old completion.
+    client = _client(_mailbox_state(original, legacy=True))
 
     response = await http_handler(_request(), client)
 
@@ -415,10 +425,12 @@ async def test_mcp_raises_for_expired_and_failed_delivery(
     client = _client(_mailbox_state(_runtime_error(), expired=expired, cleanup=expired))
     expected = EXPIRED_MESSAGE if expired else "Model endpoint unavailable"
 
-    with pytest.raises(RuntimeError, match=expected):
+    with pytest.raises(RuntimeError, match=expected) as error:
         await app._handle_mcp_tool_invocation(
             AGENT_NAME, json.dumps({"arguments": {"query": "question", "sessionId": SESSION_ID}}), client
         )
+    if expired:
+        assert "Invocation outcome: failed." in str(error.value)
 
     client.signal_entity.assert_awaited_once()
     client.read_entity_state.assert_awaited_once()
@@ -494,6 +506,7 @@ def test_entity_factory_and_task_keep_expired_delivery_terminal(cleanup: bool) -
     assert task.result.additional_properties == {
         "durable_status": "already_completed",
         "correlation_id": CORRELATION_ID,
+        "durable_outcome": "succeeded",
     }
     assert task.result.messages[0].contents[0].error_code == "response_expired"
     assert task.result.messages[0].contents[0].message == EXPIRED_MESSAGE

@@ -49,7 +49,7 @@ from dateutil import parser as date_parser
 from ._constants import ContentTypes, DurableStateFields
 from ._message_identity import message_identity
 from ._models import RunRequest, serialize_response_format
-from ._response_utils import load_agent_response, serialize_agent_response
+from ._response_utils import invocation_outcome, load_agent_response, serialize_agent_response
 
 logger = logging.getLogger("agent_framework.durabletask")
 
@@ -68,6 +68,15 @@ def _validate_delivery_layout(data: dict[str, Any]) -> None:
             "This prototype requires responseMailbox/completedCorrelations semantics; "
             "a matching schemaVersion does not authorize interpreting another completion format."
         )
+
+
+def _validate_completion_outcomes(records: dict[str, dict[str, Any]]) -> None:
+    """Absent outcomes are old completion evidence, not permission to invent success."""
+    for record in records.values():
+        if not isinstance(record, dict):
+            raise ValueError("completedCorrelations must contain objects keyed by correlation ID.")
+        if DurableStateFields.OUTCOME in record and record[DurableStateFields.OUTCOME] not in ("succeeded", "failed"):
+            raise ValueError("completedCorrelations.outcome must be 'succeeded' or 'failed' when present.")
 
 
 def _validate_json(value: Any) -> None:
@@ -599,6 +608,7 @@ class DurableAgentStateData:
 
     def to_dict(self) -> dict[str, Any]:
         _validate_delivery_layout(self.unknown_fields)
+        _validate_completion_outcomes(self.completed_correlations)
         result: dict[str, Any] = {
             **deepcopy(self.unknown_fields),
             DurableStateFields.CONVERSATION_HISTORY: [entry.to_dict() for entry in self.conversation_history],
@@ -681,6 +691,7 @@ class DurableAgentStateData:
                     load_agent_response(response)
                 elif "legacy" in record and not isinstance(record["legacy"], bool):
                     raise ValueError("completedCorrelations.legacy must be a boolean.")
+            _validate_completion_outcomes(result.completed_correlations)
         if not isinstance(result.ingested_messages, dict) or any(
             values is not None and (not isinstance(values, list) or any(not isinstance(v, str) for v in values))
             for values in result.ingested_messages.values()
@@ -807,6 +818,7 @@ class DurableAgentState:
             Retained response, expired-response status, or None when no matching result exists.
         """
         _validate_delivery_layout(self.data.unknown_fields)
+        _validate_completion_outcomes(self.data.completed_correlations)
         if self.schema_version.startswith("2."):
             mailbox = self.data.response_mailbox.get(correlation_id)
             if mailbox is not None:
@@ -826,7 +838,11 @@ class DurableAgentState:
                             ],
                         )
                     ],
-                    additional_properties={"durable_status": "already_completed", "correlation_id": correlation_id},
+                    additional_properties={
+                        "durable_status": "already_completed",
+                        "correlation_id": correlation_id,
+                        "durable_outcome": self._completion_outcome(correlation_id) or "unknown",
+                    },
                 )
             return None
         for entry in self.data.conversation_history:
@@ -834,6 +850,28 @@ class DurableAgentState:
                 return DurableAgentStateResponse.to_run_response(entry)
 
         return None
+
+    def _completion_outcome(self, correlation_id: str) -> str | None:
+        """Read a receipt or its independent result, never a possibly altered transcript."""
+        receipt = self.data.completed_correlations.get(correlation_id, {})
+        if DurableStateFields.OUTCOME in receipt:
+            return receipt[DurableStateFields.OUTCOME]
+        mailbox = self.data.response_mailbox.get(correlation_id)
+        if mailbox is None:
+            return None
+        return invocation_outcome(
+            load_agent_response(mailbox[DurableStateFields.RESPONSE]), legacy=receipt.get("legacy", False)
+        )
+
+    def _backfill_completion_outcomes(self, *, require_known: bool = False) -> None:
+        """Enrich old receipts from retained evidence without changing time or availability."""
+        _validate_completion_outcomes(self.data.completed_correlations)
+        for correlation_id, receipt in self.data.completed_correlations.items():
+            outcome = self._completion_outcome(correlation_id)
+            if outcome is not None:
+                receipt.setdefault(DurableStateFields.OUTCOME, outcome)
+            elif require_known:
+                raise ValueError("A known completion outcome requires authoritative retained result evidence.")
 
     def record_response(
         self,
@@ -851,13 +889,17 @@ class DurableAgentState:
             response: Agent response to snapshot for delivery.
             delivery_window_seconds: Seconds after the recording timestamp when the snapshot expires.
             now: Offset-aware recording timestamp, defaulting to the current UTC time.
-            legacy: Whether the completion receipt represents a migrated legacy response.
+            legacy: Whether this is a possibly altered legacy transcript projection.
+                A retained failure proves failure, but missing error content cannot prove success.
         """
         if correlation_id in self.data.completed_correlations:
             return
         timestamp = now or datetime.now(timezone.utc)
         _parse_delivery_timestamp(timestamp.isoformat())
         payload = _json_snapshot(serialize_agent_response(response))
+        outcome = invocation_outcome(load_agent_response(payload), legacy=legacy)
+        if outcome is None and not legacy:
+            raise ValueError("A new completion requires a known invocation outcome, not an acknowledgement.")
         self.data.response_mailbox[correlation_id] = {
             DurableStateFields.RESPONSE: payload,
             DurableStateFields.CREATED_AT: timestamp.isoformat(),
@@ -865,19 +907,27 @@ class DurableAgentState:
         }
         self.data.completed_correlations[correlation_id] = {
             DurableStateFields.COMPLETED_AT: timestamp.isoformat(),
+            **({DurableStateFields.OUTCOME: outcome} if outcome is not None else {}),
             **({"legacy": True} if legacy else {}),
         }
 
     def expire_responses(self, *, now: datetime | None = None) -> None:
-        """Expire result payloads only; completion evidence lives until entity deletion.
+        """Expire payloads, preserving the original completion time and known outcome.
 
         Args:
             now: Offset-aware expiry-check timestamp, defaulting to the current UTC time.
         """
+        _validate_completion_outcomes(self.data.completed_correlations)
         timestamp = now or datetime.now(timezone.utc)
         for correlation_id, mailbox in list(self.data.response_mailbox.items()):
             expiry = _parse_delivery_timestamp(mailbox[DurableStateFields.EXPIRES_AT])
             if timestamp >= expiry:
+                # Older receipts may lack the outcome. Preserve what their independent
+                # result proves before deleting it, never infer from the transcript.
+                outcome = self._completion_outcome(correlation_id)
+                receipt = self.data.completed_correlations.get(correlation_id)
+                if receipt is not None and outcome is not None:
+                    receipt.setdefault(DurableStateFields.OUTCOME, outcome)
                 del self.data.response_mailbox[correlation_id]
 
     def prepare_for_write(self, *, delivery_window_seconds: int) -> None:
@@ -888,6 +938,7 @@ class DurableAgentState:
                 requires an explicit destination operation, including its grace policy.
         """
         _validate_delivery_layout(self.data.unknown_fields)
+        _validate_completion_outcomes(self.data.completed_correlations)
         if self.schema_version == self.SCHEMA_VERSION:
             return
         if re.fullmatch(r"1\.[0-9]+\.[0-9]+", self.schema_version) is None:

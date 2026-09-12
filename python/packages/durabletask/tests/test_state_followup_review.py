@@ -340,7 +340,11 @@ def test_migrated_text_only_failure_retains_http_terminal_classification(kind: s
         # HTTP polling branches on this predicate, even when there is no error Content.
         assert is_terminal_agent_response(response) is (kind == "errorResponse")
         assert response.additional_properties == ({"durable_status": "error"} if kind == "errorResponse" else {})
-    assert state.data.completed_correlations["done"] == {"completedAt": NOW.isoformat(), "legacy": True}
+    assert state.data.completed_correlations["done"] == {
+        "completedAt": NOW.isoformat(),
+        "legacy": True,
+        **({"outcome": "failed"} if kind == "errorResponse" else {}),
+    }
     assert state.to_dict()["data"]["conversationHistory"] == source["data"]["conversationHistory"]
     assert source == before
 

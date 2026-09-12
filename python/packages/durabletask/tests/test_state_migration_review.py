@@ -143,7 +143,11 @@ def test_only_recorded_response_kinds_backfill_completion(kind: str) -> None:
     assert ("done" in result.data.response_mailbox) is is_response
     assert result.to_dict()["data"]["conversationHistory"] == source["data"]["conversationHistory"]
     if is_response:
-        assert result.data.completed_correlations["done"] == {"completedAt": NOW.isoformat(), "legacy": True}
+        assert result.data.completed_correlations["done"] == {
+            "completedAt": NOW.isoformat(),
+            "legacy": True,
+            **({"outcome": "failed"} if kind == DurableAgentStateEntryJsonType.ERROR_RESPONSE else {}),
+        }
         mailbox = result.data.response_mailbox["done"]
         assert mailbox["createdAt"] == NOW.isoformat()
         assert mailbox["expiresAt"] == (NOW + timedelta(seconds=WINDOW)).isoformat()
@@ -192,7 +196,11 @@ def test_existing_mailbox_without_receipt_is_preserved_with_completion_backfill(
     source["data"]["responseMailbox"] = _existing_delivery()["responseMailbox"]
     result = _cold(_migrate(source))
     assert result.data.response_mailbox == source["data"]["responseMailbox"]
-    assert result.data.completed_correlations["done"] == {"completedAt": NOW.isoformat(), "legacy": True}
+    assert result.data.completed_correlations["done"] == {
+        "completedAt": OLD.isoformat(),
+        "legacy": True,
+        "outcome": "succeeded",
+    }
 
 
 def test_sparse_journal_preserves_exact_revisions_not_an_inferred_prefix_after_cold_reload() -> None:

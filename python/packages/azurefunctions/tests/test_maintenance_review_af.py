@@ -404,7 +404,11 @@ def test_af_expired_duplicate_removes_physical_mailbox_without_reexecution(
     host = Host(raw)
     result = host.invoke("run", {"message": "duplicate", "correlationId": correlation})
     assert result["type"] == "agent_response"
-    assert result["additional_properties"] == {"durable_status": "already_completed", "correlation_id": correlation}
+    assert result["additional_properties"] == {
+        "durable_status": "already_completed",
+        "correlation_id": correlation,
+        "durable_outcome": "failed" if correlation == "expired-error" else "succeeded",
+    }
     assert result["messages"][0]["contents"][0]["error_code"] == "response_expired"
     assert raw["data"]["responseMailbox"][correlation]["response"]["response_id"] == f"response-{correlation}"
     assert host.raw == _without_expired(raw) and host.writes == 1

@@ -176,7 +176,10 @@ def test_record_response_snapshots_core_metadata_and_reloads_real_response() -> 
         "createdAt": now.isoformat(),
         "expiresAt": (now + timedelta(seconds=DELIVERY_WINDOW_SECONDS)).isoformat(),
     }
-    assert payload["data"]["completedCorrelations"][CORRELATION_ID] == {"completedAt": now.isoformat()}
+    assert payload["data"]["completedCorrelations"][CORRELATION_ID] == {
+        "completedAt": now.isoformat(),
+        "outcome": "succeeded",
+    }
     assert expected["type"] == "agent_response"
     assert expected["response_id"] == "response-1"
     assert expected["agent_id"] == "agent-1"

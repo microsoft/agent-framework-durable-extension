@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from copy import copy, deepcopy
 from functools import lru_cache
 from inspect import Parameter, signature
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from agent_framework import AgentResponse, Content, Message
 from pydantic import BaseModel, ValidationError
@@ -103,6 +103,29 @@ def is_terminal_agent_response(response: AgentResponse[Any]) -> bool:
         if message.role != "tool"
         for content in message.contents
     )
+
+
+def invocation_outcome(response: AgentResponse[Any], *, legacy: bool = False) -> Literal["succeeded", "failed"] | None:
+    """Classify invocation evidence, not delivery availability or an approval's pending action.
+
+    Legacy transcript projections can have lost their error contents. Their absence
+    does not prove success. An independent original mailbox does not have that loss.
+    Accepted or already-unavailable replies likewise cannot establish a new outcome.
+    """
+    status = response.additional_properties.get("durable_status")
+    if status == "accepted":
+        return None
+    if status == "already_completed" or any(
+        content.type == "error" and content.error_code == "response_expired"
+        for message in response.messages
+        if message.role != "tool"
+        for content in message.contents
+    ):
+        outcome = response.additional_properties.get("durable_outcome")
+        return outcome if outcome in ("succeeded", "failed") else None
+    if is_terminal_agent_response(response):
+        return "failed"
+    return None if legacy else "succeeded"
 
 
 def serialize_agent_response(response: AgentResponse) -> dict[str, Any]:

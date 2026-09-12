@@ -496,7 +496,11 @@ async def test_expired_duplicate_run_removes_physical_payloads_without_model_or_
 
     response = await entity.run({"message": "duplicate", "correlationId": correlation})
 
-    assert response.additional_properties == {"durable_status": "already_completed", "correlation_id": correlation}
+    assert response.additional_properties == {
+        "durable_status": "already_completed",
+        "correlation_id": correlation,
+        "durable_outcome": "failed" if correlation == "expired-error" else "succeeded",
+    }
     assert response.messages[0].contents[0].error_code == "response_expired"
     assert store.raw == _without_expired(before) and store.writes == store.attempts == 1
     assert entity.state.to_dict() == store.raw and raw == before
@@ -730,7 +734,11 @@ def test_registered_dt_expired_duplicate_removes_mailbox_without_execution(
     store = Store(raw)
     hosted = _host_entity(_registered(agent, callback), store)
     result = hosted.run({"message": "duplicate", "correlationId": correlation})
-    assert result["additional_properties"] == {"durable_status": "already_completed", "correlation_id": correlation}
+    assert result["additional_properties"] == {
+        "durable_status": "already_completed",
+        "correlation_id": correlation,
+        "durable_outcome": "failed" if correlation == "expired-error" else "succeeded",
+    }
     assert result["messages"][0]["contents"][0]["error_code"] == "response_expired"
     assert store.raw == _without_expired(raw) and store.writes == 1
     _quiet(client, hooks, callback)

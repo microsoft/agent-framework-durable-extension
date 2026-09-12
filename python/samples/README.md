@@ -29,34 +29,63 @@ reject before revised actions execute. Rewrapping old starts is not history migr
 
 ## Prototype validation
 
-These local results cover the integration-launcher and state-layout admission follow-up to
-[prototype commit 5b872d1](https://github.com/microsoft/agent-framework-durable-extension/commit/5b872d10fdc3d6aabc1e37417dff4a2036707ebc).
-They are not the current remote CI status or a claim of release readiness. See
+The published baseline is
+[prototype commit 9b4550d](https://github.com/microsoft/agent-framework-durable-extension/commit/9b4550d).
+The results below were recorded locally for the outcome, media, failure-boundary and telemetry
+follow-up. They are not the current remote CI status or a claim of release readiness. See
 [PR #59 checks](https://github.com/microsoft/agent-framework-durable-extension/pull/59/checks)
 for remote results.
 
 | Local check | Result |
 | --- | --- |
-| Python 3.13 / core 1.16 | 3,303 passed, zero skipped |
-| Python 3.13 / core 1.13 | 3,303 passed, zero skipped |
-| Python 3.10 / core 1.16 | 3,303 passed, zero skipped |
-| Direct DTS integration suite | 42 passed, zero skipped |
-| Azure Functions integration suite | 43 passed, zero skipped |
-| Ruff, Pyright, MyPy, offline lock check and both package builds | Passed |
-| Earlier unit coverage at `3ad9d6c` | 96% overall, not remeasured for this follow-up |
+| Python 3.13 / core 1.16 | 3,427 passed, zero skipped |
+| Python 3.13 / real cached core 1.13 | 3,427 passed, zero skipped |
+| Python 3.10 / core 1.16 | 3,427 passed, zero skipped |
+| Media retention units | 30 passed, six content kinds across four policies plus six protected-floor cases |
+| Cancellation/failure units and Functions consumers | 11 + 3 passed |
+| Retention OTel units | 20 passed |
+| Completion-outcome units | 52 passed, including formatted and unformatted acceptance-only regressions |
+| Existing consumer parameterizations | Eight additional cases passed |
+| Direct DTS integration suite | 45 passed in 354.65 seconds, prior 42 plus three new cases |
+| Azure Functions integration suite | 45 passed in 649.44 seconds, prior 43 plus two media cases |
+| Ruff lint/format, Pyright, MyPy, offline lock and both package builds | Passed |
 
-Both live suites ran with package-only pytest discovery, without the ancestor fixture or a parent
-`DURABLE_AGENTS_DEPLOYMENT_MODE` setting. Each launcher supplies `isolated_v2` only to its isolated
-test child. The 12 launcher regressions fail when that assignment is removed. The state-admission
-regressions fail in 31 cases against the old reader, with the valid native-state control passing.
-All 44 new cases pass with the fixes. The guard rejects known incompatible completion containers,
-not arbitrary unknown optional metadata or every possible future format.
+The focused unit counts are subsets of each 3,427-test run, not additional tests. Media cases cover
+inline PNG, inline text files, image URIs, hosted files, mixed binary/text tool results and large
+tool payloads. They check all retention/budget combinations, JSON cold reload, exact subsequent
+model input, atomic tool groups, protected floors and staged deletion measurements. Failure cases
+cover cancellation at provider/model/retention boundaries, warm rollback, lost write acknowledgement
+and provider failure combined with rejected error persistence and bounded polling. Caller polling
+cancellation does not cancel the entity. Outcome tests cover retained success/failure, unknown
+legacy receipts, strict migration and rejection of fresh acceptance-only completion records.
 
-The live suites are text-based. They do not establish live multimodal/inline-file pressure
-behavior, cancellation coverage, retention-specific OTel measurements or cross-runtime compatibility.
-Pydantic 2.11 runtime validation remains blocked by artifact downloads; the recorded runs used
-Pydantic 2.13.4. Existing .NET readers and legacy workflow histories are not compatible with the
-prototype's revised state/execution contract.
+The three new direct tests use real DTS persistence and process restarts with a deterministic
+`BaseChatClient`, not Foundry. Two exercise PNG and inline-file pressure with persisted-state
+readback, exact next model input and matching truncation/OTel counts. The third hard-kills a worker
+before commit, observes repeated simulated external effects on retry, then kills after confirmed
+scheduler readback and verifies duplicate suppression. These are not live graceful execution
+cancellation tests. The two new Functions cases use the production entity handler and actual
+`DurableEntityContext` with Azure Storage via Azurite. They verify PNG/inline-file pressure,
+persisted JSON, a restarted host, exact subsequent model input and staged OTel measurements.
+Inline media bytes dominate the live pressure cases, rather than text padding alone. The existing
+42 direct tests and 43 Functions tests remain text-based and include Foundry-backed scenarios.
+
+The Functions rerun required the local test Azurite setting `--skipApiVersionCheck`. The initial
+36 failures and seven passes were caused by unsupported Storage API `2026-02-06`, not product
+changes. The corrected final run passed all 45 tests. Coverage percentage was not remeasured here.
+
+Mutation checks reject disabled pressure/eager pruning, lost content metadata, missing rollback,
+missing binding cleanup and missing telemetry. Live DTS cases fail when pressure is disabled.
+Functions cases fail on actual stored byte size when the configured budget is deliberately inflated.
+Restored runs pass. Mutation changes stayed in fresh process memory or generated temporary test apps.
+
+Graceful-shutdown-specific host behavior and hosted-model media acceptance are not established by
+these tests. Remaining release validation includes actual scheduler-limit/offload behavior as those
+capabilities are enabled, exact Pydantic 2.11 runtime validation (artifact downloads
+remain blocked), and shared reader/writer, client, replay and rollback compatibility. The reduced
+live budget is not a scheduler-limit test. No compiled C# or cross-runtime schema acceptance is
+claimed. Existing .NET readers and legacy workflow histories remain incompatible with the revised
+contract. These gaps do not replace or defer the ADR's required validation.
 
 ## Import convention
 
@@ -158,6 +187,19 @@ reset and backend `expire_responses` clean expired payloads without erasing comp
 Idle physical cleanup needs an application-owned schedule or explicit backend signal/manual
 operation. No public HTTP/MCP cleanup endpoint is generated. Receipts can exhaust capacity, and
 entity commits do not provide a distributed transaction or exactly-once external tool execution.
+
+New receipts retain invocation success/failure after payload expiry. Expired lookup exposes
+`durable_outcome` as `succeeded`, `failed` or `unknown`, without changing original response payloads.
+An older unknown receipt still prevents reruns. Strict migration can require trustworthy outcomes,
+but a possibly pruned legacy transcript without an error is not proof of success. The default
+legacy-compatible path retains duplicate protection. Fresh acceptance-only responses do not record
+completion, and fire-and-forget acceptance remains distinct from completion.
+
+The shared [retention telemetry](../packages/durabletask/README.md#retention-telemetry) measures staged
+deletion, not committed deletion. A `set_state` return or failure leaves commit status unknown.
+Pair separate persisted readback with subsequent model input. Applications own SDK/exporter setup.
+`"backend_limit"` remains a non-normative Python-only Scheduler convenience, outside the portable
+`None` or positive-integer budget contract and without assumed shared-review agreement.
 
 - **[13_conversation_compaction](13_conversation_compaction/)**: Compact client-owned history with `InMemoryHistoryProvider` and `CompactionProvider`. Keep excluded history by default and choose transcript pruning or a state budget independently.
 - **[14_external_history_redis](14_external_history_redis/)**: Use an ordinary Redis history provider with a stable session id and no local transcript mirror. The minimal blind-append provider documents interrupted-retry duplicates and unsupported portable reset.

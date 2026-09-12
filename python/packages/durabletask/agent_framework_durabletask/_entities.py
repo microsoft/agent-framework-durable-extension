@@ -64,6 +64,7 @@ from ._retention import (
     resolve_state_budget,
     validate_retention,
 )
+from ._retention_telemetry import record_write, retention_operation
 from ._state_migration import migrate_legacy_state, state_snapshot_digest
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -240,10 +241,21 @@ class AgentEntityStateProviderMixin:
         self.persist_state()
 
     def persist_state(self) -> None:
-        """Persist the current state to the underlying storage provider."""
+        """Pass state to the host, which may stage rather than confirm a durable write."""
         if self._state_cache is None:
             self._state_cache = DurableAgentState()
-        self._set_state_dict(self._state_cache.to_dict())
+        state = self._state_cache
+        try:
+            payload = state.to_dict()
+        except BaseException:
+            record_write(state, stage="serialization", outcome="failed")
+            raise
+        try:
+            self._set_state_dict(payload)
+        except BaseException:
+            record_write(state, stage="set_state", outcome="failed")
+            raise
+        record_write(state, stage="set_state", outcome="returned")
 
     def replace_cached_state(self, state: DurableAgentState) -> None:
         """Stage or restore an operation snapshot without writing to the backend."""
@@ -340,7 +352,8 @@ class AgentEntity:
 
         Args:
             request: Source snapshot/digest, sourceSessionId, destinationSessionId,
-                migrationId, ownershipTransferId and optional deliveryEvidence.
+                migrationId, ownershipTransferId and optional deliveryEvidence and
+                requireKnownOutcomes, which rejects imports without outcome evidence.
 
         Returns:
             The committed migration ID and destination session identity.
@@ -356,7 +369,7 @@ class AgentEntity:
         if (
             not isinstance(request, dict)
             or not required <= request.keys()
-            or request.keys() - required - {"deliveryEvidence"}
+            or request.keys() - required - {"deliveryEvidence", "requireKnownOutcomes"}
         ):
             raise ValueError("Migration requires a complete explicit source and destination request.")
         for name in required - {"source"}:
@@ -386,6 +399,7 @@ class AgentEntity:
             ownership_transfer_id=request["ownershipTransferId"],
             delivery_window_seconds=self._response_delivery_window_seconds,
             delivery_evidence=request.get("deliveryEvidence"),
+            require_known_outcomes=request.get("requireKnownOutcomes", False),
         )
         staged.data.unknown_fields["migration"].update({"requestDigest": digest, "destinationSessionId": destination})
         self._state_provider.replace_cached_state(staged)
@@ -445,17 +459,18 @@ class AgentEntity:
             return already_answered
         original = self.state
         self._state_provider.replace_cached_state(deepcopy(original))
-        try:
-            self.state.expire_responses()
-            response = await self._execute_request(run_request)
-            await self._enforce_retention()
-            self.persist_state()
-            return response
-        except BaseException:
-            # A failed commit must not leave a warm worker with staged completion or
-            # ingestion receipts. External effects are outside this local rollback.
-            self._state_provider.replace_cached_state(original)
-            raise
+        with retention_operation(self.state):
+            try:
+                self.state.expire_responses()
+                response = await self._execute_request(run_request)
+                await self._enforce_retention()
+                self.persist_state()
+                return response
+            except BaseException:
+                # A failed commit must not leave a warm worker with staged completion or
+                # ingestion receipts. External effects are outside this local rollback.
+                self._state_provider.replace_cached_state(original)
+                raise
 
     async def _execute_request(self, run_request: RunRequest) -> AgentResponse:
         """Stage a turn without committing until every local slice and budget is valid."""
@@ -620,7 +635,11 @@ class AgentEntity:
             # Resolve structured output inside the runtime-error boundary. A parsing
             # error is a committed error result, not an invisible post-run failure.
             succeeded = not is_terminal_agent_response(agent_run_response)
-            if succeeded and not agent_run_response.user_input_requests:
+            if (
+                succeeded
+                and not agent_run_response.user_input_requests
+                and agent_run_response.additional_properties.get("durable_status") != "accepted"
+            ):
                 _ = agent_run_response.value
 
         except Exception as exc:

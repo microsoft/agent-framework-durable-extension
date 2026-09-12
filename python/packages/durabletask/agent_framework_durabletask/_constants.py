@@ -147,6 +147,7 @@ class DurableStateFields:
     RESPONSE: Final[str] = "response"
     EXPIRES_AT: Final[str] = "expiresAt"
     COMPLETED_AT: Final[str] = "completedAt"
+    OUTCOME: Final[str] = "outcome"
 
     # What retention has removed from this conversation. Present only once something has been
     # evicted, so its absence means the record is complete.

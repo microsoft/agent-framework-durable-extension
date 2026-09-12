@@ -10,7 +10,8 @@ pip install agent-framework-durabletask --pre
 
 Requires Python 3.10+, `agent-framework-core>=1.13.0,<2` and `pydantic>=2.11,<3`.
 The full unit suite passed on Python 3.13/core 1.16, Python 3.13/core 1.13 and Python 3.10/core 1.16.
-Pydantic 2.11 runtime validation remains blocked by dependency artifact downloads. Lock verification passed.
+Pydantic 2.11 runtime validation remains blocked by dependency artifact downloads.
+The offline lock, lint, typing and both package builds passed for this follow-up.
 See [prototype validation](../../samples/README.md#prototype-validation) for recorded results and limitations.
 
 ## Version 2 deployment warning
@@ -18,6 +19,8 @@ See [prototype validation](../../samples/README.md#prototype-validation) for rec
 The settings below describe the [PR #59 prototype](https://github.com/microsoft/agent-framework-durable-extension/pull/59),
 not an approved design or the contents of a published package. Design review belongs in
 [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88).
+The outcome, retention telemetry and validation follow-up builds on prototype baseline `9b4550d`.
+It does not establish shared-schema acceptance or a released package contract.
 After ADR approval, the agreed implementation will be submitted as stacked PRs rather than merged
 from this prototype as-is.
 
@@ -43,7 +46,8 @@ Raw/legacy starts reject before revised actions execute. Native custom schedulin
 
 Both hosts expose privileged backend `AgentEntity.migrate`, supported by the pure
 `migrate_legacy_state` helper. The request requires `source`, `sourceDigest`, `sourceSessionId`,
-`destinationSessionId`, `migrationId` and `ownershipTransferId`, with optional `deliveryEvidence`.
+`destinationSessionId`, `migrationId` and `ownershipTransferId`, with optional `deliveryEvidence`
+and `requireKnownOutcomes`.
 Use an empty, separately addressed destination after quiescing and authorizing transfer from the
 old owner. Nonempty scalar `ingestedPositions` requires a complete accepted-message journal,
 including evicted inputs. `complete=True` is an operator assertion. Digest/max-position validation
@@ -51,10 +55,16 @@ does not prove authority or completeness, and no delivered prefix is inferred. W
 keep the old session on the old engine.
 
 Only recorded responses receive legacy completion backfill and a delivery grace window. Surviving
-payloads may be partial, not original full responses. Whole-request digest idempotency prevents grace
-refresh after an exact retry, cold reload or subsequent run. Migration retains the original logical
-session ID for external history and does not copy that store or migrate workflow histories. No
-generated HTTP/MCP migration endpoint is provided. These are prototype constraints, not an agreed
+transcript payloads may be partial, so absence of error content does not prove success. Existing
+original mailbox records keep their payload and expiry. If a matching receipt is missing, its
+`completedAt` comes from the mailbox's `createdAt`, not migration time. `requireKnownOutcomes=True`
+on the entity request, or `require_known_outcomes=True` on the helper, rejects imports without
+trustworthy known outcomes. The default legacy-compatible path preserves unknown completion
+evidence and duplicate suppression rather than inventing an outcome or rerunning completed work.
+Whole-request digest idempotency prevents grace refresh after an exact retry, cold reload or
+subsequent run. Migration retains the original logical session ID for external history and does
+not copy that store or migrate workflow histories. No generated HTTP/MCP migration endpoint is
+provided. These are prototype constraints, not an agreed
 cross-runtime migration contract. See [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88)
 for the design discussion and [prototype validation](../../samples/README.md#prototype-validation)
 for recorded checks and remaining gaps.
@@ -107,6 +117,9 @@ Eager pruning and pressure eviction are independent. The matrix assumes no expli
   for `DurableTaskSchedulerWorker`, not a generic `TaskHubGrpcWorker`. An unresolved limit is
   rejected. A positive integer sets an application budget, not a larger backend limit. `"auto"`
   is no longer a retention mode.
+- `"backend_limit"` remains a non-normative Python-only convenience, outside the portable `None`
+  or positive-integer contract. It does not account for transport overhead or imply shared-review
+  agreement.
 - Watermarks default to `high_watermark=0.85` and `low_watermark=0.70`, with
   `0 < low_watermark < high_watermark <= 1`. The whole serialized entity counts, including mailbox,
   completion, session and ingestion state. Protected data can prevent a commit even after pruning.
@@ -161,9 +174,20 @@ universal unchanged-hook parity. Use a distinct store-only sink with its own `so
 both branches. Its configured storage flags still apply.
 
 `responseMailbox` holds independent original serializable response snapshots, including metadata
-and structured `value`, rather than rebuilding results from the mutable transcript. After delivery
-expiry, `completedCorrelations` prevents reinvocation and returns an already-completed status with
-`response_expired`. Version-2 lookup never falls back to a transcript response.
+and structured `value`, rather than rebuilding results from the mutable transcript. New
+`completedCorrelations` receipts retain `completedAt` and the invocation `outcome`, either
+`succeeded` or `failed`. After delivery expiry, lookup returns `durable_status="already_completed"`
+with `response_expired` and `additional_properties["durable_outcome"]` set to `succeeded`, `failed`
+or `unknown`. An older timestamp-only receipt with no trustworthy outcome still prevents
+reinvocation. Cleanup can backfill a known outcome from an independent original mailbox before
+removing its payload, even if the delivery deadline has passed. Version-2 lookup never uses the
+possibly pruned transcript to infer success or reconstruct a result.
+
+The standalone SDK API is unchanged. Retained original responses are returned unmodified rather
+than having receipt metadata injected into their payloads. Acceptance alone is not completion.
+A fresh `record_response()` with no known invocation outcome raises before changing either delivery
+map. Legacy-compatible receipts and fire-and-forget acceptance behavior remain supported. An
+approval response can complete its invocation without proving that the guarded action executed.
 
 Expiry is a logical deadline, not an idle timer. New runs, duplicates and reset remove expired
 payloads. Both hosts also expose backend `expire_responses` without model/tool/provider execution.
@@ -186,5 +210,43 @@ Uncommitted model/tool effects and external appends can repeat after failure. Co
 last until entity deletion and can exhaust capacity. A bounded receipt protocol and optional
 retry-safe external-history adapters remain deferred, with no mandatory core API changes or
 guarantee of a distributed transaction or exactly-once uncommitted effects.
+
+### Retention telemetry
+
+Both Python hosts use OpenTelemetry scope `agent_framework.durabletask`. The package directly
+depends only on `opentelemetry-api` for these instruments. The SDK is a development dependency,
+and applications own their meter provider, readers and exporters. The runtime configures none.
+
+| Instrument | Kind | Unit |
+| --- | --- | --- |
+| `durable.retention.evaluations` | Counter | `{evaluation}` |
+| `durable.retention.budget` | Histogram | `By` |
+| `durable.retention.state.size` | Histogram | `By` |
+| `durable.retention.removed_messages` | Counter | `{message}` |
+| `durable.retention.removed_entries` | Counter | `{entry}` |
+| `durable.retention.reclaimed_bytes` | Counter | `By` |
+| `durable.retention.capacity_failures` | Counter | `{failure}` |
+| `durable.retention.write_attempts` | Counter | `{attempt}` |
+| `durable.retention.operations` | Counter | `{operation}` |
+
+Attributes are bounded and apply only to the relevant instruments.
+
+| Attribute | Values |
+| --- | --- |
+| `mechanism` | `eager`, `pressure` |
+| `outcome` | Retention uses `below_threshold`, `staged`, `protected_floor`, `unreachable_target`, `protected`. Write/operation observations use `returned`, `failed`. |
+| `commit_status` | `not_attempted`, `unknown` |
+| `phase` | `before`, `after` |
+| `stage` | `serialization`, `set_state` |
+| `deletion_staged` | `true`, `false` |
+
+No payloads or session, request or message IDs are recorded in these metrics. The budget is the
+resolved whole-entity budget, and sizes describe serialized JSON at the retention boundary.
+Removal counts and nonnegative reclaimed bytes describe staged changes, not detached trial plans
+or committed deletion. Serialization failure leaves commit status `not_attempted`. A host
+`set_state` return or failure leaves it `unknown`, since either can follow a staged write without
+confirming persistence. Separate authoritative persisted-state readback is needed, paired with
+subsequent model input when validating retention. Metrics do not change warm-state rollback or
+make external effects transactional.
 
 For more details, review the standalone [Durable Task samples](https://github.com/microsoft/agent-framework-durable-extension/tree/main/python/samples) and the full [Agent Framework Python documentation](https://github.com/microsoft/agent-framework/tree/main/python).

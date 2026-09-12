@@ -229,7 +229,7 @@ def _assert_committed_error(
     data = raw["data"]
     mailbox = data["responseMailbox"][correlation_id]
     assert mailbox["response"] == json.loads(json.dumps(response.to_dict()))
-    assert data["completedCorrelations"][correlation_id] == {"completedAt": mailbox["createdAt"]}
+    assert data["completedCorrelations"][correlation_id] == {"completedAt": mailbox["createdAt"], "outcome": "failed"}
     assert datetime.fromisoformat(mailbox["expiresAt"]) > datetime.fromisoformat(mailbox["createdAt"])
     delivered = DurableAgentState.from_json(json.dumps(raw)).try_get_agent_response(correlation_id)
     assert isinstance(delivered, AgentResponse)

@@ -1659,6 +1659,8 @@ class AgentFunctionApp(DFAppBase):
                 logger.info("[MCP Tool] Agent '%s' responded successfully", agent_name)
                 return response_text
             error_msg = result.get("error", "Unknown error")
+            if result.get("status") == "already_completed":
+                error_msg = f"{error_msg} Invocation outcome: {result.get('outcome', 'unknown')}."
             logger.error("[MCP Tool] Agent '%s' execution failed: %s", agent_name, error_msg)
             raise RuntimeError(f"Agent execution failed: {error_msg}")
 
@@ -1825,6 +1827,8 @@ class AgentFunctionApp(DFAppBase):
                         state=state,
                     )
                 result["agent_response"] = snapshot
+                if expired:
+                    result["outcome"] = agent_response.additional_properties.get("durable_outcome", "unknown")
                 logger.debug(f"[HTTP Trigger] Found response for correlation ID: {correlation_id}")
 
         except Exception as exc:
@@ -1984,6 +1988,8 @@ class AgentFunctionApp(DFAppBase):
         """Return a plain-text response with optional session identifier header."""
         body_text = payload if isinstance(payload, str) else self._convert_payload_to_text(payload)
         headers = {SESSION_ID_HEADER: session_id} if session_id is not None else None
+        if isinstance(payload, dict) and payload.get("status") == "already_completed":
+            headers = {**(headers or {}), "x-ms-durable-outcome": str(payload.get("outcome", "unknown"))}
         return func.HttpResponse(body_text, status_code=status_code, mimetype=MIMETYPE_TEXT_PLAIN, headers=headers)
 
     def _build_json_response(self, payload: dict[str, Any] | str, status_code: int) -> func.HttpResponse:

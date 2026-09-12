@@ -31,6 +31,7 @@ from ._durable_agent_state import (
     DurableAgentStateEntryJsonType,
     DurableAgentStateMessage,
 )
+from ._retention_telemetry import record_retention
 
 __all__ = [
     "DEFAULT_MAX_STATE_BYTES",
@@ -180,6 +181,14 @@ async def enforce_budget(
     high = int(max_state_bytes * high_watermark)
     size = _serialized_size(state)
     if size < high:
+        record_retention(
+            state,
+            mechanism="pressure",
+            outcome="below_threshold",
+            before_bytes=size,
+            after_bytes=size,
+            budget_bytes=max_state_bytes,
+        )
         return 0
 
     baseline = deepcopy(state)
@@ -192,6 +201,14 @@ async def enforce_budget(
     floor = _serialized_size(floor_state)
     target = max(int(max_state_bytes * low_watermark), floor)
     if floor >= high:
+        record_retention(
+            state,
+            mechanism="pressure",
+            outcome="protected_floor",
+            before_bytes=size,
+            after_bytes=size,
+            budget_bytes=max_state_bytes,
+        )
         raise StateCapacityError(
             size_bytes=size, max_state_bytes=max_state_bytes, floor_bytes=floor, target_bytes=high - 1
         )
@@ -256,6 +273,16 @@ async def enforce_budget(
         if measured <= target and measured < high:
             state.data.conversation_history[:] = staged.data.conversation_history
             state.data.truncation = staged.data.truncation
+            record_retention(
+                state,
+                mechanism="pressure",
+                outcome="staged",
+                before_bytes=size,
+                after_bytes=measured,
+                budget_bytes=max_state_bytes,
+                removed_messages=len(removed),
+                removed_entries=len(baseline.data.conversation_history) - len(staged.data.conversation_history),
+            )
             logger.warning(
                 "[Retention] Evicted %d oldest transcript message(s), leaving %d serialized bytes "
                 "against a %d-byte budget. Set max_state_bytes=None to disable pressure eviction.",
@@ -269,6 +296,14 @@ async def enforce_budget(
         planning_error = max(measured - group_sizes[cutoff - 1], 1)
         planning_target = max(floor, target - planning_error)
 
+    record_retention(
+        state,
+        mechanism="pressure",
+        outcome="unreachable_target",
+        before_bytes=size,
+        after_bytes=size,
+        budget_bytes=max_state_bytes,
+    )
     raise StateCapacityError(size_bytes=size, max_state_bytes=max_state_bytes, floor_bytes=floor, target_bytes=target)
 
 
