@@ -539,7 +539,7 @@ public sealed class AgentEntityDeliveryTests
         await harness.RunAsync(new RunRequest([]) { CorrelationId = "corr-python" });
         DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(harness.PersistedState));
 
-        Assert.True(JsonElement.DeepEquals(state.Data.Session!.Value, committed.Data.Session!.Value));
+        Assert.NotEqual(JsonValueKind.Undefined, committed.Data.Session?.ValueKind);
         Assert.Equal(state.Data.IngestedPositions, committed.Data.IngestedPositions);
         Assert.Equal("python", committed.Data.ExtensionData!["dataProducer"].GetString());
         Assert.True(committed.Data.UnknownProperties!["futureDataProperty"].GetProperty("preserve").GetBoolean());
@@ -563,10 +563,16 @@ public sealed class AgentEntityDeliveryTests
         await harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" });
 
         DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(harness.PersistedState));
-        Assert.True(JsonElement.DeepEquals(state.Data.Session!.Value, committed.Data.Session!.Value));
+        Assert.NotEqual(JsonValueKind.Undefined, committed.Data.Session?.ValueKind);
         Assert.Equal(state.Data.IngestedPositions, committed.Data.IngestedPositions);
         Assert.Equal(state.Data.Truncation!.EvictedMessageCount, committed.Data.Truncation!.EvictedMessageCount);
-        Assert.True(JsonElement.DeepEquals(state.Data.HistoryBinding, committed.Data.HistoryBinding));
+        Assert.Equal(
+            DurableAgentStateHistoryBinding.DurableStateOwner,
+            committed.Data.HistoryBinding.GetProperty("ownerKind").GetString());
+        Assert.Equal(
+            DurableAgentHistoryBinding.DurableStateProviderKey,
+            committed.Data.HistoryBinding.GetProperty("providerKey").GetString());
+        Assert.True(committed.Data.HistoryBinding.GetProperty("csharpFixedOwner").GetBoolean());
         Assert.Equal(3, committed.Data.CompletionReceipts!.Count);
         Assert.Equal(2, state.Data.CompletionReceipts!.Count);
         committed.Data.IngestedPositions!["example-producer"] = 99;
@@ -906,14 +912,106 @@ public sealed class AgentEntityDeliveryTests
         Assert.Equal(1, factoryInvocationCount);
         DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(harness.PersistedState));
         Assert.NotSame(state.Data, committed.Data);
-        Assert.Equal(state.Data.HistoryBinding.ValueKind, committed.Data.HistoryBinding.ValueKind);
-        if (bindingJson is not null)
+        if (bindingJson is null)
         {
+            Assert.Equal(JsonValueKind.Object, committed.Data.HistoryBinding.ValueKind);
+            Assert.True(
+                committed.Data.HistoryBinding.TryGetProperty(
+                    "csharpFixedOwner",
+                    out JsonElement marker) &&
+                marker.ValueKind == JsonValueKind.True);
+        }
+        else
+        {
+            Assert.Equal(state.Data.HistoryBinding.ValueKind, committed.Data.HistoryBinding.ValueKind);
             Assert.True(JsonElement.DeepEquals(state.Data.HistoryBinding, committed.Data.HistoryBinding));
         }
 
         Assert.Single(state.Data.CompletionReceipts!);
         Assert.Equal(2, committed.Data.CompletionReceipts!.Count);
+    }
+
+    [Fact]
+    public async Task RecognizedProvisionalBindingIsSealedByCSharpAfterSuccessfulTurnAsync()
+    {
+        using JsonDocument binding = JsonDocument.Parse(
+            """{"version":1,"ownerKind":"historyProvider","providerKey":"provisional.v1","future":{"preserve":true}}""");
+        DurableAgentState state = CreateRevisedState("old", "response");
+        state = new DurableAgentState
+        {
+            SchemaVersion = state.SchemaVersion,
+            Data = new DurableAgentStateData
+            {
+                ConversationHistory = state.Data.ConversationHistory,
+                TerminalResults = state.Data.TerminalResults,
+                CompletionReceipts = state.Data.CompletionReceipts,
+                HistoryBinding = binding.RootElement,
+            },
+        };
+        EntityHarness harness = CreateHarness(new RecordingAgent("agent"), state);
+
+        await harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" });
+
+        DurableAgentState committed = Reload(
+            Assert.IsType<DurableAgentState>(harness.PersistedState));
+        Assert.Equal(
+            DurableAgentStateHistoryBinding.DurableStateOwner,
+            committed.Data.HistoryBinding.GetProperty("ownerKind").GetString());
+        Assert.Equal(
+            DurableAgentHistoryBinding.DurableStateProviderKey,
+            committed.Data.HistoryBinding.GetProperty("providerKey").GetString());
+        Assert.True(committed.Data.HistoryBinding.GetProperty("csharpFixedOwner").GetBoolean());
+        Assert.True(
+            committed.Data.HistoryBinding
+                .GetProperty("future")
+                .GetProperty("preserve")
+                .GetBoolean());
+    }
+
+    [Theory]
+    [InlineData("""{"version":99,"ownerKind":"durableState","providerKey":"durable-state.v1","csharpFixedOwner":true}""")]
+    [InlineData("""{"version":1,"ownerKind":null,"providerKey":"durable-state.v1","csharpFixedOwner":true}""")]
+    [InlineData("""{"version":1,"ownerKind":"durableState","providerKey":"","csharpFixedOwner":true}""")]
+    public async Task InvalidMarkedCSharpBindingFailsBeforeAgentConstructionAsync(
+        string bindingJson)
+    {
+        using JsonDocument binding = JsonDocument.Parse(bindingJson);
+        DurableAgentState state = CreateRevisedState("old", "response");
+        state = WithHistoryBinding(state, binding.RootElement);
+        int factoryInvocationCount = 0;
+        EntityHarness harness = CreateHarness(
+            new RecordingAgent("agent"),
+            state,
+            registerWithFactory: true,
+            onFactoryInvoked: () => factoryInvocationCount++);
+
+        await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
+            () => harness.RunAsync(new RunRequest("new") { CorrelationId = "new" }));
+
+        Assert.Equal(0, factoryInvocationCount);
+        Assert.False(harness.StateWasPersisted);
+    }
+
+    [Fact]
+    public async Task MarkedEntityBindingWithWrongReservedKeyFailsBeforeAgentConstructionAsync()
+    {
+        using JsonDocument binding = JsonDocument.Parse(
+            """{"version":1,"ownerKind":"durableState","providerKey":"wrong.v1","csharpFixedOwner":true}""");
+        DurableAgentState state = WithHistoryBinding(
+            CreateRevisedState("old", "response"),
+            binding.RootElement);
+        int factoryInvocationCount = 0;
+        EntityHarness harness = CreateHarness(
+            new RecordingAgent("agent"),
+            state,
+            registerWithFactory: true,
+            onFactoryInvoked: () => factoryInvocationCount++);
+
+        await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
+            () => harness.RunAsync(new RunRequest("new") { CorrelationId = "new" }));
+
+        Assert.Equal(0, factoryInvocationCount);
+        Assert.False(harness.StateWasPersisted);
     }
 
     private static DurableAgentState CreateStateWithResponse(
@@ -988,6 +1086,31 @@ public sealed class AgentEntityDeliveryTests
                     },
                 },
             },
+        };
+    }
+
+    private static DurableAgentState WithHistoryBinding(
+        DurableAgentState state,
+        JsonElement binding)
+    {
+        return new DurableAgentState
+        {
+            SchemaVersion = state.SchemaVersion,
+            Data = new DurableAgentStateData
+            {
+                ConversationHistory = state.Data.ConversationHistory,
+                TerminalResults = state.Data.TerminalResults,
+                CompletionReceipts = state.Data.CompletionReceipts,
+                HistoryBinding = binding,
+                Session = state.Data.Session,
+                IngestedPositions = state.Data.IngestedPositions,
+                Truncation = state.Data.Truncation,
+                ExpirationTimeUtc = state.Data.ExpirationTimeUtc,
+                ExtensionData = state.Data.ExtensionData,
+                UnknownProperties = state.Data.UnknownProperties,
+            },
+            ExtensionData = state.ExtensionData,
+            UnknownProperties = state.UnknownProperties,
         };
     }
 

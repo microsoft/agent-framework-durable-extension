@@ -79,19 +79,27 @@ internal sealed class DurableAgentStateMessage
         ChatMessage message,
         string? generatedMessageId = null,
         ILogger? logger = null)
-        => FromChatMessage(message, generatedMessageId, requireJsonSafeMetadata: false, logger);
+        => FromChatMessage(
+            message,
+            generatedMessageId,
+            requireJsonSafeMetadata: false,
+            logger: logger);
 
     internal static DurableAgentStateMessage FromTerminalChatMessage(
         ChatMessage message,
         string? generatedMessageId = null,
         ILogger? logger = null)
-        => FromChatMessage(message, generatedMessageId, requireJsonSafeMetadata: true, logger);
+        => FromChatMessage(
+            message,
+            generatedMessageId,
+            requireJsonSafeMetadata: true,
+            logger: logger);
 
     private static DurableAgentStateMessage FromChatMessage(
         ChatMessage message,
         string? generatedMessageId,
         bool requireJsonSafeMetadata,
-        ILogger? logger)
+        ILogger? logger = null)
     {
         string role = message.Role.ToString();
         if (!requireJsonSafeMetadata &&
@@ -139,14 +147,16 @@ internal sealed class DurableAgentStateMessage
     /// <summary>
     /// Projects shared schema-2 content without inventing native representations for opaque shapes.
     /// </summary>
-    internal ChatMessage ToChatMessageV2() => this.ToChatMessage(static content =>
+    internal ChatMessage ToChatMessageV2() => this.ToChatMessage(ConvertContentV2);
+
+    private static AIContent ConvertContentV2(DurableAgentStateContent content) =>
         content is DurableAgentStateUriContent { MediaType: null }
             ? new DurableAgentStateUnknownContent
             {
                 Content = JsonSerializer.SerializeToElement(
                     content, DurableAgentStateJsonContext.Default.DurableAgentStateContent),
             }.ToAIContent()
-            : content.ToAIContent());
+            : content.ToAIContent();
 
     private ChatMessage ToChatMessage(Func<DurableAgentStateContent, AIContent> convertContent)
     {
@@ -189,5 +199,34 @@ internal sealed class DurableAgentStateMessage
         {
             content.ValidateV2();
         }
+    }
+
+    /// <summary>
+    /// Converts this message to model context, omitting provider-specific reasoning content.
+    /// </summary>
+    public ChatMessage? ToReplayableChatMessage()
+    {
+        List<DurableAgentStateContent> replayableContents =
+            this.Contents.Where(content => content is not DurableAgentStateTextReasoningContent).ToList();
+        if (replayableContents.Count == 0)
+        {
+            return null;
+        }
+
+        AdditionalPropertiesDictionary? additionalProperties = this.AdditionalProperties is null
+            ? null
+            : new AdditionalPropertiesDictionary(
+                this.AdditionalProperties.Select(pair =>
+                    new KeyValuePair<string, object?>(pair.Key, pair.Value)));
+
+        return new ChatMessage
+        {
+            CreatedAt = this.CreatedAt,
+            AuthorName = this.AuthorName,
+            MessageId = this.MessageId,
+            AdditionalProperties = additionalProperties,
+            Contents = replayableContents.ConvertAll(ConvertContentV2),
+            Role = new(this.Role),
+        };
     }
 }
