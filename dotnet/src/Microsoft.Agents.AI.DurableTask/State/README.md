@@ -96,6 +96,40 @@ are not authority to remove a newer result. Polling is read-only. Imported/idle 
 chain require an explicit cleanup operation or a later successful new run; there is no automatic scan.
 See the [cleanup, retry, and scheduling limits](../README.md#durable-completion-and-delivery).
 
+### Optional result-expiry runtime extension
+
+This writer uses the existing root `extensionData` map for its scheduling protocol. No schema DTO or
+`schemas/` field is added. `historyBinding` remains opaque and is not an ownership/scheduling profile.
+
+```json
+{
+  "extensionData": {
+    "Microsoft.Agents.AI.DurableTask.resultExpiry": {
+      "version": 1,
+      "entityId": "@dafx-agent@session",
+      "scheduledResultExpiryUtc": "2026-09-12T00:20:00+00:00",
+      "token": "5b9ddf23b2d94e42b1dd4d946134f043"
+    }
+  }
+}
+```
+
+This fragment illustrates extension metadata, not a complete mailbox state. `scheduledResultExpiryUtc`
+is the scheduled check time (including backoff), not result-retention authority. The self-signal carries
+`scheduledTime`, `token`, and `entityId`; all must match the persisted pending check. A fresh random GUID
+token per schedule invalidates duplicate deliveries, superseded deadlines, and old entity generations.
+When no expiring payload remains, the deadline and token become explicit null together. Other profile
+fields and other extensions are retained. A missing profile is compatible for import/first use:
+a successful new run or explicit no-input cleanup installs it when needed. Old timestamp-only signals
+cannot install or consume a profile; import/upgrade recovery must explicitly enqueue no-input cleanup.
+
+Relying writers validate version, entity identity, UTC deadline, nonempty GUID token, paired nulls and
+duplicate properties, failing closed rather than dropping an unsupported/malformed profile. A new run
+validates before constructing the model. Legacy writes do not interpret/create this profile, and
+non-relying reads preserve it opaquely. Compatible serializers must preserve the extension; compatible
+schedulers must also honor the token contract. Do not roll back to an older scheduler that merely
+preserves the extension but starts a fresh chain on every run.
+
 Under the internal schema-2 test gate, one successful durable entity operation atomically stages the
 terminal result and receipt together with that operation's session continuation, ingestion bookkeeping,
 entity-local transcript, whole-entity TTL, optional binding, and other local control state. External provider
@@ -113,6 +147,12 @@ implements the mailbox/binding contract or explicitly rejects the new major vers
 fail-closed for unsupported versions and defaults new writes to 1.2. Other runtimes require coordinated version
 gating before a 2.0 producer is enabled; preserving unknown fields alone is not sufficient because an
 unaware worker could ignore completion receipts and rerun completed work.
+Production activation remains inaccessible through public options in this layer. An actual isolated
+backend/worker run proving state-and-outbox rollback, restart and duplicate dispatch is a mandatory
+**merge and release gate**, not a claim established by mock-only coverage or a skipped integration test.
+A clearly documented gated skip permits draft readiness only: do not merge or release this correction
+until the actual isolated-backend test passes. See the
+[integration safety and execution instructions](../../../tests/Microsoft.Agents.AI.DurableTask.IntegrationTests/README.md).
 
 ## Sample State
 

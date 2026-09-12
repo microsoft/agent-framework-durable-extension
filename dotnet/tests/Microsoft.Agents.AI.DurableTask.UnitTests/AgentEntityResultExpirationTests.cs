@@ -93,8 +93,7 @@ public sealed class AgentEntityResultExpirationTests
     [InlineData(10)]
     public async Task EarlyStaleAndNewGenerationChecksUseCurrentDeadlineAndClockAsync(int clockMinutes)
     {
-        // A stale self-signal carries no expiry authority: it sweeps the authoritative
-        // generation. Reusing the same correlation after deletion cannot expire this new result.
+        // An explicit imported-state recovery installs one chain, not one chain per invocation.
         DurableAgentState state = CreateState(expiresAt: s_now.AddMinutes(20));
         string before = Serialize(state);
         List<DateTimeOffset> signals = [];
@@ -102,11 +101,13 @@ public sealed class AgentEntityResultExpirationTests
 
         await cleanup.CheckResultsExpirationAsync();
 
-        Assert.Equal(before, Serialize(Assert.IsType<DurableAgentState>(cleanup.PersistedState)));
+        Assert.Equal(before, Serialize(state));
+        DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(cleanup.PersistedState));
         Assert.Equal(s_now.AddMinutes(20), Assert.Single(signals));
-        EntityHarness duplicate = CleanupHarness(Reload(state), signals, s_now.AddMinutes(clockMinutes));
+        EntityHarness duplicate = CleanupHarness(committed, signals, s_now.AddMinutes(clockMinutes));
         await duplicate.CheckResultsExpirationAsync();
-        Assert.Equal(2, signals.Count);
+        Assert.Equal(Serialize(committed), Serialize(Assert.IsType<DurableAgentState>(duplicate.PersistedState)));
+        Assert.Single(signals);
         Assert.All(signals, signal => Assert.True(signal > s_now.AddMinutes(clockMinutes)));
     }
 
@@ -115,16 +116,27 @@ public sealed class AgentEntityResultExpirationTests
     {
         DurableAgentState state = CreateState(expiresAt: s_now.AddMinutes(20));
         List<DateTimeOffset> signals = [];
-        AgentEntityResultExpirationCheck previous = new(s_now.AddMinutes(20));
+        AgentEntityResultExpirationCheck? previous = null;
+        EntityHarness first = CreateHarness(new RecordingAgent("agent"), state, timeProvider: new Clock(s_now),
+            onSignalInput: input => previous = Assert.IsType<AgentEntityResultExpirationCheck>(input));
+        await first.CheckResultsExpirationAsync();
+        state = Reload(Assert.IsType<DurableAgentState>(first.PersistedState));
         for (int check = 0; check < 3; check++)
         {
-            EntityHarness cleanup = CleanupHarness(state, signals, s_now);
-            await cleanup.CheckResultsExpirationAsync(previous);
-            Assert.True(signals[^1] >= previous.ScheduledTime.AddMinutes(1));
+            AgentEntityResultExpirationCheck delivered = Assert.IsType<AgentEntityResultExpirationCheck>(previous);
+            EntityHarness cleanup = CreateHarness(new RecordingAgent("agent"), state, timeProvider: new Clock(s_now),
+                onSignal: (name, options) => CaptureSignal(signals, name, options),
+                onSignalInput: input => previous = Assert.IsType<AgentEntityResultExpirationCheck>(input));
+            await cleanup.CheckResultsExpirationAsync(delivered);
+            Assert.Equal(delivered.ScheduledTime.AddMinutes(1), signals[^1]);
+            Assert.Equal(check + 1, signals.Count);
             state = Reload(Assert.IsType<DurableAgentState>(cleanup.PersistedState));
             Assert.Equal("available", state.Data.CompletionReceipts!["request"].ResultState);
             Assert.Single(state.Data.TerminalResults!);
-            previous = new(signals[^1]);
+            EntityHarness duplicate = CleanupHarness(state, signals, s_now);
+            await duplicate.CheckResultsExpirationAsync(delivered);
+            Assert.False(duplicate.StateWasPersisted);
+            Assert.Equal(check + 1, signals.Count);
         }
     }
 
@@ -184,8 +196,10 @@ public sealed class AgentEntityResultExpirationTests
     public async Task OldScheduledCleanupCannotExpireReusedCorrelationInNewGenerationAsync()
     {
         List<DateTimeOffset> signals = [];
+        AgentEntityResultExpirationCheck? oldCheck = null;
         EntityHarness oldGeneration = CreateHarness(new RecordingAgent("agent"), state: null,
             timeProvider: new Clock(s_now), resultRetentionPeriod: TimeSpan.FromMinutes(2),
+            onSignalInput: input => oldCheck = Assert.IsType<AgentEntityResultExpirationCheck>(input),
             onSignal: (name, options) => CaptureSignal(signals, name, options));
         await oldGeneration.RunAsync(new RunRequest("old") { CorrelationId = "reused" });
         DateTimeOffset oldSignal = Assert.Single(signals);
@@ -196,10 +210,11 @@ public sealed class AgentEntityResultExpirationTests
         string before = Serialize(fresh);
 
         EntityHarness stale = CleanupHarness(fresh, signals, oldSignal);
-        await stale.CheckResultsExpirationAsync(new AgentEntityResultExpirationCheck(oldSignal));
+        await stale.CheckResultsExpirationAsync(Assert.IsType<AgentEntityResultExpirationCheck>(oldCheck));
 
-        Assert.Equal(before, Serialize(Assert.IsType<DurableAgentState>(stale.PersistedState)));
-        Assert.Equal(s_now.AddMinutes(21), signals[^1]);
+        Assert.False(stale.StateWasPersisted);
+        Assert.Equal(before, Serialize(fresh));
+        Assert.Single(signals);
         Assert.Equal("available", fresh.Data.CompletionReceipts!["reused"].ResultState);
     }
 
