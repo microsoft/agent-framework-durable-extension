@@ -49,17 +49,19 @@ AzureOpenAIClient client = new(new Uri(endpoint), new DefaultAzureCredential());
 Console.ForegroundColor = ConsoleColor.Cyan;
 Console.WriteLine("=== Custom External History Provider Sample ===");
 Console.ResetColor();
-Console.WriteLine("Enter a short marker for the durable agent to remember:");
+Console.WriteLine(
+    "Enter a short marker for the durable agent to remember " +
+    $"(up to {MarkerInput.MaximumUtf8Bytes} UTF-8 bytes):");
 Console.WriteLine();
 
 Console.ForegroundColor = ConsoleColor.Yellow;
 Console.Write("Marker: ");
 Console.ResetColor();
 string? marker = Console.ReadLine();
-if (string.IsNullOrWhiteSpace(marker))
+if (!MarkerInput.TryValidate(marker, out string markerError))
 {
     Console.ForegroundColor = ConsoleColor.Red;
-    Console.Error.WriteLine("Error: A marker is required.");
+    Console.Error.WriteLine($"Error: {markerError}");
     Console.ResetColor();
     Environment.ExitCode = 1;
     return;
