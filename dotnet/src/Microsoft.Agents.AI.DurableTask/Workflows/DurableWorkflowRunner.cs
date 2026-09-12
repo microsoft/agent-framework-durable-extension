@@ -229,7 +229,7 @@ internal sealed class DurableWorkflowRunner
             Result = finalResult,
             Events = state.AccumulatedEvents,
             SentMessages = !string.IsNullOrEmpty(finalResult)
-                ? [new TypedPayload { Data = finalResult }]
+                ? [new TypedPayload { Data = finalResult, TypeName = typeof(string).AssemblyQualifiedName }]
                 : [],
             HaltRequested = haltRequested
         };
