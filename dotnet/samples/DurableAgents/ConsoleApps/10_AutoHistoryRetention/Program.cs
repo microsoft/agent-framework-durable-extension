@@ -11,6 +11,16 @@ using OpenAI.Chat;
 
 const string AgentName = "HistoryKeeper";
 
+if (!IsExperimentalMailboxRuntimeAvailable())
+{
+    Console.Error.WriteLine(
+        "DRAFT SAMPLE: automatic transcript retention requires schema 2 mailbox writes, which are " +
+        "protected by an internal, default-disabled rollout gate. This sample cannot run against " +
+        "production or mixed-language runtimes yet.");
+    Environment.ExitCode = 2;
+    return;
+}
+
 string projectEndpoint = Environment.GetEnvironmentVariable("FOUNDRY_PROJECT_ENDPOINT")
     ?? throw new InvalidOperationException("FOUNDRY_PROJECT_ENDPOINT is not set.");
 string deploymentName = Environment.GetEnvironmentVariable("FOUNDRY_MODEL")
@@ -148,3 +158,5 @@ Console.WriteLine(
     "Stopping and disposing the host gives the OpenTelemetry console exporter a final flush opportunity.");
 
 await host.StopAsync();
+
+static bool IsExperimentalMailboxRuntimeAvailable() => false;
