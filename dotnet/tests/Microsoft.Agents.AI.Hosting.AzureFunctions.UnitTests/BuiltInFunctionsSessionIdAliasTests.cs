@@ -107,6 +107,31 @@ public sealed class BuiltInFunctionsSessionIdAliasTests
         Assert.False(document.RootElement.TryGetProperty("thread_id", out _));
     }
 
+    [Fact]
+    public void AgentRunFailureResponse_PreservesOutcomeAndErrorMetadata()
+    {
+        BuiltInFunctions.AgentRunFailureResponse response = new(
+            410,
+            "session-3",
+            "completedResultUnavailable",
+            new BuiltInFunctions.AgentRunError(
+                "resultUnavailable",
+                "The result payload is unavailable.",
+                JsonSerializer.SerializeToElement(new { expired = true })));
+
+        using JsonDocument document =
+            JsonDocument.Parse(JsonSerializer.Serialize(response));
+
+        Assert.Equal(410, document.RootElement.GetProperty("status").GetInt32());
+        Assert.Equal("session-3", document.RootElement.GetProperty("session_id").GetString());
+        Assert.Equal(
+            "completedResultUnavailable",
+            document.RootElement.GetProperty("outcome").GetString());
+        JsonElement error = document.RootElement.GetProperty("error");
+        Assert.Equal("resultUnavailable", error.GetProperty("code").GetString());
+        Assert.True(error.GetProperty("details").GetProperty("expired").GetBoolean());
+    }
+
     [Theory]
     // bodySessionId, bodyThreadId, querySessionId, queryThreadId, expected
     [InlineData(null, null, null, null, null)]

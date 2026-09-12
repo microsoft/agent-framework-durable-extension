@@ -49,6 +49,17 @@ internal sealed class DurableAgentStateRequest : DurableAgentStateEntry
     public static DurableAgentStateRequest FromRunRequest(
         RunRequest request,
         ILogger? logger = null)
+        => FromRunRequest(request, allowLosslessV2: false, logger);
+
+    internal static DurableAgentStateRequest FromRunRequestV2(
+        RunRequest request,
+        ILogger? logger = null)
+        => FromRunRequest(request, allowLosslessV2: true, logger);
+
+    private static DurableAgentStateRequest FromRunRequest(
+        RunRequest request,
+        bool allowLosslessV2,
+        ILogger? logger)
     {
         DateTimeOffset createdAt = request.Messages.Min(m => m.CreatedAt) ?? DateTimeOffset.UtcNow;
         return new DurableAgentStateRequest()
@@ -56,14 +67,17 @@ internal sealed class DurableAgentStateRequest : DurableAgentStateEntry
             CorrelationId = request.CorrelationId,
             OrchestrationId = request.OrchestrationId,
             Messages = request.Messages.Select(
-                (message, index) => DurableAgentStateMessage.FromChatMessage(
-                    message,
-                    DurableAgentStateMessageIdentity.Create(
+                (message, index) =>
+                {
+                    string messageId = DurableAgentStateMessageIdentity.Create(
                         "request",
                         request.CorrelationId,
                         createdAt,
-                        index),
-                    logger)).ToList(),
+                        index);
+                    return allowLosslessV2
+                        ? DurableAgentStateMessage.FromTerminalChatMessage(message, messageId, logger)
+                        : DurableAgentStateMessage.FromChatMessage(message, messageId, logger);
+                }).ToList(),
             CreatedAt = createdAt,
             ResponseType = request.ResponseFormat is ChatResponseFormatJson ? "json" : "text",
             ResponseSchema = (request.ResponseFormat as ChatResponseFormatJson)?.Schema

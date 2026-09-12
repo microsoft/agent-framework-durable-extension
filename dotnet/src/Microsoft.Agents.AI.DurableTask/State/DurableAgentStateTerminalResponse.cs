@@ -114,7 +114,9 @@ internal sealed class DurableAgentStateTerminalResponse
         };
     }
 
-    public AgentResponse ToResponse()
+    public AgentResponse ToResponse() => this.ToResponse(static message => message.ToChatMessage());
+
+    internal AgentResponse ToResponse(Func<DurableAgentStateMessage, ChatMessage> messageConverter)
     {
         AdditionalPropertiesDictionary? additionalProperties = this.AdditionalProperties is null
             ? null
@@ -123,7 +125,7 @@ internal sealed class DurableAgentStateTerminalResponse
 
         return new AgentResponse
         {
-            Messages = this.Messages.Select(message => message.ToChatMessage()).ToList(),
+            Messages = this.Messages.Select(messageConverter).ToList(),
             Usage = this.Usage?.ToUsageDetails(),
             CreatedAt = this.CreatedAt,
             ResponseId = this.ResponseId,

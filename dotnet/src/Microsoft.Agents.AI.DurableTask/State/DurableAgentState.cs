@@ -35,6 +35,11 @@ internal sealed class DurableAgentState
     [JsonPropertyName("schemaVersion")]
     public string SchemaVersion { get; init; } = CurrentSchemaVersion;
 
+    // Not persisted: only mailbox-aware hydration or an explicitly enabled entity operation
+    // authorizes the production writer. Merely constructing a schema-2 DTO does not enable rollout.
+    [JsonIgnore]
+    internal bool MailboxWritesAuthorized { get; set; }
+
     /// <summary>
     /// Gets application-defined root extension metadata from the schema's <c>extensionData</c> property.
     /// </summary>
@@ -53,18 +58,14 @@ internal sealed class DurableAgentState
     /// </summary>
     public DurableAgentState Clone()
     {
-        byte[] serialized = JsonSerializer.SerializeToUtf8Bytes(
-            this,
-            DurableAgentStateJsonContext.Default.DurableAgentState);
-        DurableAgentState clone = JsonSerializer.Deserialize(
-            serialized,
-            DurableAgentStateJsonContext.Default.DurableAgentState)
-            ?? throw new JsonException("The durable agent state could not be cloned.");
+        string serialized = DurableAgentStateJsonConverter.SerializeRevisedContract(this);
+        DurableAgentState clone = DurableAgentStateJsonConverter.DeserializeRevisedContract(serialized);
         DurableAgentStateMessageIdentity.EnsureMessageIds(clone.Data.ConversationHistory);
 
         return new DurableAgentState
         {
             SchemaVersion = SelectSchemaVersionForWrite(clone.SchemaVersion),
+            MailboxWritesAuthorized = this.MailboxWritesAuthorized,
             Data = clone.Data,
             ExtensionData = clone.ExtensionData,
             UnknownProperties = clone.UnknownProperties,

@@ -192,7 +192,7 @@ internal sealed class DurableWorkflowRunner
                 logger.LogSuperstepExecutors(superstep, string.Join(", ", executorInputs.Select(e => e.ExecutorId)));
             }
 
-            string[] results = await DispatchExecutorsInParallelAsync(context, executorInputs, state, logger).ConfigureAwait(true);
+            DurableExecutorOutput[] results = await DispatchExecutorsInParallelAsync(context, executorInputs, state, logger).ConfigureAwait(true);
 
             haltRequested = ProcessSuperstepResults(executorInputs, results, state, context, logger);
 
@@ -243,13 +243,13 @@ internal sealed class DurableWorkflowRunner
         return messageQueues.Count(kvp => kvp.Value.Count > 0);
     }
 
-    private static async Task<string[]> DispatchExecutorsInParallelAsync(
+    private static async Task<DurableExecutorOutput[]> DispatchExecutorsInParallelAsync(
         TaskOrchestrationContext context,
         List<ExecutorInput> executorInputs,
         SuperstepState state,
         ILogger logger)
     {
-        Task<string>[] dispatchTasks = executorInputs
+        Task<DurableExecutorOutput>[] dispatchTasks = executorInputs
             .Select(input => DurableExecutorDispatcher.DispatchAsync(context, input.Info, input.Envelope, state.SharedState, state.LiveStatus, logger))
             .ToArray();
 
@@ -391,7 +391,7 @@ internal sealed class DurableWorkflowRunner
     /// <returns><c>true</c> if a halt was requested by any executor; otherwise, <c>false</c>.</returns>
     private static bool ProcessSuperstepResults(
         List<ExecutorInput> inputs,
-        string[] rawResults,
+        DurableExecutorOutput[] results,
         SuperstepState state,
         TaskOrchestrationContext context,
         ILogger logger)
@@ -401,11 +401,12 @@ internal sealed class DurableWorkflowRunner
         for (int i = 0; i < inputs.Count; i++)
         {
             string executorId = inputs[i].ExecutorId;
-            ExecutorResultInfo resultInfo = ParseActivityResult(rawResults[i]);
+            DurableExecutorOutput resultInfo = results[i];
+            string result = resultInfo.Result ?? string.Empty;
 
-            logger.LogExecutorResultReceived(executorId, resultInfo.Result.Length, resultInfo.SentMessages.Count);
+            logger.LogExecutorResultReceived(executorId, result.Length, resultInfo.SentMessages.Count);
 
-            state.LastResults[executorId] = resultInfo.Result;
+            state.LastResults[executorId] = result;
 
             // Merge state updates from activity into shared state
             MergeStateUpdates(state, resultInfo.StateUpdates, resultInfo.ClearedScopes);
@@ -426,7 +427,7 @@ internal sealed class DurableWorkflowRunner
                 PublishEventsToLiveStatus(context, state);
             }
 
-            RouteOutputToSuccessors(executorId, resultInfo.Result, resultInfo.SentMessages, state, logger);
+            RouteOutputToSuccessors(executorId, result, resultInfo.SentMessages, state, logger);
         }
 
         return haltRequested;
@@ -718,69 +719,5 @@ internal sealed class DurableWorkflowRunner
     private static string GetFinalResult(Dictionary<string, string> lastResults)
     {
         return lastResults.Values.LastOrDefault(value => !string.IsNullOrEmpty(value)) ?? string.Empty;
-    }
-
-    /// <summary>
-    /// Output from an executor invocation, including its result,
-    /// messages, state updates, and emitted workflow events.
-    /// </summary>
-    private sealed record ExecutorResultInfo(
-        string Result,
-        List<TypedPayload> SentMessages,
-        Dictionary<string, string?> StateUpdates,
-        List<string> ClearedScopes,
-        List<string> Events,
-        bool HaltRequested);
-
-    /// <summary>
-    /// Parses the raw activity result to extract result, messages, events, and state updates.
-    /// </summary>
-    private static ExecutorResultInfo ParseActivityResult(string rawResult)
-    {
-        if (string.IsNullOrEmpty(rawResult))
-        {
-            return new ExecutorResultInfo(rawResult, [], [], [], [], false);
-        }
-
-        try
-        {
-            DurableExecutorOutput? output = JsonSerializer.Deserialize(
-                rawResult,
-                DurableWorkflowJsonContext.Default.DurableExecutorOutput);
-
-            if (output is null || !HasMeaningfulContent(output))
-            {
-                return new ExecutorResultInfo(rawResult, [], [], [], [], false);
-            }
-
-            return new ExecutorResultInfo(
-                output.Result ?? string.Empty,
-                output.SentMessages,
-                output.StateUpdates,
-                output.ClearedScopes,
-                output.Events,
-                output.HaltRequested);
-        }
-        catch (JsonException)
-        {
-            return new ExecutorResultInfo(rawResult, [], [], [], [], false);
-        }
-    }
-
-    /// <summary>
-    /// Determines whether the activity output contains meaningful content.
-    /// </summary>
-    /// <remarks>
-    /// Distinguishes actual activity output from arbitrary JSON that deserialized
-    /// successfully but with all default/empty values.
-    /// </remarks>
-    private static bool HasMeaningfulContent(DurableExecutorOutput output)
-    {
-        return output.Result is not null
-            || output.SentMessages?.Count > 0
-            || output.Events?.Count > 0
-            || output.StateUpdates?.Count > 0
-            || output.ClearedScopes?.Count > 0
-            || output.HaltRequested;
     }
 }
