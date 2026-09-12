@@ -59,9 +59,10 @@ In revised state, `terminalResults` stores immutable result envelopes by correla
 `conversationHistory`, while `completionReceipts` retains completion evidence after a result payload expires.
 An `available` receipt requires a matching result; an `unavailable` receipt proves completion without a result
 payload while retaining its outcome. Absence of a receipt means only that no terminal completion is recorded;
-it does not distinguish an accepted pending request from an unknown identity. Optional `historyBinding` records
-a provisional configured facility kind and stable logical provider key. It does not establish effective
-per-run ownership, and the key must not be inferred from CLR type names or opaque session keys.
+it does not distinguish an accepted pending request from an unknown identity. Optional `historyBinding` is an
+opaque, separately versioned runtime profile. Non-relying consumers preserve it without interpreting any
+nested field. Only a relying runtime may validate a profile it recognizes against trusted host configuration;
+the shared contract defines no owner kind, provider key, default, or transition policy.
 
 These DTOs and converters are passive contracts. Delivery lookup and polling, binding selection and enforcement,
 result expiry, and transcript retention are implemented by later stack layers.

@@ -352,7 +352,7 @@ public sealed class DurableAgentStateTests
                           "createdAt": "2024-01-01T12:01:00Z",
                           "messages": [
                               {
-                                  "role": "agent",
+                                  "role": "assistant",
                                   "contents": [
                                       {
                                           "$type": "text",
@@ -395,7 +395,7 @@ public sealed class DurableAgentStateTests
                 Assert.Equal("12345", entry.CorrelationId);
                 Assert.Equal(DateTimeOffset.Parse("2024-01-01T12:01:00Z"), entry.CreatedAt);
                 Assert.Single(entry.Messages);
-                Assert.Equal("agent", entry.Messages[0].Role);
+                Assert.Equal("assistant", entry.Messages[0].Role);
                 Assert.Single(entry.Messages[0].Contents);
                 DurableAgentStateContent content = Assert.Single(entry.Messages[0].Contents);
                 DurableAgentStateTextContent textContent = Assert.IsType<DurableAgentStateTextContent>(content);

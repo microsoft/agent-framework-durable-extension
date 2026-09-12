@@ -93,6 +93,14 @@ internal sealed class DurableAgentStateMessage
         bool requireJsonSafeMetadata,
         ILogger? logger)
     {
+        string role = message.Role.ToString();
+        if (!requireJsonSafeMetadata &&
+            role is not ("user" or "assistant" or "system" or "tool"))
+        {
+            throw new InvalidOperationException(
+                $"The legacy durable agent state cannot persist message role '{role}'.");
+        }
+
         Dictionary<string, JsonElement>? additionalProperties = null;
         if (message.AdditionalProperties is not null)
         {
@@ -114,9 +122,11 @@ internal sealed class DurableAgentStateMessage
             AuthorName = message.AuthorName,
             MessageId = message.MessageId ?? generatedMessageId,
             AdditionalProperties = additionalProperties,
-            Role = message.Role.ToString(),
+            Role = role,
             Contents = message.Contents.Select(content =>
-                DurableAgentStateContent.FromAIContent(content, logger)).ToList()
+                requireJsonSafeMetadata
+                    ? DurableAgentStateContent.FromAIContentV2(content, logger)
+                    : DurableAgentStateContent.FromAIContent(content, logger)).ToList()
         };
     }
 
