@@ -648,6 +648,20 @@ public sealed class DurableAgentStateMailboxTests
     }
 
     [Fact]
+    public void TerminalErrorMessageAllowsContractValidControlCharacters()
+    {
+        DurableAgentStateTerminalError error = new()
+        {
+            Code = "Example",
+            Message = "line\u0001break",
+        };
+
+        error.Validate();
+
+        Assert.Contains('\u0001', error.Message);
+    }
+
+    [Fact]
     public void TerminalResponseMetadataRequiresValidKeys()
     {
         string json = File.ReadAllText(
