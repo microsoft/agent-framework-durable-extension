@@ -5,7 +5,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- CA2007: This rule should generally be suppressed in Durable Task libraries. Also, this is not library code. -->
     <!-- AD0001: Temporary workaround for Microsoft.DurableTask.Analyzers v0.2.0 bug (ArgumentNullException on 'node'). Remove when upgrading to a fixed analyzer version. -->
-    <NoWarn>$(NoWarn);CA2007;AD0001</NoWarn>
+    <!-- RT0002: The Microsoft.Agents.AI.Hosting.AzureFunctions.Extensions.DurableTask reference is intentionally
+         unused at the API level; it only carries the Durable Task extension registration attribute. -->
+    <NoWarn>$(NoWarn);CA2007;AD0001;RT0002</NoWarn>
   </PropertyGroup>
 
   <Import Project="$(RepoRoot)/dotnet/nuget/nuget-package.props" />
@@ -20,6 +22,12 @@
   <!-- Project references -->
   <ItemGroup>
     <ProjectReference Include="..\Microsoft.Agents.AI.DurableTask\Microsoft.Agents.AI.DurableTask.csproj" />
+    <!--
+        Carries the ExtensionInformationAttribute that registers the Durable Task WebJobs extension.
+        It lives in a separate assembly because the Azure Functions worker SDK only honors one such
+        attribute per assembly, and this assembly already declares one for the MCP extension below.
+    -->
+    <ProjectReference Include="..\Microsoft.Agents.AI.Hosting.AzureFunctions.Extensions.DurableTask\Microsoft.Agents.AI.Hosting.AzureFunctions.Extensions.DurableTask.csproj" />
   </ItemGroup>
 
   <!-- Public dependencies -->

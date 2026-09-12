@@ -77,6 +77,7 @@ jobs:
           # project can be specified"). The whole -p: arg is quoted so PowerShell passes
           # it through as a single literal argument.
           dotnet pack src/Microsoft.Agents.AI.DurableTask/Microsoft.Agents.AI.DurableTask.csproj --configuration Release --no-build "-p:PackageOutputPath=$(Build.ArtifactStagingDirectory)/packages/dotnet"
+          dotnet pack src/Microsoft.Agents.AI.Hosting.AzureFunctions.Extensions.DurableTask/Microsoft.Agents.AI.Hosting.AzureFunctions.Extensions.DurableTask.csproj --configuration Release --no-build "-p:PackageOutputPath=$(Build.ArtifactStagingDirectory)/packages/dotnet"
           dotnet pack src/Microsoft.Agents.AI.Hosting.AzureFunctions/Microsoft.Agents.AI.Hosting.AzureFunctions.csproj --configuration Release --no-build "-p:PackageOutputPath=$(Build.ArtifactStagingDirectory)/packages/dotnet"
         workingDirectory: dotnet
         displayName: 'Pack .NET packages'
