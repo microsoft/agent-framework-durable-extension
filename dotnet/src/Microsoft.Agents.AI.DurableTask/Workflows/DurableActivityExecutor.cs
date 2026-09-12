@@ -175,6 +175,8 @@ internal static class DurableActivityExecutor
             }
         }
 
-        return loadedType ?? supportedTypes.FirstOrDefault() ?? typeof(string);
+        // An explicit unknown hint is not untyped input. Do not reinterpret its data as
+        // the first registered handler's type; fail at the activity boundary instead.
+        return loadedType ?? throw new InvalidOperationException($"Input type '{inputTypeName}' could not be resolved for this executor.");
     }
 }

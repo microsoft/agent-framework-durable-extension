@@ -166,15 +166,26 @@ wraps their exact text in result-only values, including text that happens to be 
 activity envelope. Only trusted regular activity/subworkflow results may supply state updates, scope
 clears, events, routed messages, or halt requests. Invalid known activity-envelope fields fail closed to
 plain result text without applying partial controls. Legacy plain-text activity results remain supported.
-Each trusted activity `sentMessages` entry must explicitly contain a nonblank string `typeName` and
-`data`; missing/null/invalid fields or ambiguous repeated known fields reject the **whole** envelope.
+Each trusted activity or child-workflow `sentMessages` entry must contain a nonblank string `typeName`
+and `data`; null entries or missing/null/empty/whitespace fields reject the **whole** collection before
+any routing. Activity JSON also rejects ambiguous repeated known fields and invalid field kinds.
+An invalid child collection discards all its messages, events and halt controls, matching the
+all-or-nothing activity trust boundary. Its exact `Result` text, not the serialized invalid envelope,
+is the fallback; it is never decoded again as controls. Child shared state is always isolated.
 These are CLR string fields: serialized JSON payloads such as `null`, `false`, `0`, and `""` remain valid
 inside the `data` string. Payload text is not recursively interpreted as controls or required to resolve
-a runtime type during envelope validation. Unknown fields cannot override known controls.
+a runtime type during envelope validation. Unknown fields cannot override known controls. A nonblank
+unknown type name is structurally valid and travels unchanged to the target activity. If that activity
+cannot resolve it or match a registered input type by name, it fails rather than choosing the first
+handler. Type resolution is not added to orchestration code. Existing registered-name/version matching,
+untyped input, and supported string/string-array adaptation remain unchanged.
 The child runner tags its non-empty final result as a CLR string when routing it to parent successors,
 so an executor supporting several input types receives the original text through its string handler
-even when another supported type is listed first. Empty final results retain the existing behavior:
-they do not enqueue a successor message. Typed child halt requests and superstep limits are unchanged.
+even when another supported type is listed first. Child result-only fallback (including legacy missing,
+null or empty message collections) also retains string provenance. Whitespace-only `Result` text is
+preserved exactly, even though a whitespace-only typed `data` field is invalid. Null/empty results do
+not enqueue a fallback message. Legacy absent collections preserve trusted events/halt; invalid entries
+discard those controls. Valid typed child halt requests and superstep limits are unchanged.
 
 This is a structural provenance boundary, not a signing/authenticity mechanism. No new discriminator or
 entity-state schema field is needed. The C# workflow output format is not asserted to match Python's
