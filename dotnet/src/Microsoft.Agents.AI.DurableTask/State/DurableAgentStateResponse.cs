@@ -29,6 +29,19 @@ internal class DurableAgentStateResponse : DurableAgentStateEntry
         string correlationId,
         AgentResponse response,
         ILogger? logger = null)
+        => FromResponse(correlationId, response, allowLosslessV2: false, logger);
+
+    internal static DurableAgentStateResponse FromResponseV2(
+        string correlationId,
+        AgentResponse response,
+        ILogger? logger = null)
+        => FromResponse(correlationId, response, allowLosslessV2: true, logger);
+
+    private static DurableAgentStateResponse FromResponse(
+        string correlationId,
+        AgentResponse response,
+        bool allowLosslessV2,
+        ILogger? logger)
     {
         List<ChatMessage> messages = response.Messages.ToList();
         DateTimeOffset createdAt = response.CreatedAt ?? GetCreatedAt(messages);
@@ -36,7 +49,7 @@ internal class DurableAgentStateResponse : DurableAgentStateEntry
         {
             CorrelationId = correlationId,
             CreatedAt = createdAt,
-            Messages = CreateStoredMessages(messages, correlationId, createdAt, logger),
+            Messages = CreateStoredMessages(messages, correlationId, createdAt, logger, allowLosslessV2),
             Usage = DurableAgentStateUsage.FromUsage(response.Usage)
         };
     }
@@ -77,17 +90,21 @@ internal class DurableAgentStateResponse : DurableAgentStateEntry
         IEnumerable<ChatMessage> messages,
         string correlationId,
         DateTimeOffset createdAt,
-        ILogger? logger)
+        ILogger? logger,
+        bool allowLosslessV2 = false)
     {
         return messages
-            .Select((message, storedIndex) => DurableAgentStateMessage.FromChatMessage(
-                message,
-                DurableAgentStateMessageIdentity.Create(
+            .Select((message, storedIndex) =>
+            {
+                string messageId = DurableAgentStateMessageIdentity.Create(
                     "response",
                     correlationId,
                     createdAt,
-                    storedIndex),
-                logger))
+                    storedIndex);
+                return allowLosslessV2
+                    ? DurableAgentStateMessage.FromTerminalChatMessage(message, messageId, logger)
+                    : DurableAgentStateMessage.FromChatMessage(message, messageId, logger);
+            })
             .ToList();
     }
 

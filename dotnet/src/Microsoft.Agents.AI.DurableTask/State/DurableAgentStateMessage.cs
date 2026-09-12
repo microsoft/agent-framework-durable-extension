@@ -134,7 +134,21 @@ internal sealed class DurableAgentStateMessage
     /// Converts this <see cref="DurableAgentStateMessage"/> to a <see cref="ChatMessage"/>.
     /// </summary>
     /// <returns>A <see cref="ChatMessage"/> representing this message.</returns>
-    public ChatMessage ToChatMessage()
+    public ChatMessage ToChatMessage() => this.ToChatMessage(static content => content.ToAIContent());
+
+    /// <summary>
+    /// Projects shared schema-2 content without inventing native representations for opaque shapes.
+    /// </summary>
+    internal ChatMessage ToChatMessageV2() => this.ToChatMessage(static content =>
+        content is DurableAgentStateUriContent { MediaType: null }
+            ? new DurableAgentStateUnknownContent
+            {
+                Content = JsonSerializer.SerializeToElement(
+                    content, DurableAgentStateJsonContext.Default.DurableAgentStateContent),
+            }.ToAIContent()
+            : content.ToAIContent());
+
+    private ChatMessage ToChatMessage(Func<DurableAgentStateContent, AIContent> convertContent)
     {
         AdditionalPropertiesDictionary? additionalProperties = this.AdditionalProperties is null
             ? null
@@ -148,7 +162,7 @@ internal sealed class DurableAgentStateMessage
             AuthorName = this.AuthorName,
             MessageId = this.MessageId,
             AdditionalProperties = additionalProperties,
-            Contents = this.Contents.Select(c => c.ToAIContent()).ToList(),
+            Contents = this.Contents.Select(convertContent).ToList(),
             Role = new(this.Role)
         };
     }
