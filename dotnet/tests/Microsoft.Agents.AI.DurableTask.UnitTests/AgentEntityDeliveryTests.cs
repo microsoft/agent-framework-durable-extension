@@ -1089,15 +1089,16 @@ public sealed class AgentEntityDeliveryTests
         public async Task<AgentResponse> RunAsync(RunRequest request)
         {
             operation.SetupGet(value => value.Name).Returns(nameof(AgentEntity.Run));
+            operation.SetupGet(value => value.HasInput).Returns(true);
             operation.Setup(value => value.GetInput(typeof(RunRequest))).Returns(request);
             object? result = await ((ITaskEntity)entity).RunAsync(operation.Object);
             return Assert.IsType<AgentResponse>(result);
         }
 
-        public async Task CheckResultsExpirationAsync(AgentEntityResultExpirationCheck? scheduledCheck = null)
+        public async Task CheckResultsExpirationAsync(AgentEntityResultExpirationCheck? scheduledCheck = null, bool? hasInput = null)
         {
             operation.SetupGet(value => value.Name).Returns("CheckAndExpireResults");
-            operation.SetupGet(value => value.HasInput).Returns(scheduledCheck is not null);
+            operation.SetupGet(value => value.HasInput).Returns(hasInput ?? scheduledCheck is not null);
             operation.Setup(value => value.GetInput(typeof(AgentEntityResultExpirationCheck))).Returns(scheduledCheck);
             _ = await ((ITaskEntity)entity).RunAsync(operation.Object);
         }
