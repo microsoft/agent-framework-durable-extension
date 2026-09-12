@@ -61,6 +61,10 @@ original mailbox records keep their payload and expiry. If a matching receipt is
 on the entity request, or `require_known_outcomes=True` on the helper, rejects imports without
 trustworthy known outcomes. The default legacy-compatible path preserves unknown completion
 evidence and duplicate suppression rather than inventing an outcome or rerunning completed work.
+Both import modes reject contradictory known receipt/result outcomes. Historical `legacy=True`
+receipts can refer to transcript projections or mailbox backfills, so the marker alone cannot
+establish original-payload provenance. Unknown legacy outcomes remain unknown unless retained
+evidence establishes them. Existing completion timestamps and delivery windows are not refreshed.
 Whole-request digest idempotency prevents grace refresh after an exact retry, cold reload or
 subsequent run. Migration retains the original logical session ID for external history and does
 not copy that store or migrate workflow histories. No generated HTTP/MCP migration endpoint is
@@ -182,6 +186,12 @@ or `unknown`. An older timestamp-only receipt with no trustworthy outcome still 
 reinvocation. Cleanup can backfill a known outcome from an independent original mailbox before
 removing its payload, even if the delivery deadline has passed. Version-2 lookup never uses the
 possibly pruned transcript to infer success or reconstruct a result.
+
+Known receipt and retained-result outcomes must agree. Reads, writes and cleanup reject a
+contradictory pair before returning a result or deleting evidence, including when the payload is
+already expired. Missing outcomes and legacy payloads with insufficient evidence remain supported.
+The prototype schema declares the optional outcome enum. Cross-record consistency is enforced by
+the runtime, not by JSON Schema or by changing the prototype into the proposed shared wire format.
 
 The standalone SDK API is unchanged. Retained original responses are returned unmodified rather
 than having receipt metadata injected into their payloads. Acceptance alone is not completion.

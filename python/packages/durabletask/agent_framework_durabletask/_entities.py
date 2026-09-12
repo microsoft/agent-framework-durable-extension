@@ -384,10 +384,11 @@ class AgentEntity:
             raise ValueError("Migration source must be an exported state object.")
         digest = state_snapshot_digest(request)
         original = self.state
+        original_payload = original.to_dict()
         existing = original.data.unknown_fields.get("migration")
         if isinstance(existing, dict) and cast("dict[str, Any]", existing).get("requestDigest") == digest:
             return {"status": "migrated", "migrationId": request["migrationId"], "sessionId": destination}
-        if original.to_dict() != DurableAgentState().to_dict():
+        if original_payload != DurableAgentState().to_dict():
             raise ValueError(
                 "Migration destination must be empty; an existing or different migration cannot be replaced."
             )

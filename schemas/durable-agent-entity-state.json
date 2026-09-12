@@ -326,7 +326,7 @@
       "description": "A retained response delivery snapshot. Expiry removes only this payload, not its completedCorrelations receipt. An expired or removed payload must never be reconstructed from conversationHistory.",
       "properties": {
         "response": { "$ref": "#/$defs/coreAgentResponse" },
-        "createdAt": { "$ref": "#/$defs/deliveryTimestamp", "description": "When this delivery snapshot was recorded. For legacy conversion, this is the conversion time, not evidence of the original completion time." },
+        "createdAt": { "$ref": "#/$defs/deliveryTimestamp", "description": "When this delivery snapshot was recorded. Backfill from a surviving legacy transcript uses conversion time and fresh delivery grace. An existing independent mailbox preserves its recorded timestamp and expiry." },
         "expiresAt": { "$ref": "#/$defs/deliveryTimestamp", "description": "Exclusive end of the configured response delivery window." }
       },
       "required": ["response", "createdAt", "expiresAt"],
@@ -334,10 +334,11 @@
     },
     "completedCorrelation": {
       "type": "object",
-      "description": "Completion evidence retained until entity deletion, independently of response delivery expiry and transcript retention. A receipt without a live mailbox payload yields already_completed with response_expired, not a new execution or a transcript fallback.",
+      "description": "Completion evidence retained until entity deletion, independently of response delivery expiry and transcript retention. A receipt without a live mailbox yields already_completed with response_expired and its known outcome, or an unknown lookup status when outcome is absent. Contradictory known receipt/result outcomes require runtime semantic rejection, not selection of one authority based on payload availability.",
       "properties": {
-        "completedAt": { "$ref": "#/$defs/deliveryTimestamp", "description": "When completion evidence was recorded. For a legacy receipt this is the conversion time, not a recovered historical timestamp." },
-        "legacy": { "type": "boolean", "description": "True for a snapshot converted from surviving version 1 transcript data. Such a snapshot receives a fresh delivery grace window but is not claimed to be the immutable original response." }
+        "completedAt": { "$ref": "#/$defs/deliveryTimestamp", "description": "When completion evidence was recorded. Existing receipt timestamps are immutable. New transcript-derived backfills use conversion time. A missing receipt for an independent original mailbox uses that mailbox's createdAt." },
+        "outcome": { "type": "string", "enum": ["succeeded", "failed"], "description": "Known invocation outcome, retained after payload expiry. Optional for older receipts without authoritative evidence. Absence is not success, and unknown is a lookup status rather than a stored enum value." },
+        "legacy": { "type": "boolean", "description": "Marks a legacy conversion or receipt backfill. Historical writers used it for both surviving transcript projections and independent mailbox backfills, so it does not establish original-payload provenance. Without an already known outcome, missing error content in a legacy payload does not prove success." }
       },
       "required": ["completedAt"],
       "additionalProperties": true

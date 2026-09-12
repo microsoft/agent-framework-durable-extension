@@ -62,6 +62,10 @@ original mailbox records keep their payload and expiry. A missing matching recei
 the entity request, or `require_known_outcomes=True` on the helper, rejects imports without
 trustworthy known outcomes. The default legacy-compatible path preserves unknown completion
 evidence and duplicate suppression rather than inventing an outcome or rerunning completed work.
+Both import modes reject contradictory known receipt/result outcomes. Historical `legacy=True`
+receipts can refer to transcript projections or mailbox backfills, so the marker alone cannot
+establish original-payload provenance. Unknown legacy outcomes remain unknown unless retained
+evidence establishes them. Existing completion timestamps and delivery windows are not refreshed.
 Whole-request digest idempotency prevents grace refresh after an exact retry, cold reload or
 subsequent run. The original logical session ID is retained for external history. Migration does
 not copy that store or move workflow action histories.
