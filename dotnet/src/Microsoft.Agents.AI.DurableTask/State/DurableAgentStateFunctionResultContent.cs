@@ -32,8 +32,12 @@ internal sealed class DurableAgentStateFunctionResultContent : DurableAgentState
     /// persisted under this single property.
     /// </remarks>
     [JsonPropertyName("result")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public JsonElement? Result { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public JsonElement Result
+    {
+        get;
+        init => field = value.ValueKind == JsonValueKind.Undefined ? default : value.Clone();
+    }
 
     /// <summary>
     /// Creates a <see cref="DurableAgentStateFunctionResultContent"/> from a <see cref="FunctionResultContent"/>.
@@ -48,15 +52,14 @@ internal sealed class DurableAgentStateFunctionResultContent : DurableAgentState
 
             // A null result is left absent rather than encoded as a JSON null so that it round trips
             // back to a null FunctionResultContent.Result.
-            Result = content.Result is null ? null : ToJsonElement(content.Result)
+            Result = content.Result is null ? default : ToJsonElement(content.Result)
         };
     }
 
     /// <inheritdoc/>
     public override AIContent ToAIContent()
     {
-        // Boxing a JsonElement? yields either a boxed JsonElement or null, matching the shape chat
-        // clients expect from a tool whose result was marshalled into JSON.
-        return new FunctionResultContent(this.CallId, this.Result);
+        object? result = this.Result.ValueKind == JsonValueKind.Undefined ? null : this.Result;
+        return new FunctionResultContent(this.CallId, result);
     }
 }

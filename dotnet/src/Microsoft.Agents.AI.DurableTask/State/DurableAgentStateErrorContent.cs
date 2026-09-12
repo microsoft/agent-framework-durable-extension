@@ -1,5 +1,6 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
 
@@ -28,8 +29,12 @@ internal sealed class DurableAgentStateErrorContent : DurableAgentStateContent
     /// Gets the error details.
     /// </summary>
     [JsonPropertyName("details")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? Details { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public JsonElement Details
+    {
+        get;
+        init => field = value.ValueKind == JsonValueKind.Undefined ? default : value.Clone();
+    }
 
     /// <summary>
     /// Creates a <see cref="DurableAgentStateErrorContent"/> from an <see cref="ErrorContent"/>.
@@ -41,7 +46,11 @@ internal sealed class DurableAgentStateErrorContent : DurableAgentStateContent
     {
         return new DurableAgentStateErrorContent()
         {
-            Details = content.Details,
+            Details = content.Details is null
+                ? default
+                : JsonSerializer.SerializeToElement(
+                    content.Details,
+                    DurableAgentStateJsonContext.Default.String),
             ErrorCode = content.ErrorCode,
             Message = content.Message
         };
@@ -52,7 +61,12 @@ internal sealed class DurableAgentStateErrorContent : DurableAgentStateContent
     {
         return new ErrorContent(this.Message)
         {
-            Details = this.Details,
+            Details = this.Details.ValueKind switch
+            {
+                JsonValueKind.Undefined => null,
+                JsonValueKind.String => this.Details.GetString(),
+                _ => this.Details.GetRawText(),
+            },
             ErrorCode = this.ErrorCode
         };
     }

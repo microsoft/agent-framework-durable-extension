@@ -12,6 +12,8 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "$type")]
 [JsonDerivedType(typeof(DurableAgentStateRequest), "request")]
 [JsonDerivedType(typeof(DurableAgentStateResponse), "response")]
+[JsonDerivedType(typeof(DurableAgentStateErrorResponse), "errorResponse")]
+[JsonDerivedType(typeof(DurableAgentStateCompaction), "compaction")]
 internal abstract class DurableAgentStateEntry
 {
     /// <summary>
@@ -19,26 +21,68 @@ internal abstract class DurableAgentStateEntry
     /// </summary>
     /// <remarks>
     /// This ID is used to correlate <see cref="DurableAgentStateResponse"/> back to its
-    /// <see cref="DurableAgentStateRequest"/>.
+    /// <see cref="DurableAgentStateRequest"/>. Compaction entries do not have a correlation ID.
     /// </remarks>
     [JsonPropertyName("correlationId")]
-    public required string CorrelationId { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CorrelationId { get; init; }
 
     /// <summary>
     /// Gets the timestamp when this entry was created.
     /// </summary>
     [JsonPropertyName("createdAt")]
-    public required DateTimeOffset CreatedAt { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DateTimeOffset? CreatedAt { get; init; }
 
     /// <summary>
     /// Gets the list of messages associated with this entry, in chronological order.
     /// </summary>
     [JsonPropertyName("messages")]
-    public IReadOnlyList<DurableAgentStateMessage> Messages { get; init; } = [];
+    public IReadOnlyList<DurableAgentStateMessage> Messages
+    {
+        get;
+        init => field = value ?? [];
+    } = [];
 
     /// <summary>
-    /// Gets any additional data found during deserialization that does not map to known properties.
+    /// Gets application-defined entry metadata from the schema's <c>extensionData</c> property.
+    /// </summary>
+    [JsonPropertyName("extensionData")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IDictionary<string, JsonElement>? ExtensionData { get; init; }
+
+    /// <summary>
+    /// Gets unknown entry properties that are outside the declared schema.
     /// </summary>
     [JsonExtensionData]
-    public IDictionary<string, JsonElement>? ExtensionData { get; set; }
+    public IDictionary<string, JsonElement>? UnknownProperties { get; set; }
+
+    public void ValidateV2()
+    {
+        if (this is DurableAgentStateCompaction)
+        {
+            if (this.CorrelationId is not null)
+            {
+                throw new InvalidOperationException(
+                    "A durable agent compaction entry cannot have a correlation ID.");
+            }
+        }
+        else if (this.CorrelationId is not null)
+        {
+            DurableAgentStateContract.ValidateIdentifier(
+                this.CorrelationId,
+                "conversationHistory.correlationId");
+        }
+
+        foreach (DurableAgentStateMessage? message in this.Messages)
+        {
+            if (message is null)
+            {
+                throw new InvalidOperationException(
+                    "A revised durable agent state cannot contain null messages.");
+            }
+
+            message.ValidateV2();
+        }
+    }
 }
