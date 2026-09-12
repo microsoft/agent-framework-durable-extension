@@ -1,10 +1,17 @@
 # Opt-in Pressure Retention Sample
 
-This sample demonstrates a durable Azure OpenAI agent that explicitly selects
+> [!IMPORTANT]
+> This is a draft/experimental sample. Automatic transcript retention requires schema 2 mailbox
+> state, whose writer is internal and disabled by default. The runnable entry point fails closed
+> before reading credentials or contacting the model or DTS. Do not enable this scenario in
+> mixed-runtime production until Python, the dashboard, pollers, rollback tooling, and every other
+> reader meet the schema 2 rollout floor.
+
+This sample source demonstrates a durable Azure OpenAI agent that explicitly selects
 `DurableAgentHistoryRetentionMode.Auto` with a deliberately small `MaxStateBytes` budget.
-It also explicitly sets `EnableMailboxWrites = true`, activating schema 2 terminal results and
-completion receipts through the supported public registration API. `KeepAll` is the default and
-does not proactively delete model transcript under pressure.
+`KeepAll` is the public default and does not proactively delete model transcript under pressure.
+Selecting `Auto` configures retention policy only; it does not activate schema 2 mailbox writes.
+Deterministic tests use the runtime's existing internal, default-disabled test hook.
 
 ## Scenario
 
@@ -75,8 +82,9 @@ behavior when correctness matters.
 
 ## Run the sample
 
-See the [ConsoleApps README](../README.md) for Foundry, authentication, and Durable Task Scheduler
-setup. Then run:
+The production entry point is intentionally gated and exits before accessing credentials or
+services. Once the cross-runtime rollout gate is approved, see the [ConsoleApps README](../README.md)
+for Foundry, authentication, and Durable Task Scheduler setup. The intended command is:
 
 ```bash
 cd dotnet/samples/DurableAgents/ConsoleApps/10_AutoHistoryRetention
