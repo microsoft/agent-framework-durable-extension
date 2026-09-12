@@ -131,5 +131,24 @@ public sealed class DurableAgentStateFunctionCallContentTests
             roundTripDocument.RootElement.GetProperty("arguments").GetString());
     }
 
+    [Fact]
+    public void ProductionMappingDoesNotEmitV2StringArguments()
+    {
+        FunctionCallContent runtime = new("call-8", "future")
+        {
+            RawRepresentation = "verbatim",
+        };
+
+        DurableAgentStateFunctionCallContent legacy =
+            Assert.IsType<DurableAgentStateFunctionCallContent>(
+                DurableAgentStateContent.FromAIContent(runtime));
+        DurableAgentStateFunctionCallContent revised =
+            Assert.IsType<DurableAgentStateFunctionCallContent>(
+                DurableAgentStateContent.FromAIContentV2(runtime));
+
+        Assert.Equal(JsonValueKind.Undefined, legacy.Arguments.ValueKind);
+        Assert.Equal("verbatim", revised.Arguments.GetString());
+    }
+
     private sealed record Location(string City, string State);
 }

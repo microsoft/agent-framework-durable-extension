@@ -11,6 +11,112 @@ namespace Microsoft.Agents.AI.DurableTask.Tests.Unit.State;
 public sealed class DurableAgentStateMailboxTests
 {
     [Fact]
+    public void VersionedEnvelopeCasesMatchDotNetReaders()
+    {
+        string json = File.ReadAllText(
+            Path.Combine(AppContext.BaseDirectory, "Fixtures", "versioned-envelope-cases.json"));
+        using JsonDocument document = JsonDocument.Parse(json);
+        int caseCount = 0;
+        int schemaOnlyLegacyCases = 0;
+
+        foreach (JsonElement group in document.RootElement.EnumerateArray())
+        {
+            foreach (JsonElement test in group.GetProperty("tests").EnumerateArray())
+            {
+                string stateJson = test.GetProperty("data").GetRawText();
+                bool valid = test.GetProperty("valid").GetBoolean();
+                if (valid)
+                {
+                    JsonElement data = test.GetProperty("data");
+                    if (IsSchemaOnlyLegacyEntryCase(data))
+                    {
+                        // Historical schema snapshots allowed an undiscriminated generic entry.
+                        // The existing .NET model has always required a typed entry discriminator;
+                        // this implementation must not invent one while round-tripping old data.
+                        schemaOnlyLegacyCases++;
+                    }
+                    else
+                    {
+                        DurableAgentState state = Deserialize(stateJson);
+                        _ = Serialize(state);
+                    }
+                }
+                else
+                {
+                    Assert.ThrowsAny<Exception>(() => Deserialize(stateJson));
+                }
+
+                caseCount++;
+            }
+        }
+
+        Assert.Equal(44, caseCount);
+        Assert.Equal(3, schemaOnlyLegacyCases);
+    }
+
+    [Theory]
+    [InlineData("""{"role":"developer","contents":[]}""")]
+    [InlineData("""{"role":"assistant","contents":[{"$type":"functionCall","callId":"c","name":"f","arguments":"verbatim"}]}""")]
+    [InlineData("""{"role":"assistant","contents":[{"$type":"uri","uri":"https://example.test/media"}]}""")]
+    public void LegacySnapshotsRejectV2OnlyMessageShapes(string messageJson)
+    {
+        string json = $$"""
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [{
+                  "$type": "request",
+                  "messages": [{{messageJson}}]
+                }]
+              }
+            }
+            """;
+
+        Assert.Throws<InvalidOperationException>(() => Deserialize(json));
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("[null]")]
+    public void LegacySnapshotsRejectMalformedConversationHistory(string historyJson)
+    {
+        string json = $$"""
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": {{historyJson}}
+              }
+            }
+            """;
+
+        Assert.ThrowsAny<Exception>(() => Deserialize(json));
+    }
+
+    [Theory]
+    [InlineData("""{"$type":"request","messages":null}""")]
+    [InlineData("""{"$type":"request","messages":[null]}""")]
+    [InlineData("""{"$type":"request","messages":[{"role":null}]}""")]
+    [InlineData("""{"$type":"request","messages":[{"role":"user","contents":null}]}""")]
+    [InlineData("""{"$type":"request","messages":[{"role":"user","contents":[null]}]}""")]
+    [InlineData("""{"$type":"request","messages":[{"role":"user","contents":[{"$type":"text","text":null}]}]}""")]
+    [InlineData("""{"$type":"request","messages":[{"role":"user","contents":[{"$type":"functionCall","callId":null,"name":"f"}]}]}""")]
+    [InlineData("""{"$type":"request","messages":[{"role":"user","contents":[{"$type":"uri","uri":null,"mediaType":"text/plain"}]}]}""")]
+    [InlineData("""{"$type":"request","messages":[{"role":"user","contents":[{"$type":"usage","usage":null}]}]}""")]
+    public void LegacySnapshotsRejectMalformedEntryShapes(string entryJson)
+    {
+        string json = $$"""
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [{{entryJson}}]
+              }
+            }
+            """;
+
+        Assert.ThrowsAny<Exception>(() => Deserialize(json));
+    }
+
+    [Fact]
     public void LegacyStateRoundTripsWithoutRevisedFields()
     {
         const string Json = """
@@ -69,7 +175,9 @@ public sealed class DurableAgentStateMailboxTests
             state.Data.CompletionReceipts?["corr-expired"]);
 
         Assert.Equal(DurableAgentState.RevisedSchemaVersion, state.SchemaVersion);
-        Assert.Equal("contoso.support-history.v1", state.Data.HistoryBinding?.ProviderKey);
+        Assert.Equal(
+            "contoso.support-history.v1",
+            state.Data.HistoryBinding.GetProperty("providerKey").GetString());
         Assert.Equal("response-id-2", result.Response?.ResponseId);
         Assert.Equal(DurableAgentStateCompletionReceipt.UnavailableResult, unavailable.ResultState);
         Assert.Contains("\"futureResponseField\":{\"preserve\":true}", roundTrip, StringComparison.Ordinal);
@@ -91,7 +199,7 @@ public sealed class DurableAgentStateMailboxTests
             ["historyBinding"] = new
             {
                 version = 1,
-                ownerKind = DurableAgentStateHistoryBinding.DurableStateOwner,
+                ownerKind = "durableState",
                 providerKey = "durable-state.v1",
             },
         };
@@ -121,7 +229,7 @@ public sealed class DurableAgentStateMailboxTests
 
         DurableAgentState state = Deserialize(Json);
 
-        Assert.Null(state.Data.HistoryBinding);
+        Assert.Equal(JsonValueKind.Undefined, state.Data.HistoryBinding.ValueKind);
     }
 
     [Theory]
@@ -509,11 +617,7 @@ public sealed class DurableAgentStateMailboxTests
     [Fact]
     public void TerminalErrorLengthCountsUnicodeScalars()
     {
-        DurableAgentState state = CreateEmptyRevisedState(new()
-        {
-            OwnerKind = DurableAgentStateHistoryBinding.DurableStateOwner,
-            ProviderKey = "durable-state.v1",
-        });
+        DurableAgentState state = CreateEmptyRevisedState();
         const string CorrelationId = "failed";
         DateTimeOffset completedAt = DateTimeOffset.Parse("2026-09-10T05:00:00+00:00");
         state.Data.TerminalResults![CorrelationId] = new()
@@ -553,30 +657,33 @@ public sealed class DurableAgentStateMailboxTests
         Assert.Throws<InvalidOperationException>(() => Deserialize(json));
     }
 
-    [Theory]
-    [InlineData(2, DurableAgentStateHistoryBinding.DurableStateOwner, "durable-state.v1")]
-    [InlineData(1, "futureOwner", "provider.v1")]
-    [InlineData(1, DurableAgentStateHistoryBinding.HistoryProviderOwner, " ")]
-    public void InvalidHistoryBindingIsRejected(int version, string ownerKind, string providerKey)
-    {
-        DurableAgentState state = CreateEmptyRevisedState(new()
-        {
-            Version = version,
-            OwnerKind = ownerKind,
-            ProviderKey = providerKey,
-        });
-
-        Assert.Throws<InvalidOperationException>(() => Serialize(state));
-    }
-
     [Fact]
-    public void HistoryBindingRequiresExplicitWireVersion()
+    public void HistoryBindingIsPreservedAsOpaqueRuntimeProfile()
     {
-        string json = File.ReadAllText(
-            Path.Combine(AppContext.BaseDirectory, "Fixtures", "shared-durable-agent-state-2.0.json"))
-            .Replace("\"version\": 1,", string.Empty, StringComparison.Ordinal);
+        const string Json = """
+            {
+              "schemaVersion": "2.0.0",
+              "data": {
+                "conversationHistory": [],
+                "terminalResults": {},
+                "completionReceipts": {},
+                "historyBinding": {
+                  "runtime": "csharp",
+                  "version": -1,
+                  "ownerKind": null,
+                  "nested": {
+                    "$runtimeType": "inert"
+                  }
+                }
+              }
+            }
+            """;
 
-        Assert.Throws<JsonException>(() => Deserialize(json));
+        string roundTrip = Serialize(Deserialize(Json));
+
+        Assert.Contains("\"version\":-1", roundTrip, StringComparison.Ordinal);
+        Assert.Contains("\"ownerKind\":null", roundTrip, StringComparison.Ordinal);
+        Assert.Contains("\"$runtimeType\":\"inert\"", roundTrip, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -835,7 +942,7 @@ public sealed class DurableAgentStateMailboxTests
     }
 
     [Fact]
-    public void RevisedStateRejectsNullHistoryBindingWhenPresent()
+    public void RevisedStatePreservesNullHistoryProfileWhenPresent()
     {
         const string Json = """
             {
@@ -849,7 +956,9 @@ public sealed class DurableAgentStateMailboxTests
             }
             """;
 
-        Assert.Throws<JsonException>(() => Deserialize(Json));
+        string roundTrip = Serialize(Deserialize(Json));
+
+        Assert.Contains("\"historyBinding\":null", roundTrip, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -1099,20 +1208,91 @@ public sealed class DurableAgentStateMailboxTests
         Assert.ThrowsAny<Exception>(() => Deserialize(json));
     }
 
+    [Theory]
+    [InlineData("inputTokenCount")]
+    [InlineData("outputTokenCount")]
+    [InlineData("totalTokenCount")]
+    [InlineData("extensionData")]
+    public void LegacyUsageContentRejectsExplicitNullKnownFields(string propertyName)
+    {
+        string json = $$"""
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [{
+                  "$type": "request",
+                  "messages": [{
+                    "role": "user",
+                    "contents": [{
+                      "$type": "usage",
+                      "usage": {
+                        "{{propertyName}}": null
+                      }
+                    }]
+                  }]
+                }]
+              }
+            }
+            """;
+
+        Assert.ThrowsAny<Exception>(() => Deserialize(json));
+    }
+
+    [Theory]
+    [InlineData("\"authorName\":null")]
+    [InlineData("\"messageId\":null")]
+    [InlineData("\"createdAt\":null")]
+    [InlineData("\"extensionData\":null")]
+    public void TerminalMessagesRejectExplicitNullKnownFields(string property)
+    {
+        string json = $$"""
+            {
+              "schemaVersion": "2.0.0",
+              "data": {
+                "conversationHistory": [],
+                "terminalResults": {
+                  "c": {
+                    "correlationId": "c",
+                    "outcome": "succeeded",
+                    "completedAt": "2026-09-12T00:00:00Z",
+                    "response": {
+                      "messages": [{
+                        "role": "assistant",
+                        {{property}}
+                      }]
+                    }
+                  }
+                },
+                "completionReceipts": {
+                  "c": {
+                    "correlationId": "c",
+                    "outcome": "succeeded",
+                    "completedAt": "2026-09-12T00:00:00Z",
+                    "resultState": "available"
+                  }
+                }
+              }
+            }
+            """;
+
+        Assert.ThrowsAny<Exception>(() => Deserialize(json));
+    }
+
     [Fact]
     public void IdentifierLengthCountsUnicodeScalars()
     {
         string providerKey = string.Concat(Enumerable.Repeat("\U0001F600", 200));
-        DurableAgentState state = CreateEmptyRevisedState(new()
-        {
-            OwnerKind = DurableAgentStateHistoryBinding.HistoryProviderOwner,
-            ProviderKey = providerKey,
-        });
+        DurableAgentState state = CreateEmptyRevisedState(
+            JsonSerializer.SerializeToElement(new
+            {
+                ownerKind = "historyProvider",
+                providerKey,
+            }));
 
         string json = Serialize(state);
         DurableAgentState restored = Deserialize(json);
 
-        Assert.Equal(providerKey, restored.Data.HistoryBinding?.ProviderKey);
+        Assert.Equal(providerKey, restored.Data.HistoryBinding.GetProperty("providerKey").GetString());
     }
 
     [Fact]
@@ -1244,7 +1424,7 @@ public sealed class DurableAgentStateMailboxTests
         Assert.False(contents[2].TryGetProperty("result", out _));
     }
 
-    private static DurableAgentState CreateEmptyRevisedState(DurableAgentStateHistoryBinding binding)
+    private static DurableAgentState CreateEmptyRevisedState(JsonElement binding = default)
     {
         return new()
         {
@@ -1316,4 +1496,17 @@ public sealed class DurableAgentStateMailboxTests
         state.SchemaVersion == DurableAgentState.RevisedSchemaVersion
             ? DurableAgentStateJsonConverter.SerializeRevisedContract(state)
             : JsonSerializer.Serialize(state, DurableAgentStateJsonContext.Default.DurableAgentState);
+
+    private static bool IsSchemaOnlyLegacyEntryCase(JsonElement state)
+    {
+        if (state.GetProperty("schemaVersion").GetString() == DurableAgentState.RevisedSchemaVersion ||
+            !state.GetProperty("data").TryGetProperty("conversationHistory", out JsonElement history))
+        {
+            return false;
+        }
+
+        return history.EnumerateArray().Any(entry =>
+            entry.ValueKind == JsonValueKind.Object &&
+            !entry.TryGetProperty("$type", out _));
+    }
 }

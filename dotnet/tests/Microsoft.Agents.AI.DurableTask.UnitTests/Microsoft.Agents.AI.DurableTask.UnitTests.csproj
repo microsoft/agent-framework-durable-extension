@@ -23,6 +23,9 @@
     <None Include="..\..\..\schemas\fixtures\shared-durable-agent-state-2.0-pruned.json"
           Link="Fixtures\shared-durable-agent-state-2.0-pruned.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\schemas\tests\versioned-envelope-cases.json"
+          Link="Fixtures\versioned-envelope-cases.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

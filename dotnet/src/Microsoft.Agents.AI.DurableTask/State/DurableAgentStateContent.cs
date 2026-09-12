@@ -68,12 +68,24 @@ internal abstract class DurableAgentStateContent
     /// <param name="logger">The logger used to report safe unknown-content fallbacks.</param>
     /// <returns>A <see cref="DurableAgentStateContent"/> representing the original <see cref="AIContent"/>.</returns>
     public static DurableAgentStateContent FromAIContent(AIContent content, ILogger? logger = null)
+        => FromAIContent(content, allowLosslessV2: false, logger);
+
+    internal static DurableAgentStateContent FromAIContentV2(AIContent content, ILogger? logger = null)
+        => FromAIContent(content, allowLosslessV2: true, logger);
+
+    private static DurableAgentStateContent FromAIContent(
+        AIContent content,
+        bool allowLosslessV2,
+        ILogger? logger)
     {
         return content switch
         {
             DataContent dataContent => DurableAgentStateDataContent.FromDataContent(dataContent),
             ErrorContent errorContent => DurableAgentStateErrorContent.FromErrorContent(errorContent),
-            FunctionCallContent functionCallContent => DurableAgentStateFunctionCallContent.FromFunctionCallContent(functionCallContent),
+            FunctionCallContent functionCallContent =>
+                DurableAgentStateFunctionCallContent.FromFunctionCallContent(
+                    functionCallContent,
+                    allowLosslessV2),
             FunctionResultContent functionResultContent => DurableAgentStateFunctionResultContent.FromFunctionResultContent(functionResultContent),
             HostedFileContent hostedFileContent => DurableAgentStateHostedFileContent.FromHostedFileContent(hostedFileContent),
             HostedVectorStoreContent hostedVectorStoreContent => DurableAgentStateHostedVectorStoreContent.FromHostedVectorStoreContent(hostedVectorStoreContent),
