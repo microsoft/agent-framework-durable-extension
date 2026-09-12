@@ -145,6 +145,7 @@ internal static partial class DurableAgentJsonUtilities
     // Request Types
     [JsonSerializable(typeof(RunRequest))]
     [JsonSerializable(typeof(AgentEntityDeletionCheck))]
+    [JsonSerializable(typeof(AgentEntityResultExpirationCheck))]
     [JsonSerializable(typeof(DurableAgentFailureData))]
 
     // Primitive / Supporting Types
