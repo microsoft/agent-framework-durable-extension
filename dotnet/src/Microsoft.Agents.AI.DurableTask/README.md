@@ -242,6 +242,7 @@ services.ConfigureDurableAgents(options =>
 {
   options.AddAIAgent(
     agent,
+    timeToLive: null,
     configureHistory: history => history.ProviderKey = historyProviderKey);
 });
 ```

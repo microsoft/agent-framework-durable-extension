@@ -1740,11 +1740,12 @@ public sealed class AgentEntityHistoryTests
                     onFactoryInvoked?.Invoke();
                     return agent;
                 },
+                timeToLive: null,
                 configureHistory: configureHistory);
         }
         else
         {
-            options.AddAIAgent(agent, configureHistory: configureHistory);
+            options.AddAIAgent(agent, timeToLive: null, configureHistory: configureHistory);
         }
 
         ListLoggerProvider loggerProvider = new();
