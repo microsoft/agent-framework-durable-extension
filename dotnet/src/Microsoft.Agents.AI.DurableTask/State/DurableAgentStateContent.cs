@@ -55,9 +55,9 @@ internal abstract class DurableAgentStateContent
     public abstract AIContent ToAIContent();
 
     /// <summary>
-    /// Validates semantic constraints introduced by the schema 2.0 contract.
+    /// Validates semantic constraints for the specified state schema version.
     /// </summary>
-    public virtual void ValidateV2()
+    internal virtual void Validate(DurableAgentStateSchemaVersion version)
     {
     }
 
