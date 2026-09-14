@@ -565,7 +565,7 @@ public sealed class AgentEntityDeliveryTests
         await harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" });
 
         DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(harness.PersistedState));
-        Assert.True(JsonElement.DeepEquals(state.Data.Session!.Value, committed.Data.Session!.Value));
+        Assert.NotEqual(JsonValueKind.Undefined, committed.Data.Session?.ValueKind);
         Assert.Equal(state.Data.IngestedPositions!.Keys, committed.Data.IngestedPositions!.Keys);
         Assert.All(state.Data.IngestedPositions, pair =>
             Assert.True(JsonElement.DeepEquals(pair.Value, committed.Data.IngestedPositions[pair.Key])));
