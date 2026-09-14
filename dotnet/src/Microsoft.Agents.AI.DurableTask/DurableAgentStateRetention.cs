@@ -304,8 +304,9 @@ internal static class DurableAgentStateRetention
         DateTimeOffset effectiveTime = GetEffectiveEvictionTime(original, now);
         return new DurableAgentStateTruncation
         {
-            EvictedMessageCount =
-                (original?.EvictedMessageCount ?? 0) + removedMessages,
+            EvictedMessageCount = AddEvictedMessages(
+                original?.EvictedMessageCount ?? 0,
+                removedMessages),
             FirstEvictedAt = original?.FirstEvictedAt ?? effectiveTime,
             LastEvictedAt = effectiveTime,
             UnknownProperties = original?.UnknownProperties,
@@ -435,9 +436,14 @@ internal static class DurableAgentStateRetention
             FirstEvictedAt = now,
         };
 
-        truncation.EvictedMessageCount += removedMessages;
+        truncation.EvictedMessageCount = AddEvictedMessages(
+            truncation.EvictedMessageCount,
+            removedMessages);
         truncation.LastEvictedAt = GetEffectiveEvictionTime(truncation, now);
     }
+
+    private static int AddEvictedMessages(int current, int added) =>
+        current > int.MaxValue - added ? int.MaxValue : current + added;
 
     private static DateTimeOffset GetEffectiveEvictionTime(
         DurableAgentStateTruncation? truncation,
