@@ -1237,7 +1237,7 @@ public sealed class DurableAgentStateMailboxTests
             {
                 Truncation = new()
                 {
-                    EvictedMessageCount = 1,
+                    EvictedMessageCount = JsonSerializer.SerializeToElement(1),
                     FirstEvictedAt = DateTimeOffset.Parse("2026-09-11T11:00:00+00:00"),
                     LastEvictedAt = DateTimeOffset.Parse("2026-09-11T10:00:00+00:00"),
                 },
@@ -1547,11 +1547,11 @@ public sealed class DurableAgentStateMailboxTests
         Assert.Equal(DurableAgentStateCompletionReceipt.SucceededOutcome, receipt.Outcome);
         Assert.Equal(DurableAgentStateCompletionReceipt.UnavailableResult, receipt.ResultState);
         Assert.False(state.Data.TerminalResults?.ContainsKey("corr-pruned"));
-        Assert.Equal(3, state.Data.IngestedPositions?["example-producer"]);
+        Assert.Equal(3, state.Data.IngestedPositions?["example-producer"].GetInt32());
         Assert.Equal(
             "opaque-user-data",
             state.Data.Session?.GetProperty("exampleContinuation").GetProperty("$runtimeType").GetString());
-        Assert.Equal(4, state.Data.Truncation?.EvictedMessageCount);
+        Assert.Equal(4, state.Data.Truncation?.EvictedMessageCount.GetInt32());
     }
 
     [Theory]
