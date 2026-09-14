@@ -29,6 +29,7 @@ public sealed class JsonFileChatHistoryProvider : ChatHistoryProvider, IDisposab
     private readonly int _maxModelTextUtf8Bytes;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly ConcurrentDictionary<string, byte> _observedHistoryIds = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _newHistoryIds = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ModelWindowStatistics> _lastModelWindows = new(StringComparer.Ordinal);
 
     public JsonFileChatHistoryProvider(
@@ -67,7 +68,10 @@ public sealed class JsonFileChatHistoryProvider : ChatHistoryProvider, IDisposab
         try
         {
             List<StoredChatMessage> stored =
-                await this.ReadStoredMessagesAsync(reference, cancellationToken);
+                await this.ReadStoredMessagesAsync(
+                    reference,
+                    cancellationToken,
+                    allowMissing: this._newHistoryIds.ContainsKey(reference.FileName));
             return stored.ConvertAll(ToChatMessage);
         }
         finally
@@ -96,7 +100,7 @@ public sealed class JsonFileChatHistoryProvider : ChatHistoryProvider, IDisposab
         try
         {
             List<StoredChatMessage> stored =
-                await this.ReadStoredMessagesAsync(reference, cancellationToken);
+                await this.ReadStoredMessagesAsync(reference, cancellationToken, allowMissing: true);
             int initialCount = stored.Count;
             int seedIndex = initialCount;
             long currentBytes = this.GetPersistedBytes(reference);
@@ -167,7 +171,10 @@ public sealed class JsonFileChatHistoryProvider : ChatHistoryProvider, IDisposab
         try
         {
             List<StoredChatMessage> stored =
-                await this.ReadStoredMessagesAsync(reference, cancellationToken);
+                await this.ReadStoredMessagesAsync(
+                    reference,
+                    cancellationToken,
+                    allowMissing: this._newHistoryIds.ContainsKey(reference.FileName));
             List<StoredChatMessage> modelWindow = this.SelectModelWindow(stored);
             this._lastModelWindows[reference.FileName] = new ModelWindowStatistics(
                 modelWindow.Count,
@@ -192,7 +199,10 @@ public sealed class JsonFileChatHistoryProvider : ChatHistoryProvider, IDisposab
         try
         {
             List<StoredChatMessage> stored =
-                await this.ReadStoredMessagesAsync(reference, cancellationToken);
+                await this.ReadStoredMessagesAsync(
+                    reference,
+                    cancellationToken,
+                    allowMissing: this._newHistoryIds.ContainsKey(reference.FileName));
             stored.AddRange(context.RequestMessages.Select(ToStoredMessage));
             stored.AddRange((context.ResponseMessages ?? []).Select(ToStoredMessage));
 
@@ -214,6 +224,7 @@ public sealed class JsonFileChatHistoryProvider : ChatHistoryProvider, IDisposab
                 FileName = $"{Guid.NewGuid():N}.json",
             };
             session.StateBag.SetValue(StateKey, reference);
+            this._newHistoryIds.TryAdd(reference.FileName, 0);
         }
 
         this.ValidateHistoryId(reference.FileName);
@@ -297,12 +308,17 @@ public sealed class JsonFileChatHistoryProvider : ChatHistoryProvider, IDisposab
 
     private async Task<List<StoredChatMessage>> ReadStoredMessagesAsync(
         HistoryReference reference,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowMissing = false)
     {
         string path = this.GetHistoryPath(reference);
         if (!File.Exists(path))
         {
-            return [];
+            return allowMissing
+                ? []
+                : throw new FileNotFoundException(
+                    "The external chat history for the restored session is unavailable.",
+                    path);
         }
 
         await using FileStream stream = File.OpenRead(path);
@@ -343,6 +359,7 @@ public sealed class JsonFileChatHistoryProvider : ChatHistoryProvider, IDisposab
             }
 
             File.Move(temporaryPath, path, overwrite: true);
+            this._newHistoryIds.TryRemove(reference.FileName, out _);
         }
         finally
         {
