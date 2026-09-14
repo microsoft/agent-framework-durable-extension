@@ -280,6 +280,33 @@ public sealed class DurableAgentHistoryOwnershipTests
     }
 
     [Fact]
+    public void MarkedBindingWithInvalidProviderKeyFailsClosed()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """{"version":1,"ownerKind":"historyProvider","providerKey":"invalid\u0001key","csharpFixedOwner":true}""");
+        JsonElement binding = document.RootElement.Clone();
+
+        DurableAgentStateHistoryBinding? parsed = DurableAgentHistoryBinding.Parse(binding);
+
+        Assert.Null(parsed);
+        Assert.Throws<DurableAgentHistoryBindingMismatchException>(
+            () => DurableAgentHistoryBinding.ValidateMarkedProfile(binding, parsed));
+    }
+
+    [Fact]
+    public void RegistrationRetainsOriginalClrSignatures()
+    {
+        Type optionsType = typeof(DurableAgentsOptions);
+
+        Assert.NotNull(optionsType.GetMethod(
+            nameof(DurableAgentsOptions.AddAIAgent),
+            [typeof(AIAgent), typeof(TimeSpan?)]));
+        Assert.NotNull(optionsType.GetMethod(
+            nameof(DurableAgentsOptions.AddAIAgentFactory),
+            [typeof(string), typeof(Func<IServiceProvider, AIAgent>), typeof(TimeSpan?)]));
+    }
+
+    [Fact]
     public void DirectAgentRegistrationRejectsStaticCompactionConfiguration()
     {
         ChatClientAgent agent = new(

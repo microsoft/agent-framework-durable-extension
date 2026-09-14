@@ -61,10 +61,11 @@ internal static class DurableAgentHistoryBinding
             _ => throw new InvalidOperationException(
                 $"History ownership '{ownership}' is not a sealable durable owner."),
         };
+        using System.Text.Json.JsonDocument markerDocument = System.Text.Json.JsonDocument.Parse("true");
         binding.UnknownProperties = new Dictionary<string, System.Text.Json.JsonElement>
         {
             [CSharpFixedOwnerProperty] =
-                System.Text.Json.JsonDocument.Parse("true").RootElement.Clone(),
+            markerDocument.RootElement.Clone(),
         };
         return binding;
     }
@@ -103,7 +104,7 @@ internal static class DurableAgentHistoryBinding
                 DurableAgentStateHistoryBinding.DurableStateOwner or
                 DurableAgentStateHistoryBinding.HistoryProviderOwner or
                 DurableAgentStateHistoryBinding.ModelServiceOwner) ||
-            string.IsNullOrWhiteSpace(providerKeyValue))
+            !IsValidProviderKey(providerKeyValue))
         {
             return null;
         }
@@ -408,7 +409,7 @@ internal static class DurableAgentHistoryBinding
         string? configuredProviderKey,
         bool remoteTransitionDetectedAfterExecution)
     {
-        if (string.IsNullOrWhiteSpace(configuredProviderKey))
+        if (!IsValidProviderKey(configuredProviderKey))
         {
             throw new DurableAgentHistoryBindingMismatchException(
                 $"History ownership '{ownership}' requires an explicit stable logical provider key. " +
@@ -416,7 +417,24 @@ internal static class DurableAgentHistoryBinding
                 GetRemoteTransitionSuffix(remoteTransitionDetectedAfterExecution));
         }
 
-        return configuredProviderKey;
+        return configuredProviderKey!;
+    }
+
+    private static bool IsValidProviderKey(string? providerKey)
+    {
+        try
+        {
+            _ = new DurableAgentHistoryProviderKey(providerKey!);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     private static string GetRemoteTransitionSuffix(bool remoteTransitionDetectedAfterExecution)
