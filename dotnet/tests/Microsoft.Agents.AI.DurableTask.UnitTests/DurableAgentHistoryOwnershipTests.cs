@@ -212,6 +212,7 @@ public sealed class DurableAgentHistoryOwnershipTests
         DurableAgentsOptions returnedOptions = options.AddAIAgentFactory(
             "Agent",
             _ => new StubAgent(),
+            timeToLive: null,
             configureHistory: history => history.ServiceManagedPerServiceCallHistory = true);
 
         Assert.Same(options, returnedOptions);
@@ -231,6 +232,7 @@ public sealed class DurableAgentHistoryOwnershipTests
         DurableAgentsOptions returned = options.AddAIAgentFactory(
             "Agent",
             _ => new StubAgent(),
+            timeToLive: null,
             configureHistory: history =>
                 history.ReplayMode = DurableAgentHistoryReplayMode.CurrentRequestOnly);
 
@@ -258,6 +260,7 @@ public sealed class DurableAgentHistoryOwnershipTests
         DurableAgentsOptions returned = options.AddAIAgentFactory(
             "Agent",
             _ => new StubAgent(),
+            timeToLive: null,
             configureHistory: history => history.ProviderKey = providerKey);
 
         Assert.Same(options, returned);
