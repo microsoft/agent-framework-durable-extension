@@ -120,7 +120,7 @@ internal sealed class DurableExecutorOutput
         return true;
     }
 
-    private static bool HasValidTypedMessage(JsonElement message)
+    internal static bool HasValidTypedMessage(JsonElement message)
     {
         return HasUnambiguousProperties(message, s_messageProperties, out HashSet<string> presentProperties) &&
             presentProperties.Contains(nameof(TypedPayload.TypeName)) &&
