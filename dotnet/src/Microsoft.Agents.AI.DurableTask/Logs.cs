@@ -104,7 +104,7 @@ internal static partial class Logs
     [LoggerMessage(
         EventId = 14,
         Level = LogLevel.Error,
-        Message = "[{SessionId}] Durable agent execution failed while restoring, running, or serializing the inner agent session.")]
+        Message = "[{SessionId}] Durable agent operation failed before durable state commit.")]
     public static partial void LogDurableAgentExecutionFailed(
         this ILogger logger,
         Exception exception,

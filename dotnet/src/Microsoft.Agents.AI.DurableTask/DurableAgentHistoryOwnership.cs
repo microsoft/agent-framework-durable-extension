@@ -148,6 +148,12 @@ internal static class DurableAgentHistoryOwnershipResolver
             throw new DurableAgentHistoryOwnershipNotSupportedException();
         }
 
+        if (chatClientAgent.ChatHistoryProvider is not InMemoryChatHistoryProvider)
+        {
+            throw new DurableAgentHistoryOwnershipNotSupportedException(
+                "Service-managed per-service-call history cannot be combined with a custom chat history provider.");
+        }
+
         return new(chatClientAgent, RequiresPerServiceCallPersistence: true);
     }
 

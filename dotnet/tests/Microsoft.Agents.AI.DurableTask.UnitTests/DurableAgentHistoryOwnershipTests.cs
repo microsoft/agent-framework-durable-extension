@@ -184,6 +184,26 @@ public sealed class DurableAgentHistoryOwnershipTests
     }
 
     [Fact]
+    public async Task ServiceManagedPerCallRejectsCustomProviderBeforeExecutionAsync()
+    {
+        ChatClientAgent chatAgent = new(
+            new StubChatClient(),
+            new ChatClientAgentOptions
+            {
+                Name = "agent",
+                ChatHistoryProvider = new CustomHistoryProvider(),
+                RequirePerServiceCallChatHistoryPersistence = true,
+            });
+        AgentSession session = await chatAgent.CreateSessionAsync();
+
+        Assert.Throws<DurableAgentHistoryOwnershipNotSupportedException>(
+            () => DurableAgentHistoryOwnershipResolver.Resolve(
+                chatAgent,
+                session,
+                serviceManagedPerServiceCallHistory: true));
+    }
+
+    [Fact]
     public async Task ServiceManagedPerCallDeclarationIsIgnoredWhenPerCallPersistenceIsDisabledAsync()
     {
         ChatClientAgent chatAgent = new(
