@@ -351,6 +351,25 @@ public sealed class DurableExecutorDispatcherTests
         Assert.Equal("trusted", Assert.Single(output.SentMessages).Data);
     }
 
+    [Fact]
+    public async Task DispatchAsync_SubWorkflowPreservesControlsWithNullSentMessagesAsync()
+    {
+        const string Response = """{"result":"trusted","events":["event"],"sentMessages":null,"haltRequested":true}""";
+        Workflow workflow = new WorkflowBuilder(new FunctionExecutor<string, string>("child", (input, _, _) => input))
+            .WithName("child-workflow").Build();
+        Mock<TaskOrchestrationContext> context = new();
+        context.Setup(c => c.CallSubOrchestratorAsync<JsonElement?>(
+            It.IsAny<TaskName>(), It.IsAny<object?>(), It.IsAny<TaskOptions?>()))
+            .ReturnsAsync(JsonDocument.Parse(Response).RootElement.Clone());
+
+        DurableExecutorOutput output = await DispatchAsync(context, new("child", false, SubWorkflow: workflow));
+
+        Assert.Equal("trusted", output.Result);
+        Assert.Equal(["event"], output.Events);
+        Assert.True(output.HaltRequested);
+        Assert.Equal("trusted", Assert.Single(output.SentMessages).Data);
+    }
+
     [Theory]
     [InlineData("null")]
     [InlineData("false")]

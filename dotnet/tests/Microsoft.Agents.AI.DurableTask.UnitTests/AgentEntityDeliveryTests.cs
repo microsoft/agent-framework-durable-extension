@@ -569,8 +569,8 @@ public sealed class AgentEntityDeliveryTests
         Assert.True(JsonElement.DeepEquals(state.Data.HistoryBinding, committed.Data.HistoryBinding));
         Assert.Equal(3, committed.Data.CompletionReceipts!.Count);
         Assert.Equal(2, state.Data.CompletionReceipts!.Count);
-        committed.Data.IngestedPositions!["example-producer"] = 99;
-        Assert.Equal(3, state.Data.IngestedPositions!["example-producer"]);
+        committed.Data.IngestedPositions!["example-producer"] = JsonSerializer.SerializeToElement(99);
+        Assert.Equal(3, state.Data.IngestedPositions!["example-producer"].GetInt32());
     }
 
     [Fact]

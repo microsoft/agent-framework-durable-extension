@@ -465,7 +465,10 @@ public sealed class AgentEntityResultExpirationTests
                 ExpirationTimeUtc = s_now.AddDays(2).UtcDateTime,
                 HistoryBinding = JsonSerializer.SerializeToElement<object?>(null),
                 Session = JsonSerializer.SerializeToElement(new { continuation = "session" }),
-                IngestedPositions = new Dictionary<string, int> { ["producer"] = 2 },
+                IngestedPositions = new Dictionary<string, JsonElement>
+                {
+                    ["producer"] = JsonSerializer.SerializeToElement(2),
+                },
             },
         };
         state.Data.ConversationHistory.Add(new DurableAgentStateResponse

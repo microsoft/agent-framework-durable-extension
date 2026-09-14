@@ -117,7 +117,7 @@ internal sealed class DurableAgentStateData
     /// </remarks>
     [JsonPropertyName("ingestedPositions")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IDictionary<string, int>? IngestedPositions { get; set; }
+    public IDictionary<string, JsonElement>? IngestedPositions { get; set; }
 
     /// <summary>
     /// Gets or sets bounded evidence that transcript messages were removed from durable state.
@@ -163,7 +163,8 @@ internal sealed class DurableAgentStateData
     {
         DurableAgentStateSchemaVersion version =
             DurableAgentStateSchemaVersion.ParseSupported(schemaVersion);
-        if (this.IngestedPositions?.Values.Any(static position => position < 0) == true)
+        if (this.IngestedPositions?.Values.Any(static position =>
+            !DurableAgentStateUsage.IsNonNegativeJsonInteger(position)) == true)
         {
             throw new InvalidOperationException(
                 "Durable agent ingestion positions must be non-negative.");

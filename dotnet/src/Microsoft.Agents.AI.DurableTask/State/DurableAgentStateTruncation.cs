@@ -18,7 +18,7 @@ internal sealed class DurableAgentStateTruncation
     /// Gets or sets the cumulative number of transcript messages known to have been removed.
     /// </summary>
     [JsonPropertyName("evictedMessageCount")]
-    public int EvictedMessageCount { get; set; }
+    public JsonElement EvictedMessageCount { get; set; }
 
     /// <summary>
     /// Gets or sets when transcript removal was first recorded.
@@ -40,7 +40,7 @@ internal sealed class DurableAgentStateTruncation
 
     public void Validate()
     {
-        if (this.EvictedMessageCount < 1 ||
+        if (!DurableAgentStateUsage.IsPositiveJsonInteger(this.EvictedMessageCount) ||
             this.FirstEvictedAt == default ||
             this.LastEvictedAt == default ||
             this.LastEvictedAt < this.FirstEvictedAt)

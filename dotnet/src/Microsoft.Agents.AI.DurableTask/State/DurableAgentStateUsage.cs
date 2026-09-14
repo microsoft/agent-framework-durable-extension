@@ -159,4 +159,19 @@ internal sealed class DurableAgentStateUsage
         return exponent.Length > 9 ||
             (int.TryParse(exponent, out int exponentValue) && exponentValue >= fractionalDigits.Length);
     }
+
+    internal static bool IsNonNegativeJsonInteger(JsonElement value) =>
+        value.ValueKind == JsonValueKind.Number &&
+        IsJsonInteger(value.GetRawText()) &&
+        (value.GetRawText()[0] != '-' || !HasNonZeroSignificandDigit(value.GetRawText()));
+
+    internal static bool IsPositiveJsonInteger(JsonElement value) =>
+        IsNonNegativeJsonInteger(value) && HasNonZeroSignificandDigit(value.GetRawText());
+
+    private static bool HasNonZeroSignificandDigit(string value)
+    {
+        int exponentIndex = value.IndexOfAny('e', 'E');
+        ReadOnlySpan<char> significand = exponentIndex >= 0 ? value.AsSpan(0, exponentIndex) : value;
+        return significand.IndexOfAnyInRange('1', '9') >= 0;
+    }
 }
