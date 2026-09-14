@@ -11,6 +11,10 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 [JsonConverter(typeof(DurableAgentStateJsonConverter))]
 internal sealed class DurableAgentState
 {
+    // 1.2.0 remains the production write default during the reader-first rollout. Support for
+    // 2.0.0 is passive until every worker, poller, hosting consumer, dashboard, and supported
+    // rollback writer is mailbox-aware. After that rollout gate is met, the default write version
+    // can advance to 2.0.0; 1.x read support remains for backward compatibility.
     internal const string CurrentSchemaVersion = "1.2.0";
     internal const string RevisedSchemaVersion = "2.0.0";
     internal const int RevisedSchemaMajorVersion = 2;
