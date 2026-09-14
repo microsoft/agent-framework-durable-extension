@@ -85,7 +85,7 @@ public static class HistoryRetentionHost
 
 public static class HistoryRetentionDemo
 {
-    // Seven bounded results, receipts, history binding, session state, and bookkeeping fit below
+    // Eight bounded results, receipts, history binding, session state, and bookkeeping fit below
     // this budget while seven 4 KiB inputs force the oldest transcript groups to be evicted.
     public const int MaxStateBytes = 32 * 1024;
     public const int ScenarioTurns = 7;
