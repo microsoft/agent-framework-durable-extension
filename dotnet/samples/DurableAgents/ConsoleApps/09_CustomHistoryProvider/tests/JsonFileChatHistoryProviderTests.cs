@@ -102,6 +102,35 @@ public sealed class JsonFileChatHistoryProviderTests
     }
 
     [Fact]
+    public async Task RestoredSessionFailsWhenExternalHistoryIsMissingAsync()
+    {
+        string directory = CreateStoreDirectory();
+        try
+        {
+            using JsonFileChatHistoryProvider firstProvider = new(directory);
+            ChatClientAgent firstAgent = CreateAgent(firstProvider);
+            AgentSession session = await firstAgent.CreateSessionAsync();
+            _ = firstProvider.GetHistoryId(session);
+            JsonElement serializedSession = await firstAgent.SerializeSessionAsync(session);
+
+            using JsonFileChatHistoryProvider secondProvider = new(directory);
+            ChatClientAgent secondAgent = CreateAgent(secondProvider);
+            AgentSession restoredSession = await secondAgent.DeserializeSessionAsync(serializedSession);
+
+            await Assert.ThrowsAsync<FileNotFoundException>(async () =>
+                _ = await secondProvider.InvokingAsync(
+                    new ChatHistoryProvider.InvokingContext(
+                        secondAgent,
+                        restoredSession,
+                        [new ChatMessage(ChatRole.User, "next request")])));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task StoreDoesNotDuplicateTheProvidedHistoryPrefixAsync()
     {
         string directory = CreateStoreDirectory();
