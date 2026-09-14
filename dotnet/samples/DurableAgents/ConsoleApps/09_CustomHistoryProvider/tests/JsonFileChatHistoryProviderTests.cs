@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 using System.Text;
+using System.Text.Json;
 using CustomHistoryProvider;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
@@ -58,6 +59,41 @@ public sealed class JsonFileChatHistoryProviderTests
                 ["first request", "first response", "second request"],
                 restoredInput.Select(message => message.Text));
             Assert.Equal(firstHistoryId, secondProvider.GetHistoryId(restoredSession));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CustomRoleRoundTripsThroughANewProviderInstanceAsync()
+    {
+        string directory = CreateStoreDirectory();
+        try
+        {
+            using JsonFileChatHistoryProvider firstProvider = new(directory);
+            ChatClientAgent firstAgent = CreateAgent(firstProvider);
+            AgentSession session = await firstAgent.CreateSessionAsync();
+            IEnumerable<ChatMessage> input = await firstProvider.InvokingAsync(
+                new ChatHistoryProvider.InvokingContext(
+                    firstAgent,
+                    session,
+                    [new ChatMessage(new ChatRole("developer"), "custom role")]));
+            await firstProvider.InvokedAsync(new ChatHistoryProvider.InvokedContext(
+                firstAgent,
+                session,
+                input,
+                [new ChatMessage(ChatRole.Assistant, "response")]));
+            JsonElement serializedSession = await firstAgent.SerializeSessionAsync(session);
+
+            using JsonFileChatHistoryProvider secondProvider = new(directory);
+            ChatClientAgent secondAgent = CreateAgent(secondProvider);
+            AgentSession restoredSession = await secondAgent.DeserializeSessionAsync(serializedSession);
+            IReadOnlyList<ChatMessage> restored = await secondProvider.ReadMessagesAsync(restoredSession);
+
+            Assert.Equal("developer", restored[0].Role.Value);
+            Assert.Equal("custom role", restored[0].Text);
         }
         finally
         {
