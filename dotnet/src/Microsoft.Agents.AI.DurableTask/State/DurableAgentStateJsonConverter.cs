@@ -652,10 +652,10 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         foreach (string countName in new[] { "inputTokenCount", "outputTokenCount", "totalTokenCount" })
         {
             if (usage.TryGetProperty(countName, out JsonElement count) &&
-                (count.ValueKind != JsonValueKind.Number || !count.TryGetInt64(out _)))
+                (count.ValueKind != JsonValueKind.Number || !DurableAgentStateUsage.IsJsonInteger(count.GetRawText())))
             {
                 throw new JsonException(
-                    $"The durable agent state '{path}.{countName}' property must be an Int64 value.");
+                    $"The durable agent state '{path}.{countName}' property must be an integer.");
             }
         }
 

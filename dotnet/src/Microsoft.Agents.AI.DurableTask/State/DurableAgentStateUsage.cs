@@ -16,22 +16,34 @@ internal sealed class DurableAgentStateUsage
     /// Gets the number of input tokens used.
     /// </summary>
     [JsonPropertyName("inputTokenCount")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public long? InputTokenCount { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public JsonElement InputTokenCount
+    {
+        get;
+        init => field = ValidateCount(value, "inputTokenCount");
+    }
 
     /// <summary>
     /// Gets the number of output tokens used.
     /// </summary>
     [JsonPropertyName("outputTokenCount")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public long? OutputTokenCount { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public JsonElement OutputTokenCount
+    {
+        get;
+        init => field = ValidateCount(value, "outputTokenCount");
+    }
 
     /// <summary>
     /// Gets the total number of tokens used.
     /// </summary>
     [JsonPropertyName("totalTokenCount")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public long? TotalTokenCount { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public JsonElement TotalTokenCount
+    {
+        get;
+        init => field = ValidateCount(value, "totalTokenCount");
+    }
 
     /// <summary>
     /// Gets provider-specific usage counts from the schema's <c>extensionData</c> property.
@@ -56,9 +68,9 @@ internal sealed class DurableAgentStateUsage
         usage is not null
             ? new()
             {
-                InputTokenCount = usage.InputTokenCount,
-                OutputTokenCount = usage.OutputTokenCount,
-                TotalTokenCount = usage.TotalTokenCount,
+                InputTokenCount = ToJsonElement(usage.InputTokenCount),
+                OutputTokenCount = ToJsonElement(usage.OutputTokenCount),
+                TotalTokenCount = ToJsonElement(usage.TotalTokenCount),
                 ExtensionData = usage.AdditionalCounts?.ToDictionary(
                     pair => pair.Key,
                     pair => JsonSerializer.SerializeToElement(
@@ -94,10 +106,57 @@ internal sealed class DurableAgentStateUsage
 
         return new()
         {
-            InputTokenCount = this.InputTokenCount,
-            OutputTokenCount = this.OutputTokenCount,
-            TotalTokenCount = this.TotalTokenCount,
+            InputTokenCount = ToInt64(this.InputTokenCount),
+            OutputTokenCount = ToInt64(this.OutputTokenCount),
+            TotalTokenCount = ToInt64(this.TotalTokenCount),
             AdditionalCounts = additionalCounts,
         };
+    }
+
+    private static JsonElement ToJsonElement(long? value) => value.HasValue
+        ? JsonSerializer.SerializeToElement(value.Value, DurableAgentStateJsonContext.Default.Int64)
+        : default;
+
+    private static long? ToInt64(JsonElement value) =>
+        value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out long count)
+            ? count
+            : null;
+
+    private static JsonElement ValidateCount(JsonElement value, string propertyName)
+    {
+        if (value.ValueKind != JsonValueKind.Undefined &&
+            (value.ValueKind != JsonValueKind.Number || !IsJsonInteger(value.GetRawText())))
+        {
+            throw new JsonException($"The durable agent usage '{propertyName}' property must be an integer.");
+        }
+
+        return value;
+    }
+
+    internal static bool IsJsonInteger(string value)
+    {
+        int exponentIndex = value.IndexOfAny('e', 'E');
+        ReadOnlySpan<char> significand = exponentIndex >= 0 ? value.AsSpan(0, exponentIndex) : value;
+        ReadOnlySpan<char> exponent = exponentIndex >= 0 ? value.AsSpan(exponentIndex + 1) : default;
+        int decimalIndex = significand.IndexOf('.');
+        if (decimalIndex < 0)
+        {
+            return exponent.IsEmpty || exponent[0] != '-';
+        }
+
+        ReadOnlySpan<char> fractionalDigits = significand[(decimalIndex + 1)..];
+        if (fractionalDigits.TrimEnd('0').IsEmpty)
+        {
+            return true;
+        }
+
+        if (exponent.IsEmpty || exponent[0] == '-')
+        {
+            return false;
+        }
+
+        exponent = exponent[0] == '+' ? exponent[1..] : exponent;
+        return exponent.Length > 9 ||
+            (int.TryParse(exponent, out int exponentValue) && exponentValue >= fractionalDigits.Length);
     }
 }
