@@ -166,10 +166,11 @@ static IHost CreateHost(AIAgent foundryAgent, string dtsConnectionString)
             services.ConfigureDurableAgents(
                 options =>
                 {
-                    options.AddAIAgent(foundryAgent, timeToLive: TimeSpan.FromHours(1));
-                    options.SetHistoryProviderKey(
-                        foundryAgent.Name!,
-                        FoundryServiceHistoryProviderKey);
+                    options.AddAIAgent(
+                        foundryAgent,
+                        timeToLive: TimeSpan.FromHours(1),
+                        configureHistory: history =>
+                            history.ProviderKey = new(FoundryServiceHistoryProviderKey));
                     options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll;
 
                     // FoundryAgent's versioned-agent path does not enable

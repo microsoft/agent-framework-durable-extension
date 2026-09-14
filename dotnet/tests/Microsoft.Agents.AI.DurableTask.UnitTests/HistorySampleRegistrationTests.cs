@@ -24,6 +24,10 @@ public sealed class HistorySampleRegistrationTests
     private const string FoundryAgentName = "foundry-managed-agent";
     private const string FoundryServiceHistoryProviderKey = "foundry-managed-service.v1";
     private const string HistoryAgentName = "HistoryAgent";
+    private static readonly DurableAgentHistoryProviderKey s_foundryHistoryProviderKey =
+        new(FoundryServiceHistoryProviderKey);
+    private static readonly DurableAgentHistoryProviderKey s_customHistoryProviderKey =
+        new(JsonFileChatHistoryProvider.ProviderKey);
 
     [Fact]
     public async Task ExternalProviderRegistrationUsesMailboxAcrossProxyRestartAsync()
@@ -45,12 +49,10 @@ public sealed class HistorySampleRegistrationTests
                 stateStore,
                 options =>
                 {
-                    options.SetHistoryProviderKey(
-                        HistoryAgentName,
-                        JsonFileChatHistoryProvider.ProviderKey);
                     options.EnableMailboxWrites = true;
                     options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll;
                 },
+                s_customHistoryProviderKey,
                 services => services.AddSingleton(firstProvider)))
             {
                 await firstHost.StartAsync();
@@ -84,12 +86,10 @@ public sealed class HistorySampleRegistrationTests
                 stateStore,
                 options =>
                 {
-                    options.SetHistoryProviderKey(
-                        HistoryAgentName,
-                        JsonFileChatHistoryProvider.ProviderKey);
                     options.EnableMailboxWrites = true;
                     options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll;
                 },
+                s_customHistoryProviderKey,
                 services => services.AddSingleton(secondProvider));
             await secondHost.StartAsync();
             AIAgent restoredProxy =
@@ -137,7 +137,8 @@ public sealed class HistorySampleRegistrationTests
         using (IHost firstHost = CreateHost(
             firstAgent,
             stateStore,
-            ConfigureFoundryRegistration))
+            ConfigureFoundryRegistration,
+            s_foundryHistoryProviderKey))
         {
             await firstHost.StartAsync();
             AIAgent proxy = firstHost.Services.GetRequiredKeyedService<AIAgent>(FoundryAgentName);
@@ -167,7 +168,8 @@ public sealed class HistorySampleRegistrationTests
         using IHost secondHost = CreateHost(
             secondAgent,
             stateStore,
-            ConfigureFoundryRegistration);
+            ConfigureFoundryRegistration,
+            s_foundryHistoryProviderKey);
         await secondHost.StartAsync();
         AIAgent restoredProxy =
             secondHost.Services.GetRequiredKeyedService<AIAgent>(FoundryAgentName);
@@ -222,13 +224,8 @@ public sealed class HistorySampleRegistrationTests
             using IHost host = CreateHost(
                 agent,
                 stateStore,
-                options =>
-                {
-                    options.SetHistoryProviderKey(
-                        HistoryAgentName,
-                        JsonFileChatHistoryProvider.ProviderKey);
-                    options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll;
-                },
+                options => options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll,
+                s_customHistoryProviderKey,
                 services => services.AddSingleton(provider));
             await host.StartAsync();
             AIAgent proxy = host.Services.GetRequiredKeyedService<AIAgent>(HistoryAgentName);
@@ -259,6 +256,7 @@ public sealed class HistorySampleRegistrationTests
         AIAgent agent,
         InProcessDurableStateStore stateStore,
         Action<DurableAgentsOptions> configure,
+        DurableAgentHistoryProviderKey historyProviderKey,
         Action<IServiceCollection>? configureServices = null)
     {
         return Host.CreateDefaultBuilder()
@@ -267,7 +265,10 @@ public sealed class HistorySampleRegistrationTests
                 configureServices?.Invoke(services);
                 services.ConfigureDurableAgents(options =>
                 {
-                    options.AddAIAgent(agent, timeToLive: TimeSpan.FromHours(1));
+                    options.AddAIAgent(
+                        agent,
+                        timeToLive: TimeSpan.FromHours(1),
+                        configureHistory: history => history.ProviderKey = historyProviderKey);
                     configure(options);
                 });
                 services.AddSingleton(
@@ -282,9 +283,6 @@ public sealed class HistorySampleRegistrationTests
 
     private static void ConfigureFoundryRegistration(DurableAgentsOptions options)
     {
-        options.SetHistoryProviderKey(
-            FoundryAgentName,
-            FoundryServiceHistoryProviderKey);
         options.EnableMailboxWrites = true;
         options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll;
     }

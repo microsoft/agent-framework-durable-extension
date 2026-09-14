@@ -11,6 +11,8 @@ namespace Microsoft.Agents.AI.DurableTask.Tests.Unit;
 public sealed class FoundryAgentRegistrationTests
 {
     private const string FoundryServiceHistoryProviderKey = "foundry-managed-service.v1";
+    private static readonly DurableAgentHistoryProviderKey s_historyProviderKey =
+        new(FoundryServiceHistoryProviderKey);
 
     [Fact]
     public async Task ServerManagedFoundryAgentRestoresFixedServiceOwnershipAsync()
@@ -30,10 +32,9 @@ public sealed class FoundryAgentRegistrationTests
         AgentSession restoredSession =
             await foundryAgent.DeserializeSessionAsync(serializedSession);
 
-        options.AddAIAgent(foundryAgent);
-        options.SetHistoryProviderKey(
-            foundryAgent.Name!,
-            FoundryServiceHistoryProviderKey);
+        options.AddAIAgent(
+            foundryAgent,
+            configureHistory: history => history.ProviderKey = s_historyProviderKey);
         options.EnableMailboxWrites = true;
         options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll;
 
@@ -47,11 +48,12 @@ public sealed class FoundryAgentRegistrationTests
         Assert.Same(innerAgent, restoredInnerAgent);
         Assert.Equal("service-conversation-id", typedSession.ConversationId);
         Assert.Equal(
-            FoundryServiceHistoryProviderKey,
-            options.GetHistoryProviderKey(foundryAgent.Name!));
+            s_historyProviderKey,
+            options.GetHistoryConfiguration(foundryAgent.Name!).ProviderKey);
         Assert.True(options.EnableMailboxWrites);
         Assert.Equal(DurableAgentHistoryRetentionMode.KeepAll, options.HistoryRetentionMode);
-        Assert.False(options.IsServiceManagedPerServiceCallHistory(foundryAgent.Name!));
+        Assert.False(
+            options.GetHistoryConfiguration(foundryAgent.Name!).ServiceManagedPerServiceCallHistory);
     }
 
     private sealed class FakeAuthenticationTokenProvider : AuthenticationTokenProvider
