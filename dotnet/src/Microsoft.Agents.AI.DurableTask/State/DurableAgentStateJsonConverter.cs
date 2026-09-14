@@ -399,12 +399,10 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
 
             foreach (JsonProperty position in ingestedPositions.EnumerateObject())
             {
-                if (position.Value.ValueKind != JsonValueKind.Number ||
-                    !position.Value.TryGetInt32(out int value) ||
-                    value < 0)
+                if (!DurableAgentStateUsage.IsNonNegativeJsonInteger(position.Value))
                 {
                     throw new InvalidOperationException(
-                        $"The durable agent ingestion position '{position.Name}' must be a non-negative Int32 value.");
+                        $"The durable agent ingestion position '{position.Name}' must be a non-negative integer.");
                 }
             }
         }
@@ -418,6 +416,13 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
             {
                 throw new InvalidOperationException(
                     "Durable agent truncation evidence requires evictedMessageCount, firstEvictedAt, and lastEvictedAt.");
+            }
+
+            if (!DurableAgentStateUsage.IsPositiveJsonInteger(
+                    truncation.GetProperty("evictedMessageCount")))
+            {
+                throw new InvalidOperationException(
+                    "Durable agent truncation evictedMessageCount must be a positive integer.");
             }
         }
     }

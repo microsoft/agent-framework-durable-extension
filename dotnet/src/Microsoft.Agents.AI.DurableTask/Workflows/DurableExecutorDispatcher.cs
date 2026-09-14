@@ -197,8 +197,8 @@ internal static class DurableExecutorDispatcher
             DurableWorkflowJsonContext.Default.DurableWorkflowResult);
         if (workflowResult is not null &&
             resultElement.TryGetProperty("sentMessages", out JsonElement sentMessages) &&
-            (sentMessages.ValueKind != JsonValueKind.Array ||
-                !sentMessages.EnumerateArray().All(DurableExecutorOutput.HasValidTypedMessage)))
+            sentMessages.ValueKind == JsonValueKind.Array &&
+            !sentMessages.EnumerateArray().All(DurableExecutorOutput.HasValidTypedMessage))
         {
             workflowResult.SentMessages = [new TypedPayload()];
         }
