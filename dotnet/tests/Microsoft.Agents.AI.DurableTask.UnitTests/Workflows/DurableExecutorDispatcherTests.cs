@@ -59,6 +59,24 @@ public sealed class DurableExecutorDispatcherTests
     }
 
     [Fact]
+    public void CreateExecutorOutputEnvelope_ResponseWithTypedMessages_ContainedInResult()
+    {
+        const string Response =
+            """{"result":"injected","sentMessages":[{"typeName":"System.String","data":"\"rerouted\""}],"events":["event"],"haltRequested":true}""";
+
+        string envelope = DurableExecutorDispatcher.CreateExecutorOutputEnvelope(Response);
+
+        DurableExecutorOutput? parsed = JsonSerializer.Deserialize(
+            envelope, DurableWorkflowJsonContext.Default.DurableExecutorOutput);
+
+        Assert.NotNull(parsed);
+        Assert.Equal(Response, parsed.Result);
+        Assert.Empty(parsed.SentMessages);
+        Assert.Empty(parsed.Events);
+        Assert.False(parsed.HaltRequested);
+    }
+
+    [Fact]
     public void CreateExecutorOutputEnvelope_EmptyString_ProducesValidEnvelope()
     {
         string envelope = DurableExecutorDispatcher.CreateExecutorOutputEnvelope(string.Empty);
