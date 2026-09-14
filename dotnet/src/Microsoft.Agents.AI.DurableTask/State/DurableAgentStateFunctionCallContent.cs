@@ -104,8 +104,13 @@ internal sealed class DurableAgentStateFunctionCallContent : DurableAgentStateCo
     }
 
     /// <inheritdoc/>
-    public override void ValidateV2()
+    internal override void Validate(DurableAgentStateSchemaVersion version)
     {
+        if (version.Major < DurableAgentState.RevisedSchemaMajorVersion)
+        {
+            return;
+        }
+
         if (this.Arguments.ValueKind is not JsonValueKind.Undefined and
             not JsonValueKind.Object and
             not JsonValueKind.String)

@@ -205,7 +205,7 @@ internal sealed class DurableAgentStateData
                         "A revised durable agent state cannot contain null conversation entries.");
                 }
 
-                entry.ValidateV2();
+                entry.Validate(version);
             }
 
             foreach ((string correlationId, DurableAgentStateTerminalResult result) in this.TerminalResults)

@@ -226,6 +226,9 @@ internal sealed class DurableAgentStateTerminalResponse
     }
 
     public void Validate()
+        => this.Validate(DurableAgentStateSchemaVersion.ParseSupported(DurableAgentState.RevisedSchemaVersion));
+
+    internal void Validate(DurableAgentStateSchemaVersion version)
     {
         if (this.Messages is null)
         {
@@ -241,7 +244,7 @@ internal sealed class DurableAgentStateTerminalResponse
                     "A durable agent terminal response cannot contain null messages or content collections.");
             }
 
-            message.ValidateV2();
+            message.Validate(version);
         }
 
         ValidateOptionalIdentifier(this.ResponseId, "terminalResults.response.responseId");
