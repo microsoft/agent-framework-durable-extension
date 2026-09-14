@@ -218,10 +218,13 @@ other continuation. Mailbox results are never replayed as model history.
 Configure non-entity owners with a stable logical key:
 
 ```csharp
+DurableAgentHistoryProviderKey historyProviderKey = new("contoso.support-history.v1");
+
 services.ConfigureDurableAgents(options =>
 {
-    options.AddAIAgent(agent);
-    options.SetHistoryProviderKey(agent.Name!, "contoso.support-history.v1");
+  options.AddAIAgent(
+    agent,
+    configureHistory: history => history.ProviderKey = historyProviderKey);
 });
 ```
 
