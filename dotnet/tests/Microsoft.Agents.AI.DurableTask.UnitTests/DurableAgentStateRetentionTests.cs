@@ -121,6 +121,30 @@ public sealed class DurableAgentStateRetentionTests
     }
 
     [Fact]
+    public void AutoSaturatesEvictedMessageCountAtSchemaMaximum()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateLargeState(now);
+        state.Data.Truncation = new DurableAgentStateTruncation
+        {
+            EvictedMessageCount = int.MaxValue,
+            FirstEvictedAt = now.AddMinutes(-20),
+            LastEvictedAt = now.AddMinutes(-10),
+        };
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            2_500,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(removed > 0);
+        Assert.Equal(int.MaxValue, state.Data.Truncation?.EvictedMessageCount);
+    }
+
+    [Fact]
     public void AutoPreservesSystemExchange()
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
