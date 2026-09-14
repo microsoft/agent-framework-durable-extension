@@ -42,6 +42,26 @@ public sealed class AgentEntityResultExpirationTests
         Assert.Single(signals);
     }
 
+    [Fact]
+    public async Task OversizedRetentionSaturatesWithoutFailingAfterExecutionAsync()
+    {
+        DateTimeOffset completedAt = DateTimeOffset.MaxValue.AddDays(-1);
+        List<DateTimeOffset> signals = [];
+        EntityHarness harness = CreateHarness(
+            new RecordingAgent("agent"),
+            state: null,
+            resultRetentionPeriod: TimeSpan.MaxValue,
+            timeProvider: new Clock(completedAt),
+            onSignal: (name, options) => CaptureSignal(signals, name, options));
+
+        await harness.RunAsync(new RunRequest("request") { CorrelationId = "request" });
+
+        DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(harness.PersistedState));
+        DurableAgentStateTerminalResult result = Assert.Single(committed.Data.TerminalResults!).Value;
+        Assert.Equal(DateTimeOffset.MaxValue, result.ResultExpiresAt);
+        Assert.Equal(DateTimeOffset.MaxValue, Assert.Single(signals));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

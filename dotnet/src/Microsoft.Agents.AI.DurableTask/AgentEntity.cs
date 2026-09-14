@@ -280,7 +280,7 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
                     correlationId,
                     response,
                     completedAt,
-                    this._options.ResultRetentionPeriod is TimeSpan retention ? completedAt.Add(retention) : null,
+                    GetResultExpiration(completedAt, this._options.ResultRetentionPeriod),
                     logger: logger);
                 DurableAgentJsonUtilities.CaptureRetainedResult(
                     response, workingState.Data.TerminalResults![correlationId].Response!);
@@ -319,6 +319,20 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             // Clear the current agent context
             DurableAgentContext.ClearCurrent();
         }
+    }
+
+    private static DateTimeOffset? GetResultExpiration(
+        DateTimeOffset completedAt,
+        TimeSpan? retention)
+    {
+        if (retention is null)
+        {
+            return null;
+        }
+
+        return retention > DateTimeOffset.MaxValue - completedAt
+            ? DateTimeOffset.MaxValue
+            : completedAt.Add(retention.Value);
     }
 
     /// <summary>
