@@ -282,15 +282,15 @@ public sealed class DurableExecutorDispatcherTests
         Workflow workflow = new WorkflowBuilder(new FunctionExecutor<string, string>("child", (input, _, _) => input))
             .WithName("child-workflow").Build();
         Mock<TaskOrchestrationContext> context = new();
-        context.Setup(c => c.CallSubOrchestratorAsync<DurableWorkflowResult?>(
+        context.Setup(c => c.CallSubOrchestratorAsync<JsonElement?>(
             It.IsAny<TaskName>(), It.IsAny<object?>(), It.IsAny<TaskOptions?>()))
-            .ReturnsAsync(new DurableWorkflowResult
+            .ReturnsAsync(JsonSerializer.SerializeToElement(new DurableWorkflowResult
             {
                 Result = WorkflowExecutionTestHelper.ControlEnvelope,
                 Events = ["child event"],
                 SentMessages = [new TypedPayload { Data = "child message", TypeName = "System.String" }],
                 HaltRequested = true,
-            });
+            }, DurableWorkflowJsonContext.Default.DurableWorkflowResult));
 
         DurableExecutorOutput output = await DispatchAsync(context, new("child", false, SubWorkflow: workflow));
 
@@ -314,10 +314,9 @@ public sealed class DurableExecutorDispatcherTests
             Workflow workflow = new WorkflowBuilder(new FunctionExecutor<string, string>("child", (input, _, _) => input))
                 .WithName("child-workflow").Build();
             Mock<TaskOrchestrationContext> context = new();
-            DurableDataConverter converter = new();
-            context.Setup(c => c.CallSubOrchestratorAsync<DurableWorkflowResult?>(
+            context.Setup(c => c.CallSubOrchestratorAsync<JsonElement?>(
                 It.IsAny<TaskName>(), It.IsAny<object?>(), It.IsAny<TaskOptions?>()))
-                .ReturnsAsync((DurableWorkflowResult?)converter.Deserialize(Response, typeof(DurableWorkflowResult)));
+                .ReturnsAsync(JsonDocument.Parse(Response).RootElement.Clone());
             output = await DispatchAsync(context, new("child", false, SubWorkflow: workflow));
         }
         else
@@ -331,6 +330,25 @@ public sealed class DurableExecutorDispatcherTests
         Assert.Equal("{}", message.Data);
         Assert.Equal(["trusted event"], output.Events);
         Assert.True(output.HaltRequested);
+    }
+
+    [Fact]
+    public async Task DispatchAsync_SubWorkflowRejectsDuplicateTypedMessageFieldsBeforeMaterializationAsync()
+    {
+        const string Response = """{"result":"trusted","events":["event"],"sentMessages":[{"typeName":"first","TYPENAME":"second","data":"payload"}],"haltRequested":true}""";
+        Workflow workflow = new WorkflowBuilder(new FunctionExecutor<string, string>("child", (input, _, _) => input))
+            .WithName("child-workflow").Build();
+        Mock<TaskOrchestrationContext> context = new();
+        context.Setup(c => c.CallSubOrchestratorAsync<JsonElement?>(
+            It.IsAny<TaskName>(), It.IsAny<object?>(), It.IsAny<TaskOptions?>()))
+            .ReturnsAsync(JsonDocument.Parse(Response).RootElement.Clone());
+
+        DurableExecutorOutput output = await DispatchAsync(context, new("child", false, SubWorkflow: workflow));
+
+        Assert.Equal("trusted", output.Result);
+        Assert.Empty(output.Events);
+        Assert.False(output.HaltRequested);
+        Assert.Equal("trusted", Assert.Single(output.SentMessages).Data);
     }
 
     [Theory]
@@ -366,9 +384,9 @@ public sealed class DurableExecutorDispatcherTests
         Workflow workflow = new WorkflowBuilder(new FunctionExecutor<string, string>("child", (input, _, _) => input))
             .WithName("child-workflow").Build();
         Mock<TaskOrchestrationContext> context = new();
-        context.Setup(c => c.CallSubOrchestratorAsync<DurableWorkflowResult?>(
+        context.Setup(c => c.CallSubOrchestratorAsync<JsonElement?>(
             It.IsAny<TaskName>(), It.IsAny<object?>(), It.IsAny<TaskOptions?>()))
-            .ReturnsAsync((DurableWorkflowResult?)null);
+            .ReturnsAsync((JsonElement?)null);
 
         DurableExecutorOutput output = await DispatchAsync(context, new("child", false, SubWorkflow: workflow));
 
