@@ -129,7 +129,15 @@ internal static class DurableActivityExecutor
                 }
             }
 
-            return JsonSerializer.Deserialize(input, DurableWorkflowJsonContext.Default.DurableActivityInput);
+            DurableActivityInput? activityInput = JsonSerializer.Deserialize(
+                input,
+                DurableWorkflowJsonContext.Default.DurableActivityInput);
+            if (hasTypeHint && activityInput?.Input is null)
+            {
+                throw new JsonException("Activity input is required when an input type hint is present.");
+            }
+
+            return activityInput;
         }
         catch (JsonException) when (!hasTypeHint)
         {

@@ -378,6 +378,20 @@ public sealed class DurableActivityExecutorTests
     }
 
     [Theory]
+    [InlineData("""{"inputTypeName":"AllowedInput"}""")]
+    [InlineData("""{"inputTypeName":"AllowedInput","input":null}""")]
+    public async Task ExecuteAsync_NamedEnvelopeRequiresInputAsync(string wire)
+    {
+        ActivationCounts counts = StartTracking();
+
+        Exception? exception = await Record.ExceptionAsync(
+            () => ExecuteWithContractAsync<AllowedInput>(wire, counts));
+
+        AssertNoActivation(counts);
+        Assert.IsAssignableFrom<JsonException>(exception);
+    }
+
+    [Theory]
     [InlineData("assembly")]
     [InlineData("full")]
     [InlineData("short")]

@@ -455,6 +455,40 @@ public sealed class DurableAgentStateTests
     }
 
     [Fact]
+    public void ContractIntegersBeyondInt64RoundTripLosslessly()
+    {
+        const string Json = """
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [],
+                "ingestedPositions": { "writer": 9223372036854775808 },
+                "truncation": {
+                  "evictedMessageCount": 1e20,
+                  "firstEvictedAt": "2026-09-14T00:00:00Z",
+                  "lastEvictedAt": "2026-09-14T00:00:00Z"
+                }
+              }
+            }
+            """;
+
+        DurableAgentState state = Assert.IsType<DurableAgentState>(
+            JsonSerializer.Deserialize(Json, DurableAgentStateJsonContext.Default.DurableAgentState));
+        string roundTrip = JsonSerializer.Serialize(
+            state,
+            DurableAgentStateJsonContext.Default.DurableAgentState);
+        using JsonDocument document = JsonDocument.Parse(roundTrip);
+        JsonElement data = document.RootElement.GetProperty("data");
+
+        Assert.Equal(
+            "9223372036854775808",
+            data.GetProperty("ingestedPositions").GetProperty("writer").GetRawText());
+        Assert.Equal(
+            "1e20",
+            data.GetProperty("truncation").GetProperty("evictedMessageCount").GetRawText());
+    }
+
+    [Fact]
     public void CurrentVersionUnknownFieldsSurviveMutationAndRoundTrip()
     {
         const string JsonText = """
