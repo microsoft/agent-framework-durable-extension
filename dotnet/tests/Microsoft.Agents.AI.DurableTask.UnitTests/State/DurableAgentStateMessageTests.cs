@@ -263,8 +263,8 @@ public sealed class DurableAgentStateMessageTests
         Assert.NotNull(state);
         Assert.Equal("1.2.0", state.SchemaVersion);
         Assert.Equal("message-1", state.Data.ConversationHistory[0].Messages[0].MessageId);
-        Assert.Equal(0, state.Data.IngestedPositions?["input"]);
-        Assert.Equal(1, state.Data.IngestedPositions?["writer"]);
+        Assert.Equal(0, state.Data.IngestedPositions?["input"].GetInt32());
+        Assert.Equal(1, state.Data.IngestedPositions?["writer"].GetInt32());
         Assert.Contains("\"conversationId\":\"service-1\"", roundTrip, StringComparison.Ordinal);
         Assert.Contains("\"ingestedPositions\":{\"input\":0,\"writer\":1}", roundTrip, StringComparison.Ordinal);
         Assert.Contains("\"evictedMessageCount\":2", roundTrip, StringComparison.Ordinal);
