@@ -392,10 +392,27 @@ public sealed class DurableAgentStateContentTests
     }
 
     [Theory]
+    [InlineData("9223372036854775808")]
+    [InlineData("1.0")]
+    [InlineData("1e3")]
+    public void UsageKnownCountsPreserveSchemaIntegersBeyondRuntimeProjection(string countJson)
+    {
+        string json = $$"""{"inputTokenCount":{{countJson}}}""";
+        JsonTypeInfo usageTypeInfo =
+            DurableAgentStateJsonContext.Default.GetTypeInfo(typeof(DurableAgentStateUsage))!;
+
+        DurableAgentStateUsage stored = Assert.IsType<DurableAgentStateUsage>(
+            JsonSerializer.Deserialize(json, usageTypeInfo));
+        string roundTrip = JsonSerializer.Serialize(stored, usageTypeInfo);
+
+        Assert.Equal(countJson, JsonDocument.Parse(roundTrip).RootElement
+            .GetProperty("inputTokenCount").GetRawText());
+    }
+
+    [Theory]
     [InlineData("\"ten\"")]
     [InlineData("{}")]
     [InlineData("1.5")]
-    [InlineData("9223372036854775808")]
     public void UsageDeserializationRejectsMalformedKnownNumericFields(string invalidValue)
     {
         string json = $$"""
