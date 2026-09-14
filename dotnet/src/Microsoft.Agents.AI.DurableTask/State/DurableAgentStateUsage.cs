@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
@@ -95,8 +96,7 @@ internal sealed class DurableAgentStateUsage
 
             foreach ((string name, JsonElement value) in values)
             {
-                if (value.ValueKind == JsonValueKind.Number &&
-                    value.TryGetInt64(out long count))
+                if (TryGetInt64(value, out long count))
                 {
                     additionalCounts ??= [];
                     additionalCounts[name] = count;
@@ -117,10 +117,22 @@ internal sealed class DurableAgentStateUsage
         ? JsonSerializer.SerializeToElement(value.Value, DurableAgentStateJsonContext.Default.Int64)
         : default;
 
-    private static long? ToInt64(JsonElement value) =>
-        value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out long count)
-            ? count
-            : null;
+    private static long? ToInt64(JsonElement value) => TryGetInt64(value, out long count) ? count : null;
+
+    private static bool TryGetInt64(JsonElement value, out long count)
+    {
+        count = default;
+        return value.ValueKind == JsonValueKind.Number &&
+            decimal.TryParse(
+                value.GetRawText(),
+                NumberStyles.Float,
+                CultureInfo.InvariantCulture,
+                out decimal decimalCount) &&
+            decimalCount == decimal.Truncate(decimalCount) &&
+            decimalCount >= long.MinValue &&
+            decimalCount <= long.MaxValue &&
+            (count = decimal.ToInt64(decimalCount)) == decimalCount;
+    }
 
     private static JsonElement ValidateCount(JsonElement value, string propertyName)
     {
