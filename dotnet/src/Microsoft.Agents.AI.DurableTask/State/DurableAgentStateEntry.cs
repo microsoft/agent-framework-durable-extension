@@ -57,8 +57,13 @@ internal abstract class DurableAgentStateEntry
     [JsonExtensionData]
     public IDictionary<string, JsonElement>? UnknownProperties { get; set; }
 
-    public void ValidateV2()
+    internal void Validate(DurableAgentStateSchemaVersion version)
     {
+        if (version.Major < DurableAgentState.RevisedSchemaMajorVersion)
+        {
+            return;
+        }
+
         if (this is DurableAgentStateCompaction)
         {
             if (this.CorrelationId is not null)
@@ -82,7 +87,7 @@ internal abstract class DurableAgentStateEntry
                     "A revised durable agent state cannot contain null messages.");
             }
 
-            message.ValidateV2();
+            message.Validate(version);
         }
     }
 }

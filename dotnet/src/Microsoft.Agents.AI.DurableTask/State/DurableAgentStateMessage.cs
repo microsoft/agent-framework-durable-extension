@@ -153,8 +153,13 @@ internal sealed class DurableAgentStateMessage
         };
     }
 
-    public void ValidateV2()
+    internal void Validate(DurableAgentStateSchemaVersion version)
     {
+        if (version.Major < DurableAgentState.RevisedSchemaMajorVersion)
+        {
+            return;
+        }
+
         if (this.Role is not "user" and
             not "assistant" and
             not "system" and
@@ -173,7 +178,7 @@ internal sealed class DurableAgentStateMessage
 
         foreach (DurableAgentStateContent content in this.Contents)
         {
-            content.ValidateV2();
+            content.Validate(version);
         }
     }
 }
