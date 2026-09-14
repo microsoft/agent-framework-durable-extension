@@ -183,9 +183,25 @@ internal static class DurableExecutorDispatcher
 
         DurableWorkflowInput<string> workflowInput = new() { Input = input };
 
-        DurableWorkflowResult? workflowResult = await context.CallSubOrchestratorAsync<DurableWorkflowResult?>(
+        JsonElement? serializedWorkflowResult = await context.CallSubOrchestratorAsync<JsonElement?>(
             orchestrationName,
             workflowInput).ConfigureAwait(true);
+
+        if (serializedWorkflowResult is null || serializedWorkflowResult.Value.ValueKind == JsonValueKind.Null)
+        {
+            return ConvertWorkflowResultToExecutorOutput(null);
+        }
+
+        JsonElement resultElement = serializedWorkflowResult.Value;
+        DurableWorkflowResult? workflowResult = resultElement.Deserialize(
+            DurableWorkflowJsonContext.Default.DurableWorkflowResult);
+        if (workflowResult is not null &&
+            resultElement.TryGetProperty("sentMessages", out JsonElement sentMessages) &&
+            (sentMessages.ValueKind != JsonValueKind.Array ||
+                !sentMessages.EnumerateArray().All(DurableExecutorOutput.HasValidTypedMessage)))
+        {
+            workflowResult.SentMessages = [new TypedPayload()];
+        }
 
         return ConvertWorkflowResultToExecutorOutput(workflowResult);
     }
