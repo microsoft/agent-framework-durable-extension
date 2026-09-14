@@ -392,10 +392,12 @@ public sealed class DurableAgentStateContentTests
     }
 
     [Theory]
-    [InlineData("9223372036854775808")]
-    [InlineData("1.0")]
-    [InlineData("1e3")]
-    public void UsageKnownCountsPreserveSchemaIntegersBeyondRuntimeProjection(string countJson)
+    [InlineData("9223372036854775808", null)]
+    [InlineData("1.0", 1L)]
+    [InlineData("1e3", 1000L)]
+    public void UsageKnownCountsPreserveSchemaIntegersAndProjectWhenRepresentable(
+        string countJson,
+        long? expectedRuntimeCount)
     {
         string json = $$"""{"inputTokenCount":{{countJson}}}""";
         JsonTypeInfo usageTypeInfo =
@@ -407,6 +409,7 @@ public sealed class DurableAgentStateContentTests
 
         Assert.Equal(countJson, JsonDocument.Parse(roundTrip).RootElement
             .GetProperty("inputTokenCount").GetRawText());
+        Assert.Equal(expectedRuntimeCount, stored.ToUsageDetails().InputTokenCount);
     }
 
     [Theory]
