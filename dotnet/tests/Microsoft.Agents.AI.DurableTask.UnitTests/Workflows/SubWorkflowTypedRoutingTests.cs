@@ -456,7 +456,7 @@ public sealed class SubWorkflowTypedRoutingTests
                         throw new TaskFailedException(name.ToString(), 0, failure);
                     }
                 });
-            context.Setup(value => value.CallSubOrchestratorAsync<DurableWorkflowResult?>(
+            context.Setup(value => value.CallSubOrchestratorAsync<JsonElement?>(
                 It.IsAny<TaskName>(), It.IsAny<object?>(), It.IsAny<TaskOptions?>()))
                 .Returns(async (TaskName name, object? childInput, TaskOptions? _) =>
                 {
@@ -478,7 +478,8 @@ public sealed class SubWorkflowTypedRoutingTests
                         this.RecordCall(workflow.Name!, new RecordedCall(name.ToString(), inputWire, outputWire));
                     }
 
-                    return (DurableWorkflowResult?)converter.Deserialize(outputWire, typeof(DurableWorkflowResult));
+                    using JsonDocument outputDocument = JsonDocument.Parse(outputWire);
+                    return (JsonElement?)outputDocument.RootElement.Clone();
                 });
             DurableWorkflowResult result = await new DurableWorkflowRunner(this._options).RunWorkflowOrchestrationAsync(
                 context.Object, input, NullLogger.Instance);

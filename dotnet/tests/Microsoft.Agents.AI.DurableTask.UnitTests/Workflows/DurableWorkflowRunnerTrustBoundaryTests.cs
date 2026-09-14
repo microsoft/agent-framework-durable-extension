@@ -219,15 +219,15 @@ public sealed class DurableWorkflowRunnerTrustBoundaryTests
         Workflow workflow = new WorkflowBuilder(start).WithName(WorkflowName)
             .AddEdge(start, middle).AddEdge(middle, end).Build();
         Mock<TaskOrchestrationContext> context = new();
-        context.Setup(c => c.CallSubOrchestratorAsync<DurableWorkflowResult?>(
+        context.Setup(c => c.CallSubOrchestratorAsync<JsonElement?>(
             It.IsAny<TaskName>(), It.IsAny<object?>(), It.IsAny<TaskOptions?>()))
-            .ReturnsAsync(new DurableWorkflowResult
+            .ReturnsAsync(JsonSerializer.SerializeToElement(new DurableWorkflowResult
             {
                 Result = WorkflowExecutionTestHelper.ControlEnvelope,
                 Events = ["child event"],
                 SentMessages = [new TypedPayload { Data = WorkflowExecutionTestHelper.ControlEnvelope, TypeName = typeof(string).AssemblyQualifiedName }],
                 HaltRequested = halt,
-            });
+            }, DurableWorkflowJsonContext.Default.DurableWorkflowResult));
         List<DurableActivityInput> inputs = ConfigureActivities(context, (index, input) => index == 0
             ? SeedOutput()
             : new DurableExecutorOutput { Result = input.Input });

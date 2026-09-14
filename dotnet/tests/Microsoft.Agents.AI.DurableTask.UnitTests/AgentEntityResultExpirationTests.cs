@@ -66,7 +66,9 @@ public sealed class AgentEntityResultExpirationTests
         Assert.Equal(state.Data.ExpirationTimeUtc, cleaned.Data.ExpirationTimeUtc);
         Assert.True(JsonElement.DeepEquals(state.Data.HistoryBinding, cleaned.Data.HistoryBinding));
         Assert.True(JsonElement.DeepEquals(state.Data.Session!.Value, cleaned.Data.Session!.Value));
-        Assert.Equal(state.Data.IngestedPositions, cleaned.Data.IngestedPositions);
+        Assert.True(JsonElement.DeepEquals(
+            state.Data.IngestedPositions!["producer"],
+            cleaned.Data.IngestedPositions!["producer"]));
         Assert.Equal(original, Serialize(state));
         Assert.Empty(signals);
 
