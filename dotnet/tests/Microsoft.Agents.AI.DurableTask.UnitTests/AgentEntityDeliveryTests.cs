@@ -540,7 +540,9 @@ public sealed class AgentEntityDeliveryTests
         DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(harness.PersistedState));
 
         Assert.True(JsonElement.DeepEquals(state.Data.Session!.Value, committed.Data.Session!.Value));
-        Assert.Equal(state.Data.IngestedPositions, committed.Data.IngestedPositions);
+        Assert.Equal(state.Data.IngestedPositions!.Keys, committed.Data.IngestedPositions!.Keys);
+        Assert.All(state.Data.IngestedPositions, pair =>
+            Assert.True(JsonElement.DeepEquals(pair.Value, committed.Data.IngestedPositions[pair.Key])));
         Assert.Equal("python", committed.Data.ExtensionData!["dataProducer"].GetString());
         Assert.True(committed.Data.UnknownProperties!["futureDataProperty"].GetProperty("preserve").GetBoolean());
         Assert.True(committed.UnknownProperties!["futureRootProperty"].GetProperty("preserve").GetBoolean());
@@ -564,8 +566,12 @@ public sealed class AgentEntityDeliveryTests
 
         DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(harness.PersistedState));
         Assert.True(JsonElement.DeepEquals(state.Data.Session!.Value, committed.Data.Session!.Value));
-        Assert.Equal(state.Data.IngestedPositions, committed.Data.IngestedPositions);
-        Assert.Equal(state.Data.Truncation!.EvictedMessageCount, committed.Data.Truncation!.EvictedMessageCount);
+        Assert.Equal(state.Data.IngestedPositions!.Keys, committed.Data.IngestedPositions!.Keys);
+        Assert.All(state.Data.IngestedPositions, pair =>
+            Assert.True(JsonElement.DeepEquals(pair.Value, committed.Data.IngestedPositions[pair.Key])));
+        Assert.True(JsonElement.DeepEquals(
+            state.Data.Truncation!.EvictedMessageCount,
+            committed.Data.Truncation!.EvictedMessageCount));
         Assert.True(JsonElement.DeepEquals(state.Data.HistoryBinding, committed.Data.HistoryBinding));
         Assert.Equal(3, committed.Data.CompletionReceipts!.Count);
         Assert.Equal(2, state.Data.CompletionReceipts!.Count);
