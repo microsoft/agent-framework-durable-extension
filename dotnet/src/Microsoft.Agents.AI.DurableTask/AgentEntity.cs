@@ -341,7 +341,8 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                 effectiveOwnership,
                 chatClientAgent is not null &&
                     (durableHistoryProvider is not null || !entityOwnedHistory),
-                historyConfiguration.ReplayMode);
+                historyConfiguration.ReplayMode,
+                workingState.SchemaVersion != DurableAgentState.RevisedSchemaVersion);
 
             // Start the agent response stream
             IAsyncEnumerable<AgentResponseUpdate> responseStream = agentWrapper.RunStreamingAsync(
@@ -577,7 +578,8 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         RunRequest request,
         DurableAgentHistoryOwnership ownership,
         bool contextPipelineSuppliesHistory,
-        DurableAgentHistoryReplayMode historyReplayMode)
+        DurableAgentHistoryReplayMode historyReplayMode,
+        bool isLegacyState)
     {
         if (contextPipelineSuppliesHistory ||
             ownership == DurableAgentHistoryOwnership.AgentSession ||
@@ -586,6 +588,13 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             // A MAF history/context pipeline or a server-owned opaque session supplies prior context.
             // Passing stored history here as well would duplicate messages.
             return request.Messages;
+        }
+
+        if (isLegacyState)
+        {
+            return workingState.Data.ConversationHistory
+                .SelectMany(entry => entry.Messages)
+                .Select(message => message.ToChatMessage());
         }
 
         // Generic AIAgents have no discoverable context pipeline. In the backward-compatible preload
