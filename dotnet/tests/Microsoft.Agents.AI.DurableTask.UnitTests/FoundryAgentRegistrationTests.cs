@@ -34,6 +34,7 @@ public sealed class FoundryAgentRegistrationTests
 
         options.AddAIAgent(
             foundryAgent,
+            timeToLive: null,
             configureHistory: history => history.ProviderKey = s_historyProviderKey);
         options.EnableMailboxWrites = true;
         options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll;
