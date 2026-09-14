@@ -3,6 +3,9 @@
 Durable agents are represented as durable entities, with conversation history stored as JSON-serialized
 state for an individual entity instance.
 
+For the ownership and lifecycle boundaries around this representation, see the
+[durable agent state architecture](../../../../docs/features/durable-agents/durable-state-architecture.md).
+
 ## State Schema
 
 The [schema](../../../../schemas/durable-agent-entity-state.json) for durable agent state is a distillation of the prompt and response messages accumulated over the lifetime of a session. While these messages and content originate from Microsoft Agent Framework types (for .NET, see [ChatMessage](https://github.com/dotnet/extensions/blob/main/src/Libraries/Microsoft.Extensions.AI.Abstractions/ChatCompletion/ChatMessage.cs) and [AIContent](https://github.com/dotnet/extensions/blob/main/src/Libraries/Microsoft.Extensions.AI.Abstractions/Contents/AIContent.cs)), durable agent state uses its own, parallel, types in order to (1) better manage the versioning and compatibility of serialized state over time, (2) account for agent implementations across languages/platforms (e.g. .NET and Python), as well as (3) ensure consistency for external tools that make use of state data.
@@ -48,7 +51,7 @@ replay filtering, compaction, retention, and provider behavior is deferred to la
 ## Revised execution-state foundation
 
 > [!IMPORTANT]
-> Schema `2.0.0` is an inactive contract proposal. Production .NET readers and writers currently default to
+> Schema `2.0.0` is being adopted through a staged cross-runtime rollout. Production .NET readers and writers currently default to
 > schema `1.2.0` and reject schema 2 until the mailbox-aware runtime rollout requirements are met.
 
 The mailbox and provisional history-binding contracts use schema `2.0.0`. This is intentionally a fail-closed major
@@ -68,9 +71,9 @@ nested field. Only a relying runtime may validate a profile it recognizes agains
 the shared contract defines no owner kind, provider key, default, or transition policy.
 
 The schema 2 DTOs and converters currently form a passive contract: they validate and round-trip persisted shape
-but do not perform delivery lookup, polling, binding enforcement, result expiry, or transcript retention. A future
-mailbox-aware runtime must implement those stateful operations before it can activate schema 2. See the
-[proposed schema 2 contract](../../../../schemas/README.md) for the complete semantic invariants and rollout gate.
+but do not perform delivery lookup, polling, binding enforcement, result expiry, or transcript retention. The
+mailbox-aware runtime layer must implement those stateful operations before it can activate schema 2. See the
+[schema 2 contract](../../../../schemas/README.md) for the complete semantic invariants and rollout gate.
 
 When those layers activate schema 2.0, one successful durable entity operation must atomically commit the
 terminal result and receipt together with that operation's session continuation, ingestion bookkeeping,
@@ -225,7 +228,7 @@ highest-seen position for one producer, not an array or proof that every earlier
 }
 ```
 
-### Proposed schema 2.0
+### Schema 2.0
 
 This example is for contract review and contributor guidance only. Production runtimes must not emit schema 2
 until the activation requirements above are met. An `available` receipt has a matching terminal result; an

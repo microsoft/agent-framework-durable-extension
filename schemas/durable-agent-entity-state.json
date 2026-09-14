@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json",
-  "title": "Durable agent state: proposed 2.0 contract and legacy review shapes",
-  "description": "Proposed contract under review; validation does not authorize any runtime to read, migrate, or emit 2.0. See README.md for semantic invariants and the cross-runtime deployment gate.",
+  "title": "Durable agent state 2.0 contract and legacy shapes",
+  "description": "Cross-runtime state contract. Validation alone does not enable a runtime to read, migrate, or emit 2.0. See README.md for semantic invariants and the deployment gate.",
   "$defs": {
     "identifier": {
       "type": "string",
@@ -483,7 +483,7 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Exact review snapshots, not a runtime acceptance list. 1.2.0 and 2.0.0 are proposals; future versions require an explicit compatibility decision. By convention this is the first property.",
+      "description": "Exact contract versions, not a runtime acceptance list. Future versions require an explicit compatibility decision. By convention this is the first property.",
       "enum": ["1.0.0", "1.1.0", "1.2.0", "2.0.0"]
     },
     "data": { "$ref": "#/$defs/data" },

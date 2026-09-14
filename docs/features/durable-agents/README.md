@@ -249,6 +249,7 @@ When using the [Durable Task Scheduler](https://learn.microsoft.com/azure/azure-
 
 ## Further reading
 
+- [Durable agent state architecture](durable-state-architecture.md)
 - [Azure Functions (Durable) — Microsoft Learn](https://learn.microsoft.com/agent-framework/integrations/azure-functions)
 - [Durable Task Scheduler](https://learn.microsoft.com/azure/azure-functions/durable/durable-task-scheduler/durable-task-scheduler)
 - [Durable Entities](https://learn.microsoft.com/azure/azure-functions/durable/durable-functions-entities)
