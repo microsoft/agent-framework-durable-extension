@@ -219,8 +219,10 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             DurableAgentHistoryBinding.IsSealedByCSharp(persistedHistoryBinding)
                 ? persistedHistoryBinding
                 : null;
+        DurableAgentHistoryConfiguration historyConfiguration =
+            this._options.GetHistoryConfiguration(sessionId.Name);
         string? configuredHistoryProviderKey =
-            this._options.GetHistoryProviderKey(sessionId.Name) ??
+            historyConfiguration.ProviderKey?.Value ??
             persistedHistoryBinding?.ProviderKey;
         DurableAgentHistoryBinding.ValidateContinuationPresence(
             existingHistoryBinding,
@@ -235,14 +237,10 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         }
 
         AIAgent agent = this.GetAgent(sessionId);
-        bool serviceManagedPerServiceCallHistory =
-            this._options.IsServiceManagedPerServiceCallHistory(sessionId.Name);
         ValidatedDurableAgentHistoryConfiguration validatedHistoryConfiguration =
             DurableAgentHistoryOwnershipResolver.ValidateRunConfiguration(
                 agent,
-                serviceManagedPerServiceCallHistory);
-        DurableAgentHistoryReplayMode historyReplayMode =
-            this._options.GetHistoryReplayMode(sessionId.Name);
+                historyConfiguration.ServiceManagedPerServiceCallHistory);
 
         foreach (ChatMessage msg in request.Messages)
         {
@@ -271,7 +269,7 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             DurableAgentHistoryOwnership effectiveOwnership =
                 DurableAgentHistoryOwnershipResolver.GetEffectiveOwnership(
                     ownership,
-                    historyReplayMode);
+                    historyConfiguration.ReplayMode);
             DurableAgentHistoryBinding.ValidatePreExecutionContinuationContract(
                 effectiveOwnership,
                 session,
@@ -345,7 +343,7 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                 effectiveOwnership,
                 chatClientAgent is not null &&
                     (durableHistoryProvider is not null || !entityOwnedHistory),
-                historyReplayMode,
+                historyConfiguration.ReplayMode,
                 workingState.SchemaVersion != DurableAgentState.RevisedSchemaVersion);
 
             // Start the agent response stream
@@ -416,7 +414,7 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                     validatedHistoryConfiguration);
             finalOwnership = DurableAgentHistoryOwnershipResolver.GetEffectiveOwnership(
                 finalOwnership,
-                historyReplayMode);
+                historyConfiguration.ReplayMode);
             bool remoteServiceTransition =
                 finalOwnership != effectiveOwnership &&
                 finalOwnership == DurableAgentHistoryOwnership.Service;
