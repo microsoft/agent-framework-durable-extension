@@ -1,6 +1,6 @@
 # Language-neutral schema validation cases
 
-`validation-cases.json` and `versioned-envelope-cases.json` record positive and negative review expectations using
+`validation-cases.json` and `versioned-envelope-cases.json` record positive and negative contract expectations using
 the JSON Schema Test Suite's group shape: `description`, `schema`, and `tests`;
 each test has `description`, `data`, and `valid`. These are test data, not durable
 state fixtures, product implementation, or runtime test-project integration.
@@ -51,8 +51,8 @@ print(f"Passed {count} structural validation cases")
 
 These cases have no timestamp-format assertions. Validate the separate state
 fixtures with date-time format checking as well as the cross-map/time invariants
-in the shared proposal. Test data alone cannot prove serializer round-tripping,
+in the shared contract. Test data alone cannot prove serializer round-tripping,
 atomic entity commits, per-run ownership transitions, or runtime lookup behavior.
-Future runtime implementations must additionally verify that original string
+Compatible runtime implementations must additionally verify that original string
 arguments, absent media types, opaque JSON metadata, and all present `value`
 forms survive persistence without conversion, omission, or invented data.
