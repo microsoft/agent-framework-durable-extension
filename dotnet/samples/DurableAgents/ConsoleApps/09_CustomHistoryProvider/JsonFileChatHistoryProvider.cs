@@ -240,20 +240,10 @@ public sealed class JsonFileChatHistoryProvider : ChatHistoryProvider, IDisposab
     }
 
     private static ChatMessage ToChatMessage(StoredChatMessage message) =>
-        new(ToChatRole(message.Role), message.Text)
+        new(new ChatRole(message.Role), message.Text)
         {
             MessageId = message.MessageId,
             CreatedAt = message.CreatedAt,
-        };
-
-    private static ChatRole ToChatRole(string role) =>
-        role switch
-        {
-            "assistant" => ChatRole.Assistant,
-            "system" => ChatRole.System,
-            "tool" => ChatRole.Tool,
-            "user" => ChatRole.User,
-            _ => throw new JsonException($"Unsupported chat role '{role}'."),
         };
 
     private static StoredChatMessage CreateSeedMessage(
