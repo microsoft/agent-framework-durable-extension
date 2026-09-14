@@ -444,7 +444,7 @@ public sealed class RetentionProbeTests
             ServiceProvider provider = services.BuildServiceProvider();
             if (exporter is not null)
             {
-                _ = provider.GetRequiredService<MeterProvider>();
+                provider.GetRequiredService<MeterProvider>();
             }
 
             return new EntityTestHost(

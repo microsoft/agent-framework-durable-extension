@@ -90,7 +90,7 @@ Console.WriteLine(
 Console.WriteLine(
     "The filler creates pressure but is not printed, so the scenario remains readable.");
 Console.WriteLine(
-    "KeepAll is the default. This sample explicitly enables mailbox writes and selects Auto to bound the model transcript.");
+    "KeepAll is the default. This sample selects Auto as policy only; mailbox writes remain behind the internal rollout gate.");
 Console.WriteLine(
     "Watch the OpenTelemetry console exporter for durable.agent.history.* retention metrics.");
 Console.WriteLine();

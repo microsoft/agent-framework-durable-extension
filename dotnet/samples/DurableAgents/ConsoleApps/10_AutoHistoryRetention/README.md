@@ -20,7 +20,7 @@ without printing their filler text, and asks the model to recall the exact marke
 retention. Agent instructions keep every response under 20 words and `MaxOutputTokens = 64`
 enforces a service-request bound so protected result mailboxes do not dominate the state floor.
 
-The 32 KiB budget was checked against schema 2 state containing seven bounded terminal results,
+The 32 KiB budget was checked against schema 2 state containing eight bounded terminal results,
 completion receipts, the fixed history binding, serialized agent session, and bookkeeping.
 Seven 4 KiB inputs plus their state envelopes cross the 85% high watermark, while the protected
 mailbox and session floor still fits below it. `Auto` can therefore remove old model-transcript
