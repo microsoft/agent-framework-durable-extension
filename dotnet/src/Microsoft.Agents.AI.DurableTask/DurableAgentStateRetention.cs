@@ -449,15 +449,40 @@ internal static class DurableAgentStateRetention
         string rawCount = current.ValueKind == JsonValueKind.Undefined
             ? "0"
             : current.GetRawText();
-        if (rawCount.IndexOfAny('.', 'e', 'E') >= 0 ||
-            !BigInteger.TryParse(rawCount, NumberStyles.Integer, CultureInfo.InvariantCulture, out BigInteger count))
-        {
-            return current.Clone();
-        }
+        BigInteger count = ParseJsonInteger(rawCount);
 
         using JsonDocument document = JsonDocument.Parse(
             (count + added).ToString(CultureInfo.InvariantCulture));
         return document.RootElement.Clone();
+    }
+
+    private static BigInteger ParseJsonInteger(string value)
+    {
+        int exponentIndex = value.IndexOfAny('e', 'E');
+        ReadOnlySpan<char> significand = exponentIndex >= 0 ? value.AsSpan(0, exponentIndex) : value;
+        int exponent = exponentIndex >= 0
+            ? int.Parse(value.AsSpan(exponentIndex + 1), CultureInfo.InvariantCulture)
+            : 0;
+        int decimalIndex = significand.IndexOf('.');
+        int fractionalDigits = decimalIndex >= 0 ? significand.Length - decimalIndex - 1 : 0;
+        string digits = decimalIndex >= 0
+            ? string.Concat(significand[..decimalIndex], significand[(decimalIndex + 1)..])
+            : significand.ToString();
+        int scale = checked(exponent - fractionalDigits);
+        BigInteger integer = BigInteger.Parse(digits, NumberStyles.Integer, CultureInfo.InvariantCulture);
+        if (scale < 0)
+        {
+            return integer / BigInteger.Pow(10, -scale);
+        }
+
+        const int MaximumExpandedDigits = 1_000_000;
+        if (scale > MaximumExpandedDigits)
+        {
+            throw new InvalidOperationException(
+                "The durable agent eviction count is too large to increment safely.");
+        }
+
+        return integer * BigInteger.Pow(10, scale);
     }
 
     private static DateTimeOffset GetEffectiveEvictionTime(

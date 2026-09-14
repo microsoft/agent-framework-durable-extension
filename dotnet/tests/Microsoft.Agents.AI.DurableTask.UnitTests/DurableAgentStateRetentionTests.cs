@@ -144,6 +144,32 @@ public sealed class DurableAgentStateRetentionTests
         Assert.Equal((long)int.MaxValue + removed, state.Data.Truncation?.EvictedMessageCount.GetInt64());
     }
 
+    [Theory]
+    [InlineData("1.0", 1)]
+    [InlineData("1e3", 1000)]
+    public void AutoIncrementsEquivalentJsonIntegerSpellings(string countJson, int initialCount)
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateLargeState(now);
+        state.Data.Truncation = new DurableAgentStateTruncation
+        {
+            EvictedMessageCount = JsonDocument.Parse(countJson).RootElement.Clone(),
+            FirstEvictedAt = now.AddMinutes(-20),
+            LastEvictedAt = now.AddMinutes(-10),
+        };
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            2_500,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(removed > 0);
+        Assert.Equal(initialCount + removed, state.Data.Truncation?.EvictedMessageCount.GetInt32());
+    }
+
     [Fact]
     public void AutoPreservesSystemExchange()
     {
