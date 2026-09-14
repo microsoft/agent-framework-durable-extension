@@ -1,5 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Globalization;
+using System.Numerics;
 using System.Text.Json;
 using Microsoft.Agents.AI.DurableTask.State;
 using Microsoft.Extensions.AI;
@@ -305,7 +307,7 @@ internal static class DurableAgentStateRetention
         return new DurableAgentStateTruncation
         {
             EvictedMessageCount = AddEvictedMessages(
-                original?.EvictedMessageCount ?? 0,
+                original?.EvictedMessageCount ?? default,
                 removedMessages),
             FirstEvictedAt = original?.FirstEvictedAt ?? effectiveTime,
             LastEvictedAt = effectiveTime,
@@ -442,8 +444,21 @@ internal static class DurableAgentStateRetention
         truncation.LastEvictedAt = GetEffectiveEvictionTime(truncation, now);
     }
 
-    private static int AddEvictedMessages(int current, int added) =>
-        current > int.MaxValue - added ? int.MaxValue : current + added;
+    private static JsonElement AddEvictedMessages(JsonElement current, int added)
+    {
+        string rawCount = current.ValueKind == JsonValueKind.Undefined
+            ? "0"
+            : current.GetRawText();
+        if (rawCount.IndexOfAny('.', 'e', 'E') >= 0 ||
+            !BigInteger.TryParse(rawCount, NumberStyles.Integer, CultureInfo.InvariantCulture, out BigInteger count))
+        {
+            return current.Clone();
+        }
+
+        using JsonDocument document = JsonDocument.Parse(
+            (count + added).ToString(CultureInfo.InvariantCulture));
+        return document.RootElement.Clone();
+    }
 
     private static DateTimeOffset GetEffectiveEvictionTime(
         DurableAgentStateTruncation? truncation,

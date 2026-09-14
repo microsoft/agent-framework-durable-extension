@@ -86,7 +86,7 @@ public sealed class DurableAgentStateRetentionTests
         Assert.DoesNotContain(state.Data.ConversationHistory, entry => entry.CorrelationId == "oldest");
         Assert.Contains(state.Data.ConversationHistory, entry => entry.CorrelationId == "newest");
         Assert.NotNull(state.Data.Truncation);
-        Assert.Equal(removed, state.Data.Truncation.EvictedMessageCount);
+        Assert.Equal(removed, state.Data.Truncation.EvictedMessageCount.GetInt32());
         Assert.True(
             DurableAgentStateRetention.GetSerializedSize(state) <
             2_500 * DurableAgentStateRetention.HighWatermark);
@@ -101,7 +101,7 @@ public sealed class DurableAgentStateRetentionTests
         DurableAgentState state = CreateLargeState(now);
         state.Data.Truncation = new DurableAgentStateTruncation
         {
-            EvictedMessageCount = 4,
+            EvictedMessageCount = JsonSerializer.SerializeToElement(4),
             FirstEvictedAt = firstEviction,
             LastEvictedAt = lastEviction,
         };
@@ -117,17 +117,17 @@ public sealed class DurableAgentStateRetentionTests
         Assert.True(removed > 0);
         Assert.Equal(firstEviction, state.Data.Truncation?.FirstEvictedAt);
         Assert.Equal(lastEviction, state.Data.Truncation?.LastEvictedAt);
-        Assert.Equal(4 + removed, state.Data.Truncation?.EvictedMessageCount);
+        Assert.Equal(4 + removed, state.Data.Truncation?.EvictedMessageCount.GetInt32());
     }
 
     [Fact]
-    public void AutoSaturatesEvictedMessageCountAtSchemaMaximum()
+    public void AutoIncrementsEvictedMessageCountBeyondInt32()
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
         DurableAgentState state = CreateLargeState(now);
         state.Data.Truncation = new DurableAgentStateTruncation
         {
-            EvictedMessageCount = int.MaxValue,
+            EvictedMessageCount = JsonSerializer.SerializeToElement(int.MaxValue),
             FirstEvictedAt = now.AddMinutes(-20),
             LastEvictedAt = now.AddMinutes(-10),
         };
@@ -141,7 +141,7 @@ public sealed class DurableAgentStateRetentionTests
             new AgentSessionId("agent", "session"));
 
         Assert.True(removed > 0);
-        Assert.Equal(int.MaxValue, state.Data.Truncation?.EvictedMessageCount);
+        Assert.Equal((long)int.MaxValue + removed, state.Data.Truncation?.EvictedMessageCount.GetInt64());
     }
 
     [Fact]
@@ -548,7 +548,7 @@ public sealed class DurableAgentStateRetentionTests
         state.Data.Session = JsonSerializer.SerializeToElement(new { conversationId = new string('c', 100) });
         state.Data.Truncation = new DurableAgentStateTruncation
         {
-            EvictedMessageCount = 2,
+            EvictedMessageCount = JsonSerializer.SerializeToElement(2),
             FirstEvictedAt = DateTimeOffset.UtcNow,
             LastEvictedAt = DateTimeOffset.UtcNow,
         };
@@ -569,9 +569,9 @@ public sealed class DurableAgentStateRetentionTests
         state.Data.Session = JsonSerializer.SerializeToElement(
             new { continuation = new string('s', 2_000) });
         state.Data.ExpirationTimeUtc = now.AddDays(1).UtcDateTime;
-        state.Data.IngestedPositions = new Dictionary<string, int>
+        state.Data.IngestedPositions = new Dictionary<string, JsonElement>
         {
-            ["workflow"] = 42,
+            ["workflow"] = JsonSerializer.SerializeToElement(42),
         };
         state.Data.UnknownProperties = new Dictionary<string, JsonElement>
         {
@@ -596,7 +596,7 @@ public sealed class DurableAgentStateRetentionTests
             DurableAgentHistoryBinding.Parse(state.Data.HistoryBinding)?.ProviderKey);
         Assert.NotNull(state.Data.Session);
         Assert.NotNull(state.Data.ExpirationTimeUtc);
-        Assert.Equal(42, state.Data.IngestedPositions?["workflow"]);
+        Assert.Equal(42, state.Data.IngestedPositions?["workflow"].GetInt32());
         Assert.True(exception.StateSizeBytes > exception.MaxStateBytes);
     }
 
@@ -927,7 +927,7 @@ public sealed class DurableAgentStateRetentionTests
                 ? null
                 : new DurableAgentStateTruncation
                 {
-                    EvictedMessageCount = removedMessages,
+                    EvictedMessageCount = JsonSerializer.SerializeToElement(removedMessages),
                     FirstEvictedAt = now,
                     LastEvictedAt = now,
                 };
