@@ -208,8 +208,6 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             _ = AgentEntityResultExpirySchedule.Read(workingState, this.Context.Id.ToString());
         }
 
-        bool isLegacyState =
-            this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion;
         DurableAgentStateHistoryBinding? persistedHistoryBinding =
             DurableAgentHistoryBinding.Parse(this.State.Data.HistoryBinding);
         DurableAgentHistoryBinding.ValidateMarkedProfile(
