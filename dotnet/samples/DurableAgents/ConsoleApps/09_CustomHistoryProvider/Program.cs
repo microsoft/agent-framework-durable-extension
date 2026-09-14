@@ -199,10 +199,11 @@ static IHost CreateHost(
             services.ConfigureDurableAgents(
                 options =>
                 {
-                    options.AddAIAgent(agent, timeToLive: TimeSpan.FromHours(1));
-                    options.SetHistoryProviderKey(
-                        AgentName,
-                        JsonFileChatHistoryProvider.ProviderKey);
+                    options.AddAIAgent(
+                        agent,
+                        timeToLive: TimeSpan.FromHours(1),
+                        configureHistory: history =>
+                            history.ProviderKey = new(JsonFileChatHistoryProvider.ProviderKey));
                     options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll;
                 },
                 workerBuilder: builder => builder.UseDurableTaskScheduler(dtsConnectionString),
