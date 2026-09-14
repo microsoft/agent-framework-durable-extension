@@ -10,10 +10,30 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 #pragma warning disable MEAI001 // ResponseContinuationToken is part of the AgentResponse contract captured here.
 
 /// <summary>
-/// Immutable, JSON-safe projection of the fields consumed from an <see cref="AgentResponse"/>.
+/// Stores a JSON-safe snapshot of the final caller-visible
+/// <see cref="AgentResponse"/> for durable result delivery.
 /// </summary>
+/// <remarks>
+/// This response is part of the durable result mailbox, not the model transcript.
+/// It allows polling and duplicate requests to return the original completed
+/// result even when conversation history has been compacted or removed.
+///
+/// The snapshot contains only data that can be safely persisted as JSON. It does
+/// not serialize the original runtime object graph, exceptions, services, or
+/// executable .NET types.
+/// </remarks>
 internal sealed class DurableAgentStateTerminalResponse
 {
+    /// <summary>
+    /// Gets the messages in the final aggregate agent response.
+    /// </summary>
+    /// <remarks>
+    /// These are the caller-visible response messages produced by the completed
+    /// outer invocation. They must not include a second copy of previously loaded
+    /// history or intermediate responses produced during a model/tool loop.
+    ///
+    /// The collection may be empty but is never null.
+    /// </remarks>
     [JsonPropertyName("messages")]
     public IReadOnlyList<DurableAgentStateMessage> Messages
     {
@@ -21,20 +41,43 @@ internal sealed class DurableAgentStateTerminalResponse
         init => field = value ?? [];
     } = [];
 
+    /// <summary>
+    /// Gets the usage information reported for the completed response, when
+    /// provided by the model or agent implementation.
+    /// </summary>
+    /// <remarks>
+    /// This preserves caller-visible usage metadata such as token counts. It is not
+    /// used as durable completion evidence and may be absent when the underlying
+    /// provider does not report usage.
+    /// </remarks>
     [JsonPropertyName("usage")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public DurableAgentStateUsage? Usage { get; init; }
 
+    /// <summary>
+    /// Gets the creation time reported by the original agent response.
+    /// </summary>
+    /// <remarks>
+    /// This is response metadata supplied by the agent or provider. It is distinct
+    /// from the durable completion time recorded by the terminal result and
+    /// completion receipt.
+    /// </remarks>
     [JsonPropertyName("createdAt")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public DateTimeOffset? CreatedAt { get; init; }
 
     /// <summary>
-    /// Gets an optional caller-visible JSON result independent of the response messages.
+    /// Gets the optional caller-visible structured result independently of the
+    /// response messages.
     /// </summary>
     /// <remarks>
-    /// <see cref="JsonValueKind.Undefined"/> means the wire property was absent. All other JSON values,
-    /// including explicit null, false, zero, empty strings, arrays, and objects, are present values.
+    /// Some agent APIs return a structured value in addition to messages or text.
+    /// Keeping it as a separate JSON value preserves that contract without
+    /// serializing model classes or arbitrary runtime objects.
+    ///
+    /// <see cref="JsonValueKind.Undefined"/> means the wire property was absent.
+    /// Every other JSON value, including explicit null, false, zero, an empty
+    /// string, an empty array, or an empty object, represents a present result.
     /// </remarks>
     [JsonPropertyName("value")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -44,18 +87,53 @@ internal sealed class DurableAgentStateTerminalResponse
         init => field = value.ValueKind == JsonValueKind.Undefined ? default : value.Clone();
     }
 
+    /// <summary>
+    /// Gets the identifier assigned to the original response by the agent or model
+    /// provider, when available.
+    /// </summary>
+    /// <remarks>
+    /// This is provider response metadata. It is not the durable request correlation
+    /// identifier and is not used for duplicate suppression.
+    /// </remarks>
     [JsonPropertyName("responseId")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ResponseId { get; init; }
 
+    /// <summary>
+    /// Gets the agent identifier reported by the original response, when available.
+    /// </summary>
+    /// <remarks>
+    /// This preserves caller-visible response metadata. It does not identify the
+    /// durable entity or determine which history provider owns the session.
+    /// </remarks>
     [JsonPropertyName("agentId")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? AgentId { get; init; }
 
+    /// <summary>
+    /// Gets the model or agent finish reason reported by the original response,
+    /// when available.
+    /// </summary>
+    /// <remarks>
+    /// This value describes why response generation ended. It is not a workflow
+    /// halt instruction and must never be interpreted as durable control state.
+    /// </remarks>
     [JsonPropertyName("finishReason")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? FinishReason { get; init; }
 
+    /// <summary>
+    /// Gets the original response continuation token encoded as canonical base64,
+    /// when one was returned.
+    /// </summary>
+    /// <remarks>
+    /// The token is opaque provider data preserved for caller-visible response
+    /// fidelity. Persisting it does not guarantee that another provider or runtime
+    /// can interpret or resume it.
+    ///
+    /// This is distinct from the serialized <c>AgentSession</c> continuation state
+    /// used to restore the durable agent session.
+    /// </remarks>
     [JsonPropertyName("continuationToken")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ContinuationToken { get; init; }
@@ -73,6 +151,17 @@ internal sealed class DurableAgentStateTerminalResponse
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IDictionary<string, JsonElement>? AdditionalProperties { get; init; }
 
+    /// <summary>
+    /// Gets undeclared JSON properties preserved for forward compatibility.
+    /// </summary>
+    /// <remarks>
+    /// The current runtime does not interpret these properties. It retains them so
+    /// reading and rewriting state does not discard fields written by a newer
+    /// compatible runtime.
+    ///
+    /// These values must not be treated as trusted control data or used to activate
+    /// runtime types.
+    /// </remarks>
     [JsonExtensionData]
     public IDictionary<string, JsonElement>? UnknownProperties { get; set; }
 
