@@ -412,7 +412,7 @@ internal static class DurableAgentHistoryBinding
         {
             throw new DurableAgentHistoryBindingMismatchException(
                 $"History ownership '{ownership}' requires an explicit stable logical provider key. " +
-                "Configure DurableAgentsOptions.SetHistoryProviderKey before running this durable session." +
+                "Set ProviderKey in the agent registration's history options before running this durable session." +
                 GetRemoteTransitionSuffix(remoteTransitionDetectedAfterExecution));
         }
 

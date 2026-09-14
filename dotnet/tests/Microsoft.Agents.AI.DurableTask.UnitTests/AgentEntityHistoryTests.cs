@@ -205,7 +205,7 @@ public sealed class AgentEntityHistoryTests
             agent,
             new DurableAgentState(),
             new RunRequest("new request") { CorrelationId = "new" },
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
 
         Assert.Equal(1, provider.StoreCount);
         Assert.Empty(persisted.Data.ConversationHistory);
@@ -239,7 +239,7 @@ public sealed class AgentEntityHistoryTests
             agent,
             initialState,
             new RunRequest("new request") { CorrelationId = "new" },
-            options => options.SetHistoryProviderKey("agent", "model-service.v1"));
+            options => options.ProviderKey = new("model-service.v1"));
 
         Assert.Equal(["new request"], client.LastMessages.Select(message => message.Text));
         Assert.Empty(persisted.Data.ConversationHistory);
@@ -261,7 +261,7 @@ public sealed class AgentEntityHistoryTests
             agent,
             new DurableAgentState(),
             new RunRequest("new request") { CorrelationId = "new" },
-            options => options.SetHistoryProviderKey("agent", "model-service.v1"));
+            options => options.ProviderKey = new("model-service.v1"));
 
         Assert.Empty(persisted.Data.ConversationHistory);
         Assert.Equal(DurableAgentStateHistoryBinding.ModelServiceOwner, GetBinding(persisted)?.OwnerKind);
@@ -284,7 +284,7 @@ public sealed class AgentEntityHistoryTests
             agent,
             state,
             new RunRequest("new request") { CorrelationId = "new" },
-            options => options.SetServiceManagedPerServiceCallHistory("AGENT"));
+            options => options.ServiceManagedPerServiceCallHistory = true);
 
         Assert.Equal(["old request", "old response", "new request"], client.LastMessages.Select(message => message.Text));
         Assert.Equal(4, persisted.Data.ConversationHistory.Count);
@@ -310,8 +310,8 @@ public sealed class AgentEntityHistoryTests
             new RunRequest("new request") { CorrelationId = "new" },
             options =>
             {
-                options.SetServiceManagedPerServiceCallHistory("agent");
-                options.SetHistoryProviderKey("agent", "model-service.v1");
+                options.ServiceManagedPerServiceCallHistory = true;
+                options.ProviderKey = new("model-service.v1");
             });
 
         Assert.Equal(["new request"], client.LastMessages.Select(message => message.Text));
@@ -372,8 +372,8 @@ public sealed class AgentEntityHistoryTests
             legacyState,
             options =>
             {
-                options.SetServiceManagedPerServiceCallHistory("agent");
-                options.SetHistoryProviderKey("agent", "model-service.v1");
+                options.ServiceManagedPerServiceCallHistory = true;
+                options.ProviderKey = new("model-service.v1");
             });
 
         await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
@@ -405,7 +405,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             agent,
             state,
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
 
         await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
             () => harness.RunAsync(new RunRequest("new") { CorrelationId = "new" }));
@@ -561,7 +561,7 @@ public sealed class AgentEntityHistoryTests
             {
                 if (replayMode.HasValue)
                 {
-                    options.SetHistoryReplayMode("agent", replayMode.Value);
+                    options.ReplayMode = replayMode.Value;
                 }
             });
 
@@ -598,8 +598,8 @@ public sealed class AgentEntityHistoryTests
             new RunRequest("first") { CorrelationId = "first" },
             options =>
             {
-                options.SetHistoryReplayMode("agent", DurableAgentHistoryReplayMode.CurrentRequestOnly);
-                options.SetHistoryProviderKey("agent", "opaque-agent-session.v1");
+                options.ReplayMode = DurableAgentHistoryReplayMode.CurrentRequestOnly;
+                options.ProviderKey = new("opaque-agent-session.v1");
             });
 
         RecordingAgent secondAgent = new("agent");
@@ -609,8 +609,8 @@ public sealed class AgentEntityHistoryTests
             new RunRequest("second") { CorrelationId = "second" },
             options =>
             {
-                options.SetHistoryReplayMode("agent", DurableAgentHistoryReplayMode.CurrentRequestOnly);
-                options.SetHistoryProviderKey("agent", "opaque-agent-session.v1");
+                options.ReplayMode = DurableAgentHistoryReplayMode.CurrentRequestOnly;
+                options.ProviderKey = new("opaque-agent-session.v1");
             });
 
         Assert.Equal(["first"], firstAgent.LastMessages.Select(message => message.Text));
@@ -633,8 +633,8 @@ public sealed class AgentEntityHistoryTests
             legacyState,
             options =>
             {
-                options.SetHistoryReplayMode("agent", DurableAgentHistoryReplayMode.CurrentRequestOnly);
-                options.SetHistoryProviderKey("agent", "opaque-agent-session.v1");
+                options.ReplayMode = DurableAgentHistoryReplayMode.CurrentRequestOnly;
+                options.ProviderKey = new("opaque-agent-session.v1");
             });
 
         await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
@@ -779,7 +779,7 @@ public sealed class AgentEntityHistoryTests
             wrappedAgent,
             initialState,
             new RunRequest("new request") { CorrelationId = "new" },
-            options => options.SetHistoryProviderKey("agent", "model-service.v1"));
+            options => options.ProviderKey = new("model-service.v1"));
         AgentSession restored = await wrappedAgent.DeserializeSessionAsync(
             persisted.Data.Session!.Value);
         ChatClientAgentSession restoredTyped = Assert.IsType<ChatClientAgentSession>(restored);
@@ -897,7 +897,7 @@ public sealed class AgentEntityHistoryTests
             firstAgent,
             new DurableAgentState(),
             new RunRequest("first") { CorrelationId = "first" },
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
         DurableAgentState coldState = DeserializeState(SerializeState(firstWrite));
 
         RecordingHistoryProvider secondProvider = new();
@@ -907,7 +907,7 @@ public sealed class AgentEntityHistoryTests
             secondAgent,
             coldState,
             new RunRequest("second") { CorrelationId = "second" },
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
 
         Assert.Equal(1, secondProvider.LoadCount);
         Assert.Equal(1, secondProvider.StoreCount);
@@ -930,7 +930,7 @@ public sealed class AgentEntityHistoryTests
             firstAgent,
             new DurableAgentState(),
             new RunRequest("first") { CorrelationId = "first" },
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
 
         RecordingHistoryProvider replacementProvider = new();
         RecordingChatClient replacementClient = new();
@@ -941,7 +941,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             replacementAgent,
             DeserializeState(SerializeState(persisted)),
-            options => options.SetHistoryProviderKey("agent", "external-history.v2"),
+            options => options.ProviderKey = new("external-history.v2"),
             registerWithFactory: true,
             onFactoryInvoked: () => factoryInvocationCount++);
 
@@ -973,7 +973,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             replacementAgent,
             DeserializeState(SerializeState(persisted)),
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
 
         await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
             () => harness.RunAsync(new RunRequest("second") { CorrelationId = "second" }));
@@ -992,7 +992,7 @@ public sealed class AgentEntityHistoryTests
             firstAgent,
             new DurableAgentState(),
             new RunRequest("first") { CorrelationId = "first" },
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
         DurableAgentState missingContinuation = CopyState(persisted, session: null);
 
         RecordingHistoryProvider replacementProvider = new();
@@ -1000,7 +1000,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             CreateAgentWithProvider(replacementClient, replacementProvider),
             missingContinuation,
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
 
         await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
             () => harness.RunAsync(new RunRequest("second") { CorrelationId = "second" }));
@@ -1024,7 +1024,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             replacementAgent,
             CopyState(persisted, emptySession),
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
 
         await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
             () => harness.RunAsync(new RunRequest("second") { CorrelationId = "second" }));
@@ -1042,7 +1042,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             CreateAgentWithProvider(client, provider),
             new DurableAgentState(),
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
 
         await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
             () => harness.RunAsync(new RunRequest("first") { CorrelationId = "first" }));
@@ -1067,7 +1067,7 @@ public sealed class AgentEntityHistoryTests
                     ChatHistoryProvider = provider,
                 }),
             new DurableAgentState(),
-            options => options.SetHistoryProviderKey("agent", "empty-provider.v1"));
+            options => options.ProviderKey = new("empty-provider.v1"));
 
         await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
             () => harness.RunAsync(new RunRequest("first") { CorrelationId = "first" }));
@@ -1092,7 +1092,7 @@ public sealed class AgentEntityHistoryTests
                     ChatHistoryProvider = provider,
                 }),
             new DurableAgentState(),
-            options => options.SetHistoryProviderKey("agent", "multi-key-history.v1"));
+            options => options.ProviderKey = new("multi-key-history.v1"));
 
         await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
             () => harness.RunAsync(new RunRequest("first") { CorrelationId = "first" }));
@@ -1117,7 +1117,7 @@ public sealed class AgentEntityHistoryTests
                 }),
             new DurableAgentState(),
             new RunRequest("first") { CorrelationId = "first" },
-            options => options.SetHistoryProviderKey("agent", "multi-key-history.v1"));
+            options => options.ProviderKey = new("multi-key-history.v1"));
 
         Assert.Equal(1, provider.StoreCount);
         Assert.Equal("multi-key-history.v1", GetBinding(persisted)?.ProviderKey);
@@ -1133,7 +1133,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             agent,
             legacyState,
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
 
         DurableAgentHistoryBindingMismatchException exception =
             await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
@@ -1172,7 +1172,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             CreateAgentWithProvider(client, provider),
             state,
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
 
         await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
             () => harness.RunAsync(new RunRequest("new") { CorrelationId = "new" }));
@@ -1287,8 +1287,8 @@ public sealed class AgentEntityHistoryTests
             state,
             options =>
             {
-                options.SetHistoryReplayMode("agent", DurableAgentHistoryReplayMode.CurrentRequestOnly);
-                options.SetHistoryProviderKey("agent", "opaque-agent-session.v1");
+                options.ReplayMode = DurableAgentHistoryReplayMode.CurrentRequestOnly;
+                options.ProviderKey = new("opaque-agent-session.v1");
             });
 
         await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
@@ -1331,8 +1331,8 @@ public sealed class AgentEntityHistoryTests
             state,
             options =>
             {
-                options.SetServiceManagedPerServiceCallHistory("agent");
-                options.SetHistoryProviderKey("agent", "model-service.v1");
+                options.ServiceManagedPerServiceCallHistory = true;
+                options.ProviderKey = new("model-service.v1");
             });
 
         await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
@@ -1365,7 +1365,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             agent,
             state,
-            options => options.SetHistoryProviderKey("agent", "model-service.v1"));
+            options => options.ProviderKey = new("model-service.v1"));
 
         DurableAgentHistoryBindingMismatchException exception =
             await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
@@ -1393,7 +1393,7 @@ public sealed class AgentEntityHistoryTests
             agent,
             legacyState,
             new RunRequest("new") { CorrelationId = "new" },
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
 
         Assert.Equal(1, provider.LoadCount);
         Assert.Equal(1, provider.StoreCount);
@@ -1416,7 +1416,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             transitioningAgent,
             DeserializeState(SerializeState(persisted)),
-            options => options.SetHistoryProviderKey("agent", "model-service.v1"));
+            options => options.ProviderKey = new("model-service.v1"));
 
         DurableAgentHistoryBindingMismatchException exception =
             await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
@@ -1451,7 +1451,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             CreateAgentWithProvider(client, provider),
             new DurableAgentState(),
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
 
         DurableAgentHistoryBindingMismatchException exception =
             await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
@@ -1476,7 +1476,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             agent,
             initialState,
-            options => options.SetHistoryProviderKey("agent", "model-service.v1"));
+            options => options.ProviderKey = new("model-service.v1"));
 
         DurableAgentHistoryBindingMismatchException exception =
             await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
@@ -1497,7 +1497,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             agent,
             legacyState,
-            options => options.SetHistoryProviderKey("agent", "model-service.v1"));
+            options => options.ProviderKey = new("model-service.v1"));
 
         DurableAgentHistoryBindingMismatchException exception =
             await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
@@ -1572,7 +1572,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             agent,
             initialState,
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
 
         InvalidOperationException actual = await Assert.ThrowsAsync<InvalidOperationException>(
             () => harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" }));
@@ -1598,7 +1598,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             agent,
             initialState,
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
 
         InvalidOperationException actual = await Assert.ThrowsAsync<InvalidOperationException>(
             () => harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" }));
@@ -1627,7 +1627,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             agent,
             initialState,
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"),
+            options => options.ProviderKey = new("external-history.v1"),
             applicationLifetime: lifetime);
 
         Task runTask = harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" });
@@ -1672,7 +1672,7 @@ public sealed class AgentEntityHistoryTests
         EntityHarness harness = CreateHarness(
             agent,
             initialState,
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"),
+            options => options.ProviderKey = new("external-history.v1"),
             applicationLifetime: lifetime);
 
         Task runTask = harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" });
@@ -1708,9 +1708,9 @@ public sealed class AgentEntityHistoryTests
         AIAgent agent,
         DurableAgentState state,
         RunRequest request,
-        Action<DurableAgentsOptions>? configure = null)
+        Action<DurableAgentHistoryOptions>? configureHistory = null)
     {
-        EntityHarness harness = CreateHarness(agent, state, configure);
+        EntityHarness harness = CreateHarness(agent, state, configureHistory);
         await harness.RunAsync(request);
         return Assert.IsType<DurableAgentState>(harness.PersistedState);
     }
@@ -1718,7 +1718,7 @@ public sealed class AgentEntityHistoryTests
     private static EntityHarness CreateHarness(
         AIAgent agent,
         DurableAgentState state,
-        Action<DurableAgentsOptions>? configure = null,
+        Action<DurableAgentHistoryOptions>? configureHistory = null,
         bool registerWithFactory = false,
         Action? onFactoryInvoked = null,
         IHostApplicationLifetime? applicationLifetime = null,
@@ -1739,14 +1739,13 @@ public sealed class AgentEntityHistoryTests
                 {
                     onFactoryInvoked?.Invoke();
                     return agent;
-                });
+                },
+                configureHistory: configureHistory);
         }
         else
         {
-            options.AddAIAgent(agent);
+            options.AddAIAgent(agent, configureHistory: configureHistory);
         }
-
-        configure?.Invoke(options);
 
         ListLoggerProvider loggerProvider = new();
         Dictionary<Type, object> services = new()
@@ -1803,7 +1802,7 @@ public sealed class AgentEntityHistoryTests
             agent,
             new DurableAgentState(),
             new RunRequest("seed") { CorrelationId = "seed" },
-            options => options.SetHistoryProviderKey("agent", "external-history.v1"));
+            options => options.ProviderKey = new("external-history.v1"));
     }
 
     private static string SerializeState(DurableAgentState state) =>

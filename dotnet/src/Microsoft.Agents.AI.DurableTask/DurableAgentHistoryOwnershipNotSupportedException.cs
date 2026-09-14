@@ -10,7 +10,7 @@ public sealed class DurableAgentHistoryOwnershipNotSupportedException : NotSuppo
     private const string DefaultMessage =
         "Agent Framework per-service-call history persistence can represent either framework-local history " +
         "or a service-managed conversation, but it does not publicly expose which kind a conversation ID is. " +
-        "Call DurableAgentsOptions.SetServiceManagedPerServiceCallHistory when the model service owns history. " +
+        "Set ServiceManagedPerServiceCallHistory in the agent registration's history options when the model service owns history. " +
         "Framework-local per-service-call persistence is not currently supported by durable agents. The declaration " +
         "is ignored when RequirePerServiceCallChatHistoryPersistence is disabled.";
 

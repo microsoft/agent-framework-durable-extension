@@ -205,16 +205,18 @@ public sealed class DurableAgentHistoryOwnershipTests
     }
 
     [Fact]
-    public void ServiceManagedPerCallDeclarationMatchesAgentNamesCaseInsensitively()
+    public void ServiceManagedPerCallDeclarationIsScopedToRegistration()
     {
         DurableAgentsOptions options = new();
 
-        DurableAgentsOptions returnedOptions =
-            options.SetServiceManagedPerServiceCallHistory("Agent");
+        DurableAgentsOptions returnedOptions = options.AddAIAgentFactory(
+            "Agent",
+            _ => new StubAgent(),
+            configureHistory: history => history.ServiceManagedPerServiceCallHistory = true);
 
         Assert.Same(options, returnedOptions);
-        Assert.True(options.IsServiceManagedPerServiceCallHistory("agent"));
-        Assert.False(options.IsServiceManagedPerServiceCallHistory("other"));
+        Assert.True(options.GetHistoryConfiguration("agent").ServiceManagedPerServiceCallHistory);
+        Assert.False(options.GetHistoryConfiguration("other").ServiceManagedPerServiceCallHistory);
     }
 
     [Fact]
@@ -224,41 +226,47 @@ public sealed class DurableAgentHistoryOwnershipTests
 
         Assert.Equal(
             DurableAgentHistoryReplayMode.PreloadEntityHistory,
-            options.GetHistoryReplayMode("agent"));
+            options.GetHistoryConfiguration("agent").ReplayMode);
 
-        DurableAgentsOptions returned = options.SetHistoryReplayMode(
+        DurableAgentsOptions returned = options.AddAIAgentFactory(
             "Agent",
-            DurableAgentHistoryReplayMode.CurrentRequestOnly);
+            _ => new StubAgent(),
+            configureHistory: history =>
+                history.ReplayMode = DurableAgentHistoryReplayMode.CurrentRequestOnly);
 
         Assert.Same(options, returned);
         Assert.Equal(
             DurableAgentHistoryReplayMode.CurrentRequestOnly,
-            options.GetHistoryReplayMode("agent"));
+            options.GetHistoryConfiguration("agent").ReplayMode);
     }
 
     [Fact]
     public void InvalidHistoryReplayModeFailsDuringOptionsConfiguration()
     {
-        DurableAgentsOptions options = new();
+        DurableAgentHistoryOptions options = new();
 
         Assert.Throws<ArgumentOutOfRangeException>(
-            () => options.SetHistoryReplayMode(
-                "agent",
-                (DurableAgentHistoryReplayMode)int.MaxValue));
+            () => options.ReplayMode = (DurableAgentHistoryReplayMode)int.MaxValue);
     }
 
     [Fact]
-    public void LogicalHistoryProviderKeyIsStableCaseInsensitiveRegistrationMetadata()
+    public void LogicalHistoryProviderKeyIsStableRegistrationMetadata()
     {
         DurableAgentsOptions options = new();
+        DurableAgentHistoryProviderKey providerKey = new("contoso.history.v1");
 
-        DurableAgentsOptions returned =
-            options.SetHistoryProviderKey("Agent", "contoso.history.v1");
+        DurableAgentsOptions returned = options.AddAIAgentFactory(
+            "Agent",
+            _ => new StubAgent(),
+            configureHistory: history => history.ProviderKey = providerKey);
 
         Assert.Same(options, returned);
-        Assert.Equal("contoso.history.v1", options.GetHistoryProviderKey("agent"));
-        Assert.Throws<InvalidOperationException>(
-            () => options.SetHistoryProviderKey("AGENT", "contoso.history.v2"));
+        Assert.Equal(
+            providerKey,
+            options.GetHistoryConfiguration("agent").ProviderKey);
+        Assert.Equal(providerKey, new DurableAgentHistoryProviderKey("contoso.history.v1"));
+        Assert.NotEqual(providerKey, new DurableAgentHistoryProviderKey("contoso.history.v2"));
+        Assert.Equal("contoso.history.v1", providerKey.ToString());
     }
 
     [Theory]
@@ -267,10 +275,8 @@ public sealed class DurableAgentHistoryOwnershipTests
     [InlineData("invalid\u0001key")]
     public void InvalidLogicalHistoryProviderKeyFailsDuringConfiguration(string providerKey)
     {
-        DurableAgentsOptions options = new();
-
         Assert.ThrowsAny<Exception>(
-            () => options.SetHistoryProviderKey("agent", providerKey));
+            () => new DurableAgentHistoryProviderKey(providerKey));
     }
 
     [Fact]
