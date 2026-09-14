@@ -169,6 +169,33 @@ public sealed class DurableChatHistoryProviderTests
     }
 
     [Fact]
+    public async Task RepeatedToolLoopCallbacksReplaceTheStagedResponseAsync()
+    {
+        ChatClientAgent chatAgent = new(new RecordingChatClient(), name: "test-agent");
+        AgentSession session = await chatAgent.CreateSessionAsync();
+        DurableAgentState state = new();
+        RunRequest request = new("new request") { CorrelationId = "new" };
+        DurableChatHistoryProvider provider = new(state.Data.ConversationHistory, request);
+
+        await provider.InvokedAsync(new(
+            chatAgent,
+            session,
+            request.Messages,
+            [new ChatMessage(ChatRole.Assistant, "intermediate")]));
+        await provider.InvokedAsync(new(
+            chatAgent,
+            session,
+            request.Messages,
+            [new ChatMessage(ChatRole.Assistant, "final")]));
+
+        Assert.Equal(2, state.Data.ConversationHistory.Count);
+        Assert.Single(state.Data.ConversationHistory.OfType<DurableAgentStateRequest>());
+        DurableAgentStateResponse response =
+            Assert.Single(state.Data.ConversationHistory.OfType<DurableAgentStateResponse>());
+        Assert.Equal("final", Assert.Single(response.Messages).ToChatMessage().Text);
+    }
+
+    [Fact]
     public async Task ProviderReplaysCompactionButNotErrorResponseAsync()
     {
         RecordingChatClient client = new();

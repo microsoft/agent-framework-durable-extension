@@ -59,22 +59,30 @@ internal sealed class DurableChatHistoryProvider(
         // ChatHistoryProvider calls this "store", but the list is the entity operation's isolated
         // working state. Do not write the Durable Task backend here: doing so would persist an
         // intermediate turn before aggregate response metadata, session state, and TTL.
-        this._history.Add(DurableAgentStateRequest.FromRunRequest(
-            this._request,
-            this._request.Messages,
-            allowLosslessV2,
-            this._logger));
-        this._history.Add(
-            allowLosslessV2
-                ? DurableAgentStateResponse.FromMessagesV2(
-                    this._request.CorrelationId,
-                    context.ResponseMessages ?? [],
-                    this._logger)
-                : DurableAgentStateResponse.FromMessages(
-                    this._request.CorrelationId,
-                    context.ResponseMessages ?? [],
-                    this._logger));
-        this._responseIndex = this._history.Count - 1;
+        DurableAgentStateResponse response = allowLosslessV2
+            ? DurableAgentStateResponse.FromMessagesV2(
+                this._request.CorrelationId,
+                context.ResponseMessages ?? [],
+                this._logger)
+            : DurableAgentStateResponse.FromMessages(
+                this._request.CorrelationId,
+                context.ResponseMessages ?? [],
+                this._logger);
+        if (this._responseIndex >= 0)
+        {
+            this._history[this._responseIndex] = response;
+        }
+        else
+        {
+            this._history.Add(DurableAgentStateRequest.FromRunRequest(
+                this._request,
+                this._request.Messages,
+                allowLosslessV2,
+                this._logger));
+            this._history.Add(response);
+            this._responseIndex = this._history.Count - 1;
+        }
+
         return default;
     }
 
