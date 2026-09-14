@@ -18,27 +18,41 @@ internal sealed class DurableAgentStateData
     public IList<DurableAgentStateEntry> ConversationHistory { get; init; } = [];
 
     /// <summary>
-    /// Gets immutable terminal result payloads indexed by correlation ID.
+    /// Gets terminal response or error payloads keyed by their case-sensitive
+    /// correlation IDs. These entries form the durable result-delivery mailbox.
+    /// A committed payload is not replaced; it may be removed after its delivery
+    /// lifetime expires, while the corresponding completion receipt remains.
     /// </summary>
     [JsonPropertyName("terminalResults")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IDictionary<string, DurableAgentStateTerminalResult>? TerminalResults { get; init; }
 
     /// <summary>
-    /// Gets completion receipts retained independently from result payload expiry.
+    /// Gets completion evidence keyed by case-sensitive correlation ID.
+    /// A receipt remains after transcript pruning or terminal-result expiry so a
+    /// completed request cannot appear pending or execute again. Removing the
+    /// entire durable session also removes this deduplication evidence.
     /// </summary>
     [JsonPropertyName("completionReceipts")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IDictionary<string, DurableAgentStateCompletionReceipt>? CompletionReceipts { get; init; }
 
     /// <summary>
-    /// Gets an optional, separately versioned runtime history profile.
+    /// Gets optional, runtime-specific information identifying the configured
+    /// authority for conversation history.
+    ///
+    /// For example, the C# durable runtime may use this field to record that history
+    /// is owned by the durable entity, by a user-configured external history
+    /// provider, or by a remote model service.
+    ///
+    /// This value identifies the logical history configuration, not a provider
+    /// object, CLR type, credential, or individual conversation ID. Provider-specific
+    /// continuation data, such as a remote conversation ID, remains in the opaque
+    /// agent session.
+    ///
+    /// The shared schema does not interpret this value or require every runtime to
+    /// use fixed ownership. Runtimes must preserve profiles they do not recognize.
     /// </summary>
-    /// <remarks>
-    /// The shared contract treats this object as opaque. This layer preserves its complete JSON shape
-    /// without interpreting owner fields, inferring defaults, or constraining per-run ownership transitions.
-    /// A relying C# profile may apply stricter validation in a later layer.
-    /// </remarks>
     [JsonPropertyName("historyBinding")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public JsonElement HistoryBinding
