@@ -177,8 +177,16 @@ inside the `data` string. Payload text is not recursively interpreted as control
 a runtime type during envelope validation. Unknown fields cannot override known controls. A nonblank
 unknown type name is structurally valid and travels unchanged to the target activity. If that activity
 cannot resolve it or match a registered input type by name, it fails rather than choosing the first
-handler. Type resolution is not added to orchestration code. Existing registered-name/version matching,
-untyped input, and supported string/string-array adaptation remain unchanged.
+handler. Resolution alone does not authorize a type: every selected non-string input type must be in
+the receiving executor's `InputTypes` before payload deserialization, including fan-in array elements.
+Rejected hints cannot invoke payload constructors, JSON converters, or handlers; the executor factory
+may run to obtain its registered contract. Type resolution is not added to orchestration code.
+Existing registered-name/version matching and string/string-array adaptation to a registered type
+remain supported. Absent, null, and empty hints retain legacy default-type selection; whitespace-only
+or surrounding-whitespace names do not. A recognized top-level `inputTypeName` (case-insensitive)
+identifies an activity input envelope: duplicate hints, invalid hint field kinds, and malformed
+envelopes cannot discard that provenance and retry as untyped payloads. Legacy raw input without a
+recognized top-level hint remains supported, including opaque non-JSON string input.
 The child runner tags its non-empty final result as a CLR string when routing it to parent successors,
 so an executor supporting several input types receives the original text through its string handler
 even when another supported type is listed first. Child result-only fallback (including legacy missing,
