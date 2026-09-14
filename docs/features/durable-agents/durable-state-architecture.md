@@ -127,13 +127,7 @@ The application or external provider remains responsible for availability, autho
 
 Closed choices are represented by enums: `DurableAgentHistoryReplayMode` has `PreloadEntityHistory` and `CurrentRequestOnly`; `DurableAgentHistoryRetentionMode` has `KeepAll` and `Auto`. History ownership is also a closed internal enum after resolution.
 
-Agent names and logical provider identities are open sets, so an enum is not appropriate for them. The current options address history policy by agent name and persist a logical provider key through:
-
-- `SetServiceManagedPerServiceCallHistory`
-- `SetHistoryReplayMode`
-- `SetHistoryProviderKey`
-
-History policy belongs to the agent registration; it should not require callers to repeat an agent name. A logical provider identity crosses the JSON wire as a string for interoperability, while public configuration can represent it with a validated value object or registration token. Applications should define any unavoidable identifier once as a constant or static typed value.
+Agent names and logical provider identities are open sets, so an enum is not appropriate for them. History policy is attached to `AddAIAgent` or `AddAIAgentFactory` through `DurableAgentHistoryOptions`; callers do not repeat the agent name. `DurableAgentHistoryProviderKey` validates the logical provider identity before registration. It crosses the JSON wire as a string for interoperability, but applications can define it once as a static typed value.
 
 The persisted `ownerKind` strings are not application configuration. `DurableAgentStateHistoryBinding` owns the constants and `DurableAgentHistoryBinding` converts the internal ownership enum to the wire profile. Callers should not construct `historyBinding` JSON or select an owner with a string.
 
