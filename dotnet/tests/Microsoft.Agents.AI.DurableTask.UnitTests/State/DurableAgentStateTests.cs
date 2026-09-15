@@ -599,4 +599,84 @@ public sealed class DurableAgentStateTests
         Assert.DoesNotContain("\"responseType\"", json, StringComparison.Ordinal);
         Assert.DoesNotContain("\"expirationTimeUtc\"", json, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void LegacyWriteRejectsUriContentWithoutMediaType()
+    {
+        DurableAgentState state = new();
+        state.Data.ConversationHistory.Add(
+            new DurableAgentStateRequest
+            {
+                CreatedAt = DateTimeOffset.UtcNow,
+                Messages =
+                [
+                    new DurableAgentStateMessage
+                    {
+                        Role = "user",
+                        Contents =
+                        [
+                            new DurableAgentStateUriContent
+                            {
+                                Uri = new Uri("https://contoso.example/image")
+                            }
+                        ]
+                    }
+                ]
+            });
+
+        Assert.Throws<InvalidOperationException>(
+            () => JsonSerializer.Serialize(
+                state,
+                DurableAgentStateJsonContext.Default.DurableAgentState));
+    }
+
+    [Fact]
+    public void LegacyWriteRejectsV2OnlyMessageShapes()
+    {
+        DurableAgentState developerRoleState = new();
+        developerRoleState.Data.ConversationHistory.Add(
+            new DurableAgentStateRequest
+            {
+                CreatedAt = DateTimeOffset.UtcNow,
+                Messages =
+                [
+                    new DurableAgentStateMessage { Role = "developer" }
+                ]
+            });
+
+        Assert.Throws<InvalidOperationException>(
+            () => JsonSerializer.Serialize(
+                developerRoleState,
+                DurableAgentStateJsonContext.Default.DurableAgentState));
+
+        DurableAgentState verbatimArgumentsState = new();
+        verbatimArgumentsState.Data.ConversationHistory.Add(
+            new DurableAgentStateRequest
+            {
+                CreatedAt = DateTimeOffset.UtcNow,
+                Messages =
+                [
+                    new DurableAgentStateMessage
+                    {
+                        Role = "assistant",
+                        Contents =
+                        [
+                            new DurableAgentStateFunctionCallContent
+                            {
+                                CallId = "call-1",
+                                Name = "tool",
+                                Arguments = JsonSerializer.SerializeToElement(
+                                    "{\"partial\":",
+                                    DurableAgentStateJsonContext.Default.String)
+                            }
+                        ]
+                    }
+                ]
+            });
+
+        Assert.Throws<InvalidOperationException>(
+            () => JsonSerializer.Serialize(
+                verbatimArgumentsState,
+                DurableAgentStateJsonContext.Default.DurableAgentState));
+    }
 }

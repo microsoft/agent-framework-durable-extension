@@ -155,19 +155,26 @@ internal sealed class DurableAgentStateMessage
 
     internal void Validate(DurableAgentStateSchemaVersion version)
     {
-        if (version.Major < DurableAgentState.RevisedSchemaMajorVersion)
+        bool revised = version.Major >= DurableAgentState.RevisedSchemaMajorVersion;
+        if (revised)
         {
-            return;
+            if (this.Role is not "user" and
+                not "assistant" and
+                not "system" and
+                not "developer" and
+                not "tool")
+            {
+                throw new InvalidOperationException(
+                    $"The durable agent state message role '{this.Role}' is not supported.");
+            }
         }
-
-        if (this.Role is not "user" and
-            not "assistant" and
-            not "system" and
-            not "developer" and
-            not "tool")
+        else if (this.Role is not "user" and
+                 not "assistant" and
+                 not "system" and
+                 not "tool")
         {
             throw new InvalidOperationException(
-                $"The durable agent state message role '{this.Role}' is not supported.");
+                $"The legacy durable agent state message role '{this.Role}' is not supported.");
         }
 
         if (this.Contents.Any(static content => content is null))

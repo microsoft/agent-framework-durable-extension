@@ -247,5 +247,20 @@ internal sealed class DurableAgentStateData
             throw new InvalidOperationException(
                 "Mailbox and provisional history-binding fields require durable agent state schema version 2.0.0.");
         }
+
+        if (version.Major < DurableAgentState.RevisedSchemaMajorVersion &&
+            this.ConversationHistory is not null)
+        {
+            foreach (DurableAgentStateEntry? entry in this.ConversationHistory)
+            {
+                if (entry is null)
+                {
+                    throw new InvalidOperationException(
+                        "A durable agent state cannot contain null conversation entries.");
+                }
+
+                entry.Validate(version);
+            }
+        }
     }
 }
