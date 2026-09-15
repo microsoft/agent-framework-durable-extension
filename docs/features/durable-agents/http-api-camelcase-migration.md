@@ -10,7 +10,7 @@ Use these names for new code:
 | --- | --- | --- |
 | `session_id` | `sessionId` | Agent run query parameter and JSON request/response field |
 | `wait_for_response` | `waitForResponse` | Agent run query parameter and Python JSON request field |
-| `correlation_id` | `correlationId` | Python agent run JSON response field |
+| `correlation_id` | `correlationId` | Python agent run JSON response field; not a request field |
 | `thread_id` | `sessionId` | Deprecated alias for the same session key |
 
 The `x-ms-session-id` and `x-ms-wait-for-response` headers did not change.
@@ -21,8 +21,16 @@ The old snake_case names are still accepted on requests so existing callers can 
 
 If a request supplies more than one alias for the same value, all aliases must match. For example, `sessionId=abc` and `session_id=abc` is accepted, but `sessionId=abc` and `session_id=def` returns HTTP 400.
 
+Responses to requests that use legacy agent HTTP aliases include these migration signals:
+
+```http
+Deprecation: true
+Link: <https://github.com/microsoft/agent-framework-durable-extension/blob/main/docs/features/durable-agents/http-api-camelcase-migration.md>; rel="deprecation"
+Warning: 299 - "Deprecated agent HTTP field names are supported temporarily; use sessionId and waitForResponse."
+```
+
 ## Migration steps
 
 Update callers to send `sessionId` and `waitForResponse`. Update response parsing to read `sessionId` and, for Python Azure Functions agent responses, `correlationId`. Keep support for the old response names only as a temporary fallback until the compatibility window ends.
 
-This change is limited to the public agent HTTP boundary. Do not rename persisted durable state fields, entity IDs, workflow HTTP fields, MCP tool arguments, or SDK/internal constants as part of this migration.
+This change is limited to the public agent HTTP boundary. Do not rename persisted durable state fields, entity IDs, workflow HTTP fields, MCP tool arguments, Python SDK options such as `response_format` and `enable_tool_calls`, or SDK/internal constants as part of this migration.

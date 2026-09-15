@@ -15,6 +15,7 @@ using Microsoft.DurableTask.Client;
 using Microsoft.DurableTask.Worker.Grpc;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Agents.AI.Hosting.AzureFunctions;
 
@@ -26,6 +27,11 @@ internal static class BuiltInFunctions
     internal const string RespondFunctionSuffix = "-respond";
 
     private const string WaitForResponseHeaderName = "x-ms-wait-for-response";
+    private const string DeprecationHeaderName = "Deprecation";
+    private const string LinkHeaderName = "Link";
+    private const string WarningHeaderName = "Warning";
+    private const string AgentHttpMigrationGuideUrl =
+        "https://github.com/microsoft/agent-framework-durable-extension/blob/main/docs/features/durable-agents/http-api-camelcase-migration.md";
 
     /// <summary>
     /// Query parameter used by the agent endpoints.
@@ -370,6 +376,18 @@ internal static class BuiltInFunctions
             message = await req.ReadAsStringAsync();
         }
 
+        bool usedLegacyAgentHttpNames = UsesLegacyAgentHttpNames(
+            legacySessionIdFromBody,
+            legacyThreadIdFromBody,
+            req.Query[LegacySessionIdParameterName],
+            req.Query[LegacyThreadIdParameterName],
+            req.Query[LegacyAgentWaitForResponseParameterName]);
+        if (usedLegacyAgentHttpNames)
+        {
+            context.GetLogger(nameof(BuiltInFunctions)).LogWarning(
+                "Deprecated agent HTTP field names were used. Use sessionId and waitForResponse for new code.");
+        }
+
         // The session ID can come from the query string or the request body, using the canonical
         // "sessionId" name or a deprecated alias. Conflicting values are rejected.
         if (!TryResolveSessionKey(
@@ -382,7 +400,9 @@ internal static class BuiltInFunctions
                 out string? sessionIdValue,
                 out string? sessionKeyError))
         {
-            return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, sessionKeyError);
+            HttpResponseData response = await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, sessionKeyError);
+            AddAgentHttpDeprecationHeaders(response, usedLegacyAgentHttpNames);
+            return response;
         }
 
         // The caller-supplied value is treated as a session key (not a full session ID).
@@ -395,16 +415,20 @@ internal static class BuiltInFunctions
 
         if (string.IsNullOrWhiteSpace(message))
         {
-            return await CreateErrorResponseAsync(
+            HttpResponseData response = await CreateErrorResponseAsync(
                 req,
                 context,
                 HttpStatusCode.BadRequest,
                 "Run request cannot be empty.");
+            AddAgentHttpDeprecationHeaders(response, usedLegacyAgentHttpNames);
+            return response;
         }
 
         if (!TryGetAgentWaitForResponse(req, out bool waitForResponse, out string? waitForResponseError))
         {
-            return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, waitForResponseError!);
+            HttpResponseData response = await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, waitForResponseError!);
+            AddAgentHttpDeprecationHeaders(response, usedLegacyAgentHttpNames);
+            return response;
         }
 
         AIAgent agentProxy = client.AsDurableAgentProxy(context, agentName);
@@ -424,7 +448,8 @@ internal static class BuiltInFunctions
                 context,
                 HttpStatusCode.OK,
                 sessionId.Key,
-                agentResponse);
+                agentResponse,
+                usedLegacyAgentHttpNames);
         }
 
         // Fire and forget - return 202 Accepted
@@ -437,7 +462,8 @@ internal static class BuiltInFunctions
         return await CreateAcceptedResponseAsync(
             req,
             context,
-            sessionId.Key);
+            sessionId.Key,
+            usedLegacyAgentHttpNames);
     }
 
     public static async Task<string?> RunMcpToolAsync(
@@ -709,16 +735,19 @@ internal static class BuiltInFunctions
     /// <param name="statusCode">The HTTP status code (typically 200 OK).</param>
     /// <param name="sessionId">The session ID for the conversation.</param>
     /// <param name="agentResponse">The agent's response.</param>
+    /// <param name="addDeprecationHeaders">Whether to include agent HTTP migration headers.</param>
     /// <returns>The HTTP response data containing the success response.</returns>
     private static async Task<HttpResponseData> CreateSuccessResponseAsync(
         HttpRequestData req,
         FunctionContext context,
         HttpStatusCode statusCode,
         string sessionId,
-        AgentResponse agentResponse)
+        AgentResponse agentResponse,
+        bool addDeprecationHeaders = false)
     {
         HttpResponseData response = req.CreateResponse(statusCode);
         response.Headers.Add(SessionIdHeaderName, sessionId);
+        AddAgentHttpDeprecationHeaders(response, addDeprecationHeaders);
 
         if (AcceptsJson(req))
         {
@@ -740,14 +769,17 @@ internal static class BuiltInFunctions
     /// <param name="req">The HTTP request data.</param>
     /// <param name="context">The function context.</param>
     /// <param name="sessionId">The session ID for the conversation.</param>
+    /// <param name="addDeprecationHeaders">Whether to include agent HTTP migration headers.</param>
     /// <returns>The HTTP response data containing the accepted response.</returns>
     private static async Task<HttpResponseData> CreateAcceptedResponseAsync(
         HttpRequestData req,
         FunctionContext context,
-        string sessionId)
+        string sessionId,
+        bool addDeprecationHeaders = false)
     {
         HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
         response.Headers.Add(SessionIdHeaderName, sessionId);
+        AddAgentHttpDeprecationHeaders(response, addDeprecationHeaders);
 
         if (AcceptsJson(req))
         {
@@ -762,6 +794,23 @@ internal static class BuiltInFunctions
 
         return response;
     }
+
+    internal static void AddAgentHttpDeprecationHeaders(HttpResponseData response, bool shouldAdd)
+    {
+        if (!shouldAdd)
+        {
+            return;
+        }
+
+        response.Headers.Add(DeprecationHeaderName, "true");
+        response.Headers.Add(LinkHeaderName, $"<{AgentHttpMigrationGuideUrl}>; rel=\"deprecation\"");
+        response.Headers.Add(
+            WarningHeaderName,
+            "299 - \"Deprecated agent HTTP field names are supported temporarily; use sessionId and waitForResponse.\"");
+    }
+
+    internal static bool UsesLegacyAgentHttpNames(params string?[] values) =>
+        values.Any(value => !string.IsNullOrWhiteSpace(value));
 
     /// <summary>
     /// Returns <see langword="true"/> when the caller has requested waiting for the workflow/agent to complete,
@@ -793,13 +842,6 @@ internal static class BuiltInFunctions
         out bool waitForResponse,
         out string? error)
     {
-        if (req.Headers.TryGetValues(WaitForResponseHeaderName, out IEnumerable<string>? values) &&
-            TryParseBoolean(values.FirstOrDefault(), out waitForResponse))
-        {
-            error = null;
-            return true;
-        }
-
         string? canonicalValue = req.Query[AgentWaitForResponseParameterName];
         string? legacyValue = req.Query[LegacyAgentWaitForResponseParameterName];
 
@@ -811,6 +853,13 @@ internal static class BuiltInFunctions
             waitForResponse = true;
             error = $"{AgentWaitForResponseParameterName} and {LegacyAgentWaitForResponseParameterName} specified in the query string must match.";
             return false;
+        }
+
+        if (req.Headers.TryGetValues(WaitForResponseHeaderName, out IEnumerable<string>? values) &&
+            TryParseBoolean(values.FirstOrDefault(), out waitForResponse))
+        {
+            error = null;
+            return true;
         }
 
         waitForResponse = hasCanonical ? canonical : hasLegacy ? legacy : true;

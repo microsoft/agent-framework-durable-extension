@@ -1,7 +1,10 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 using System.Text.Json;
+using Microsoft.Azure.Functions.Worker;
+using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Extensions.AI;
+using Moq;
 
 namespace Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests;
 
@@ -199,5 +202,30 @@ public sealed class BuiltInFunctionsSessionIdAliasTests
         Assert.Null(sessionKey);
         Assert.NotNull(error);
         Assert.Contains(expectedMessageFragment, error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddAgentHttpDeprecationHeaders_AddsMigrationHeadersOnlyForLegacyRequests()
+    {
+        // Arrange
+        Mock<HttpResponseData> response = new(Mock.Of<FunctionContext>());
+        response.SetupGet(r => r.Headers).Returns(new HttpHeadersCollection());
+
+        // Act
+        BuiltInFunctions.AddAgentHttpDeprecationHeaders(response.Object, shouldAdd: false);
+
+        // Assert
+        Assert.Empty(response.Object.Headers);
+
+        // Act
+        BuiltInFunctions.AddAgentHttpDeprecationHeaders(response.Object, shouldAdd: true);
+
+        // Assert
+        Assert.True(response.Object.Headers.TryGetValues("Deprecation", out IEnumerable<string>? deprecation));
+        Assert.Equal("true", Assert.Single(deprecation));
+        Assert.True(response.Object.Headers.TryGetValues("Link", out IEnumerable<string>? links));
+        Assert.Contains("rel=\"deprecation\"", Assert.Single(links), StringComparison.Ordinal);
+        Assert.True(response.Object.Headers.TryGetValues("Warning", out IEnumerable<string>? warnings));
+        Assert.Contains("Deprecated agent HTTP field names", Assert.Single(warnings), StringComparison.Ordinal);
     }
 }

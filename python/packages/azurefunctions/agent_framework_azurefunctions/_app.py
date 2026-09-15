@@ -73,6 +73,13 @@ _AGENT_SESSION_ID_FIELD = "sessionId"
 _AGENT_WAIT_FOR_RESPONSE_FIELD = "waitForResponse"
 _AGENT_CORRELATION_ID_FIELD = "correlationId"
 _LEGACY_AGENT_CORRELATION_ID_FIELD = "correlation_id"
+_AGENT_HTTP_DEPRECATION_HEADER = "Deprecation"
+_AGENT_HTTP_LINK_HEADER = "Link"
+_AGENT_HTTP_WARNING_HEADER = "Warning"
+_AGENT_HTTP_MIGRATION_GUIDE_URL = (
+    "https://github.com/microsoft/agent-framework-durable-extension/blob/main/"
+    "docs/features/durable-agents/http-api-camelcase-migration.md"
+)
 _RUN_ID_QUERY_PARAMETER = "runId"
 _MAX_WORKFLOW_RUN_ID_LENGTH = 100
 _WORKFLOW_WAIT_FOR_RESPONSE_QUERY_PARAMETER = "waitForResponse"
@@ -999,9 +1006,16 @@ class AgentFunctionApp(DFAppBase):
             """
             request_response_format: str = REQUEST_RESPONSE_FORMAT_JSON
             session_id: str | None = None
+            used_legacy_agent_http_names = self._uses_legacy_agent_http_names(req=req)
 
             try:
                 req_body, message, request_response_format = self._parse_incoming_request(req)
+                used_legacy_agent_http_names = self._uses_legacy_agent_http_names(req=req, req_body=req_body)
+                if used_legacy_agent_http_names:
+                    logger.warning(
+                        "[HTTP Trigger] Deprecated agent HTTP field names were used. "
+                        "Use sessionId and waitForResponse for new code."
+                    )
                 session_id = self._resolve_session_id(req=req, req_body=req_body)
                 wait_for_response = self._should_wait_for_response(req=req, req_body=req_body)
 
@@ -1017,6 +1031,7 @@ class AgentFunctionApp(DFAppBase):
                         status_code=400,
                         request_response_format=request_response_format,
                         session_id=session_id,
+                        add_deprecation_headers=used_legacy_agent_http_names,
                     )
 
                 agent_session_id = self._create_session_id(agent_name, session_id)
@@ -1057,6 +1072,7 @@ class AgentFunctionApp(DFAppBase):
                         status_code=200 if result.get("status") == "success" else 500,
                         request_response_format=request_response_format,
                         session_id=session_id,
+                        add_deprecation_headers=used_legacy_agent_http_names,
                     )
 
                 logger.debug("[HTTP Trigger] wait_for_response disabled; returning correlation ID")
@@ -1070,6 +1086,7 @@ class AgentFunctionApp(DFAppBase):
                     status_code=202,
                     request_response_format=request_response_format,
                     session_id=session_id,
+                    add_deprecation_headers=used_legacy_agent_http_names,
                 )
 
             except IncomingRequestError as exc:
@@ -1079,6 +1096,7 @@ class AgentFunctionApp(DFAppBase):
                     status_code=exc.status_code,
                     request_response_format=request_response_format,
                     session_id=session_id,
+                    add_deprecation_headers=used_legacy_agent_http_names,
                 )
             except ValueError as exc:
                 logger.error(f"[HTTP Trigger] Invalid JSON: {exc!s}")
@@ -1087,6 +1105,7 @@ class AgentFunctionApp(DFAppBase):
                     status_code=400,
                     request_response_format=request_response_format,
                     session_id=session_id,
+                    add_deprecation_headers=used_legacy_agent_http_names,
                 )
             except Exception as exc:
                 logger.error(f"[HTTP Trigger] Error: {exc!s}", exc_info=True)
@@ -1095,6 +1114,7 @@ class AgentFunctionApp(DFAppBase):
                     status_code=500,
                     request_response_format=request_response_format,
                     session_id=session_id,
+                    add_deprecation_headers=used_legacy_agent_http_names,
                 )
 
         _ = http_start
@@ -1563,28 +1583,72 @@ class AgentFunctionApp(DFAppBase):
         status_code: int,
         request_response_format: str,
         session_id: str | None,
+        *,
+        add_deprecation_headers: bool = False,
     ) -> func.HttpResponse:
         """Create the HTTP response using helper serializers for clarity."""
         if request_response_format == REQUEST_RESPONSE_FORMAT_TEXT:
-            return self._build_plain_text_response(payload=payload, status_code=status_code, session_id=session_id)
+            return self._build_plain_text_response(
+                payload=payload,
+                status_code=status_code,
+                session_id=session_id,
+                add_deprecation_headers=add_deprecation_headers,
+            )
 
-        return self._build_json_response(payload=payload, status_code=status_code)
+        return self._build_json_response(
+            payload=payload,
+            status_code=status_code,
+            add_deprecation_headers=add_deprecation_headers,
+        )
 
     def _build_plain_text_response(
         self,
         payload: dict[str, Any] | str,
         status_code: int,
         session_id: str | None,
+        *,
+        add_deprecation_headers: bool = False,
     ) -> func.HttpResponse:
         """Return a plain-text response with optional session identifier header."""
         body_text = payload if isinstance(payload, str) else self._convert_payload_to_text(payload)
         headers = {SESSION_ID_HEADER: session_id} if session_id is not None else None
+        headers = self._add_agent_http_deprecation_headers(headers, add_deprecation_headers)
         return func.HttpResponse(body_text, status_code=status_code, mimetype=MIMETYPE_TEXT_PLAIN, headers=headers)
 
-    def _build_json_response(self, payload: dict[str, Any] | str, status_code: int) -> func.HttpResponse:
+    def _build_json_response(
+        self,
+        payload: dict[str, Any] | str,
+        status_code: int,
+        *,
+        add_deprecation_headers: bool = False,
+    ) -> func.HttpResponse:
         """Return the JSON response, serializing dictionaries as needed."""
         body_json = payload if isinstance(payload, str) else json.dumps(payload)
-        return func.HttpResponse(body_json, status_code=status_code, mimetype=MIMETYPE_APPLICATION_JSON)
+        headers = self._add_agent_http_deprecation_headers(None, add_deprecation_headers)
+        return func.HttpResponse(
+            body_json,
+            status_code=status_code,
+            mimetype=MIMETYPE_APPLICATION_JSON,
+            headers=headers,
+        )
+
+    @staticmethod
+    def _add_agent_http_deprecation_headers(
+        headers: dict[str, str] | None,
+        should_add: bool,
+    ) -> dict[str, str] | None:
+        """Add migration hints when the caller used a deprecated agent HTTP name."""
+        if not should_add:
+            return headers
+
+        merged = dict(headers or {})
+        merged[_AGENT_HTTP_DEPRECATION_HEADER] = "true"
+        merged[_AGENT_HTTP_LINK_HEADER] = f'<{_AGENT_HTTP_MIGRATION_GUIDE_URL}>; rel="deprecation"'
+        merged[_AGENT_HTTP_WARNING_HEADER] = (
+            '299 - "Deprecated agent HTTP field names are supported temporarily; '
+            'use sessionId and waitForResponse."'
+        )
+        return merged
 
     @staticmethod
     def _build_error_response(message: str, status_code: int = 400) -> func.HttpResponse:
@@ -1612,6 +1676,24 @@ class AgentFunctionApp(DFAppBase):
         if session_key:
             return AgentSessionId(name=agent_name, key=session_key)
         return AgentSessionId.with_random_key(name=agent_name)
+
+    @staticmethod
+    def _uses_legacy_agent_http_names(req: func.HttpRequest, req_body: dict[str, Any] | None = None) -> bool:
+        """Return True when deprecated agent HTTP aliases are present."""
+        params = req.params or {}
+        legacy_values = [
+            params.get(SESSION_ID_FIELD),
+            params.get(LEGACY_THREAD_ID_FIELD),
+            params.get(WAIT_FOR_RESPONSE_FIELD),
+        ]
+        if req_body:
+            legacy_values.extend([
+                req_body.get(SESSION_ID_FIELD),
+                req_body.get(LEGACY_THREAD_ID_FIELD),
+                req_body.get(WAIT_FOR_RESPONSE_FIELD),
+            ])
+
+        return any(value is not None and str(value).strip() for value in legacy_values)
 
     def _resolve_session_id(self, req: func.HttpRequest, req_body: dict[str, Any]) -> str:
         """Retrieve the session identifier from the request body or query parameters.
@@ -1740,10 +1822,6 @@ class AgentFunctionApp(DFAppBase):
         headers: dict[str, str] = self._extract_normalized_headers(req)
         header_value: str | None = headers.get(WAIT_FOR_RESPONSE_HEADER)
 
-        parsed_header = self._try_coerce_to_bool(header_value)
-        if parsed_header is not None:
-            return parsed_header
-
         params = req.params or {}
         parsed_query = self._try_coerce_to_bool(params.get(query_parameter))
         parsed_legacy_query = self._try_coerce_to_bool(params.get(WAIT_FOR_RESPONSE_FIELD))
@@ -1751,10 +1829,6 @@ class AgentFunctionApp(DFAppBase):
             raise IncomingRequestError(
                 f"{query_parameter} and {WAIT_FOR_RESPONSE_FIELD} specified in the query string must match."
             )
-        if parsed_query is not None:
-            return parsed_query
-        if parsed_legacy_query is not None:
-            return parsed_legacy_query
 
         parsed_body = self._try_coerce_to_bool(req_body.get(_AGENT_WAIT_FOR_RESPONSE_FIELD))
         parsed_legacy_body = self._try_coerce_to_bool(req_body.get(WAIT_FOR_RESPONSE_FIELD))
@@ -1763,6 +1837,14 @@ class AgentFunctionApp(DFAppBase):
                 f"{_AGENT_WAIT_FOR_RESPONSE_FIELD} and {WAIT_FOR_RESPONSE_FIELD} specified in the request body "
                 "must match."
             )
+
+        parsed_header = self._try_coerce_to_bool(header_value)
+        if parsed_header is not None:
+            return parsed_header
+        if parsed_query is not None:
+            return parsed_query
+        if parsed_legacy_query is not None:
+            return parsed_legacy_query
         if parsed_body is not None:
             return parsed_body
         if parsed_legacy_body is not None:

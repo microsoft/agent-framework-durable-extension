@@ -98,6 +98,7 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
     [InlineData(null, null, "false", true, false)]
     [InlineData(null, "false", "false", true, false)]
     [InlineData(null, "true", "false", false, true)]
+    [InlineData("true", "true", "false", false, true)]
     [InlineData("false", "true", "true", true, false)]
     [InlineData("invalid", null, "false", true, false)]
     public void TryGetAgentWaitForResponse_AcceptsCamelCaseAndLegacyQueryNames(

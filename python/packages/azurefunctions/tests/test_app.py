@@ -372,6 +372,14 @@ class TestWaitForResponseAndCorrelationId:
         with pytest.raises(IncomingRequestError, match="waitForResponse"):
             app._should_wait_for_response(request, {"waitForResponse": "true", WAIT_FOR_RESPONSE_FIELD: "false"})
 
+        request = self._make_request(params={"waitForResponse": "false"})
+        with pytest.raises(IncomingRequestError, match="waitForResponse"):
+            app._should_wait_for_response(request, {"waitForResponse": "true", WAIT_FOR_RESPONSE_FIELD: "false"})
+
+        request = self._make_request(headers={WAIT_FOR_RESPONSE_HEADER: "true"})
+        with pytest.raises(IncomingRequestError, match="waitForResponse"):
+            app._should_wait_for_response(request, {"waitForResponse": "true", WAIT_FOR_RESPONSE_FIELD: "false"})
+
     def test_invalid_wait_for_response_header_falls_back_to_query(self) -> None:
         """Test that an invalid header does not suppress a valid query option."""
         app = self._create_app()
@@ -950,8 +958,9 @@ class TestHttpRunRoute:
         assert payload["session_id"] == payload["sessionId"]
         assert payload["correlation_id"] == payload["correlationId"]
         assert "thread_id" not in payload
+        assert response.headers.get("Deprecation") is None
 
-    async def test_http_run_round_trips_explicit_session_id(self) -> None:
+    async def test_http_run_round_trips_explicit_session_id(self, caplog: pytest.LogCaptureFixture) -> None:
         """An explicit caller-supplied key flows through the entity, payload, and header unchanged."""
         mock_agent = Mock()
         mock_agent.name = "HttpAgentEcho"
@@ -968,9 +977,14 @@ class TestHttpRunRoute:
 
         client = AsyncMock()
 
-        response = await handler(request, client)
+        with caplog.at_level("WARNING", logger="agent_framework.azurefunctions"):
+            response = await handler(request, client)
 
         assert response.status_code == 202
+        assert response.headers["Deprecation"] == "true"
+        assert "http-api-camelcase-migration.md" in response.headers["Link"]
+        assert "Deprecated agent HTTP field names" in response.headers["Warning"]
+        assert "Deprecated agent HTTP field names were used" in caplog.text
         payload = json.loads(response.get_body().decode("utf-8"))
         assert payload["sessionId"] == "caller-key-1"
         assert payload["session_id"] == "caller-key-1"
@@ -999,6 +1013,7 @@ class TestHttpRunRoute:
         response = await handler(request, client)
 
         assert response.status_code == 400
+        assert response.headers["Deprecation"] == "true"
         assert "Conflicting session identifiers" in response.get_body().decode("utf-8")
         client.signal_entity.assert_not_called()
 

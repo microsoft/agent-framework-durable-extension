@@ -80,7 +80,7 @@ The recommended production hosting model. A single call to `ConfigureDurableAgen
 - Optionally exposes agents as MCP tools.
 
 > [!NOTE]
-> Preview versions of this extension used `session_id`, `wait_for_response`, and `thread_id` on the agent HTTP API. The camelCase names `sessionId` and `waitForResponse` are now preferred, and JSON responses include `sessionId` as the canonical field. The legacy names remain supported during the migration window; if multiple aliases are provided they must carry the same value, otherwise the request is rejected with HTTP 400. See the [agent HTTP API camelCase migration guide](http-api-camelcase-migration.md).
+> Preview versions of this extension used `session_id`, `wait_for_response`, and `thread_id` on the agent HTTP API. The camelCase names `sessionId` and `waitForResponse` are now preferred, and JSON responses include `sessionId` as the canonical field. The legacy names remain supported during the migration window; if multiple aliases are provided they must carry the same value, otherwise the request is rejected with HTTP 400. Responses to legacy requests include deprecation headers that point to the [agent HTTP API camelCase migration guide](http-api-camelcase-migration.md).
 
 **C# example:**
 
