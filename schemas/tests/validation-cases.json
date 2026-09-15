@@ -74,7 +74,7 @@
         "valid": true
       },
       {
-        "description": "Proposed 1.2 control-character correlation remains unchanged",
+        "description": "Version 1.2 control-character correlation remains unchanged",
         "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "$type": "errorResponse", "correlationId": "id\u0000" }] } },
         "valid": true
       },

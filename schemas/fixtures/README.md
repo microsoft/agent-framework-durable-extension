@@ -1,18 +1,18 @@
-# Durable agent state review fixtures
+# Durable agent state contract fixtures
 
-All JSON files here are synthetic, language-neutral review data validated with
+All JSON files here are synthetic, language-neutral contract data validated with
 the parent [Draft 2020-12 schema](../durable-agent-entity-state.json).
 They are not captured production state, generated serializer snapshots, or
 evidence of Python/.NET 2.0 support.
 
 | Fixture | Provenance and purpose |
 | --- | --- |
-| `shared-durable-agent-state-1.2-python-shape.json` | Reproduced from proposal commit `247bbdd60944d5ac93e79079803aa23e992d0369`. Modeled on parallel Python-shaped 1.2 work, with synthetic future fields and content for preservation review. **Not byte-for-byte output from the current Python serializer.** |
-| `shared-durable-agent-state-2.0.json` | Reproduced from the same proposal commit. Synthetic available success and expired failure receipt, detached from transcript responses; includes unknown mailbox/binding fields. |
-| `shared-durable-agent-state-2.0-pruned.json` | Authored for this contract-only proposal. Empty transcript with available failure, unavailable success, opaque session data, truncation evidence, and whole-entity TTL. Not a migration output. |
-| `shared-durable-agent-state-2.0-lossless.json` | Authored for review feedback. Synthetic developer-role request, verbatim string-form function arguments, URI without invented media type, complete opaque JSON content, explicit structured `false` value, and no binding. |
+| `shared-durable-agent-state-1.2-python-shape.json` | Reproduced from source commit `247bbdd60944d5ac93e79079803aa23e992d0369`. Modeled on parallel Python-shaped 1.2 work, with synthetic future fields and content for preservation coverage. **Not byte-for-byte output from the current Python serializer.** |
+| `shared-durable-agent-state-2.0.json` | Reproduced from the same source commit. Synthetic available success and expired failure receipt, detached from transcript responses; includes unknown mailbox/binding fields. |
+| `shared-durable-agent-state-2.0-pruned.json` | Authored for this contract. Empty transcript with available failure, unavailable success, opaque session data, truncation evidence, and whole-entity TTL. Not a migration output. |
+| `shared-durable-agent-state-2.0-lossless.json` | Authored for lossless compatibility coverage. Synthetic developer-role request, verbatim string-form function arguments, URI without invented media type, complete opaque JSON content, explicit structured `false` value, and no binding. |
 
-The source proposal builds on `5de13e8d5dd4b4b76e7360e89ceeb3968a103781`;
+The source contract builds on `5de13e8d5dd4b4b76e7360e89ceeb3968a103781`;
 its runtime DTOs, converters, tests, and test-project fixture links are
 deliberately excluded. The corrected `python-shape` filename identifies
 provenance, not a promise of current serializer behavior. There is no fixture
@@ -35,7 +35,7 @@ For `shared-durable-agent-state-2.0-pruned.json`, interpret the example at
 `2026-09-10T06:00:05Z`: `corr-failed` has an available failure payload and
 `corr-pruned` proves completed success without one. Transcript removal did not
 erase either completion. `expirationTimeUtc` is a separate whole-entity deadline,
-not a proposed resolution of tombstone lifetime after entity deletion.
+and does not define tombstone lifetime after entity deletion.
 
 The lossless fixture intentionally contains incomplete function-argument text.
 The exact string must survive; parsing it, completing the JSON, or replacing it
@@ -64,6 +64,6 @@ schema-version-only migration. The 1.2 and 2.0 examples are independent
 snapshots, not a before/after pair with inferred completion evidence.
 
 Validation must enable Draft 2020-12 and date-time format checking, then check
-the cross-map/time invariants in [the proposal](../README.md). JSON Schema alone
+the cross-map/time invariants in [the contract](../README.md). JSON Schema alone
 cannot enforce key equality, atomicity, historical immutability, expiry relative
 to a clock, or compatibility of a deployed reader.
