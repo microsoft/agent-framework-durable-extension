@@ -129,6 +129,15 @@ internal static class DurableAgentStateRetention
             protectedStateCapacityFailure);
         DurableAgentTelemetry.RecordRetentionAttempt(sessionId.Name, result);
 
+        if (protectedStateCapacityFailure)
+        {
+            logger.LogDurableHistoryStillOverBudget(
+                sessionId,
+                finalSize,
+                maxStateBytes);
+            throw new DurableAgentStateSizeLimitExceededException(finalSize, maxStateBytes);
+        }
+
         if (removedEntries > 0)
         {
             logger.LogDurableHistoryTruncated(
@@ -138,15 +147,6 @@ internal static class DurableAgentStateRetention
                 removedEntries,
                 removedMessages,
                 finalSize);
-        }
-
-        if (protectedStateCapacityFailure)
-        {
-            logger.LogDurableHistoryStillOverBudget(
-                sessionId,
-                finalSize,
-                maxStateBytes);
-            throw new DurableAgentStateSizeLimitExceededException(finalSize, maxStateBytes);
         }
 
         return result.RemovedMessageCount;
