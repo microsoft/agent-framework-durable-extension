@@ -2,7 +2,7 @@
 ### Use with the VS Code REST Client extension or any HTTP client
 ###
 ### Workflow:
-### 1. POST /api/agents/{agentName}/run  -> Start durable agent (returns conversation_id)
+### 1. POST /api/agents/{agentName}/run  -> Start durable agent (returns sessionId)
 ### 2. GET  /api/agent/stream/{id}       -> Read chunks from Redis (SSE or plain text)
 ### 3. Add ?cursor={id} to resume from a specific point
 ###
@@ -32,16 +32,16 @@ Plan a 3-day trip to Tokyo
 
 ### Stream from Redis (SSE format)
 # Reads persisted chunks from Redis using cursor-based pagination.
-# The conversation_id is automatically captured from the previous request.
-@conversationId = {{trip.response.body.$.conversation_id}}
-GET {{baseUrl}}/api/agent/stream/{{conversationId}}
+# The sessionId is automatically captured from the previous request.
+@sessionId = {{trip.response.body.$.sessionId}}
+GET {{baseUrl}}/api/agent/stream/{{sessionId}}
 Accept: text/event-stream
 
 ###
 
 ### Stream from Redis (plain text)
 # Same as above, but returns plain text instead of SSE format
-GET {{baseUrl}}/api/agent/stream/{{conversationId}}
+GET {{baseUrl}}/api/agent/stream/{{sessionId}}
 Accept: text/plain
 
 ###
@@ -49,7 +49,7 @@ Accept: text/plain
 ### Resume from cursor
 # Use a cursor ID from an SSE event to skip already-processed messages
 # Replace {cursor_id} with an actual entry ID from the SSE stream
-GET {{baseUrl}}/api/agent/stream/{{conversationId}}?cursor={cursor_id}
+GET {{baseUrl}}/api/agent/stream/{{sessionId}}?cursor={cursor_id}
 Accept: text/event-stream
 
 ###
