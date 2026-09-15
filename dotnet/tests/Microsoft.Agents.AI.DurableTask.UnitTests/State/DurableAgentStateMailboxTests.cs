@@ -76,6 +76,63 @@ public sealed class DurableAgentStateMailboxTests
     }
 
     [Theory]
+    [InlineData("1.0.0")]
+    [InlineData("1.1.0")]
+    [InlineData("1.2.0")]
+    [InlineData("2.0.0")]
+    public void ProductionWriterEnforcesVersionedRequestAndResponseShapes(string schemaVersion)
+    {
+        string[] messageShapes =
+        [
+            """{"role":"developer","contents":[]}""",
+            """{"role":"assistant","contents":[{"$type":"functionCall","callId":"c","name":"f","arguments":"verbatim"}]}""",
+            """{"role":"assistant","contents":[{"$type":"uri","uri":"https://example.test/media"}]}""",
+        ];
+        foreach (string messageJson in messageShapes)
+        {
+            DurableAgentStateMessage message = JsonSerializer.Deserialize(
+                messageJson, DurableAgentStateJsonContext.Default.DurableAgentStateMessage)!;
+            foreach (bool response in new[] { false, true })
+            {
+                bool revised = schemaVersion == DurableAgentState.RevisedSchemaVersion;
+                DurableAgentState state = new()
+                {
+                    SchemaVersion = schemaVersion,
+                    MailboxWritesAuthorized = revised,
+                    Data = new()
+                    {
+                        ConversationHistory =
+                        [
+                            response
+                                ? new DurableAgentStateResponse { Messages = [message] }
+                                : new DurableAgentStateRequest { Messages = [message] },
+                        ],
+                        TerminalResults = revised ? new Dictionary<string, DurableAgentStateTerminalResult>() : null,
+                        CompletionReceipts = revised ? new Dictionary<string, DurableAgentStateCompletionReceipt>() : null,
+                    },
+                };
+
+                if (revised)
+                {
+                    string json = JsonSerializer.Serialize(state, DurableAgentStateJsonContext.Default.DurableAgentState);
+                    DurableAgentState restored = JsonSerializer.Deserialize(json, DurableAgentStateJsonContext.Default.DurableAgentState)!;
+                    JsonElement roundTrip = JsonSerializer.SerializeToElement(
+                        Assert.Single(Assert.Single(restored.Data.ConversationHistory).Messages),
+                        DurableAgentStateJsonContext.Default.DurableAgentStateMessage);
+                    using JsonDocument expected = JsonDocument.Parse(messageJson);
+                    Assert.True(JsonElement.DeepEquals(expected.RootElement, roundTrip));
+                }
+                else
+                {
+                    Assert.Throws<InvalidOperationException>(() =>
+                        JsonSerializer.Serialize(state, DurableAgentStateJsonContext.Default.DurableAgentState));
+                    Assert.Null(state.Data.CompletionReceipts);
+                }
+            }
+        }
+    }
+
+    [Theory]
     [InlineData("null")]
     [InlineData("[null]")]
     public void LegacySnapshotsRejectMalformedConversationHistory(string historyJson)
@@ -137,7 +194,7 @@ public sealed class DurableAgentStateMailboxTests
     }
 
     [Fact]
-    public void ProductionConverterRejectsRevisedStateUntilMailboxActivation()
+    public void ProductionReaderSupportsRevisedStateButPassiveDtosDoNotActivateNewWrites()
     {
         const string Json = """
             {
@@ -151,10 +208,12 @@ public sealed class DurableAgentStateMailboxTests
             """;
         DurableAgentState state = Deserialize(Json);
 
-        Assert.Throws<InvalidOperationException>(
-            () => JsonSerializer.Deserialize(
-                Json,
-                DurableAgentStateJsonContext.Default.DurableAgentState));
+        DurableAgentState hydrated = Assert.IsType<DurableAgentState>(
+            JsonSerializer.Deserialize(Json, DurableAgentStateJsonContext.Default.DurableAgentState));
+        Assert.Equal(DurableAgentState.RevisedSchemaVersion, hydrated.SchemaVersion);
+        Assert.Contains("\"schemaVersion\":\"2.0.0\"",
+            JsonSerializer.Serialize(hydrated, DurableAgentStateJsonContext.Default.DurableAgentState),
+            StringComparison.Ordinal);
         Assert.Throws<InvalidOperationException>(
             () => JsonSerializer.Serialize(
                 state,
@@ -1057,7 +1116,7 @@ public sealed class DurableAgentStateMailboxTests
             {
                 Truncation = new()
                 {
-                    EvictedMessageCount = 1,
+                    EvictedMessageCount = JsonSerializer.SerializeToElement(1),
                     FirstEvictedAt = DateTimeOffset.Parse("2026-09-11T11:00:00+00:00"),
                     LastEvictedAt = DateTimeOffset.Parse("2026-09-11T10:00:00+00:00"),
                 },
@@ -1367,11 +1426,11 @@ public sealed class DurableAgentStateMailboxTests
         Assert.Equal(DurableAgentStateCompletionReceipt.SucceededOutcome, receipt.Outcome);
         Assert.Equal(DurableAgentStateCompletionReceipt.UnavailableResult, receipt.ResultState);
         Assert.False(state.Data.TerminalResults?.ContainsKey("corr-pruned"));
-        Assert.Equal(3, state.Data.IngestedPositions?["example-producer"]);
+        Assert.Equal(3, state.Data.IngestedPositions?["example-producer"].GetInt32());
         Assert.Equal(
             "opaque-user-data",
             state.Data.Session?.GetProperty("exampleContinuation").GetProperty("$runtimeType").GetString());
-        Assert.Equal(4, state.Data.Truncation?.EvictedMessageCount);
+        Assert.Equal(4, state.Data.Truncation?.EvictedMessageCount.GetInt32());
     }
 
     [Theory]

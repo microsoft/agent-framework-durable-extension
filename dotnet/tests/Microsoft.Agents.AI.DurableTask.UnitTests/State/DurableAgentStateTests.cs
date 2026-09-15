@@ -426,7 +426,7 @@ public sealed class DurableAgentStateTests
             DurableAgentStateJsonContext.Default.DurableAgentState);
 
         Assert.Equal(DurableAgentState.CurrentSchemaVersion, promoted.SchemaVersion);
-        Assert.Equal(2, promoted.Data.IngestedPositions?["writer"]);
+        Assert.Equal(2, promoted.Data.IngestedPositions?["writer"].GetInt32());
         Assert.Contains("\"schemaVersion\":\"1.2.0\"", roundTrip, StringComparison.Ordinal);
     }
 
@@ -452,6 +452,40 @@ public sealed class DurableAgentStateTests
 
         Assert.Equal(Version, clone.SchemaVersion);
         Assert.Contains($"\"schemaVersion\":\"{Version}\"", roundTrip, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ContractIntegersBeyondInt64RoundTripLosslessly()
+    {
+        const string Json = """
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [],
+                "ingestedPositions": { "writer": 9223372036854775808 },
+                "truncation": {
+                  "evictedMessageCount": 1e20,
+                  "firstEvictedAt": "2026-09-14T00:00:00Z",
+                  "lastEvictedAt": "2026-09-14T00:00:00Z"
+                }
+              }
+            }
+            """;
+
+        DurableAgentState state = Assert.IsType<DurableAgentState>(
+            JsonSerializer.Deserialize(Json, DurableAgentStateJsonContext.Default.DurableAgentState));
+        string roundTrip = JsonSerializer.Serialize(
+            state,
+            DurableAgentStateJsonContext.Default.DurableAgentState);
+        using JsonDocument document = JsonDocument.Parse(roundTrip);
+        JsonElement data = document.RootElement.GetProperty("data");
+
+        Assert.Equal(
+            "9223372036854775808",
+            data.GetProperty("ingestedPositions").GetProperty("writer").GetRawText());
+        Assert.Equal(
+            "1e20",
+            data.GetProperty("truncation").GetProperty("evictedMessageCount").GetRawText());
     }
 
     [Fact]
@@ -485,7 +519,10 @@ public sealed class DurableAgentStateTests
             JsonSerializer.Deserialize(JsonText, DurableAgentStateJsonContext.Default.DurableAgentState));
 
         DurableAgentState mutated = state.Clone();
-        mutated.Data.IngestedPositions = new Dictionary<string, int> { ["writer"] = 7 };
+        mutated.Data.IngestedPositions = new Dictionary<string, JsonElement>
+        {
+            ["writer"] = JsonSerializer.SerializeToElement(7),
+        };
         string roundTrip = JsonSerializer.Serialize(
             mutated,
             DurableAgentStateJsonContext.Default.DurableAgentState);
@@ -570,7 +607,7 @@ public sealed class DurableAgentStateTests
         Assert.Contains("\"futureArray\":[9]", roundTrip, StringComparison.Ordinal);
         Assert.Contains("\"type\":\"future_python_content\"", roundTrip, StringComparison.Ordinal);
         Assert.Contains("\"payload\":\"python-value\"", roundTrip, StringComparison.Ordinal);
-        Assert.Equal(3, migrated.Data.IngestedPositions?["writer"]);
+        Assert.Equal(3, migrated.Data.IngestedPositions?["writer"].GetInt32());
         Assert.Equal("interop-fixture", migrated.ExtensionData?["rootProducer"].GetString());
         Assert.True(migrated.UnknownProperties?["futureRootProperty"].GetProperty("preserve").GetBoolean());
         Assert.Equal("python", migrated.Data.ExtensionData?["dataProducer"].GetString());

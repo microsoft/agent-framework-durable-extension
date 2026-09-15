@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -29,10 +30,64 @@ namespace Microsoft.Agents.AI.DurableTask;
 /// </remarks>
 internal static partial class DurableAgentJsonUtilities
 {
+    private static readonly ConditionalWeakTable<AgentResponse, RetainedResult> s_retainedResults = new();
+
     /// <summary>
     /// Gets the singleton <see cref="JsonSerializerOptions"/> used for Durable Agent serialization.
     /// </summary>
     public static JsonSerializerOptions DefaultOptions { get; } = CreateDefaultOptions();
+
+    /// <summary>
+    /// Gets the canonical retained terminal-response JSON associated with a durable delivery response.
+    /// </summary>
+    /// <remarks>
+    /// The snapshot preserves absent versus explicit-null <c>value</c>, opaque content, and unknown
+    /// metadata independently of the native <see cref="AgentResponse"/> projection. It is not inferred
+    /// from text, stored in producer-defined additional properties, or serialized as part of the native
+    /// response. The durable data converter explicitly transports and restores this association.
+    /// </remarks>
+    /// <param name="response">The response returned by durable polling or its proxy.</param>
+    /// <returns>The immutable retained JSON, or null for a response not produced by durable delivery.</returns>
+    internal static JsonElement? GetRetainedResult(AgentResponse response)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        return s_retainedResults.TryGetValue(response, out RetainedResult? retained) ? retained.Value : null;
+    }
+
+    internal static void CaptureRetainedResult(
+        AgentResponse response,
+        DurableAgentStateTerminalResponse terminalResponse)
+    {
+        JsonElement snapshot = JsonSerializer.SerializeToElement(
+            terminalResponse, DurableAgentStateJsonContext.Default.DurableAgentStateTerminalResponse);
+        CaptureRetainedResult(response, snapshot);
+    }
+
+    internal static void CaptureRetainedResult(AgentResponse response, JsonElement snapshot) =>
+        s_retainedResults.Add(response, new RetainedResult(snapshot.Clone()));
+
+    internal static void CaptureRetainedLegacyResult(AgentResponse response, DurableAgentStateResponse source) =>
+        CaptureRetainedResult(response, new DurableAgentStateTerminalResponse
+        {
+            Messages = source.Messages,
+            Usage = source.Usage,
+            CreatedAt = source.CreatedAt,
+            AdditionalProperties = source.ExtensionData,
+            UnknownProperties = source.UnknownProperties,
+        });
+
+    internal static void CopyRetainedResult(AgentResponse source, AgentResponse target)
+    {
+        if (GetRetainedResult(source) is JsonElement result)
+        {
+            CaptureRetainedResult(target, result);
+        }
+    }
+
+    private sealed class RetainedResult(JsonElement value)
+    {
+        public JsonElement Value { get; } = value;
+    }
 
     /// <summary>
     /// Serializes a sequence of chat messages using the durable agent default options.
@@ -89,6 +144,9 @@ internal static partial class DurableAgentJsonUtilities
 
     // Request Types
     [JsonSerializable(typeof(RunRequest))]
+    [JsonSerializable(typeof(AgentEntityDeletionCheck))]
+    [JsonSerializable(typeof(AgentEntityResultExpirationCheck))]
+    [JsonSerializable(typeof(DurableAgentFailureData))]
 
     // Primitive / Supporting Types
     [JsonSerializable(typeof(ChatMessage))]

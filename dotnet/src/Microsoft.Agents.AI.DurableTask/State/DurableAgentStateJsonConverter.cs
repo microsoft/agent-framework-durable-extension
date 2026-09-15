@@ -27,7 +27,15 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
             ref reader,
             DurableAgentStateJsonContext.Default.JsonElement);
 
-        return ReadElement(element, allowRevisedSchema: false);
+        DurableAgentState? state = ReadElement(element, allowRevisedSchema: true);
+        if (state?.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
+        {
+            // This worker understands receipts. Preserve already revised state without a downgrade,
+            // including when a read-only duplicate operation republishes the hydrated state.
+            state.MailboxWritesAuthorized = true;
+        }
+
+        return state;
     }
 
     internal static DurableAgentState DeserializeRevisedContract(string json)
@@ -129,7 +137,7 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
     /// <inheritdoc/>
     public override void Write(Utf8JsonWriter writer, DurableAgentState value, JsonSerializerOptions options)
     {
-        WriteValue(writer, value, allowRevisedSchema: false);
+        WriteValue(writer, value, allowRevisedSchema: value.MailboxWritesAuthorized);
     }
 
     private static void WriteValue(
@@ -146,14 +154,21 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
 
         value.Data.Validate(value.SchemaVersion);
 
+        JsonElement data = JsonSerializer.SerializeToElement(
+            value.Data, DurableAgentStateJsonContext.Default.DurableAgentStateData);
+        if (value.SchemaVersion != DurableAgentState.RevisedSchemaVersion)
+        {
+            // Apply the historical reader's shape checks before publishing any legacy JSON.
+            // DTOs and extension properties must not bypass the legacy message adapters.
+            RejectLegacyRevisedFields(data);
+            ValidateLegacyTranscript(data);
+        }
+
         writer.WriteStartObject();
         writer.WritePropertyName(SchemaVersionPropertyName);
         writer.WriteStringValue(value.SchemaVersion);
         writer.WritePropertyName(DataPropertyName);
-        JsonSerializer.Serialize(
-            writer,
-            value.Data,
-            DurableAgentStateJsonContext.Default.DurableAgentStateData);
+        data.WriteTo(writer);
         if (value.ExtensionData is not null)
         {
             writer.WritePropertyName(ExtensionDataPropertyName);
@@ -384,12 +399,10 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
 
             foreach (JsonProperty position in ingestedPositions.EnumerateObject())
             {
-                if (position.Value.ValueKind != JsonValueKind.Number ||
-                    !position.Value.TryGetInt32(out int value) ||
-                    value < 0)
+                if (!DurableAgentStateUsage.IsNonNegativeJsonInteger(position.Value))
                 {
                     throw new InvalidOperationException(
-                        $"The durable agent ingestion position '{position.Name}' must be a non-negative Int32 value.");
+                        $"The durable agent ingestion position '{position.Name}' must be a non-negative integer.");
                 }
             }
         }
@@ -403,6 +416,13 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
             {
                 throw new InvalidOperationException(
                     "Durable agent truncation evidence requires evictedMessageCount, firstEvictedAt, and lastEvictedAt.");
+            }
+
+            if (!DurableAgentStateUsage.IsPositiveJsonInteger(
+                    truncation.GetProperty("evictedMessageCount")))
+            {
+                throw new InvalidOperationException(
+                    "Durable agent truncation evictedMessageCount must be a positive integer.");
             }
         }
     }
