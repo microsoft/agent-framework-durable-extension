@@ -485,7 +485,7 @@ public sealed class DurableAgentStateTests
             JsonSerializer.Deserialize(JsonText, DurableAgentStateJsonContext.Default.DurableAgentState));
 
         DurableAgentState mutated = state.Clone();
-        mutated.Data.IngestedPositions = new Dictionary<string, int> { ["writer"] = 7 };
+        mutated.Data.IngestedPositions = new Dictionary<string, long> { ["writer"] = 7 };
         string roundTrip = JsonSerializer.Serialize(
             mutated,
             DurableAgentStateJsonContext.Default.DurableAgentState);

@@ -117,7 +117,7 @@ internal sealed class DurableAgentStateData
     /// </remarks>
     [JsonPropertyName("ingestedPositions")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IDictionary<string, int>? IngestedPositions { get; set; }
+    public IDictionary<string, long>? IngestedPositions { get; set; }
 
     /// <summary>
     /// Gets or sets bounded evidence that transcript messages were removed from durable state.
