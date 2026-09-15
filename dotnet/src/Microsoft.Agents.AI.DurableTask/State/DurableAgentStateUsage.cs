@@ -1,8 +1,6 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 using System.Diagnostics.CodeAnalysis;
-using System.Globalization;
-using System.Numerics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
@@ -19,33 +17,21 @@ internal sealed class DurableAgentStateUsage
     /// </summary>
     [JsonPropertyName("inputTokenCount")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public JsonElement InputTokenCount
-    {
-        get;
-        init => field = ValidateCount(value, "inputTokenCount");
-    }
+    public long? InputTokenCount { get; init; }
 
     /// <summary>
     /// Gets the number of output tokens used.
     /// </summary>
     [JsonPropertyName("outputTokenCount")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public JsonElement OutputTokenCount
-    {
-        get;
-        init => field = ValidateCount(value, "outputTokenCount");
-    }
+    public long? OutputTokenCount { get; init; }
 
     /// <summary>
     /// Gets the total number of tokens used.
     /// </summary>
     [JsonPropertyName("totalTokenCount")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public JsonElement TotalTokenCount
-    {
-        get;
-        init => field = ValidateCount(value, "totalTokenCount");
-    }
+    public long? TotalTokenCount { get; init; }
 
     /// <summary>
     /// Gets provider-specific usage counts from the schema's <c>extensionData</c> property.
@@ -70,9 +56,9 @@ internal sealed class DurableAgentStateUsage
         usage is not null
             ? new()
             {
-                InputTokenCount = ToJsonElement(usage.InputTokenCount),
-                OutputTokenCount = ToJsonElement(usage.OutputTokenCount),
-                TotalTokenCount = ToJsonElement(usage.TotalTokenCount),
+                InputTokenCount = usage.InputTokenCount,
+                OutputTokenCount = usage.OutputTokenCount,
+                TotalTokenCount = usage.TotalTokenCount,
                 ExtensionData = usage.AdditionalCounts?.ToDictionary(
                     pair => pair.Key,
                     pair => JsonSerializer.SerializeToElement(
@@ -97,7 +83,7 @@ internal sealed class DurableAgentStateUsage
 
             foreach ((string name, JsonElement value) in values)
             {
-                if (TryGetInt64(value, out long count))
+                if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out long count))
                 {
                     additionalCounts ??= [];
                     additionalCounts[name] = count;
@@ -107,80 +93,10 @@ internal sealed class DurableAgentStateUsage
 
         return new()
         {
-            InputTokenCount = ToInt64(this.InputTokenCount),
-            OutputTokenCount = ToInt64(this.OutputTokenCount),
-            TotalTokenCount = ToInt64(this.TotalTokenCount),
+            InputTokenCount = this.InputTokenCount,
+            OutputTokenCount = this.OutputTokenCount,
+            TotalTokenCount = this.TotalTokenCount,
             AdditionalCounts = additionalCounts,
         };
-    }
-
-    private static JsonElement ToJsonElement(long? value) => value.HasValue
-        ? JsonSerializer.SerializeToElement(value.Value, DurableAgentStateJsonContext.Default.Int64)
-        : default;
-
-    private static long? ToInt64(JsonElement value) => TryGetInt64(value, out long count) ? count : null;
-
-    private static bool TryGetInt64(JsonElement value, out long count)
-    {
-        count = default;
-        return value.ValueKind == JsonValueKind.Number &&
-            decimal.TryParse(
-                value.GetRawText(),
-                NumberStyles.Float,
-                CultureInfo.InvariantCulture,
-                out decimal decimalCount) &&
-            decimalCount == decimal.Truncate(decimalCount) &&
-            decimalCount >= long.MinValue &&
-            decimalCount <= long.MaxValue &&
-            (count = decimal.ToInt64(decimalCount)) == decimalCount;
-    }
-
-    private static JsonElement ValidateCount(JsonElement value, string propertyName)
-    {
-        if (value.ValueKind != JsonValueKind.Undefined &&
-            (value.ValueKind != JsonValueKind.Number || !IsJsonInteger(value.GetRawText())))
-        {
-            throw new JsonException($"The durable agent usage '{propertyName}' property must be an integer.");
-        }
-
-        return value;
-    }
-
-    internal static bool IsJsonInteger(string value)
-    {
-        int exponentIndex = value.IndexOfAny('e', 'E');
-        ReadOnlySpan<char> significand = exponentIndex >= 0 ? value.AsSpan(0, exponentIndex) : value;
-        ReadOnlySpan<char> exponentText = exponentIndex >= 0 ? value.AsSpan(exponentIndex + 1) : default;
-        int decimalIndex = significand.IndexOf('.');
-        int fractionalDigitCount = decimalIndex >= 0 ? significand.Length - decimalIndex - 1 : 0;
-        int trailingZeroCount = 0;
-        bool hasNonZeroDigit = false;
-        for (int index = significand.Length - 1; index >= 0; index--)
-        {
-            char character = significand[index];
-            if (character is '.' or '-')
-            {
-                continue;
-            }
-
-            if (character == '0' && !hasNonZeroDigit)
-            {
-                trailingZeroCount++;
-            }
-            else
-            {
-                hasNonZeroDigit = true;
-            }
-        }
-
-        if (!hasNonZeroDigit)
-        {
-            return true;
-        }
-
-        BigInteger exponent = exponentText.IsEmpty
-            ? BigInteger.Zero
-            : BigInteger.Parse(exponentText, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
-        return exponent >= fractionalDigitCount - trailingZeroCount;
     }
 }

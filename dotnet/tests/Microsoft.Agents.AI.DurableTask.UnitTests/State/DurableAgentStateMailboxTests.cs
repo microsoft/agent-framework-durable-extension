@@ -1075,6 +1075,92 @@ public sealed class DurableAgentStateMailboxTests
     }
 
     [Fact]
+    public void IngestionPositionsAcceptInt64Maximum()
+    {
+        const string Json = """
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [],
+                "ingestedPositions": {
+                  "producer": 9223372036854775807
+                }
+              }
+            }
+            """;
+
+        DurableAgentState state = Deserialize(Json);
+
+        Assert.Equal(long.MaxValue, state.Data.IngestedPositions?["producer"]);
+    }
+
+    [Theory]
+    [InlineData("1.0")]
+    [InlineData("1e3")]
+    [InlineData("9223372036854775808")]
+    public void IngestionPositionsRejectNonCanonicalOrOverflowValues(string value)
+    {
+        string json = $$"""
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [],
+                "ingestedPositions": {
+                  "producer": {{value}}
+                }
+              }
+            }
+            """;
+
+        Assert.Throws<InvalidOperationException>(() => Deserialize(json));
+    }
+
+    [Fact]
+    public void TruncationAcceptsInt64Maximum()
+    {
+        const string Json = """
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [],
+                "truncation": {
+                  "evictedMessageCount": 9223372036854775807,
+                  "firstEvictedAt": "2026-09-11T10:00:00Z",
+                  "lastEvictedAt": "2026-09-11T11:00:00Z"
+                }
+              }
+            }
+            """;
+
+        DurableAgentState state = Deserialize(Json);
+
+        Assert.Equal(long.MaxValue, state.Data.Truncation?.EvictedMessageCount);
+    }
+
+    [Theory]
+    [InlineData("1.0")]
+    [InlineData("1e3")]
+    [InlineData("9223372036854775808")]
+    public void TruncationRejectsNonCanonicalOrOverflowCount(string value)
+    {
+        string json = $$"""
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [],
+                "truncation": {
+                  "evictedMessageCount": {{value}},
+                  "firstEvictedAt": "2026-09-11T10:00:00Z",
+                  "lastEvictedAt": "2026-09-11T11:00:00Z"
+                }
+              }
+            }
+            """;
+
+        Assert.Throws<InvalidOperationException>(() => Deserialize(json));
+    }
+
+    [Fact]
     public void TruncationRequiresCompleteValidEvidence()
     {
         const string MissingFields = """

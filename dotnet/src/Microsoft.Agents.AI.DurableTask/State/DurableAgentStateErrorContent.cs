@@ -63,7 +63,7 @@ internal sealed class DurableAgentStateErrorContent : DurableAgentStateContent
         {
             Details = this.Details.ValueKind switch
             {
-                JsonValueKind.Undefined => null,
+                JsonValueKind.Undefined or JsonValueKind.Null => null,
                 JsonValueKind.String => this.Details.GetString(),
                 _ => this.Details.GetRawText(),
             },

@@ -390,11 +390,11 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
             foreach (JsonProperty position in ingestedPositions.EnumerateObject())
             {
                 if (position.Value.ValueKind != JsonValueKind.Number ||
-                    !position.Value.TryGetInt32(out int value) ||
+                    !position.Value.TryGetInt64(out long value) ||
                     value < 0)
                 {
                     throw new InvalidOperationException(
-                        $"The durable agent ingestion position '{position.Name}' must be a non-negative Int32 value.");
+                        $"The durable agent ingestion position '{position.Name}' must be a non-negative Int64 integer token.");
                 }
             }
         }
@@ -402,12 +402,20 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         if (dataElement.TryGetProperty("truncation", out JsonElement truncation))
         {
             if (truncation.ValueKind != JsonValueKind.Object ||
-                !truncation.TryGetProperty("evictedMessageCount", out _) ||
+                !truncation.TryGetProperty("evictedMessageCount", out JsonElement evictedMessageCount) ||
                 !truncation.TryGetProperty("firstEvictedAt", out _) ||
                 !truncation.TryGetProperty("lastEvictedAt", out _))
             {
                 throw new InvalidOperationException(
                     "Durable agent truncation evidence requires evictedMessageCount, firstEvictedAt, and lastEvictedAt.");
+            }
+
+            if (evictedMessageCount.ValueKind != JsonValueKind.Number ||
+                !evictedMessageCount.TryGetInt64(out long value) ||
+                value < 1)
+            {
+                throw new InvalidOperationException(
+                    "The durable agent truncation evictedMessageCount must be a positive Int64 integer token.");
             }
         }
     }
@@ -657,10 +665,10 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         foreach (string countName in new[] { "inputTokenCount", "outputTokenCount", "totalTokenCount" })
         {
             if (usage.TryGetProperty(countName, out JsonElement count) &&
-                (count.ValueKind != JsonValueKind.Number || !DurableAgentStateUsage.IsJsonInteger(count.GetRawText())))
+                (count.ValueKind != JsonValueKind.Number || !count.TryGetInt64(out _)))
             {
                 throw new JsonException(
-                    $"The durable agent state '{path}.{countName}' property must be an integer.");
+                    $"The durable agent state '{path}.{countName}' property must be an Int64 integer token.");
             }
         }
 

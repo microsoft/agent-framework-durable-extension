@@ -69,6 +69,24 @@ public sealed class DurableAgentStateContentTests
     }
 
     [Fact]
+    public void ErrorContentMapsExplicitNullDetailsToNull()
+    {
+        const string Json = """
+            {
+              "$type": "error",
+              "message": "failed",
+              "details": null
+            }
+            """;
+        DurableAgentStateContent stored = Assert.IsType<DurableAgentStateErrorContent>(
+            JsonSerializer.Deserialize(Json, s_stateContentTypeInfo));
+
+        ErrorContent restored = Assert.IsType<ErrorContent>(stored.ToAIContent());
+
+        Assert.Null(restored.Details);
+    }
+
+    [Fact]
     public void TextContentSerializationDeserialization()
     {
         // Arrange
@@ -412,14 +430,9 @@ public sealed class DurableAgentStateContentTests
     }
 
     [Theory]
-    [InlineData("9223372036854775808", null)]
-    [InlineData("1.0", 1L)]
-    [InlineData("1e3", 1000L)]
-    [InlineData("10e-1", 1L)]
-    [InlineData("1e999999999999999999999999", null)]
-    public void UsageKnownCountsPreserveSchemaIntegersAndProjectWhenRepresentable(
-        string countJson,
-        long? expectedRuntimeCount)
+    [InlineData("-9223372036854775808", long.MinValue)]
+    [InlineData("9223372036854775807", long.MaxValue)]
+    public void UsageKnownCountsAcceptCanonicalInt64Tokens(string countJson, long expectedCount)
     {
         string json = $$"""{"inputTokenCount":{{countJson}}}""";
         JsonTypeInfo usageTypeInfo =
@@ -431,14 +444,17 @@ public sealed class DurableAgentStateContentTests
 
         Assert.Equal(countJson, JsonDocument.Parse(roundTrip).RootElement
             .GetProperty("inputTokenCount").GetRawText());
-        Assert.Equal(expectedRuntimeCount, stored.ToUsageDetails().InputTokenCount);
+        Assert.Equal(expectedCount, stored.ToUsageDetails().InputTokenCount);
     }
 
     [Theory]
     [InlineData("\"ten\"")]
     [InlineData("{}")]
     [InlineData("1.5")]
-    [InlineData("1.0e-1")]
+    [InlineData("1.0")]
+    [InlineData("1e3")]
+    [InlineData("9223372036854775808")]
+    [InlineData("-9223372036854775809")]
     public void UsageDeserializationRejectsMalformedKnownNumericFields(string invalidValue)
     {
         string json = $$"""
