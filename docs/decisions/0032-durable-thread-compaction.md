@@ -1,8 +1,8 @@
 ---
-status: proposed
+status: accepted
 contact: ahmedmuhsin
-date: 2026-07-27
-deciders:
+date: 2026-09-15
+deciders: ahmedmuhsin
 consulted:
 informed:
 ---
