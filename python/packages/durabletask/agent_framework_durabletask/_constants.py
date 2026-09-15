@@ -21,11 +21,11 @@ MIMETYPE_TEXT_PLAIN: str = "text/plain"
 
 # Field and header names.
 #
-# SESSION_ID_FIELD / WAIT_FOR_RESPONSE_FIELD are the snake_case names the agent HTTP API
-# originally shipped with. The canonical agent HTTP names are now camelCase ("sessionId",
-# "waitForResponse"); these remain accepted on requests and are still emitted on responses
-# alongside the camelCase names for backward compatibility. See
-# docs/features/durable-agents/http-api-camelcase-migration.md.
+# These are the snake_case names the agent HTTP API originally shipped with. The canonical
+# agent HTTP names are now camelCase ("sessionId", "waitForResponse"), and both spellings stay
+# accepted on incoming requests. Only the session identifier is echoed back: responses carry it
+# as both "sessionId" and SESSION_ID_FIELD. WAIT_FOR_RESPONSE_FIELD is request-only and is never
+# part of a response. See docs/features/durable-agents/http-api-camelcase-migration.md.
 SESSION_ID_FIELD: str = "session_id"
 SESSION_ID_HEADER: str = "x-ms-session-id"
 WAIT_FOR_RESPONSE_FIELD: str = "wait_for_response"
