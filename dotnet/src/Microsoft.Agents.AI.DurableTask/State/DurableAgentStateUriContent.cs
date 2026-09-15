@@ -38,6 +38,17 @@ internal sealed class DurableAgentStateUriContent : DurableAgentStateContent
     }
 
     /// <inheritdoc/>
+    internal override void Validate(DurableAgentStateSchemaVersion version)
+    {
+        if (version.Major < DurableAgentState.RevisedSchemaMajorVersion &&
+            this.MediaType is null)
+        {
+            throw new InvalidOperationException(
+                "Legacy durable agent URI content requires a media type.");
+        }
+    }
+
+    /// <inheritdoc/>
     public override AIContent ToAIContent()
     {
         if (this.MediaType is null)

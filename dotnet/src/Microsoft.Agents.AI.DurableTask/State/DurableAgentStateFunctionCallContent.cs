@@ -108,6 +108,13 @@ internal sealed class DurableAgentStateFunctionCallContent : DurableAgentStateCo
     {
         if (version.Major < DurableAgentState.RevisedSchemaMajorVersion)
         {
+            if (this.Arguments.ValueKind is not JsonValueKind.Undefined and
+                not JsonValueKind.Object)
+            {
+                throw new InvalidOperationException(
+                    "Legacy durable agent function-call arguments must be an object or absent.");
+            }
+
             return;
         }
 

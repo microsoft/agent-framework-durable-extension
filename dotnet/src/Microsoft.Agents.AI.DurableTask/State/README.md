@@ -48,6 +48,10 @@ ignored by the runtime projection. Malformed known count fields fail deserializa
 This layer defines and round-trips the schema contracts only. Agent entity integration for session ownership,
 replay filtering, compaction, retention, and provider behavior is deferred to later stack layers.
 
+Version-aware validation is symmetric: the 1.x message restrictions (no `developer` role, object-only function-call
+`arguments`, and a required URI `mediaType`) are enforced when legacy state is written, not only when it is read, so
+a programmatically constructed 1.x state cannot be persisted in a form this reader later rejects.
+
 ## Revised execution-state foundation
 
 > [!IMPORTANT]

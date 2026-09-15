@@ -59,24 +59,22 @@ internal abstract class DurableAgentStateEntry
 
     internal void Validate(DurableAgentStateSchemaVersion version)
     {
-        if (version.Major < DurableAgentState.RevisedSchemaMajorVersion)
+        if (version.Major >= DurableAgentState.RevisedSchemaMajorVersion)
         {
-            return;
-        }
-
-        if (this is DurableAgentStateCompaction)
-        {
-            if (this.CorrelationId is not null)
+            if (this is DurableAgentStateCompaction)
             {
-                throw new InvalidOperationException(
-                    "A durable agent compaction entry cannot have a correlation ID.");
+                if (this.CorrelationId is not null)
+                {
+                    throw new InvalidOperationException(
+                        "A durable agent compaction entry cannot have a correlation ID.");
+                }
             }
-        }
-        else if (this.CorrelationId is not null)
-        {
-            DurableAgentStateContract.ValidateIdentifier(
-                this.CorrelationId,
-                "conversationHistory.correlationId");
+            else if (this.CorrelationId is not null)
+            {
+                DurableAgentStateContract.ValidateIdentifier(
+                    this.CorrelationId,
+                    "conversationHistory.correlationId");
+            }
         }
 
         foreach (DurableAgentStateMessage? message in this.Messages)
@@ -84,7 +82,7 @@ internal abstract class DurableAgentStateEntry
             if (message is null)
             {
                 throw new InvalidOperationException(
-                    "A revised durable agent state cannot contain null messages.");
+                    "A durable agent state cannot contain null messages.");
             }
 
             message.Validate(version);
