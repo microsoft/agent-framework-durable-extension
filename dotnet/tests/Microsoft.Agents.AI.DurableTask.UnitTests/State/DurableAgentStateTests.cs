@@ -631,7 +631,7 @@ public sealed class DurableAgentStateTests
     }
 
     [Fact]
-    public void LegacyWriteRejectsV2OnlyMessageShapes()
+    public void LegacyWriteRejectsDeveloperRole()
     {
         DurableAgentState developerRoleState = new();
         developerRoleState.Data.ConversationHistory.Add(
@@ -648,7 +648,11 @@ public sealed class DurableAgentStateTests
             () => JsonSerializer.Serialize(
                 developerRoleState,
                 DurableAgentStateJsonContext.Default.DurableAgentState));
+    }
 
+    [Fact]
+    public void LegacyWriteRejectsNonObjectFunctionCallArguments()
+    {
         DurableAgentState verbatimArgumentsState = new();
         verbatimArgumentsState.Data.ConversationHistory.Add(
             new DurableAgentStateRequest
