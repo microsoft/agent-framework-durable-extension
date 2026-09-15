@@ -137,6 +137,41 @@ public sealed class DurableAgentStateMailboxTests
     }
 
     [Fact]
+    public void LegacySerializationRejectsProgrammaticV2OnlyTranscriptContent()
+    {
+        DurableAgentState state = new()
+        {
+            Data = new()
+            {
+                ConversationHistory =
+            [
+              new DurableAgentStateRequest
+              {
+                Messages =
+                [
+                  new DurableAgentStateMessage
+                  {
+                    Role = "assistant",
+                    Contents =
+                    [
+                      new DurableAgentStateFunctionCallContent
+                      {
+                        CallId = "call-1",
+                        Name = "tool",
+                        Arguments = JsonSerializer.SerializeToElement("verbatim"),
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+            },
+        };
+
+        Assert.Throws<InvalidOperationException>(() => Serialize(state));
+    }
+
+    [Fact]
     public void ProductionConverterRejectsRevisedStateUntilMailboxActivation()
     {
         const string Json = """

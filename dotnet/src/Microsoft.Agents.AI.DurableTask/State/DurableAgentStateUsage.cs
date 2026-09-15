@@ -2,6 +2,7 @@
 
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Numerics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
@@ -149,26 +150,37 @@ internal sealed class DurableAgentStateUsage
     {
         int exponentIndex = value.IndexOfAny('e', 'E');
         ReadOnlySpan<char> significand = exponentIndex >= 0 ? value.AsSpan(0, exponentIndex) : value;
-        ReadOnlySpan<char> exponent = exponentIndex >= 0 ? value.AsSpan(exponentIndex + 1) : default;
+        ReadOnlySpan<char> exponentText = exponentIndex >= 0 ? value.AsSpan(exponentIndex + 1) : default;
         int decimalIndex = significand.IndexOf('.');
-        if (decimalIndex < 0)
+        int fractionalDigitCount = decimalIndex >= 0 ? significand.Length - decimalIndex - 1 : 0;
+        int trailingZeroCount = 0;
+        bool hasNonZeroDigit = false;
+        for (int index = significand.Length - 1; index >= 0; index--)
         {
-            return exponent.IsEmpty || exponent[0] != '-';
+            char character = significand[index];
+            if (character is '.' or '-')
+            {
+                continue;
+            }
+
+            if (character == '0' && !hasNonZeroDigit)
+            {
+                trailingZeroCount++;
+            }
+            else
+            {
+                hasNonZeroDigit = true;
+            }
         }
 
-        ReadOnlySpan<char> fractionalDigits = significand[(decimalIndex + 1)..];
-        if (fractionalDigits.TrimEnd('0').IsEmpty)
+        if (!hasNonZeroDigit)
         {
             return true;
         }
 
-        if (exponent.IsEmpty || exponent[0] == '-')
-        {
-            return false;
-        }
-
-        exponent = exponent[0] == '+' ? exponent[1..] : exponent;
-        return exponent.Length > 9 ||
-            (int.TryParse(exponent, out int exponentValue) && exponentValue >= fractionalDigits.Length);
+        BigInteger exponent = exponentText.IsEmpty
+            ? BigInteger.Zero
+            : BigInteger.Parse(exponentText, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+        return exponent >= fractionalDigitCount - trailingZeroCount;
     }
 }
