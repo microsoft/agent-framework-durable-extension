@@ -61,7 +61,7 @@ internal static class BuiltInFunctions
     private const string SessionIdMcpArgumentName = "sessionId";
 
     /// <summary>
-    /// Deprecated alias for <see cref="LegacySessionIdParameterName"/>. Still accepted on incoming requests,
+    /// Deprecated alias for <see cref="SessionIdParameterName"/>. Still accepted on incoming requests,
     /// but never emitted on responses.
     /// </summary>
     private const string LegacyThreadIdParameterName = "thread_id";

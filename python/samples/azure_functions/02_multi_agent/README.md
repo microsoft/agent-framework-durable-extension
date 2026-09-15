@@ -29,6 +29,7 @@ Weather agent request:
 ```bash
 curl -X POST http://localhost:7071/api/agents/WeatherAgent/run \
     -H "Content-Type: application/json" \
+    -H "x-ms-wait-for-response: false" \
     -d '{"message": "What is the weather in Seattle?"}'
 ```
 
@@ -49,6 +50,7 @@ Math agent request:
 ```bash
 curl -X POST http://localhost:7071/api/agents/MathAgent/run \
     -H "Content-Type: application/json" \
+    -H "x-ms-wait-for-response: false" \
     -d '{"message": "Calculate a 20% tip on a $50 bill"}'
 ```
 

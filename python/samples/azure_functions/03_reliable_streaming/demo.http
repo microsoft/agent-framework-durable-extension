@@ -22,9 +22,13 @@ GET {{baseUrl}}/api/health
 ### Start Agent Run
 # Starts the agent in the background via durable orchestration.
 # The RedisStreamCallback persists streaming chunks to Redis.
+# The run endpoint waits for completion and echoes the body format by default, so opt out of the
+# wait and ask for JSON to get the 202 payload carrying the sessionId used below.
 # @name trip
 POST {{baseUrl}}/api/agents/{{agentName}}/run
 Content-Type: text/plain
+Accept: application/json
+x-ms-wait-for-response: false
 
 Plan a 3-day trip to Tokyo
 

@@ -38,6 +38,8 @@ The agent executes in the background via durable orchestration. The `RedisStream
 ```bash
 curl -X POST http://localhost:7071/api/agents/TravelPlanner/run \
   -H "Content-Type: text/plain" \
+  -H "Accept: application/json" \
+  -H "x-ms-wait-for-response: false" \
   -d "Plan a 3-day trip to Tokyo"
 ```
 
