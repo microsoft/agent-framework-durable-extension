@@ -91,7 +91,7 @@ internal abstract class DurableAgentStateContent
             HostedVectorStoreContent hostedVectorStoreContent => DurableAgentStateHostedVectorStoreContent.FromHostedVectorStoreContent(hostedVectorStoreContent),
             TextContent textContent => DurableAgentStateTextContent.FromTextContent(textContent),
             TextReasoningContent textReasoningContent => DurableAgentStateTextReasoningContent.FromTextReasoningContent(textReasoningContent),
-            UriContent uriContent => DurableAgentStateUriContent.FromUriContent(uriContent),
+            UriContent uriContent => DurableAgentStateUriContent.FromUriContent(uriContent, allowLosslessV2),
             UsageContent usageContent => DurableAgentStateUsageContent.FromUsageContent(usageContent),
             _ => DurableAgentStateUnknownContent.FromUnknownContent(content, logger)
         };

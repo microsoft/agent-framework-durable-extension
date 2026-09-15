@@ -1,5 +1,6 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
@@ -290,6 +291,25 @@ public sealed class DurableAgentStateContentTests
     }
 
     [Fact]
+    public void UriContentWithoutMediaTypeIsRejectedForLegacyAndPreservedForV2()
+    {
+        UriContent uriContent = new(new Uri("https://example.com"), "application/octet-stream");
+        typeof(UriContent).GetField(
+            "_mediaType",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(uriContent, null);
+
+        Assert.Throws<InvalidOperationException>(
+            () => DurableAgentStateContent.FromAIContent(uriContent));
+
+        DurableAgentStateUriContent durableContent = Assert.IsType<DurableAgentStateUriContent>(
+            DurableAgentStateContent.FromAIContentV2(uriContent));
+        string jsonContent = JsonSerializer.Serialize(durableContent, s_stateContentTypeInfo);
+
+        Assert.Null(durableContent.MediaType);
+        Assert.DoesNotContain("\"mediaType\"", jsonContent, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void UsageContentSerializationDeserialization()
     {
         // Arrange
@@ -395,6 +415,8 @@ public sealed class DurableAgentStateContentTests
     [InlineData("9223372036854775808", null)]
     [InlineData("1.0", 1L)]
     [InlineData("1e3", 1000L)]
+    [InlineData("10e-1", 1L)]
+    [InlineData("1e999999999999999999999999", null)]
     public void UsageKnownCountsPreserveSchemaIntegersAndProjectWhenRepresentable(
         string countJson,
         long? expectedRuntimeCount)
@@ -416,6 +438,7 @@ public sealed class DurableAgentStateContentTests
     [InlineData("\"ten\"")]
     [InlineData("{}")]
     [InlineData("1.5")]
+    [InlineData("1.0e-1")]
     public void UsageDeserializationRejectsMalformedKnownNumericFields(string invalidValue)
     {
         string json = $$"""

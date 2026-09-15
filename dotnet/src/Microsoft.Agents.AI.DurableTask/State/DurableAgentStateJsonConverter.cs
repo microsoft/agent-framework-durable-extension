@@ -137,7 +137,8 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         DurableAgentState value,
         bool allowRevisedSchema)
     {
-        _ = DurableAgentStateSchemaVersion.ParseSupported(value.SchemaVersion);
+        DurableAgentStateSchemaVersion schemaVersion =
+            DurableAgentStateSchemaVersion.ParseSupported(value.SchemaVersion);
         if (value.SchemaVersion == DurableAgentState.RevisedSchemaVersion && !allowRevisedSchema)
         {
             throw new InvalidOperationException(
@@ -145,15 +146,19 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         }
 
         value.Data.Validate(value.SchemaVersion);
+        JsonElement dataElement = JsonSerializer.SerializeToElement(
+            value.Data,
+            DurableAgentStateJsonContext.Default.DurableAgentStateData);
+        if (schemaVersion.Major < DurableAgentState.RevisedSchemaMajorVersion)
+        {
+            ValidateLegacyTranscript(dataElement);
+        }
 
         writer.WriteStartObject();
         writer.WritePropertyName(SchemaVersionPropertyName);
         writer.WriteStringValue(value.SchemaVersion);
         writer.WritePropertyName(DataPropertyName);
-        JsonSerializer.Serialize(
-            writer,
-            value.Data,
-            DurableAgentStateJsonContext.Default.DurableAgentStateData);
+        dataElement.WriteTo(writer);
         if (value.ExtensionData is not null)
         {
             writer.WritePropertyName(ExtensionDataPropertyName);
