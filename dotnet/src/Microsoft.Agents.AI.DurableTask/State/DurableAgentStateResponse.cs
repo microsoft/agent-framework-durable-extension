@@ -61,6 +61,19 @@ internal class DurableAgentStateResponse : DurableAgentStateEntry
         string correlationId,
         IEnumerable<ChatMessage> messages,
         ILogger? logger = null)
+        => FromMessages(correlationId, messages, allowLosslessV2: false, logger);
+
+    internal static DurableAgentStateResponse FromMessagesV2(
+        string correlationId,
+        IEnumerable<ChatMessage> messages,
+        ILogger? logger = null)
+        => FromMessages(correlationId, messages, allowLosslessV2: true, logger);
+
+    private static DurableAgentStateResponse FromMessages(
+        string correlationId,
+        IEnumerable<ChatMessage> messages,
+        bool allowLosslessV2,
+        ILogger? logger)
     {
         List<ChatMessage> messageList = messages.ToList();
         DateTimeOffset createdAt = GetCreatedAt(messageList);
@@ -68,7 +81,12 @@ internal class DurableAgentStateResponse : DurableAgentStateEntry
         {
             CorrelationId = correlationId,
             CreatedAt = createdAt,
-            Messages = CreateStoredMessages(messageList, correlationId, createdAt, logger),
+            Messages = CreateStoredMessages(
+                messageList,
+                correlationId,
+                createdAt,
+                logger,
+                allowLosslessV2),
         };
     }
 
