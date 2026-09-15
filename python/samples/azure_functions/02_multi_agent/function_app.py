@@ -98,8 +98,8 @@ HTTP/1.1 202 Accepted
   "status": "accepted",
   "response": "Agent request accepted",
   "message": "What is the weather in Seattle?",
-  "conversation_id": "<guid>",
-  "correlation_id": "<guid>"
+  "sessionId": "<guid>",
+  "correlationId": "<guid>"
 }
 
 Expected output when invoking `POST /api/agents/MathAgent/run`:
@@ -109,7 +109,7 @@ HTTP/1.1 202 Accepted
   "status": "accepted",
   "response": "Agent request accepted",
   "message": "Calculate a 20% tip on a $50 bill",
-  "conversation_id": "<guid>",
-  "correlation_id": "<guid>"
+  "sessionId": "<guid>",
+  "correlationId": "<guid>"
 }
 """
