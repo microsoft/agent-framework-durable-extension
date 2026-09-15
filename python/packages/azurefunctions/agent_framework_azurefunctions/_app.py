@@ -67,9 +67,12 @@ from ._workflow import run_workflow_orchestrator
 _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS = 10
 _MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS = 200
 
-# The workflow endpoints use camelCase names throughout their query string, request body, and
-# response body. The agent endpoints use snake_case throughout, so they reuse the shared
-# ``SESSION_ID_FIELD`` / ``WAIT_FOR_RESPONSE_FIELD`` constants instead of the names below.
+# HTTP endpoints use camelCase for public wire names. Legacy snake_case agent names are still
+# accepted and temporarily emitted so existing callers can migrate without a hard cutover.
+_AGENT_SESSION_ID_FIELD = "sessionId"
+_AGENT_WAIT_FOR_RESPONSE_FIELD = "waitForResponse"
+_AGENT_CORRELATION_ID_FIELD = "correlationId"
+_LEGACY_AGENT_CORRELATION_ID_FIELD = "correlation_id"
 _RUN_ID_QUERY_PARAMETER = "runId"
 _MAX_WORKFLOW_RUN_ID_LENGTH = 100
 _WORKFLOW_WAIT_FOR_RESPONSE_QUERY_PARAMETER = "waitForResponse"
@@ -493,7 +496,7 @@ class AgentFunctionApp(DFAppBase):
 
             outputs = yield from run_workflow_orchestrator(context, captured_workflow, initial_message, shared_state)
             # Durable Functions runtime extracts return value from StopIteration
-            return outputs  # noqa: B901
+            return outputs  # ruff: ignore[return-in-generator]
 
         # Ensure the orchestrator function is registered (prevents garbage collection)
         _ = workflow_orchestrator
@@ -988,7 +991,7 @@ class AgentFunctionApp(DFAppBase):
             Expected request body (RunRequest format):
             {
                 "message": "user message to agent",
-                "session_id": "optional conversation identifier",
+                "sessionId": "optional conversation identifier",
                 "role": "user|system" (optional, default: "user"),
                 "response_format": {...} (optional JSON schema for structured responses),
                 "enable_tool_calls": true|false (optional, default: true)
@@ -1436,9 +1439,11 @@ class AgentFunctionApp(DFAppBase):
         payload = {
             "response": response,
             "message": message,
+            _AGENT_SESSION_ID_FIELD: session_id,
             SESSION_ID_FIELD: session_id,
             "status": status,
-            "correlation_id": correlation_id,
+            _AGENT_CORRELATION_ID_FIELD: correlation_id,
+            _LEGACY_AGENT_CORRELATION_ID_FIELD: correlation_id,
         }
         if extra_fields:
             payload.update(extra_fields)
@@ -1611,9 +1616,9 @@ class AgentFunctionApp(DFAppBase):
     def _resolve_session_id(self, req: func.HttpRequest, req_body: dict[str, Any]) -> str:
         """Retrieve the session identifier from the request body or query parameters.
 
-        Callers may use the canonical ``session_id`` name or the deprecated ``thread_id`` alias, in
-        either the request body or the query string. Blank values are treated as absent. Any two
-        non-blank values that disagree are rejected, matching the .NET implementation. A random
+        Callers may use the canonical ``sessionId`` name or a deprecated snake_case alias, in either
+        the request body or the query string. Blank values are treated as absent. Any two non-blank
+        values that disagree are rejected, matching the .NET implementation. A random
         identifier is generated when no name is supplied.
 
         Raises:
@@ -1623,7 +1628,7 @@ class AgentFunctionApp(DFAppBase):
 
         candidates: dict[str, str] = {}
         for source_name, source in (("request body", req_body), ("query string", params)):
-            for field in (SESSION_ID_FIELD, LEGACY_THREAD_ID_FIELD):
+            for field in (_AGENT_SESSION_ID_FIELD, SESSION_ID_FIELD, LEGACY_THREAD_ID_FIELD):
                 value = source.get(field)
                 if value is not None and str(value).strip():
                     candidates[f"{field} in the {source_name}"] = str(value)
@@ -1723,14 +1728,13 @@ class AgentFunctionApp(DFAppBase):
         req: func.HttpRequest,
         req_body: dict[str, Any],
         *,
-        query_parameter: str = WAIT_FOR_RESPONSE_FIELD,
+        query_parameter: str = _AGENT_WAIT_FOR_RESPONSE_FIELD,
         default_value: bool = True,
     ) -> bool:
         """Determine whether the caller requested to wait for the response.
 
-        The ``x-ms-wait-for-response`` header takes precedence, followed by ``query_parameter``
-        (``wait_for_response`` for the snake_case agent endpoints, ``waitForResponse`` for the
-        camelCase workflow endpoints), and finally the ``wait_for_response`` request body field.
+        The ``x-ms-wait-for-response`` header takes precedence, followed by the camelCase query
+        parameter and the legacy snake_case query parameter, then the same pair in the request body.
         Values that cannot be parsed as a boolean are ignored so that the next source is consulted.
         """
         headers: dict[str, str] = self._extract_normalized_headers(req)
@@ -1742,12 +1746,27 @@ class AgentFunctionApp(DFAppBase):
 
         params = req.params or {}
         parsed_query = self._try_coerce_to_bool(params.get(query_parameter))
+        parsed_legacy_query = self._try_coerce_to_bool(params.get(WAIT_FOR_RESPONSE_FIELD))
+        if parsed_query is not None and parsed_legacy_query is not None and parsed_query != parsed_legacy_query:
+            raise IncomingRequestError(
+                f"{query_parameter} and {WAIT_FOR_RESPONSE_FIELD} specified in the query string must match."
+            )
         if parsed_query is not None:
             return parsed_query
+        if parsed_legacy_query is not None:
+            return parsed_legacy_query
 
-        parsed_body = self._try_coerce_to_bool(req_body.get(WAIT_FOR_RESPONSE_FIELD))
+        parsed_body = self._try_coerce_to_bool(req_body.get(_AGENT_WAIT_FOR_RESPONSE_FIELD))
+        parsed_legacy_body = self._try_coerce_to_bool(req_body.get(WAIT_FOR_RESPONSE_FIELD))
+        if parsed_body is not None and parsed_legacy_body is not None and parsed_body != parsed_legacy_body:
+            raise IncomingRequestError(
+                f"{_AGENT_WAIT_FOR_RESPONSE_FIELD} and {WAIT_FOR_RESPONSE_FIELD} specified in the request body "
+                "must match."
+            )
         if parsed_body is not None:
             return parsed_body
+        if parsed_legacy_body is not None:
+            return parsed_legacy_body
         return default_value
 
     @staticmethod

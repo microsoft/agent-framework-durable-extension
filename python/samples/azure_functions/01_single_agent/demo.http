@@ -13,7 +13,7 @@ Content-Type: application/json
 
 {
   "message": "Add a security element to it.",
-  "session_id": "session-001"
+  "sessionId": "session-001"
 }
 
 ### Ask for a joke (plain text payload)

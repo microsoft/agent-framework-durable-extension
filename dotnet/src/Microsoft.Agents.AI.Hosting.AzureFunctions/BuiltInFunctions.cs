@@ -28,14 +28,14 @@ internal static class BuiltInFunctions
     private const string WaitForResponseHeaderName = "x-ms-wait-for-response";
 
     /// <summary>
-    /// Query parameter used by the agent endpoints, which use snake_case names throughout their
-    /// query string, request body, and response body.
+    /// Query parameter used by the agent endpoints.
     /// </summary>
     /// <remarks>
-    /// Issue https://github.com/microsoft/agent-framework-durable-extension/issues/51 tracks the plan
-    /// to unify the query parameter naming across all endpoints.
+    /// The old snake_case query parameter remains accepted for compatibility, but callers should use
+    /// this camelCase name for new code.
     /// </remarks>
-    private const string AgentWaitForResponseParameterName = "wait_for_response";
+    private const string AgentWaitForResponseParameterName = "waitForResponse";
+    private const string LegacyAgentWaitForResponseParameterName = "wait_for_response";
 
     /// <summary>
     /// Query parameter used by the workflow endpoints, which use camelCase names throughout their
@@ -50,11 +50,12 @@ internal static class BuiltInFunctions
     private const int MaxWaitTimeoutSeconds = 200;
 
     private const string SessionIdHeaderName = "x-ms-session-id";
-    private const string SessionIdParameterName = "session_id";
+    private const string SessionIdParameterName = "sessionId";
+    private const string LegacySessionIdParameterName = "session_id";
     private const string SessionIdMcpArgumentName = "sessionId";
 
     /// <summary>
-    /// Deprecated alias for <see cref="SessionIdParameterName"/>. Still accepted on incoming requests,
+    /// Deprecated alias for <see cref="LegacySessionIdParameterName"/>. Still accepted on incoming requests,
     /// but never emitted on responses.
     /// </summary>
     private const string LegacyThreadIdParameterName = "thread_id";
@@ -347,6 +348,7 @@ internal static class BuiltInFunctions
         // Parse request body - support both JSON and plain text
         string? message = null;
         string? sessionIdFromBody = null;
+        string? legacySessionIdFromBody = null;
         string? legacyThreadIdFromBody = null;
 
         if (req.Headers.TryGetValues("Content-Type", out IEnumerable<string>? contentTypeValues) &&
@@ -358,6 +360,7 @@ internal static class BuiltInFunctions
             {
                 message = requestBody.Message;
                 sessionIdFromBody = requestBody.SessionId;
+                legacySessionIdFromBody = requestBody.LegacySessionId;
                 legacyThreadIdFromBody = requestBody.ThreadId;
             }
         }
@@ -367,12 +370,14 @@ internal static class BuiltInFunctions
             message = await req.ReadAsStringAsync();
         }
 
-        // The session ID can come from the query string or the request body, using either the canonical
-        // "session_id" name or the deprecated "thread_id" alias. Conflicting values are rejected.
+        // The session ID can come from the query string or the request body, using the canonical
+        // "sessionId" name or a deprecated alias. Conflicting values are rejected.
         if (!TryResolveSessionKey(
                 sessionIdFromBody,
+                legacySessionIdFromBody,
                 legacyThreadIdFromBody,
                 req.Query[SessionIdParameterName],
+                req.Query[LegacySessionIdParameterName],
                 req.Query[LegacyThreadIdParameterName],
                 out string? sessionIdValue,
                 out string? sessionKeyError))
@@ -397,8 +402,10 @@ internal static class BuiltInFunctions
                 "Run request cannot be empty.");
         }
 
-        // Check if we should wait for response (default is true)
-        bool waitForResponse = ShouldWaitForResponse(req, AgentWaitForResponseParameterName, defaultValue: true);
+        if (!TryGetAgentWaitForResponse(req, out bool waitForResponse, out string? waitForResponseError))
+        {
+            return await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, waitForResponseError!);
+        }
 
         AIAgent agentProxy = client.AsDurableAgentProxy(context, agentName);
 
@@ -715,7 +722,7 @@ internal static class BuiltInFunctions
 
         if (AcceptsJson(req))
         {
-            AgentRunSuccessResponse successResponse = new((int)statusCode, sessionId, agentResponse);
+            AgentRunSuccessResponse successResponse = new((int)statusCode, sessionId, sessionId, agentResponse);
             await response.WriteAsJsonAsync(successResponse, context.CancellationToken);
         }
         else
@@ -744,7 +751,7 @@ internal static class BuiltInFunctions
 
         if (AcceptsJson(req))
         {
-            AgentRunAcceptedResponse acceptedResponse = new((int)HttpStatusCode.Accepted, sessionId);
+            AgentRunAcceptedResponse acceptedResponse = new((int)HttpStatusCode.Accepted, sessionId, sessionId);
             await response.WriteAsJsonAsync(acceptedResponse, context.CancellationToken);
         }
         else
@@ -775,6 +782,40 @@ internal static class BuiltInFunctions
         }
 
         return defaultValue;
+    }
+
+    /// <summary>
+    /// Gets the agent wait preference. The header keeps its existing precedence; the camelCase query
+    /// parameter is preferred, with the legacy snake_case name accepted during the deprecation window.
+    /// </summary>
+    internal static bool TryGetAgentWaitForResponse(
+        HttpRequestData req,
+        out bool waitForResponse,
+        out string? error)
+    {
+        if (req.Headers.TryGetValues(WaitForResponseHeaderName, out IEnumerable<string>? values) &&
+            TryParseBoolean(values.FirstOrDefault(), out waitForResponse))
+        {
+            error = null;
+            return true;
+        }
+
+        string? canonicalValue = req.Query[AgentWaitForResponseParameterName];
+        string? legacyValue = req.Query[LegacyAgentWaitForResponseParameterName];
+
+        bool hasCanonical = TryParseBoolean(canonicalValue, out bool canonical);
+        bool hasLegacy = TryParseBoolean(legacyValue, out bool legacy);
+
+        if (hasCanonical && hasLegacy && canonical != legacy)
+        {
+            waitForResponse = true;
+            error = $"{AgentWaitForResponseParameterName} and {LegacyAgentWaitForResponseParameterName} specified in the query string must match.";
+            return false;
+        }
+
+        waitForResponse = hasCanonical ? canonical : hasLegacy ? legacy : true;
+        error = null;
+        return true;
     }
 
     /// <summary>
@@ -928,37 +969,41 @@ internal static class BuiltInFunctions
     }
 
     /// <summary>
-    /// Resolves the session key for an agent run request from the four places a caller may supply it:
-    /// the canonical <c>session_id</c> and its deprecated <c>thread_id</c> alias, in both the request body
+    /// Resolves the session key for an agent run request from the places a caller may supply it:
+    /// the canonical <c>sessionId</c> and deprecated aliases, in both the request body
     /// and the query string. Blank values are treated as absent. Any two non-blank values that disagree —
     /// whether within one source or across the body and query string — are rejected.
     /// </summary>
-    /// <param name="bodySessionId">The <c>session_id</c> value from the request body, if any.</param>
+    /// <param name="bodySessionId">The <c>sessionId</c> value from the request body, if any.</param>
+    /// <param name="bodyLegacySessionId">The legacy <c>session_id</c> value from the request body, if any.</param>
     /// <param name="bodyThreadId">The deprecated <c>thread_id</c> value from the request body, if any.</param>
-    /// <param name="querySessionId">The <c>session_id</c> value from the query string, if any.</param>
+    /// <param name="querySessionId">The <c>sessionId</c> value from the query string, if any.</param>
+    /// <param name="queryLegacySessionId">The legacy <c>session_id</c> value from the query string, if any.</param>
     /// <param name="queryThreadId">The deprecated <c>thread_id</c> value from the query string, if any.</param>
     /// <param name="sessionKey">The resolved session key, or <see langword="null"/> when none was supplied.</param>
     /// <param name="errorMessage">The error to return to the caller when resolution fails.</param>
     /// <returns><see langword="false"/> when conflicting values were supplied; otherwise <see langword="true"/>.</returns>
     internal static bool TryResolveSessionKey(
         string? bodySessionId,
+        string? bodyLegacySessionId,
         string? bodyThreadId,
         string? querySessionId,
+        string? queryLegacySessionId,
         string? queryThreadId,
         out string? sessionKey,
         [NotNullWhen(false)] out string? errorMessage)
     {
         sessionKey = null;
 
-        if (!TryCombineSessionIdAliases(bodySessionId, bodyThreadId, out string? bodyValue))
+        if (!TryCombineSessionIdAliases(bodySessionId, bodyLegacySessionId, bodyThreadId, out string? bodyValue))
         {
-            errorMessage = $"{SessionIdParameterName} and {LegacyThreadIdParameterName} specified in the request body must match.";
+            errorMessage = "Session identifier aliases specified in the request body must match.";
             return false;
         }
 
-        if (!TryCombineSessionIdAliases(querySessionId, queryThreadId, out string? queryValue))
+        if (!TryCombineSessionIdAliases(querySessionId, queryLegacySessionId, queryThreadId, out string? queryValue))
         {
-            errorMessage = $"{SessionIdParameterName} and {LegacyThreadIdParameterName} specified in the query string must match.";
+            errorMessage = "Session identifier aliases specified in the query string must match.";
             return false;
         }
 
@@ -973,29 +1018,41 @@ internal static class BuiltInFunctions
     }
 
     /// <summary>
-    /// Combines the canonical <c>session_id</c> value with its deprecated <c>thread_id</c> alias from a single
+    /// Combines the canonical <c>sessionId</c> value with legacy aliases from a single
     /// source (the request body or the query string). Whichever non-blank value is present is returned; when
     /// both are present they must be equal, otherwise the pair is rejected. Blank values are treated as absent,
     /// matching how the MCP tool trigger resolves its arguments.
     /// </summary>
-    /// <param name="sessionId">The canonical <c>session_id</c> value, if any.</param>
-    /// <param name="legacyThreadId">The deprecated <c>thread_id</c> value, if any.</param>
+    /// <param name="sessionId">The canonical <c>sessionId</c> value, if any.</param>
+    /// <param name="legacySessionId">The legacy <c>session_id</c> value, if any.</param>
+    /// <param name="legacyThreadId">The legacy <c>thread_id</c> value, if any.</param>
     /// <param name="result">The resolved value, or <see langword="null"/> when neither was supplied.</param>
     /// <returns><see langword="false"/> when both values are supplied but differ; otherwise <see langword="true"/>.</returns>
-    internal static bool TryCombineSessionIdAliases(string? sessionId, string? legacyThreadId, out string? result)
+    internal static bool TryCombineSessionIdAliases(
+        string? sessionId,
+        string? legacySessionId,
+        string? legacyThreadId,
+        out string? result)
     {
-        bool hasSessionId = !string.IsNullOrWhiteSpace(sessionId);
-        bool hasLegacyThreadId = !string.IsNullOrWhiteSpace(legacyThreadId);
+        string? normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? null : sessionId;
+        string? normalizedLegacySessionId = string.IsNullOrWhiteSpace(legacySessionId) ? null : legacySessionId;
+        string? normalizedLegacyThreadId = string.IsNullOrWhiteSpace(legacyThreadId) ? null : legacyThreadId;
 
-        if (hasSessionId && hasLegacyThreadId && !string.Equals(sessionId, legacyThreadId, StringComparison.Ordinal))
+        string? first = normalizedSessionId ?? normalizedLegacySessionId ?? normalizedLegacyThreadId;
+        if ((normalizedSessionId is not null && !string.Equals(first, normalizedSessionId, StringComparison.Ordinal)) ||
+            (normalizedLegacySessionId is not null && !string.Equals(first, normalizedLegacySessionId, StringComparison.Ordinal)) ||
+            (normalizedLegacyThreadId is not null && !string.Equals(first, normalizedLegacyThreadId, StringComparison.Ordinal)))
         {
             result = null;
             return false;
         }
 
-        result = hasSessionId ? sessionId : hasLegacyThreadId ? legacyThreadId : null;
+        result = first;
         return true;
     }
+
+    internal static bool TryCombineSessionIdAliases(string? sessionId, string? legacyThreadId, out string? result) =>
+        TryCombineSessionIdAliases(sessionId, null, legacyThreadId, out result);
 
     private static string GetAgentName(FunctionContext context)
     {
@@ -1051,10 +1108,12 @@ internal static class BuiltInFunctions
     /// </summary>
     /// <param name="Message">The message to send to the agent.</param>
     /// <param name="SessionId">The optional session ID to continue a conversation.</param>
-    /// <param name="ThreadId">Deprecated alias for <paramref name="SessionId"/>.</param>
+    /// <param name="LegacySessionId">Deprecated alias for <paramref name="SessionId"/>.</param>
+    /// <param name="ThreadId">Legacy alias for <paramref name="SessionId"/>.</param>
     internal sealed record AgentRunRequest(
         [property: JsonPropertyName("message")] string? Message,
-        [property: JsonPropertyName("session_id")] string? SessionId,
+        [property: JsonPropertyName("sessionId")] string? SessionId,
+        [property: JsonPropertyName("session_id")] string? LegacySessionId,
         [property: JsonPropertyName("thread_id")] string? ThreadId);
 
     /// <summary>
@@ -1071,10 +1130,12 @@ internal static class BuiltInFunctions
     /// </summary>
     /// <param name="Status">The HTTP status code.</param>
     /// <param name="SessionId">The session ID for the conversation.</param>
+    /// <param name="LegacySessionId">The legacy snake_case session ID field emitted during the migration window.</param>
     /// <param name="Response">The agent response.</param>
     internal sealed record AgentRunSuccessResponse(
         [property: JsonPropertyName("status")] int Status,
-        [property: JsonPropertyName("session_id")] string SessionId,
+        [property: JsonPropertyName("sessionId")] string SessionId,
+        [property: JsonPropertyName("session_id")] string LegacySessionId,
         [property: JsonPropertyName("response")] AgentResponse Response);
 
     /// <summary>
@@ -1082,9 +1143,11 @@ internal static class BuiltInFunctions
     /// </summary>
     /// <param name="Status">The HTTP status code.</param>
     /// <param name="SessionId">The session ID for the conversation.</param>
+    /// <param name="LegacySessionId">The legacy snake_case session ID field emitted during the migration window.</param>
     internal sealed record AgentRunAcceptedResponse(
         [property: JsonPropertyName("status")] int Status,
-        [property: JsonPropertyName("session_id")] string SessionId);
+        [property: JsonPropertyName("sessionId")] string SessionId,
+        [property: JsonPropertyName("session_id")] string LegacySessionId);
 
     /// <summary>
     /// Represents a request to respond to a pending RequestPort in a workflow.

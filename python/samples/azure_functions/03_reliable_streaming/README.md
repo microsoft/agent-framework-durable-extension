@@ -47,7 +47,7 @@ Response (202 Accepted):
   "status": "accepted",
   "response": "Agent request accepted",
   "conversation_id": "abc-123-def-456",
-  "correlation_id": "xyz-789"
+  "correlationId": "xyz-789"
 }
 ```
 
