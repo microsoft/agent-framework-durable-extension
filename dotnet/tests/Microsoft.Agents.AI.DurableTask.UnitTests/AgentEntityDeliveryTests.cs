@@ -542,7 +542,7 @@ public sealed class AgentEntityDeliveryTests
         Assert.True(JsonElement.DeepEquals(state.Data.Session!.Value, committed.Data.Session!.Value));
         Assert.Equal(state.Data.IngestedPositions!.Keys, committed.Data.IngestedPositions!.Keys);
         Assert.All(state.Data.IngestedPositions, pair =>
-            Assert.True(JsonElement.DeepEquals(pair.Value, committed.Data.IngestedPositions[pair.Key])));
+            Assert.Equal(pair.Value, committed.Data.IngestedPositions[pair.Key]));
         Assert.Equal("python", committed.Data.ExtensionData!["dataProducer"].GetString());
         Assert.True(committed.Data.UnknownProperties!["futureDataProperty"].GetProperty("preserve").GetBoolean());
         Assert.True(committed.UnknownProperties!["futureRootProperty"].GetProperty("preserve").GetBoolean());
@@ -568,15 +568,15 @@ public sealed class AgentEntityDeliveryTests
         Assert.True(JsonElement.DeepEquals(state.Data.Session!.Value, committed.Data.Session!.Value));
         Assert.Equal(state.Data.IngestedPositions!.Keys, committed.Data.IngestedPositions!.Keys);
         Assert.All(state.Data.IngestedPositions, pair =>
-            Assert.True(JsonElement.DeepEquals(pair.Value, committed.Data.IngestedPositions[pair.Key])));
-        Assert.True(JsonElement.DeepEquals(
+            Assert.Equal(pair.Value, committed.Data.IngestedPositions[pair.Key]));
+        Assert.Equal(
             state.Data.Truncation!.EvictedMessageCount,
-            committed.Data.Truncation!.EvictedMessageCount));
+            committed.Data.Truncation!.EvictedMessageCount);
         Assert.True(JsonElement.DeepEquals(state.Data.HistoryBinding, committed.Data.HistoryBinding));
         Assert.Equal(3, committed.Data.CompletionReceipts!.Count);
         Assert.Equal(2, state.Data.CompletionReceipts!.Count);
-        committed.Data.IngestedPositions!["example-producer"] = JsonSerializer.SerializeToElement(99);
-        Assert.Equal(3, state.Data.IngestedPositions!["example-producer"].GetInt32());
+        committed.Data.IngestedPositions!["example-producer"] = 99;
+        Assert.Equal(3, state.Data.IngestedPositions!["example-producer"]);
     }
 
     [Fact]

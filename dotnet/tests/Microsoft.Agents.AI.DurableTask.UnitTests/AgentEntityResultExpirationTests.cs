@@ -86,9 +86,9 @@ public sealed class AgentEntityResultExpirationTests
         Assert.Equal(state.Data.ExpirationTimeUtc, cleaned.Data.ExpirationTimeUtc);
         Assert.True(JsonElement.DeepEquals(state.Data.HistoryBinding, cleaned.Data.HistoryBinding));
         Assert.True(JsonElement.DeepEquals(state.Data.Session!.Value, cleaned.Data.Session!.Value));
-        Assert.True(JsonElement.DeepEquals(
+        Assert.Equal(
             state.Data.IngestedPositions!["producer"],
-            cleaned.Data.IngestedPositions!["producer"]));
+            cleaned.Data.IngestedPositions!["producer"]);
         Assert.Equal(original, Serialize(state));
         Assert.Empty(signals);
 
@@ -487,9 +487,9 @@ public sealed class AgentEntityResultExpirationTests
                 ExpirationTimeUtc = s_now.AddDays(2).UtcDateTime,
                 HistoryBinding = JsonSerializer.SerializeToElement<object?>(null),
                 Session = JsonSerializer.SerializeToElement(new { continuation = "session" }),
-                IngestedPositions = new Dictionary<string, JsonElement>
+                IngestedPositions = new Dictionary<string, long>
                 {
-                    ["producer"] = JsonSerializer.SerializeToElement(2),
+                    ["producer"] = 2,
                 },
             },
         };
