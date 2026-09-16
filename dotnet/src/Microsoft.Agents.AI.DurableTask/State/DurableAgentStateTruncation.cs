@@ -40,7 +40,7 @@ internal sealed class DurableAgentStateTruncation
 
     public void Validate()
     {
-        if (!DurableAgentStateUsage.IsPositiveJsonInteger(this.EvictedMessageCount) ||
+        if (this.EvictedMessageCount < 1 ||
             this.FirstEvictedAt == default ||
             this.LastEvictedAt == default ||
             this.LastEvictedAt < this.FirstEvictedAt)
