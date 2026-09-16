@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json",
-  "title": "Durable agent state: proposed 2.0 contract and legacy review shapes",
-  "description": "Proposed contract under review; validation does not authorize any runtime to read, migrate, or emit 2.0. See README.md for semantic invariants and the cross-runtime deployment gate.",
+  "title": "Durable agent state 2.0 contract and legacy shapes",
+  "description": "Cross-runtime state contract. Validation alone does not enable a runtime to read, migrate, or emit 2.0. See README.md for semantic invariants and the deployment gate.",
   "$defs": {
     "identifier": {
       "type": "string",
@@ -15,9 +15,9 @@
       "type": "object",
       "description": "Token usage statistics.",
       "properties": {
-          "inputTokenCount": { "type": "integer" },
-          "outputTokenCount": { "type": "integer" },
-          "totalTokenCount": { "type": "integer" },
+          "inputTokenCount": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 },
+          "outputTokenCount": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 },
+          "totalTokenCount": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 },
           "extensionData": {
             "type": "object",
             "description": "Opaque provider-specific usage metadata, preserved even when values cannot be projected to runtime numeric counts."
@@ -459,13 +459,13 @@
         "ingestedPositions": {
           "type": "object",
           "description": "Legacy highest-seen position by producer, not proof of a contiguous delivered prefix or request completion. Preserve historical values without inferring missing deliveries during migration. Exact gap-preserving workflow receipts require separately versioned bookkeeping independent of transcript retention.",
-          "additionalProperties": { "type": "integer", "minimum": 0 }
+          "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 }
         },
         "truncation": {
           "type": "object",
           "description": "Diagnostic evidence of transcript removal; not model context or terminal completion evidence.",
           "properties": {
-            "evictedMessageCount": { "type": "integer", "minimum": 1 },
+            "evictedMessageCount": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
             "firstEvictedAt": { "type": "string", "format": "date-time" },
             "lastEvictedAt": { "type": "string", "format": "date-time" }
           },
@@ -483,7 +483,7 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Exact review snapshots, not a runtime acceptance list. 1.2.0 and 2.0.0 are proposals; future versions require an explicit compatibility decision. By convention this is the first property.",
+      "description": "Exact contract versions, not a runtime acceptance list. Future versions require an explicit compatibility decision. By convention this is the first property.",
       "enum": ["1.0.0", "1.1.0", "1.2.0", "2.0.0"]
     },
     "data": { "$ref": "#/$defs/data" },
