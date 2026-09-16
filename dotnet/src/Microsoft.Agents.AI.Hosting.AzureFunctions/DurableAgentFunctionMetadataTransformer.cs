@@ -98,9 +98,10 @@ internal sealed class DurableAgentFunctionMetadataTransformer : IFunctionMetadat
             Language = "dotnet-isolated",
             RawBindings =
             [
-                $$"""{"name":"context","type":"mcpToolTrigger","direction":"In","toolName":"{{agentName}}","description":"{{description}}","toolProperties":"[{\"propertyName\":\"query\",\"propertyType\":\"string\",\"description\":\"The query to send to the agent.\",\"isRequired\":true,\"isArray\":false},{\"propertyName\":\"sessionId\",\"propertyType\":\"string\",\"description\":\"Optional session identifier.\",\"isRequired\":false,\"isArray\":false}]"}""",
+                $$"""{"name":"context","type":"mcpToolTrigger","direction":"In","toolName":"{{agentName}}","description":"{{description}}","toolProperties":"[{\"propertyName\":\"query\",\"propertyType\":\"string\",\"description\":\"The query to send to the agent.\",\"isRequired\":true,\"isArray\":false},{\"propertyName\":\"sessionId\",\"propertyType\":\"string\",\"description\":\"Optional session identifier.\",\"isRequired\":false,\"isArray\":false},{\"propertyName\":\"responseFormat\",\"propertyType\":\"string\",\"description\":\"Optional response format: text (default) or json (full result metadata).\",\"isRequired\":false,\"isArray\":false}]"}""",
                 """{"name":"query","type":"mcpToolProperty","direction":"In","propertyName":"query","description":"The query to send to the agent","isRequired":true,"dataType":"String","propertyType":"string"}""",
                 """{"name":"sessionId","type":"mcpToolProperty","direction":"In","propertyName":"sessionId","description":"The session identifier.","isRequired":false,"dataType":"String","propertyType":"string"}""",
+                """{"name":"responseFormat","type":"mcpToolProperty","direction":"In","propertyName":"responseFormat","description":"Response format: text (default) or json (full result metadata).","isRequired":false,"dataType":"String","propertyType":"string"}""",
                 """{"name":"client","type":"durableClient","direction":"In"}"""
             ],
             EntryPoint = BuiltInFunctions.RunAgentMcpToolFunctionEntryPoint,

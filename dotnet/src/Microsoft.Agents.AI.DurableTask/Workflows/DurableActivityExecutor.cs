@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 using System.Diagnostics.CodeAnalysis;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Agents.AI.Workflows;
 using Microsoft.Agents.AI.Workflows.Checkpointing;
@@ -103,11 +104,42 @@ internal static class DurableActivityExecutor
 
     private static DurableActivityInput? TryDeserializeActivityInput(string input)
     {
+        bool hasTypeHint = false;
         try
         {
-            return JsonSerializer.Deserialize(input, DurableWorkflowJsonContext.Default.DurableActivityInput);
+            // A recognized top-level hint identifies an envelope even if another field is
+            // malformed. Do not lose that provenance through the legacy raw-input fallback.
+            Utf8JsonReader reader = new(Encoding.UTF8.GetBytes(input));
+            while (reader.Read())
+            {
+                if (reader.TokenType == JsonTokenType.PropertyName &&
+                    reader.CurrentDepth == 1 &&
+                    string.Equals(reader.GetString(), nameof(DurableActivityInput.InputTypeName), StringComparison.OrdinalIgnoreCase))
+                {
+                    if (hasTypeHint)
+                    {
+                        throw new JsonException("Activity input contains duplicate input type hints.");
+                    }
+
+                    hasTypeHint = true;
+                    if (!reader.Read() || reader.TokenType is not (JsonTokenType.String or JsonTokenType.Null))
+                    {
+                        throw new JsonException("Activity input type hint must be a string or null.");
+                    }
+                }
+            }
+
+            DurableActivityInput? activityInput = JsonSerializer.Deserialize(
+                input,
+                DurableWorkflowJsonContext.Default.DurableActivityInput);
+            if (hasTypeHint && activityInput?.Input is null)
+            {
+                throw new JsonException("Activity input is required when an input type hint is present.");
+            }
+
+            return activityInput;
         }
-        catch (JsonException)
+        catch (JsonException) when (!hasTypeHint)
         {
             return null;
         }
@@ -151,6 +183,11 @@ internal static class DurableActivityExecutor
             return supportedTypes.FirstOrDefault() ?? typeof(string);
         }
 
+        if (inputTypeName.AsSpan().Trim().Length != inputTypeName.Length)
+        {
+            throw new InvalidOperationException($"Input type '{inputTypeName}' must not have surrounding whitespace.");
+        }
+
         Type? loadedType = DurableTaskTypeResolver.Resolve(inputTypeName);
         if (loadedType is not null && supportedTypes.Contains(loadedType))
         {
@@ -175,6 +212,8 @@ internal static class DurableActivityExecutor
             }
         }
 
-        return loadedType ?? supportedTypes.FirstOrDefault() ?? typeof(string);
+        // Resolution is not authorization: reject before scalar or fan-in deserialization
+        // can invoke payload constructors or converters for an unregistered type.
+        throw new InvalidOperationException($"Input type '{inputTypeName}' is not supported by this executor.");
     }
 }

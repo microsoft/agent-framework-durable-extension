@@ -33,6 +33,11 @@ public record RunRequest
     /// <summary>
     /// Gets or sets the correlation ID for correlating this request with its response.
     /// </summary>
+    /// <remarks>
+    /// This is a probabilistically unique caller idempotency key. Reusing it delivers the retained
+    /// terminal outcome (including throwing for a committed failure) without comparing request content.
+    /// Storage detects multiple terminal entries for one ID, but does not detect request-content collisions.
+    /// </remarks>
     [JsonInclude]
     internal string CorrelationId { get; set; } = Guid.NewGuid().ToString("N");
 

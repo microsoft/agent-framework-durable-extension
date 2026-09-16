@@ -455,6 +455,28 @@ public sealed class DurableAgentStateTests
     }
 
     [Fact]
+    public void ContractIntegersBeyondInt64AreRejected()
+    {
+        const string Json = """
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [],
+                "ingestedPositions": { "writer": 9223372036854775808 },
+                "truncation": {
+                  "evictedMessageCount": 1e20,
+                  "firstEvictedAt": "2026-09-14T00:00:00Z",
+                  "lastEvictedAt": "2026-09-14T00:00:00Z"
+                }
+              }
+            }
+            """;
+
+        Assert.Throws<InvalidOperationException>(() =>
+            JsonSerializer.Deserialize(Json, DurableAgentStateJsonContext.Default.DurableAgentState));
+    }
+
+    [Fact]
     public void CurrentVersionUnknownFieldsSurviveMutationAndRoundTrip()
     {
         const string JsonText = """
