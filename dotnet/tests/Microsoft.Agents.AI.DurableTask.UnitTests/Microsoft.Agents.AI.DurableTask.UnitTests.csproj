@@ -7,7 +7,14 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Microsoft.Agents.AI.DurableTask\Microsoft.Agents.AI.DurableTask.csproj" />
+    <PackageReference Include="Microsoft.Agents.AI.Foundry" />
     <PackageReference Include="Microsoft.Agents.AI.Workflows" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\samples\DurableAgents\ConsoleApps\09_CustomHistoryProvider\JsonFileChatHistoryProvider.cs"
+             Link="Samples\09_CustomHistoryProvider\JsonFileChatHistoryProvider.cs" />
   </ItemGroup>
 
   <ItemGroup>
