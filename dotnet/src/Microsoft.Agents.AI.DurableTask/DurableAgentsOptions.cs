@@ -12,6 +12,7 @@ public sealed class DurableAgentsOptions
     // Agent names are case-insensitive
     private readonly Dictionary<string, Func<IServiceProvider, AIAgent>> _agentFactories = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TimeSpan?> _agentTimeToLive = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DurableAgentHistoryConfiguration> _historyConfigurations = new(StringComparer.OrdinalIgnoreCase);
     private bool _defaultTimeToLiveConfigured;
 
     // Agents that were discovered on a workflow rather than registered explicitly by the caller. Hosts use
@@ -124,15 +125,39 @@ public sealed class DurableAgentsOptions
     /// </summary>
     /// <param name="name">The name of the agent.</param>
     /// <param name="factory">The factory function to create the agent.</param>
+    /// <param name="timeToLive">Optional time-to-live for this agent's entities.</param>
+    /// <returns>The options instance.</returns>
+    public DurableAgentsOptions AddAIAgentFactory(
+        string name,
+        Func<IServiceProvider, AIAgent> factory,
+        TimeSpan? timeToLive = null) =>
+        this.AddAIAgentFactory(name, factory, timeToLive, configureHistory: null);
+
+    /// <summary>
+    /// Adds an AI agent factory to the options and configures its history policy.
+    /// </summary>
+    /// <param name="name">The name of the agent.</param>
+    /// <param name="factory">The factory function to create the agent.</param>
     /// <param name="timeToLive">Optional time-to-live for this agent's entities. If not specified, uses <see cref="DefaultTimeToLive"/>.</param>
+    /// <param name="configureHistory">Configures history ownership and replay for this registration.</param>
     /// <returns>The options instance.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="name"/> or <paramref name="factory"/> is null.</exception>
     /// <exception cref="ArgumentException">Thrown when an agent with the same name has already been registered explicitly.</exception>
-    public DurableAgentsOptions AddAIAgentFactory(string name, Func<IServiceProvider, AIAgent> factory, TimeSpan? timeToLive = null)
+    /// <remarks>
+    /// The factory is not invoked for validation during registration. Its returned agent is validated once, before
+    /// session restoration or model/provider execution, on each entity operation that needs to execute the agent.
+    /// </remarks>
+    public DurableAgentsOptions AddAIAgentFactory(
+        string name,
+        Func<IServiceProvider, AIAgent> factory,
+        TimeSpan? timeToLive,
+        Action<DurableAgentHistoryOptions>? configureHistory)
     {
         ArgumentNullException.ThrowIfNull(name);
         ArgumentNullException.ThrowIfNull(factory);
+        DurableAgentHistoryConfiguration historyConfiguration = CreateHistoryConfiguration(configureHistory);
         this.AddExplicitAgentFactory(name, factory, nameof(name));
+        this._historyConfigurations[name] = historyConfiguration;
         if (timeToLive.HasValue)
         {
             this._agentTimeToLive[name] = timeToLive;
@@ -145,7 +170,17 @@ public sealed class DurableAgentsOptions
     /// Adds an AI agent to the options.
     /// </summary>
     /// <param name="agent">The agent to add.</param>
+    /// <param name="timeToLive">Optional time-to-live for this agent's entities.</param>
+    /// <returns>The options instance.</returns>
+    public DurableAgentsOptions AddAIAgent(AIAgent agent, TimeSpan? timeToLive = null) =>
+        this.AddAIAgent(agent, timeToLive, configureHistory: null);
+
+    /// <summary>
+    /// Adds an AI agent to the options and configures its history policy.
+    /// </summary>
+    /// <param name="agent">The agent to add.</param>
     /// <param name="timeToLive">Optional time-to-live for this agent's entities. If not specified, uses <see cref="DefaultTimeToLive"/>.</param>
+    /// <param name="configureHistory">Configures history ownership and replay for this registration.</param>
     /// <returns>The options instance.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="agent"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -154,8 +189,14 @@ public sealed class DurableAgentsOptions
     /// <remarks>
     /// Registering an agent that a workflow already discovered is allowed: the explicit registration takes over,
     /// so an agent can be promoted to a standalone agent regardless of whether the workflow was configured first.
+    /// Static pipeline incompatibilities such as stateful compaction are rejected during this call. Validation that
+    /// depends on the completed options composition or restored session remains at entity execution time, before
+    /// provider, session, or model side effects.
     /// </remarks>
-    public DurableAgentsOptions AddAIAgent(AIAgent agent, TimeSpan? timeToLive = null)
+    public DurableAgentsOptions AddAIAgent(
+        AIAgent agent,
+        TimeSpan? timeToLive,
+        Action<DurableAgentHistoryOptions>? configureHistory)
     {
         ArgumentNullException.ThrowIfNull(agent);
 
@@ -164,7 +205,12 @@ public sealed class DurableAgentsOptions
             throw new ArgumentException($"{nameof(agent.Name)} must not be null or whitespace.", nameof(agent));
         }
 
+        // Direct registrations expose the constructed pipeline, so reject static incompatibilities now.
+        // Factory registrations are validated after their single per-operation construction.
+        DurableAgentHistoryOwnershipResolver.ValidateStaticConfiguration(agent);
+        DurableAgentHistoryConfiguration historyConfiguration = CreateHistoryConfiguration(configureHistory);
         this.AddExplicitAgentFactory(agent.Name, sp => agent, nameof(agent));
+        this._historyConfigurations[agent.Name] = historyConfiguration;
         if (timeToLive.HasValue)
         {
             this._agentTimeToLive[agent.Name] = timeToLive;
@@ -248,6 +294,24 @@ public sealed class DurableAgentsOptions
         return revisedState && !this._defaultTimeToLiveConfigured ? null : this.DefaultTimeToLive;
     }
 
+    private static DurableAgentHistoryConfiguration CreateHistoryConfiguration(
+        Action<DurableAgentHistoryOptions>? configure)
+    {
+        DurableAgentHistoryOptions options = new();
+        configure?.Invoke(options);
+        return new(
+            options.ServiceManagedPerServiceCallHistory,
+            options.ReplayMode,
+            options.ProviderKey);
+    }
+
+    internal DurableAgentHistoryConfiguration GetHistoryConfiguration(string agentName)
+    {
+        return this._historyConfigurations.TryGetValue(agentName, out DurableAgentHistoryConfiguration configuration)
+            ? configuration
+            : DurableAgentHistoryConfiguration.Default;
+    }
+
     /// <summary>
     /// Determines whether an agent with the specified name is registered.
     /// </summary>
@@ -258,4 +322,15 @@ public sealed class DurableAgentsOptions
         ArgumentNullException.ThrowIfNull(agentName);
         return this._agentFactories.ContainsKey(agentName);
     }
+}
+
+internal readonly record struct DurableAgentHistoryConfiguration(
+    bool ServiceManagedPerServiceCallHistory,
+    DurableAgentHistoryReplayMode ReplayMode,
+    DurableAgentHistoryProviderKey? ProviderKey)
+{
+    public static DurableAgentHistoryConfiguration Default { get; } = new(
+        ServiceManagedPerServiceCallHistory: false,
+        DurableAgentHistoryReplayMode.PreloadEntityHistory,
+        ProviderKey: null);
 }
