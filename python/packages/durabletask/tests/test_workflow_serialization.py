@@ -334,7 +334,7 @@ class TestReconstructToType:
         """Test that data with checkpoint markers is decoded via deserialize_value.
 
         reconstruct_to_type is general-purpose and handles trusted checkpoint
-        data.  Untrusted HITL callers must call strip_pickle_markers() first.
+        data. Untrusted HITL callers must select encoded=False instead.
         """
         original = SampleData(value=99, name="marker-test")
         encoded = serialize_value(original)
@@ -356,13 +356,12 @@ class TestReconstructToType:
         assert result == data
 
     def test_reconstruct_strips_injected_pickle_markers(self) -> None:
-        """End-to-end: strip_pickle_markers + reconstruct_to_type blocks attack.
+        """End-to-end: raw reconstruction strips injected checkpoint markers.
 
-        This mirrors the real HITL flow where callers sanitize before reconstruction.
+        This mirrors the real HITL flow where raw mode sanitizes before reconstruction.
         """
         malicious = {"__pickled__": "gASVDgAAAAAAAACMBHRlc3SULg==", "__type__": "builtins:str"}
-        sanitized = strip_pickle_markers(malicious)
-        result = reconstruct_to_type(sanitized, str)
+        result = reconstruct_to_type(malicious, str, encoded=False)
         assert result is None
 
 

@@ -14,7 +14,11 @@ streaming counterpart to [`08_workflow`](../08_workflow/README.md).
     / ...) as the workflow progresses, ending when it reaches a terminal state.
     Each event's `data` is already reconstructed into its original typed object,
     so the client never deserializes anything by hand.
-  - `await_workflow_output(instance_id)` — read the final reconstructed output.
+  - `await_workflow_output(instance_id)` is synchronous. The sample calls it with
+    `asyncio.to_thread` to read the final output without blocking the event loop
+    or scheduling another workflow.
+- **Stable workflow identity.** The worker names its workflow `content_pipeline`,
+  and the client uses that same name as its default target.
 - **Brokerless streaming.** The orchestrator publishes accumulated events to the
   orchestration **custom status** after each superstep (only on live execution,
   not replay), and the client streams them by polling. No Redis or other message

@@ -46,7 +46,7 @@ class RedisHistoryProvider(HistoryProvider):
         """
         super().__init__(source_id)
         self.key_prefix = key_prefix
-        self._client: aioredis.Redis = aioredis.from_url(redis_url, decode_responses=True)
+        self._redis_url = redis_url
 
     def _key(self, session_id: str | None) -> str:
         """Build the Redis key holding the history for a session.
@@ -72,7 +72,9 @@ class RedisHistoryProvider(HistoryProvider):
         Returns:
             The stored messages in chronological order.
         """
-        stored: list[str] = await self._client.lrange(self._key(session_id), 0, -1)
+        # Create, use and close the pool on the loop executing this operation.
+        async with aioredis.from_url(self._redis_url, decode_responses=True) as client:
+            stored: list[str] = await client.lrange(self._key(session_id), 0, -1)
         return [Message.from_json(entry) for entry in stored]
 
     async def save_messages(
@@ -96,13 +98,5 @@ class RedisHistoryProvider(HistoryProvider):
         """
         if not messages:
             return
-        await self._client.rpush(self._key(session_id), *[message.to_json() for message in messages])
-
-    async def aclose(self) -> None:
-        """Close the Redis connection pool.
-
-        A provider that opens a connection should offer a way to give it back. Without this the
-        pool stays open until the process exits, which is survivable in a sample but shows up as
-        unclosed-connection warnings and is the wrong thing to copy into an application.
-        """
-        await self._client.aclose()
+        async with aioredis.from_url(self._redis_url, decode_responses=True) as client:
+            await client.rpush(self._key(session_id), *[message.to_json() for message in messages])

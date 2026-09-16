@@ -30,6 +30,8 @@ def main():
     silent_handler = logging.NullHandler()
 
     dts_worker = get_worker(log_handler=silent_handler)
+    # This scope stops the worker even if setup or the client fails. Redis pools
+    # close inside each history operation on its own loop, not during shutdown here.
     with dts_worker:
         setup_worker(dts_worker)
         dts_worker.start()

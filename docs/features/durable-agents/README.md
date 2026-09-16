@@ -26,7 +26,9 @@ Durable agents are implemented on top of [Durable Entities](https://learn.micros
 4. Entity-local changes are persisted. External provider writes and tool effects are not part of a distributed transaction.
 
 > [!WARNING]
-> The [Python prototype in PR #59](https://github.com/microsoft/agent-framework-durable-extension/pull/59) uses schema `2.0.0`, independent response/completion storage and an explicit `isolated_v2` deployment gate. It does not require a local mirror of external/service-owned history. Existing .NET readers do not support this layout. Do not mix these writers or replay old workflow histories through the new Python engine. These are provisional [prototype deployment constraints](../../../python/packages/durabletask/README.md#version-2-deployment-warning). Design review belongs in [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88); the agreed implementation will follow in stacked PRs after ADR approval.
+> The [Python prototype in PR #59](https://github.com/microsoft/agent-framework-durable-extension/pull/59) uses schema `2.0.0`, private independent response/completion storage and an explicit `isolated_v2` deployment gate. It does not require a local mirror of external/service-owned history. Existing .NET readers do not support this layout. Do not mix these writers or replay old workflow histories through the new Python engine. The [prototype deployment constraints](../../../python/packages/durabletask/README.md#version-2-deployment-warning) apply to every host, including samples and tests. Operator acknowledgement does not establish isolation, and the prototype is not a production drop-in.
+
+The architecture in [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88) was accepted and merged on September 15, 2026 into `feature/python-durable-thread-compaction` at `7d90e8f`. PR #59 remains an integrated prototype, not a merge-as-is implementation or evidence of shared-schema interoperability. Focused, stacked implementation PRs will deliver the accepted architecture. The [validation record](../../../python/samples/README.md#prototype-validation) distinguishes the post-acceptance follow-up from historical results and remaining release gates.
 
 Because the entity framework serializes access to each entity instance, concurrent messages to the same session are processed one at a time, eliminating race conditions.
 
@@ -70,11 +72,17 @@ Key types:
 - **`DurableAIAgentOrchestrationContext`** – Wraps an `OrchestrationContext` for use inside orchestrations. `get_agent()` returns a `DurableAIAgent[DurableAgentTask]`.
 - **`AgentEntity`** – Platform-agnostic agent execution logic that manages state, invokes the agent, handles streaming, and calls response callbacks.
 
+The prototype keeps public message IDs separate from internal history reconciliation IDs. Repeated IDs survive reload through optional string `originalMessageId` alongside unique internal `messageId` values in its private layout. Configured `CompactionProvider` hooks temporarily see internal IDs for summary/source links, while normal model calls, other providers and audit sinks see public IDs. Arbitrary hooks that depend on public IDs or substitute different input IDs are not guaranteed transparent behavior. Private occurrence attributes are not serialized into public message envelopes, and unknown optional input envelope fields remain inert metadata rather than dynamically loaded types.
+
+The default durable history after-run hook calls public `save_messages()` separately for request and response batches, allowing overrides to validate, transform or reject each batch. One core hook can therefore produce two saves for provenance. Completed external-primary default save hooks and completed service-owned `ChatResponse` values affirm accepted inputs even after a later failure. Opaque custom after-run hooks, interrupted saves and store-only sinks cannot establish primary acceptance by inference. Existing core and provider APIs are unchanged. See [Python history integration](../../../python/packages/durabletask/README.md#history-and-retention-settings) for the contract and branch-isolation limits.
+
+Explicit legacy migration can enrich an existing receipt whose outcome is absent to `failed` from retained failure evidence such as typed `errorResponse`, but only without a mailbox. Known receipt outcomes and independent mailbox evidence take precedence. Enrichment preserves the timestamp and other receipt fields without reopening delivery. These private mechanics are not a shared migration format. See [migration constraints](../../../python/packages/durabletask/README.md#version-2-deployment-warning).
+
 ## Hosting models
 
 ### Azure Functions
 
-The recommended production hosting model. A single call to `ConfigureDurableAgents` (C#) or `AgentFunctionApp` (Python) automatically:
+For Azure Functions hosting, a single call to `ConfigureDurableAgents` (C#) or `AgentFunctionApp` (Python) automatically:
 
 - Registers agent entities with the Durable Task worker.
 - Generates HTTP endpoints at `/api/agents/{agentName}/run` for each registered agent.
@@ -112,6 +120,8 @@ Alternatively, `ConfigureDurableOptions` configures both from a single delegate 
 
 **Python example:**
 
+Configure a separate Functions task hub/deployment with compatible version-2 workers and clients first. The explicit deployment mode below is the operator's acknowledgement of that verified setup, not automatic isolation.
+
 ```python
 app = AgentFunctionApp(agents=[agent], deployment_mode="isolated_v2")
 ```
@@ -135,6 +145,8 @@ IHost host = Host.CreateDefaultBuilder(args)
 ```
 
 **Python example:**
+
+Configure the endpoint and hub as a separate version-2 deployment with compatible workers and clients before acknowledging the deployment mode. A localhost address alone does not isolate the prototype.
 
 ```python
 worker = DurableAIAgentWorker(TaskHubGrpcWorker(host_address="localhost:4001"), deployment_mode="isolated_v2")

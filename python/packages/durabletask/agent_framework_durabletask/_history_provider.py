@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import copy
 import logging
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Generator, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from agent_framework import (
     SUMMARIZED_BY_SUMMARY_ID_KEY,
     SUMMARY_OF_MESSAGE_IDS_KEY,
     AgentResponse,
+    CompactionProvider,
     HistoryProvider,
     InMemoryHistoryProvider,
     Message,
@@ -57,6 +59,12 @@ logger = logging.getLogger("agent_framework.durabletask")
 WORKING_BUFFER_KEY = "messages"
 POSITIONS_KEY = "_positions"
 EXCLUDED_KEY = "_excluded"
+_HISTORY_ID_ATTRIBUTE = "_durable_history_id"
+
+
+def _history_message_id(message: Message) -> str | None:
+    """Resolve transient reconciliation identity without changing the public message ID."""
+    return getattr(message, _HISTORY_ID_ATTRIBUTE, None) or message.message_id
 
 
 @dataclass
@@ -85,6 +93,21 @@ class DurableHistoryBinding:
 
     pending_inputs: list[Message] = field(default_factory=lambda: list[Message](), repr=False)
     """Detached inputs of the latest per-service call, never serialized into session state."""
+
+    accepted_inputs: set[tuple[str, str]] = field(default_factory=lambda: set[tuple[str, str]](), repr=False)
+    """Input receipts affirmed by completed primary storage or service response hooks."""
+
+    append_response: AgentResponse | None = field(default=None, repr=False)
+    """Response provenance while dispatching the public save hook, never persisted."""
+
+    def accept(self, messages: Sequence[Message]) -> None:
+        """Record only operation-supplied receipts carried by actually accepted messages."""
+        for message in messages:
+            receipt = getattr(message, "_durable_ingestion_receipt", None)
+            if isinstance(receipt, tuple):
+                items = cast("tuple[Any, ...]", receipt)
+                if len(items) == 2 and all(isinstance(item, str) for item in items):
+                    self.accepted_inputs.add(cast("tuple[str, str]", items))
 
 
 _current_binding: ContextVar[DurableHistoryBinding | None] = ContextVar(
@@ -211,13 +234,15 @@ class DurableHistoryProvider(HistoryProvider):
         replayable = [content for content in chat_message.contents if content.type != "reasoning"]
         if not replayable:
             return None
-        return Message(
+        message = Message(
             role=chat_message.role,
             contents=replayable,
             author_name=chat_message.author_name,
-            message_id=stored.message_id,
+            message_id=stored.public_message_id,
             additional_properties=chat_message.additional_properties,
         )
+        setattr(message, _HISTORY_ID_ATTRIBUTE, stored.message_id)
+        return message
 
     @staticmethod
     def _unique_message_id(candidate: str, reserved: set[str]) -> str:
@@ -238,6 +263,8 @@ class DurableHistoryProvider(HistoryProvider):
         for entry, index in self._replayable_entries(binding):
             stored = entry.messages[index]
             if not stored.message_id or stored.message_id in positions:
+                if stored.message_id is not None and stored.original_message_id is None:
+                    stored.original_message_id = stored.message_id
                 stored.message_id = self._unique_message_id(self._synthetic_message_id(entry, index), reserved)
             positions[stored.message_id] = (entry, index)
         return positions
@@ -289,7 +316,7 @@ class DurableHistoryProvider(HistoryProvider):
             return
         if state is not None:
             self.flush(state)
-        self._append_messages(binding, messages, state=state)
+        self._append_messages(binding, messages, state=state, response=binding.append_response)
 
     def _append_messages(
         self,
@@ -374,10 +401,13 @@ class DurableHistoryProvider(HistoryProvider):
             if not stored.message_id or stored.message_id in used:
                 prefix = "durable_revision" if stored.message_id else "durable"
                 candidate = f"{prefix}_{kind.value}_{scope}_{ordinal}_{index}"
+                if stored.message_id is not None and kind != DurableAgentStateEntryJsonType.COMPACTION:
+                    stored.original_message_id = stored.message_id
                 stored.message_id = self._unique_message_id(candidate, reserved)
             used.add(stored.message_id)
             working = copy.deepcopy(message)
-            working.message_id = stored.message_id
+            working.message_id = stored.public_message_id
+            setattr(working, _HISTORY_ID_ATTRIBUTE, stored.message_id)
             stored_messages.append(stored)
             working_messages.append(working)
         return stored_messages, working_messages
@@ -427,9 +457,15 @@ class DurableHistoryProvider(HistoryProvider):
         request_messages = self._get_context_messages_to_store(context)
         if self.store_inputs:
             request_messages.extend(context.input_messages)
-        self._append_messages(binding, request_messages, state=state)
+        if request_messages:
+            await self.save_messages(context.session_id, request_messages, state=state)
         if self.store_outputs and context.response and context.response.messages:
-            self._append_messages(binding, context.response.messages, state=state, response=context.response)
+            previous_response = binding.append_response
+            binding.append_response = context.response
+            try:
+                await self.save_messages(context.session_id, context.response.messages, state=state)
+            finally:
+                binding.append_response = previous_response
         binding.pending_inputs.clear()
 
     def finalize_failed_run(self, state: dict[str, Any]) -> None:
@@ -517,7 +553,8 @@ class DurableHistoryProvider(HistoryProvider):
         last_known: tuple[DurableAgentStateEntry, int] | None = None
 
         for message in buffer:
-            position = stored_by_id.get(message.message_id) if message.message_id else None
+            history_id = _history_message_id(message)
+            position = stored_by_id.get(history_id) if history_id else None
             summary_ids = self._summary_original_ids(message)
             summary_revision = False
             if position is not None and summary_ids is not None:
@@ -536,7 +573,7 @@ class DurableHistoryProvider(HistoryProvider):
                 summary_revision = original_payload != working_payload or original_ids != summary_ids
 
             if position is None or summary_revision:
-                if not summary_revision and message.message_id in previous_ids:
+                if not summary_revision and history_id in previous_ids:
                     # This was persisted before, not a newly generated summary. Never resurrect
                     # a message removed since the working buffer was assembled.
                     continue
@@ -550,7 +587,7 @@ class DurableHistoryProvider(HistoryProvider):
                     # sources may still point to the old summary, including when that summary
                     # is itself a source here. Its forward ID must therefore remain unchanged.
                     for source in buffer:
-                        if source is message or source.message_id not in summary_ids:
+                        if source is message or _history_message_id(source) not in summary_ids:
                             continue
                         source_group = source.additional_properties.get(GROUP_ANNOTATION_KEY)
                         if (
@@ -566,7 +603,8 @@ class DurableHistoryProvider(HistoryProvider):
         # Link repair can touch sources that precede an inserted summary. Persist annotations
         # only after every insertion, using the final positions after any entry splits.
         for message in buffer:
-            position = stored_by_id.get(message.message_id) if message.message_id else None
+            history_id = _history_message_id(message)
+            position = stored_by_id.get(history_id) if history_id else None
             if position is None:
                 continue
             entry, index = position
@@ -578,7 +616,7 @@ class DurableHistoryProvider(HistoryProvider):
         # A strategy may shrink the list without setting _excluded. Compare final identities
         # after summary revision IDs have been allocated, so replacing a summary does not leave
         # its old revision active. Preserve stored metadata and backlinks on absent messages.
-        remaining_ids = {message.message_id for message in buffer if message.message_id}
+        remaining_ids = {_history_message_id(message) for message in buffer if _history_message_id(message)}
         for message_id in previous_ids - remaining_ids:
             position = stored_by_id.get(message_id)
             if position is not None:
@@ -601,7 +639,7 @@ class DurableHistoryProvider(HistoryProvider):
                 ],
             )
         stored_by_id = self._positions(binding)
-        buffer[:] = [message for message in buffer if message.message_id in stored_by_id]
+        buffer[:] = [message for message in buffer if _history_message_id(message) in stored_by_id]
         state[POSITIONS_KEY] = stored_by_id
 
     @staticmethod
@@ -641,6 +679,7 @@ class DurableHistoryProvider(HistoryProvider):
             created_at,
         )
         message.message_id = stored[0].message_id
+        setattr(message, _HISTORY_ID_ATTRIBUTE, stored[0].message_id)
         entry = DurableAgentStateCompaction(
             created_at=created_at,
             messages=stored,
@@ -863,6 +902,106 @@ def validate_history_providers(agent: SupportsAgentRun) -> None:
         )
 
 
+class _ObservedHistoryProvider(HistoryProvider):
+    """Delegate the original primary's hooks and observe only completed persistence hooks."""
+
+    def __init__(self, provider: HistoryProvider) -> None:
+        super().__init__(
+            source_id=provider.source_id,
+            load_messages=provider.load_messages,
+            store_inputs=provider.store_inputs,
+            store_outputs=provider.store_outputs,
+            store_context_messages=provider.store_context_messages,
+            store_context_from=provider.store_context_from,
+        )
+        self.__wrapped__ = provider
+        if hasattr(provider, "after_run_once_per_turn"):
+            self.after_run_once_per_turn = provider.after_run_once_per_turn
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.__wrapped__, name)
+
+    async def get_messages(self, session_id: str | None, **kwargs: Any) -> list[Message]:
+        return await self.__wrapped__.get_messages(session_id, **kwargs)
+
+    async def save_messages(self, session_id: str | None, messages: Sequence[Message], **kwargs: Any) -> None:
+        await self.__wrapped__.save_messages(session_id, messages, **kwargs)
+        binding = current_durable_history_binding()
+        if binding is not None and self.store_inputs:
+            binding.accept(messages)
+
+    async def before_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+        await self.__wrapped__.before_run(agent=agent, session=session, context=context, state=state)
+
+    def _get_context_messages_to_store(self, context: SessionContext) -> list[Message]:
+        return self.__wrapped__._get_context_messages_to_store(context)
+
+    async def after_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+        if type(self.__wrapped__).after_run is HistoryProvider.after_run:
+            # The default hook delegates its actual selected batch through save_messages,
+            # so a returned save is observable without modifying the original provider.
+            await super().after_run(agent=agent, session=session, context=context, state=state)
+        else:
+            # An opaque custom hook may intentionally skip storage or persist only
+            # a subset. Preserve its implementation, without guessing acceptance.
+            await self.__wrapped__.after_run(agent=agent, session=session, context=context, state=state)
+
+
+@contextmanager
+def _compaction_id_scope(messages: list[Message]) -> Generator[None]:
+    """Give a strategy unique reconciliation IDs only for the duration of its hook."""
+    public_ids: dict[str, str | None] = {}
+    original_messages = list(messages)
+    for message in original_messages:
+        history_id = getattr(message, _HISTORY_ID_ATTRIBUTE, None)
+        if isinstance(history_id, str):
+            public_ids[history_id] = message.message_id
+            message.message_id = history_id
+    try:
+        yield
+    finally:
+        # Strategies may deepcopy, reorder or remove messages. Restore every
+        # surviving occurrence and aliases still held by another context provider.
+        for message in [*original_messages, *messages]:
+            history_id = getattr(message, _HISTORY_ID_ATTRIBUTE, None)
+            if history_id in public_ids and message.message_id == history_id:
+                message.message_id = public_ids[history_id]
+
+
+class _DurableCompactionProvider(CompactionProvider):
+    """Preserve a configured compaction provider while isolating its internal IDs."""
+
+    def __init__(self, provider: CompactionProvider) -> None:
+        super().__init__(
+            before_strategy=provider.before_strategy,
+            after_strategy=provider.after_strategy,
+            tokenizer=provider.tokenizer,
+            source_id=provider.source_id,
+            history_source_id=provider.history_source_id,
+        )
+        self.__wrapped__ = provider
+        # Core 1.13 predates the optional cadence hint. Preserve absence as well
+        # as an explicit value rather than imposing the newer default.
+        if hasattr(provider, "after_run_once_per_turn"):
+            self.after_run_once_per_turn = provider.after_run_once_per_turn
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.__wrapped__, name)
+
+    async def before_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+        messages = context.get_messages()
+        with _compaction_id_scope(messages):
+            await self.__wrapped__.before_run(agent=agent, session=session, context=context, state=state)
+
+    async def after_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+        history_state: Any = session.state.get(self.history_source_id, {}) if session else {}
+        messages = (
+            cast("dict[str, Any]", history_state).get(WORKING_BUFFER_KEY) if isinstance(history_state, dict) else None
+        )
+        with _compaction_id_scope(cast("list[Message]", messages) if isinstance(messages, list) else []):
+            await self.__wrapped__.after_run(agent=agent, session=session, context=context, state=state)
+
+
 class _ServiceOwnedHistoryProvider(HistoryProvider):
     """Occupy the primary slot without loading or saving the inactive external branch."""
 
@@ -922,8 +1061,20 @@ def prepare_history_owner(agent: SupportsAgentRun, service_owns_history: bool) -
         return agent
     updated: list[Any] = []
     changed = False
+    binding = current_durable_history_binding()
+    durable_sources = {
+        provider.source_id
+        for provider in cast("Sequence[Any]", providers)
+        if isinstance(provider, DurableHistoryProvider)
+    }
     for provider in cast("Sequence[Any]", providers):
-        original = provider.__wrapped__ if isinstance(provider, _ServiceOwnedHistoryProvider) else provider
+        original = (
+            provider.__wrapped__
+            if isinstance(
+                provider, (_ServiceOwnedHistoryProvider, _ObservedHistoryProvider, _DurableCompactionProvider)
+            )
+            else provider
+        )
         replacement = original
         if (
             service_owns_history
@@ -937,6 +1088,16 @@ def prepare_history_owner(agent: SupportsAgentRun, service_owns_history: bool) -
                 if isinstance(provider, _ServiceOwnedHistoryProvider)
                 else _ServiceOwnedHistoryProvider(original)
             )
+        elif (
+            binding is not None
+            and not service_owns_history
+            and isinstance(original, HistoryProvider)
+            and original.load_messages
+            and not isinstance(original, DurableHistoryProvider)
+        ):
+            replacement = _ObservedHistoryProvider(original)
+        elif isinstance(original, CompactionProvider) and original.history_source_id in durable_sources:
+            replacement = _DurableCompactionProvider(original)
         changed |= replacement is not provider
         updated.append(replacement)
     if not changed:

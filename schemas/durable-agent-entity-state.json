@@ -176,7 +176,11 @@
         "createdAt": { "type": "string", "format": "date-time", "description": "When this message was created (RFC 3339)." },
         "messageId": {
           "type": "string",
-          "description": "Stable identity for this message. Context management reconciles its results back onto stored messages by this value, so an implementation that drops it on round-trip silently loses compaction state. Assigned by the runtime when the producer left it unset."
+          "description": "Stable durable reconciliation key. Assigned when the producer omitted an ID or reused one. A reused application ID is preserved separately in originalMessageId."
+        },
+        "originalMessageId": {
+          "type": "string",
+          "description": "Original public application message ID when it differs from the reconciliation key. Readers expose this value as Message.message_id. Omission preserves legacy messageId behavior without guessing an original identity."
         },
         "extensionData": {
           "type": "object",

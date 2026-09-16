@@ -41,6 +41,12 @@ operation is interrupted before its local state commits, retrying can append the
 again. A stable session id does not prevent that. A production provider needs its own idempotency
 policy for external writes.
 
+Each read or append creates and closes its own async Redis client on the event loop
+running that operation. The provider keeps no connection pool between calls, so neither
+entry point needs to close a worker-loop pool from its main loop during shutdown. This
+trades connection reuse for a small, loop-safe example. Both entry points scope worker
+setup and execution in the worker's context manager so it stops on normal exit or failure.
+
 Portable durable `reset` is unsupported for this external provider. Clearing its history requires a
 provider-owned operation and coordination with the caller. The sample does not implement one.
 
@@ -60,6 +66,22 @@ until entity deletion. Existing local history from before an ownership change is
    ```
 
 2. Copy `.env.example` to `.env` and set `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`.
+
+   Choose a **new isolated task hub** for `TASKHUB`, shared only with compatible schema 2
+   workers and upgraded clients. Use the same hub for the worker and client. Keep old
+   workflow histories on the old engine, not on this hub.
+
+   Only after verifying those conditions, explicitly set the following in `.env`.
+   Replace the example hub name with your new hub's name.
+
+   ```dotenv
+   TASKHUB=DurableAgentsV2Sample
+   DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2
+   ```
+
+   The supplied acknowledgement is deliberately blank. This is an operator acknowledgement,
+   not runtime proof of isolation or a migration step. Do not set it for an arbitrary
+   production hub or incompatible peers.
 
 3. Sign in for `AzureCliCredential`:
 

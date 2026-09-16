@@ -1088,12 +1088,11 @@ def _route_result_messages(
 
     if result.activity_result and result.activity_result.get("sent_messages"):
         for msg_data in result.activity_result["sent_messages"]:
-            sent_msg = msg_data.get("message")
-            target_id = msg_data.get("target_id")
-            # Use an explicit None check so legitimately falsy payloads
-            # (empty string, 0, False) are still routed.
-            if sent_msg is not None:
-                sent_msg = deserialize_value(sent_msg)
+            # Missing payloads are ignored, but an explicit None is a message,
+            # including when a child workflow yields None to its parent.
+            if "message" in msg_data:
+                sent_msg = deserialize_value(msg_data["message"])
+                target_id = msg_data.get("target_id")
                 messages_to_route.append((sent_msg, target_id))
 
     for msg_to_route, explicit_target in messages_to_route:
@@ -1331,10 +1330,9 @@ def _coerce_initial_input(workflow: Workflow, raw_value: Any) -> Any:
     input_type = _select_primary_input_type(start_executor)
     if input_type is None:
         return strip_pickle_markers(raw_value)
-    # The initial payload is untrusted external input (HTTP body / client input) with no
-    # legitimate checkpoint type markers, so neutralize any pickle-marker injection before
-    # it can reach deserialize_value() inside reconstruct_to_type() (avoids pickle RCE).
-    return reconstruct_to_type(strip_pickle_markers(raw_value), input_type)
+    # Raw application JSON is not an encoded checkpoint, even after sanitization.
+    # Reconstruct only the declared type, leaving literal response markers opaque.
+    return reconstruct_to_type(raw_value, input_type, encoded=False)
 
 
 # ============================================================================
@@ -1345,7 +1343,11 @@ def _coerce_initial_input(workflow: Workflow, raw_value: Any) -> Any:
 def _load_agent_hitl_content(request_id: str, original_request: Content, raw_response: Any) -> Content:
     """Rebuild a reply using the fixed local Content type, never a supplied type name."""
     sanitized = strip_pickle_markers(raw_response)
-    response = Content.from_text(sanitized) if isinstance(sanitized, str) else reconstruct_to_type(sanitized, Content)
+    response = (
+        Content.from_text(sanitized)
+        if isinstance(sanitized, str)
+        else reconstruct_to_type(sanitized, Content, encoded=False)
+    )
     if not isinstance(response, Content):
         raise TypeError("Agent user input responses must be Content objects or Content mappings.")
     if response.type == "function_approval_response" and response.id != request_id:
@@ -1454,7 +1456,7 @@ def _deserialize_hitl_response(response_data: Any, response_type_str: str | None
         response_type = resolve_type(response_type_str)
         if response_type:
             logger.debug("Found response type %s, attempting reconstruction", response_type)
-            result = reconstruct_to_type(response_data, response_type)
+            result = reconstruct_to_type(response_data, response_type, encoded=False)
             logger.debug("Reconstructed response type: %s", type(result).__name__)
             return result
         logger.warning("Could not resolve response type: %s", response_type_str)

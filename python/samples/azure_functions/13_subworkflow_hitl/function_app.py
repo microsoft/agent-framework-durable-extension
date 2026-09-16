@@ -39,6 +39,7 @@ Prerequisites:
 """
 
 import logging
+import sys
 from dataclasses import dataclass
 
 from agent_framework import (
@@ -344,13 +345,9 @@ def launch(durable: bool = True) -> AgentFunctionApp | None:
     return None
 
 
-# Default: Azure Functions mode
-# Run with `python function_app.py --maf` for pure MAF mode with DevUI
-app = launch(durable=True)
-
-
 if __name__ == "__main__":
-    import sys
-
     if "--maf" in sys.argv:
         launch(durable=False)
+else:
+    # Azure Functions imports this module. Pure MAF mode never builds a durable host.
+    app = launch(durable=True)

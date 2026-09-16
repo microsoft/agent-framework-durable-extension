@@ -327,6 +327,8 @@ def _serialized_size(state: DurableAgentState) -> int:
 
 def _detached_message(stored: DurableAgentStateMessage) -> Message:
     message: Message = deepcopy(stored).to_chat_message()
+    # Retention groups use unique internal keys, never aliases exposed to applications.
+    message.message_id = stored.message_id
     message.additional_properties.pop(EXCLUDED_KEY, None)
     # Recount with this tokenizer rather than trusting another strategy's cached token count.
     message.additional_properties.pop(GROUP_ANNOTATION_KEY, None)

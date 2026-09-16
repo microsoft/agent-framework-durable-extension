@@ -49,7 +49,7 @@ from dateutil import parser as date_parser
 from ._constants import ContentTypes, DurableStateFields
 from ._message_identity import message_identity
 from ._models import RunRequest, serialize_response_format
-from ._response_utils import invocation_outcome, load_agent_response, serialize_agent_response
+from ._response_utils import invocation_outcome, load_agent_response, serialize_agent_response, serialize_input_content
 
 logger = logging.getLogger("agent_framework.durabletask")
 
@@ -140,6 +140,14 @@ def _validate_core_message(data: Any) -> None:
         content_type = cast(dict[str, Any], content).get("type")
         if not isinstance(content_type, str) or not content_type:
             raise ValueError("Core contents must be objects with a non-empty type.")
+
+
+def _validate_core_message_keys(data: dict[str, Any]) -> None:
+    """Keep public core envelopes from smuggling private persisted-field aliases."""
+    reserved = {"originalMessageId", "messageId", "authorName", "createdAt", "extensionData"}
+    conflicts = reserved.intersection(data)
+    if conflicts:
+        raise ValueError(f"Core message contains reserved durable fields: {', '.join(sorted(conflicts))}.")
 
 
 def _entry_unknown_fields(entry: DurableAgentStateEntry, data: dict[str, Any]) -> dict[str, Any]:
@@ -473,11 +481,16 @@ class DurableAgentStateContent:
             Durable content with canonical fields not owned by its subtype stored as metadata.
         """
         stored = DurableAgentStateContent._from_ai_content(content)
-        if isinstance(content, Content) and not isinstance(stored, DurableAgentStateUnknownContent):
-            payload = _json_snapshot(content.to_dict())
-            mapped = stored.core_projection()
-            # An empty overlay still identifies canonical rather than legacy conversion.
-            stored.extensionData = {"coreContent": {key: value for key, value in payload.items() if key not in mapped}}
+        if isinstance(content, Content):
+            payload = _json_snapshot(serialize_input_content(content))
+            if isinstance(stored, DurableAgentStateUnknownContent):
+                stored.content = payload
+            else:
+                mapped = stored.core_projection()
+                # An empty overlay still identifies canonical rather than legacy conversion.
+                stored.extensionData = {
+                    "coreContent": {key: value for key, value in payload.items() if key not in mapped}
+                }
         return stored
 
     @staticmethod
@@ -1330,6 +1343,7 @@ class DurableAgentStateMessage:
     extension_data: dict[str, Any] | None = None
     ingestion_identity: str | None = None
     ingestion_occurrence: str | None = None
+    _original_core_message: dict[str, Any] | None = None
 
     def __init__(
         self,
@@ -1347,6 +1361,12 @@ class DurableAgentStateMessage:
         self.message_id = message_id
         self.extension_data = extension_data
         self.unknown_fields: dict[str, Any] = {}
+        self.original_message_id: str | None = None
+
+    @property
+    def public_message_id(self) -> str | None:
+        """Return the application ID, independently of the durable reconciliation key."""
+        return self.original_message_id if self.original_message_id is not None else self.message_id
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -1361,6 +1381,10 @@ class DurableAgentStateMessage:
             result[DurableStateFields.AUTHOR_NAME] = self.author_name
         if self.message_id is not None:
             result[DurableStateFields.MESSAGE_ID] = self.message_id
+        if self.original_message_id is not None:
+            if not isinstance(self.original_message_id, str):
+                raise ValueError("originalMessageId must be a string when present.")
+            result["originalMessageId"] = self.original_message_id
         if self.extension_data is not None:
             result[DurableStateFields.EXTENSION_DATA] = self.extension_data
         return _json_snapshot(result)
@@ -1378,6 +1402,10 @@ class DurableAgentStateMessage:
             message_id=data.get(DurableStateFields.MESSAGE_ID),
             extension_data=data.get(DurableStateFields.EXTENSION_DATA),
         )
+        if "originalMessageId" in data:
+            if not isinstance(data["originalMessageId"], str):
+                raise ValueError("originalMessageId must be a string when present.")
+            message.original_message_id = data["originalMessageId"]
         known = {
             DurableStateFields.ROLE,
             DurableStateFields.CONTENTS,
@@ -1385,6 +1413,7 @@ class DurableAgentStateMessage:
             DurableStateFields.CREATED_AT,
             DurableStateFields.MESSAGE_ID,
             DurableStateFields.EXTENSION_DATA,
+            "originalMessageId",
         }
         message.unknown_fields = {key: deepcopy(value) for key, value in data.items() if key not in known}
         return message
@@ -1425,6 +1454,7 @@ class DurableAgentStateMessage:
         """
         raw = _json_snapshot(data)
         _validate_core_message(raw)
+        _validate_core_message_keys(raw)
         message = load_agent_response({"messages": [raw]}).messages[0]
         stored = DurableAgentStateMessage.from_chat_message(message)
         for content, original in zip(stored.contents, raw.get("contents", []), strict=True):
@@ -1440,6 +1470,7 @@ class DurableAgentStateMessage:
                 }
         known = {"type", "role", "contents", "author_name", "message_id", "additional_properties"}
         stored.unknown_fields = {key: value for key, value in raw.items() if key not in known}
+        stored._original_core_message = raw
         return stored
 
     @staticmethod
@@ -1465,9 +1496,22 @@ class DurableAgentStateMessage:
         )
         stored.ingestion_identity = message_identity(chat_message)
         known = {"type", "role", "contents", "author_name", "message_id", "additional_properties"}
-        stored.unknown_fields = {
-            key: value for key, value in _json_snapshot(chat_message.to_dict()).items() if key not in known
-        }
+        current_payload = _json_snapshot(chat_message.to_dict())
+        _validate_core_message_keys(current_payload)
+        stored.unknown_fields = {key: value for key, value in current_payload.items() if key not in known}
+        original = getattr(chat_message, "_durable_original_core_message", None)
+        if isinstance(original, dict):
+            # Only inert optional envelope data crosses this bridge. Current public
+            # fields remain authoritative after application/provider transformations.
+            from ._response_utils import _constructor_fields  # pyright: ignore[reportPrivateUsage]
+
+            raw = _json_snapshot(original)
+            _validate_core_message_keys(raw)
+            message_fields = {*_constructor_fields(Message), "type"}
+            stored.unknown_fields = {
+                **{key: value for key, value in raw.items() if key not in message_fields},
+                **stored.unknown_fields,
+            }
         return stored
 
     def to_chat_message(self) -> Any:
@@ -1488,8 +1532,8 @@ class DurableAgentStateMessage:
         if self.author_name is not None:
             kwargs["author_name"] = self.author_name
 
-        if self.message_id is not None:
-            kwargs["message_id"] = self.message_id
+        if self.public_message_id is not None:
+            kwargs["message_id"] = self.public_message_id
 
         if self.extension_data is not None:
             # Copied, not shared. Callers treat the result as detached and mutate it: retention

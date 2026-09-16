@@ -47,10 +47,10 @@ from ._history_provider import (
     service_stores_history,
     unbind_durable_history,
 )
-from ._invocation_safety import DurableToolGuard, InvocationProgress
+from ._invocation_safety import DurableServiceClient, DurableToolGuard, InvocationProgress
 from ._message_identity import message_identity
 from ._models import RunRequest
-from ._response_utils import is_terminal_agent_response, load_agent_response
+from ._response_utils import is_terminal_agent_response, load_agent_response, preserve_input_envelope
 from ._retention import (
     DEFAULT_MAX_STATE_BYTES,
     DEFAULT_RETENTION,
@@ -499,19 +499,12 @@ class AgentEntity:
         if not uses_context_pipeline:
             self.state.data.conversation_history.append(state_request)
 
-        binding_token = (
-            bind_durable_history(
-                DurableHistoryBinding(
-                    state_provider=self._state_provider,
-                    correlation_id=correlation_id,
-                    # The provider stays attached either way so core never injects one of its own,
-                    # but it must not load history on a turn the service is already carrying.
-                    service_owns_history=service_owns_history,
-                )
-            )
-            if durable_history is not None
-            else None
+        history_binding = DurableHistoryBinding(
+            state_provider=self._state_provider,
+            correlation_id=correlation_id,
+            service_owns_history=service_owns_history,
         )
+        binding_token = bind_durable_history(history_binding) if uses_context_pipeline else None
 
         # Bound before the try so the failure path can always reach it. ``_create_session`` can
         # raise, and referencing an unbound name while handling that would replace the agent's
@@ -597,9 +590,19 @@ class AgentEntity:
                 chat_messages = self._replay_all_messages()
                 run_kwargs = {"messages": chat_messages, "options": options}
 
-            if isinstance(self.agent, Agent):
+            middleware_agent = self.agent
+            if isinstance(middleware_agent, Agent):
+                if service_owns_history:
+                    invocation_agent = copy(cast(Any, middleware_agent))
+                    invocation_agent.client = DurableServiceClient(invocation_agent.client, history_binding.accept)
+                    self.agent = invocation_agent
+                middleware = [DurableToolGuard(progress, enabled=run_request.enable_tool_calls)]
+                # Core combines configured and run-level middleware here, then
+                # replaces the client-level list. Supplying only client_kwargs
+                # loses these safeguards whenever the agent has middleware.
+                run_kwargs["middleware"] = middleware
                 run_kwargs["client_kwargs"] = {
-                    "middleware": [DurableToolGuard(progress, enabled=run_request.enable_tool_calls)]
+                    "middleware": middleware,
                 }
             original_service_id = getattr(session, "service_session_id", None)
             try:
@@ -681,14 +684,15 @@ class AgentEntity:
 
         if not succeeded and uses_context_pipeline:
             # A failed pre-invocation/provider load did not deliver these messages.
-            # Retain receipts only for inputs actually staged by durable history;
-            # no portable external provider API proves an interrupted append.
+            # Keep affirmative completed primary/service hooks as well as staged
+            # local inputs. An interrupted external append still proves nothing.
             staged_inputs = {
                 (stored.ingestion_occurrence, stored.ingestion_identity)
                 for entry in self.state.data.conversation_history
                 if isinstance(entry, DurableAgentStateRequest) and entry.correlation_id == correlation_id
                 for stored in entry.messages
             }
+            staged_inputs.update(history_binding.accepted_inputs)
             self.state.data.ingested_messages = prior_receipts
             for stored in state_request.messages:
                 identity = stored.ingestion_occurrence or stored.message_id
@@ -966,14 +970,11 @@ class AgentEntity:
     @staticmethod
     def _to_current_message(message: DurableAgentStateMessage, request: RunRequest) -> Message | None:
         """Preserve core input content metadata rather than round-tripping through legacy types."""
-        if request.context_messages is not None and message.ingestion_identity:
-            for raw in request.context_messages:
-                original = load_agent_response({"messages": [raw]}).messages[0]
-                if (
-                    original.message_id == message.message_id
-                    and message_identity(original) == message.ingestion_identity
-                ):
-                    return original
+        raw = getattr(message, "_original_core_message", None)
+        if request.context_messages is not None and isinstance(raw, dict):
+            original = load_agent_response({"messages": [raw]}).messages[0]
+            preserve_input_envelope(original, cast("dict[str, Any]", raw))
+            return original
         return AgentEntity._to_replayable_message(message)
 
     @staticmethod

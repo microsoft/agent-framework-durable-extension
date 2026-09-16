@@ -9,27 +9,23 @@ pip install agent-framework-azurefunctions --pre
 ```
 
 Requires Python 3.10+ and `agent-framework-core>=1.13.0,<2`. The Durable Task dependency requires
-`pydantic>=2.11,<3`. Full unit runs passed on Python 3.13/core 1.16, Python 3.13/core 1.13 and
-Python 3.10/core 1.16. Pydantic 2.11 runtime validation remains blocked by dependency artifact
-downloads. The offline lock, lint, typing and both package builds passed for this follow-up.
+`pydantic>=2.11,<3`. The post-acceptance follow-up passed full local unit suites on
+Python 3.13/core 1.16, Python 3.13/core 1.13 and Python 3.10/core 1.16, plus both 45-test integration
+suites. Offline lock, lint, typing and both package builds passed. Exact Pydantic 2.11 validation
+remains unverified because dependency artifact downloads failed.
 See [prototype validation](../../samples/README.md#prototype-validation)
 for recorded results and limitations.
 
 ## Version 2 deployment warning
 
-The settings below describe the [PR #59 prototype](https://github.com/microsoft/agent-framework-durable-extension/pull/59),
-not an approved design or the contents of a published package. Design review belongs in
-[ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88).
-The outcome, retention telemetry and validation follow-up builds on prototype baseline `9b4550d`.
-It does not establish shared-schema acceptance or a released package contract.
-After ADR approval, the agreed implementation will be submitted as stacked PRs rather than merged
-from this prototype as-is.
+The architecture in [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88) was accepted and merged on September 15, 2026 into `feature/python-durable-thread-compaction` at `7d90e8f`. [PR #59](https://github.com/microsoft/agent-framework-durable-extension/pull/59) remains an integrated prototype, not a merge-as-is implementation or the contents of a published package. Focused, stacked implementation PRs will deliver the accepted architecture. The private prototype delivery layout does not establish shared-schema interoperability or a released package contract.
 
+> [!WARNING]
 > **Breaking deployment and state contract.** `AgentFunctionApp` and standalone `create_agent_entity`
 > require `deployment_mode="isolated_v2"`, or `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2` when the
 > argument is omitted/`None`. This is operator acknowledgement, not a handshake, security boundary
 > or proof of isolation. Use a separate hub/deployment with compatible workers and all clients.
-> Keep old workers and workflow histories on the old engine. The current .NET reader rejects version 2.
+> Keep old workers and workflow histories on the old engine. The current .NET reader rejects version 2. The gate applies to every prototype host, including samples and tests. ADR acceptance does not make this a production drop-in.
 
 Only `schemaVersion="2.0.0"` is writable. Legacy `1.x.y` and supported later `2.x.y` state can be
 read/round-tripped, but `run`, `reset` and `expire_responses` reject those layouts. No operation
@@ -66,12 +62,14 @@ Both import modes reject contradictory known receipt/result outcomes. Historical
 receipts can refer to transcript projections or mailbox backfills, so the marker alone cannot
 establish original-payload provenance. Unknown legacy outcomes remain unknown unless retained
 evidence establishes them. Existing completion timestamps and delivery windows are not refreshed.
+
+Without a mailbox, migration can enrich an existing receipt whose optional outcome is absent to `failed` from affirmative retained legacy failure evidence, including a typed `errorResponse`. It preserves the receipt's other fields and timestamp without recreating a mailbox or reopening delivery. Known receipt outcomes and independent mailbox evidence take precedence. Missing error content never establishes success.
+
 Whole-request digest idempotency prevents grace refresh after an exact retry, cold reload or
 subsequent run. The original logical session ID is retained for external history. Migration does
 not copy that store or move workflow action histories.
-No generated HTTP/MCP migration endpoint is provided. These are prototype constraints, not an agreed
-cross-runtime migration contract. See [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88)
-for the design discussion and [prototype validation](../../samples/README.md#prototype-validation)
+No generated HTTP/MCP migration endpoint is provided. These private prototype mechanics do not establish cross-runtime migration interoperability. See [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88)
+for the accepted architecture and [prototype validation](../../samples/README.md#prototype-validation)
 for recorded checks and remaining gaps.
 
 ## Durable Agent Extension
@@ -79,6 +77,8 @@ for recorded checks and remaining gaps.
 The durable agent extension lets you host Microsoft Agent Framework agents on Azure Durable Functions so they can persist state, replay conversation history, and recover from failures automatically.
 
 ### Basic Usage Example
+
+Before running this example, configure a separate Functions task hub/deployment with compatible version-2 workers and clients. Set `deployment_mode="isolated_v2"` only after the operator has verified that setup.
 
 ```python
 from agent_framework import Agent
@@ -106,6 +106,10 @@ Registration does not enable compaction. External primaries and store-only sinks
 policies, subject to the intentional service-branch restriction below. Multiple primaries or
 duplicate `source_id` values are rejected. Providers append through core hooks, followed by a final
 durable flush. Only agents without a context pipeline use direct entity transcript appends.
+
+The default `DurableHistoryProvider.after_run()` calls public `save_messages()` for separate request and response batches, so overrides can validate, transform or reject them. A single core hook can produce two saves for provenance, not an unchanged combined-batch cadence. Existing core and provider APIs are unchanged.
+
+Repeated public message IDs survive history reload through optional string `originalMessageId` in the private layout, alongside unique internal `messageId` values. The private occurrence attribute is not serialized into public message envelopes. The durable adapter presents internal IDs only during configured `CompactionProvider` hooks. Strategies use those IDs for internal summary/source links, while normal model calls, other providers and audits see public IDs. Arbitrary custom hooks that depend on public IDs or substitute different input IDs are not guaranteed transparent behavior. Unknown optional input message/content envelope fields remain inert JSON metadata, not dynamically loaded types. See [history integration](../durabletask/README.md#history-and-retention-settings).
 
 Eager pruning and pressure eviction are independent. The matrix assumes no explicit provider
 `prune_excluded` override.
@@ -135,6 +139,7 @@ Eager pruning and pressure eviction are independent. The matrix assumes no expli
 As an alternative to the default app above, configure an explicit budget for standalone agents and
 disable it for an existing named `workflow`. The sample byte budget is an application choice, not
 an inferred Functions backend limit.
+The same verified isolated deployment and explicit operator acknowledgement are required.
 
 ```python
 from agent_framework_durabletask import INHERIT
@@ -173,6 +178,8 @@ primary during service-owned runs, including per-service-call persistence. Core 
 to a configured primary on such runs. This branch-isolation restriction is not universal unchanged
 hook semantics. Use a distinct store-only sink with its own `source_id` to audit both branches.
 Its configured storage flags still apply.
+
+A completed save through an external primary's default after-run hook or a completed service-owned `ChatResponse` affirms the inputs actually accepted, even if the invocation later fails. This is accepted-input evidence, not invocation success or a distributed commit. Opaque custom `after_run()` overrides and interrupted saves do not permit inferred acknowledgement. A store-only sink cannot establish acceptance by the primary.
 
 HTTP polling uses independent original response snapshots in `responseMailbox`, including
 serializable metadata and structured `value`. Transcript pruning or reset cannot change those

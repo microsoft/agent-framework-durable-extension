@@ -242,9 +242,11 @@ def assert_current_positions(provider: _InMemoryStateProvider, state: dict[str, 
     history = provider.state.data.conversation_history
     positions = state[POSITIONS_KEY]
     for message in state[WORKING_BUFFER_KEY]:
-        entry, index = positions[message.message_id]
+        # Public IDs may repeat. Reconciliation must still identify the exact stored occurrence.
+        history_id = getattr(message, "_durable_history_id", None) or message.message_id
+        entry, index = positions[history_id]
         assert any(candidate is entry for candidate in history)
-        assert entry.messages[index].message_id == message.message_id
+        assert entry.messages[index].message_id == history_id
     assert len(positions) == len({message.message_id for message in transcript(provider)})
 
 
@@ -955,7 +957,9 @@ async def test_reused_ids_get_internal_revisions_without_changing_external_ids()
         marked = [message.text for message in transcript(cold) if (message.extension_data or {}).get("revision_marker")]
         assert marked == ["version two"]
         assert_current_positions(cold, state)
-    assert [message.message_id for message in loaded] == ids(provider)
+    # Cold replay restores application IDs, while private occurrence IDs retain the storage mapping.
+    assert [message.message_id for message in loaded] == ["shared"] * 4
+    assert [getattr(message, "_durable_history_id", None) for message in loaded] == ids(provider)
     assert [message.text for message in loaded] == ["version one", "answer-1", "version two", "answer-2"]
 
 

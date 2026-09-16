@@ -1,6 +1,8 @@
 {
+  "_comment": "Leave the acknowledgement blank until you select a new isolated task hub with compatible clients and workers. Then set DURABLE_AGENTS_DEPLOYMENT_MODE to isolated_v2 as described in ../README.md. Never reuse old workflow histories.",
   "IsEncrypted": false,
   "Values": {
+    "DURABLE_AGENTS_DEPLOYMENT_MODE": "",
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "DURABLE_TASK_SCHEDULER_CONNECTION_STRING": "Endpoint=http://localhost:8080;TaskHub=default;Authentication=None",

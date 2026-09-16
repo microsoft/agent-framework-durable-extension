@@ -404,7 +404,8 @@ async def test_terminal_core_hooks_respect_storage_flags_and_service_ownership(
         [] if service_owned else (["request"] if store_inputs else []) + (["errorResponse"] if store_outputs else [])
     )
     assert [entry["$type"] for entry in entries[1:]] == expected
-    assert bool(provider.raw["data"].get("ingestedMessages")) is (store_inputs and not service_owned)
+    # A completed service response affirms receipt independently of the inactive local storage flags.
+    assert bool(provider.raw["data"].get("ingestedMessages")) is (service_owned or store_inputs)
     assert [m.text for m in client.inputs[0]] == ([] if service_owned else ["previous valid answer"]) + ["first input"]
     assert _mailbox(provider, "first") == _json(serialize_agent_response(response))
     assert provider.writes == 1

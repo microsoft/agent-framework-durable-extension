@@ -431,7 +431,9 @@ async def test_store_true_false_true_parks_external_primary_but_not_store_only_s
             assert invocation is not registered
             assert invocation.context_providers[0].__wrapped__ is primary
         else:
-            assert invocation.context_providers[0] is primary
+            # Local runs observe completed primary saves without replacing the original hooks or resource.
+            assert invocation.context_providers[0].__wrapped__ is primary
+            assert agent.context_providers[0] is primary
         assert invocation.context_providers[1] is outputs and invocation.context_providers[2] is inputs
         assert outputs.load_messages is False and outputs.store_inputs is False and outputs.store_outputs is True
         assert inputs.load_messages is False and inputs.store_inputs is True and inputs.store_outputs is False

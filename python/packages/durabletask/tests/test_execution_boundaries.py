@@ -517,7 +517,7 @@ async def test_failed_model_turn_consumes_only_inputs_actually_saved_by_history(
 
 
 @pytest.mark.parametrize("per_call", [False, True], ids=["per-run", "per-service-call"])
-async def test_partial_external_save_does_not_claim_a_local_ingestion_receipt(per_call: bool) -> None:
+async def test_completed_external_save_preserves_receipt_when_a_later_service_call_fails(per_call: bool) -> None:
     external = _RecoverableExternalHistory()
     external.fail_reads = False
     client = _FailAfterFirstServiceCall()
@@ -554,9 +554,9 @@ async def test_partial_external_save_does_not_claim_a_local_ingestion_receipt(pe
         assert external.saved[0][0].message_id == message.message_id
         assert any(content.type == "function_call" for item in external.saved[0] for content in item.contents)
     assert data["conversationHistory"] == []
-    # External appends are outside the entity transaction. Even a saved first call
-    # cannot establish a portable local receipt for the interrupted whole run.
-    assert "external-partial-input" not in data.get("ingestedMessages", {})
+    # The first per-call save returned before the later service call failed.
+    # That affirms those inputs, not exactly-once external writes or whole-run success.
+    assert ("external-partial-input" in data.get("ingestedMessages", {})) is per_call
     calls_before_duplicate = len(client.received_messages)
     saved_before_duplicate = deepcopy(external.saved)
     assert (await entity.run(request)).to_dict() == response.to_dict()

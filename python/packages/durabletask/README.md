@@ -9,26 +9,22 @@ pip install agent-framework-durabletask --pre
 ```
 
 Requires Python 3.10+, `agent-framework-core>=1.13.0,<2` and `pydantic>=2.11,<3`.
-The full unit suite passed on Python 3.13/core 1.16, Python 3.13/core 1.13 and Python 3.10/core 1.16.
-Pydantic 2.11 runtime validation remains blocked by dependency artifact downloads.
-The offline lock, lint, typing and both package builds passed for this follow-up.
+The post-acceptance follow-up passed full local unit suites on Python 3.13/core 1.16,
+Python 3.13/core 1.13 and Python 3.10/core 1.16, plus both 45-test integration suites.
+Offline lock, lint, typing and both package builds passed. Exact Pydantic 2.11 validation remains
+unverified because dependency artifact downloads failed.
 See [prototype validation](../../samples/README.md#prototype-validation) for recorded results and limitations.
 
 ## Version 2 deployment warning
 
-The settings below describe the [PR #59 prototype](https://github.com/microsoft/agent-framework-durable-extension/pull/59),
-not an approved design or the contents of a published package. Design review belongs in
-[ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88).
-The outcome, retention telemetry and validation follow-up builds on prototype baseline `9b4550d`.
-It does not establish shared-schema acceptance or a released package contract.
-After ADR approval, the agreed implementation will be submitted as stacked PRs rather than merged
-from this prototype as-is.
+The architecture in [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88) was accepted and merged on September 15, 2026 into `feature/python-durable-thread-compaction` at `7d90e8f`. [PR #59](https://github.com/microsoft/agent-framework-durable-extension/pull/59) remains an integrated prototype, not a merge-as-is implementation or the contents of a published package. Focused, stacked implementation PRs will deliver the accepted architecture. The private prototype delivery layout does not establish shared-schema interoperability or a released package contract.
 
+> [!WARNING]
 > **Breaking deployment and state contract.** `DurableAIAgentWorker` requires
 > `deployment_mode="isolated_v2"`, or `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2` when the argument
 > is omitted/`None`. This is operator acknowledgement, not a handshake, security boundary or proof
 > of isolation. Use a separate hub/deployment with compatible workers and all clients. Keep old
-> workers and workflow histories on the old engine. The current .NET reader rejects version 2.
+> workers and workflow histories on the old engine. The current .NET reader rejects version 2. The gate applies to every prototype host, including samples and tests. ADR acceptance does not make this a production drop-in.
 
 Only `schemaVersion="2.0.0"` is writable. Legacy `1.x.y` and supported later `2.x.y` state can be
 read/round-tripped, but `run`, `reset` and `expire_responses` reject those layouts. No operation
@@ -38,7 +34,7 @@ protocol. Names are unchanged. Reusing an old `@name@key` on an empty new hub is
 A matching version label does not prove layout compatibility. The reader rejects known alternate
 `data.terminalResults` or `data.completionReceipts` containers instead of treating their completed
 requests as new work. Unrelated optional metadata remains opaque, including nested uses of those
-names. This guard is not a general format detector or a conversion between proposed schemas.
+names. This guard is not a general format detector or conversion to the accepted shared schema.
 
 `DurableWorkflowClient` and internal child dispatch wrap new starts with workflow engine version 2.
 Raw/legacy starts reject before revised actions execute. Native custom scheduling must use public
@@ -65,12 +61,14 @@ Both import modes reject contradictory known receipt/result outcomes. Historical
 receipts can refer to transcript projections or mailbox backfills, so the marker alone cannot
 establish original-payload provenance. Unknown legacy outcomes remain unknown unless retained
 evidence establishes them. Existing completion timestamps and delivery windows are not refreshed.
+
+Without a mailbox, migration can enrich an existing receipt whose optional outcome is absent to `failed` from affirmative retained legacy failure evidence, including a typed `errorResponse`. It preserves the receipt's other fields and timestamp without recreating a mailbox or reopening delivery. Known receipt outcomes and independent mailbox evidence take precedence. Missing error content never establishes success.
+
 Whole-request digest idempotency prevents grace refresh after an exact retry, cold reload or
 subsequent run. Migration retains the original logical session ID for external history and does
 not copy that store or migrate workflow histories. No generated HTTP/MCP migration endpoint is
-provided. These are prototype constraints, not an agreed
-cross-runtime migration contract. See [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88)
-for the design discussion and [prototype validation](../../samples/README.md#prototype-validation)
+provided. These private prototype mechanics do not establish cross-runtime migration interoperability. See [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88)
+for the accepted architecture and [prototype validation](../../samples/README.md#prototype-validation)
 for recorded checks and remaining gaps.
 
 ## Durable Task Integration
@@ -78,6 +76,8 @@ for recorded checks and remaining gaps.
 The durable task integration lets you host Microsoft Agent Framework agents using the [Durable Task](https://github.com/microsoft/durabletask-python) framework so they can persist state, replay conversation history, and recover from failures automatically.
 
 ### Basic Usage Example
+
+Before running this example, configure the endpoint and hub as a separate version-2 deployment with compatible workers and clients. Set `deployment_mode="isolated_v2"` only after the operator has verified that setup. A localhost endpoint alone is not isolation.
 
 ```python
 from agent_framework import Agent
@@ -109,6 +109,12 @@ are rejected. Registration does not enable compaction. The provider owns appends
 with a final durable flush after all after-run callbacks. Only agents without a context pipeline use
 direct entity transcript appends.
 
+The default `DurableHistoryProvider.after_run()` calls public `save_messages()` for the selected request and response batches. An override can validate, transform or reject each batch. One core after-run hook can therefore produce two saves to preserve request/response provenance, rather than core's combined-batch cadence. Existing core and provider APIs are unchanged.
+
+Repeated public `Message.message_id` values are preserved in the private optional string field `originalMessageId` when durable storage allocates a unique internal `messageId`. Public history loads restore the original IDs. A private occurrence attribute supports reconciliation but is not serialized into public message envelopes. Unknown optional input message/content envelope fields remain inert JSON metadata, not dynamically loaded types.
+
+The durable adapter invokes configured `CompactionProvider` hooks with internal unique IDs only for the hook duration. Normal model calls, other providers and audit sinks see public IDs. Compaction strategies must use the IDs presented inside those hooks for summary/source links, which belong to the internal reconciliation domain, not the public-ID domain. This does not promise transparent behavior for arbitrary custom hooks that depend on application IDs or substitute different input IDs.
+
 Eager pruning and pressure eviction are independent. The matrix assumes no explicit provider
 `prune_excluded` override.
 
@@ -138,6 +144,7 @@ Eager pruning and pressure eviction are independent. The matrix assumes no expli
 
 As an alternative to the default registration above, use an unregistered worker, `my_agent` and an
 existing named `workflow` to set an explicit byte budget while disabling it for workflow nodes.
+The same verified isolated deployment and explicit operator acknowledgement are required.
 
 ```python
 from agent_framework_durabletask import INHERIT
@@ -177,6 +184,8 @@ configured primary on such runs. This restriction avoids mixing service/client b
 universal unchanged-hook parity. Use a distinct store-only sink with its own `source_id` to audit
 both branches. Its configured storage flags still apply.
 
+A completed save through an external primary's default after-run hook affirms acceptance of the inputs actually saved. A completed service-owned `ChatResponse` likewise affirms its inputs, even if the invocation later fails. These observations preserve accepted-input evidence, not a successful invocation outcome or a distributed commit. Opaque custom `after_run()` overrides and interrupted saves do not permit inferred acknowledgement. A store-only audit sink is not the primary and cannot establish its acceptance.
+
 `responseMailbox` holds independent original serializable response snapshots, including metadata
 and structured `value`, rather than rebuilding results from the mutable transcript. New
 `completedCorrelations` receipts retain `completedAt` and the invocation `outcome`, either
@@ -191,7 +200,7 @@ Known receipt and retained-result outcomes must agree. Reads, writes and cleanup
 contradictory pair before returning a result or deleting evidence, including when the payload is
 already expired. Missing outcomes and legacy payloads with insufficient evidence remain supported.
 The prototype schema declares the optional outcome enum. Cross-record consistency is enforced by
-the runtime, not by JSON Schema or by changing the prototype into the proposed shared wire format.
+the runtime, not by JSON Schema or by changing the prototype into the accepted shared wire format.
 
 The standalone SDK API is unchanged. Retained original responses are returned unmodified rather
 than having receipt metadata injected into their payloads. Acceptance alone is not completion.

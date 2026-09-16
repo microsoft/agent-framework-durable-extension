@@ -46,9 +46,6 @@ load_dotenv()
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# Providers holding a Redis connection pool, closed when the worker stops.
-_open_history_providers: list[RedisHistoryProvider] = []
-
 
 def create_archivist_agent() -> Agent:
     """Create an agent whose history is stored in Redis.
@@ -57,8 +54,6 @@ def create_archivist_agent() -> Agent:
         Agent: The configured Archivist agent.
     """
     history = RedisHistoryProvider(os.getenv("REDIS_CONNECTION_STRING", "redis://localhost:6379"))
-    # Kept so the worker can hand the connection pool back on the way out.
-    _open_history_providers.append(history)
 
     return Agent(
         client=FoundryChatClient(
@@ -124,20 +119,15 @@ def setup_worker(worker: DurableTaskSchedulerWorker) -> DurableAIAgentWorker:
 
 async def main():
     """Main entry point for the worker process."""
-    worker = get_worker()
-    setup_worker(worker)
-
-    logger.info("Worker is ready and listening for requests...")
-
     try:
-        worker.start()
-        while True:
-            await asyncio.sleep(1)
+        with get_worker() as worker:
+            setup_worker(worker)
+            logger.info("Worker is ready and listening for requests...")
+            worker.start()
+            while True:  # noqa: ASYNC110
+                await asyncio.sleep(1)
     except KeyboardInterrupt:
         logger.debug("Worker shutdown initiated")
-    finally:
-        for history in _open_history_providers:
-            await history.aclose()
 
 
 if __name__ == "__main__":

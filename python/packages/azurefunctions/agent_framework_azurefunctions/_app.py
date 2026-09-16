@@ -1577,7 +1577,8 @@ class AgentFunctionApp(DFAppBase):
 
         Raises:
             ValueError: If required arguments are missing or context is invalid JSON
-            RuntimeError: If agent execution fails
+            RuntimeError: If agent execution fails, response delivery expires, or polling
+                times out with an unresolved invocation outcome
         """
         logger.debug("[MCP Tool Handler] Processing invocation for agent '%s'", agent_name)
 
@@ -1658,15 +1659,24 @@ class AgentFunctionApp(DFAppBase):
                 response_text = str(result.get("response", "No response"))
                 logger.info("[MCP Tool] Agent '%s' responded successfully", agent_name)
                 return response_text
-            error_msg = result.get("error", "Unknown error")
-            if result.get("status") == "already_completed":
-                error_msg = f"{error_msg} Invocation outcome: {result.get('outcome', 'unknown')}."
-            logger.error("[MCP Tool] Agent '%s' execution failed: %s", agent_name, error_msg)
-            raise RuntimeError(f"Agent execution failed: {error_msg}")
+            if result.get("status") != "timeout":
+                error_msg = result.get("error", "Unknown error")
+                if result.get("status") == "already_completed":
+                    error_msg = f"{error_msg} Invocation outcome: {result.get('outcome', 'unknown')}."
+                logger.error("[MCP Tool] Agent '%s' execution failed: %s", agent_name, error_msg)
+                raise RuntimeError(f"Agent execution failed: {error_msg}")
 
         except Exception as exc:
             logger.error("[MCP Tool] Error invoking agent '%s': %s", agent_name, exc, exc_info=True)
             raise
+
+        timeout_message = (
+            "Agent response timed out. Invocation outcome unresolved. "
+            f"Correlation ID: {correlation_id}. Session ID: {session_id}. "
+            "Execution may still be in progress."
+        )
+        logger.warning("[MCP Tool] %s", timeout_message)
+        raise RuntimeError(timeout_message)
 
     def _setup_health_route(self) -> None:
         """Register the optional health check route."""

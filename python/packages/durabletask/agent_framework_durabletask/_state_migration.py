@@ -19,7 +19,7 @@ from ._durable_agent_state import (
     _validate_json,  # pyright: ignore[reportPrivateUsage]
 )
 from ._message_identity import message_identity
-from ._response_utils import load_agent_response
+from ._response_utils import invocation_outcome, load_agent_response
 from ._retention import StateCapacityError
 from ._workflows.naming import parse_workflow_message_id
 
@@ -236,10 +236,13 @@ def migrate_legacy_state(
 
     Only recorded responses receive completion/mailbox backfill. Surviving legacy
     responses may be partial, not immutable originals. Existing delivery records
-    are preserved, never reopened. A fresh grace timestamp is captured once per
-    call, not once per migration ID: the parent owns retry idempotency and must not
-    repeatedly migrate the same source to refresh grace. Fixed now gives fixed
-    backfill timestamps. Existing state parsing owns legacy transcript conversion.
+    are never reopened. Without a mailbox, affirmative retained legacy failure
+    evidence may fill an unknown receipt outcome, preserving its timestamp and
+    other fields. It cannot override known outcomes or establish success from
+    absent errors. A fresh grace timestamp is captured once per call, not once per
+    migration ID: the parent owns retry idempotency and must not repeatedly migrate
+    the same source to refresh grace. Fixed now gives fixed backfill timestamps.
+    Existing state parsing owns legacy transcript conversion.
 
     Args:
         source: Raw exported version-1 state. The caller's object remains untouched.
@@ -331,6 +334,15 @@ def migrate_legacy_state(
                     now=timestamp,
                     legacy=True,
                 )
+            elif (
+                correlation_id not in state.data.response_mailbox
+                and DurableStateFields.OUTCOME not in state.data.completed_correlations[correlation_id]
+                and invocation_outcome(entry.to_run_response(entry), legacy=True) == "failed"
+            ):
+                # A partial legacy response can still prove failure, but cannot
+                # replace an immutable known outcome or independent mailbox evidence.
+                # Enrich only the receipt, never restore delivery or refresh its time.
+                state.data.completed_correlations[correlation_id][DurableStateFields.OUTCOME] = "failed"
 
     state._backfill_completion_outcomes(require_known=require_known_outcomes)  # pyright: ignore[reportPrivateUsage]
     state.schema_version = DurableAgentState.SCHEMA_VERSION

@@ -408,7 +408,7 @@ def test_declared_framework_reconstruction_does_not_import_payload_type_names(re
     if reply_type is Message:
         payload = {"role": "user", "contents": [payload]}
     with patch("importlib.import_module", side_effect=AssertionError("Payload type names must remain data")):
-        restored = reconstruct_to_type(payload, reply_type)
+        restored = reconstruct_to_type(payload, reply_type, encoded=False)
     assert isinstance(restored, reply_type)
 
 
@@ -419,7 +419,7 @@ def test_content_known_nested_envelopes_are_rebuilt_but_application_results_stay
         "function_call": {"type": "function_call", "call_id": "call", "name": "lookup", "arguments": "{}"},
         "result": {"type": "application_result", "items": [False, None, 0]},
     }
-    restored = reconstruct_to_type(payload, Content)
+    restored = reconstruct_to_type(payload, Content, encoded=False)
     assert isinstance(restored, Content)
     assert isinstance(restored.function_call, Content)
     assert restored.function_call.call_id == "call"
@@ -428,6 +428,6 @@ def test_content_known_nested_envelopes_are_rebuilt_but_application_results_stay
 
 @pytest.mark.parametrize("content_type", get_args(ContentType))
 def test_all_declared_core_content_kinds_reconstruct_without_a_copied_kind_allowlist(content_type: str) -> None:
-    restored = reconstruct_to_type({"type": content_type}, Content)
+    restored = reconstruct_to_type({"type": content_type}, Content, encoded=False)
     assert isinstance(restored, Content)
     assert restored.type == content_type

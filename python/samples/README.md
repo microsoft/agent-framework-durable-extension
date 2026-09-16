@@ -4,10 +4,7 @@ This directory contains samples for durable agent hosting using the Durable Task
 
 ## PR #59 prototype scope
 
-This is an integrated reference for [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88),
-not the final implementation PR. After ADR approval, the agreed changes will be split into stacked
-implementation PRs. [PR #59](https://github.com/microsoft/agent-framework-durable-extension/pull/59)
-remains the prototype until that stack lands. Its APIs and deployment choices are provisional.
+The architecture in [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88) was accepted and merged on September 15, 2026 into `feature/python-durable-thread-compaction` at `7d90e8f`. [PR #59](https://github.com/microsoft/agent-framework-durable-extension/pull/59) remains the integrated prototype, not a merge-as-is implementation. Focused, stacked implementation PRs will deliver the accepted architecture. The private prototype delivery layout does not establish shared-schema interoperability, and the prototype is not a production drop-in.
 
 The prototype's version-2 runtime requires `deployment_mode="isolated_v2"` on `DurableAIAgentWorker`,
 `AgentFunctionApp` and the standalone Functions entity factory, or
@@ -15,6 +12,7 @@ The prototype's version-2 runtime requires `deployment_mode="isolated_v2"` on `D
 host environment accordingly. This is operator acknowledgement, not proof of isolation. Use a
 separate hub/deployment with compatible workers and clients. Old workers and workflow histories,
 including paused legacy HITL, must stay on the old engine.
+This gate applies to every prototype host, including samples and tests. A sample or localhost endpoint does not establish isolation on the operator's behalf.
 
 Only `2.0.0` entity state is writable. Legacy and supported future-minor state is read-only.
 Names are unchanged, so using an old `@name@key` on an empty new hub is not migration. Explicit
@@ -29,10 +27,38 @@ reject before revised actions execute. Rewrapping old starts is not history migr
 
 ## Prototype validation
 
-The published baseline is
-[prototype commit 9b4550d](https://github.com/microsoft/agent-framework-durable-extension/commit/9b4550d).
-The results below were recorded locally for the outcome, media, failure-boundary and telemetry
-follow-up. They are not the current remote CI status or a claim of release readiness. See
+### Post-acceptance correctness validation
+
+The post-acceptance follow-up was validated locally with these results. Check the PR head and
+remote checks separately before treating a local result as a published CI result.
+
+| Check | Result |
+| --- | --- |
+| Python 3.13 / core 1.16 | 4,116 passed, zero skipped |
+| Python 3.13 / real cached core 1.13 | 4,096 passed, zero skipped |
+| Python 3.10 / core 1.16 | 4,116 passed, zero skipped |
+| Direct DTS integration | 45 passed |
+| Functions / Azure Storage integration | 45 passed |
+| Package lint, 165-file format check, both source analyzers and Linux test typing | Passed |
+| Offline lock, wheel and source distributions for both packages | Passed |
+
+The 20-case difference on core 1.13 comes from middleware singleton/bundle forms that the older
+core does not expose. Shared list-form cases run on both versions. The regression coverage includes
+literal workflow dictionaries, explicit null routing, public history IDs, acknowledged-input
+receipts, nested opaque input metadata, middleware composition, cold mailbox reads, conservative
+legacy outcome enrichment, MCP timeouts and sample entrypoints. Real host tests retain the limits
+described below, rather than proving hosted-model media support or cross-runtime interoperability.
+
+The Functions launch environment explicitly selected the isolated test interpreter. An initial
+attempt without that child-interpreter configuration could not start the sample hosts. That was
+corrected in the local test launcher without changing product behavior. Exact Pydantic 2.11 remains
+unverified because its isolated artifact download failed with a TLS handshake error.
+
+### Historical outcome and retention validation
+
+The results below are the historical local outcome, media, failure-boundary and telemetry follow-up to
+[prototype baseline 9b4550d](https://github.com/microsoft/agent-framework-durable-extension/commit/9b4550d), not the post-acceptance follow-up above.
+These pinned counts are not current remote CI status or a claim of release readiness. See
 [PR #59 checks](https://github.com/microsoft/agent-framework-durable-extension/pull/59/checks)
 for remote results.
 
@@ -177,6 +203,10 @@ intentionally suppress both load and store hooks on the inactive primary, includ
 That differs from core 1.16 behavior. Use a distinct store-only sink to audit both service/client
 branches. Do not assume universal unchanged-hook semantics or retry-safe external effects.
 
+The default `DurableHistoryProvider.after_run()` calls public `save_messages()` for request and response batches. Overrides can validate, transform or reject each batch, and one core hook can produce two saves for provenance. A completed save through an external primary's default hook, or a completed service-owned `ChatResponse`, preserves affirmative input acceptance after a later invocation failure. Opaque custom after-run hooks and interrupted saves do not permit inferred acknowledgement. Store-only sinks do not establish primary acceptance. Existing core and provider APIs are unchanged.
+
+Durable history preserves repeated public IDs through optional string `originalMessageId` in its private layout while keeping unique internal `messageId` values. Public history loads, normal model calls, other providers and audits use public IDs. Configured `CompactionProvider` hooks temporarily see internal IDs and must use those IDs for internal summary/source links. Arbitrary custom hooks that depend on public IDs or substitute different input IDs are not guaranteed transparent behavior. Private occurrence attributes are not serialized into public message envelopes. Unknown optional input message/content envelope fields remain inert metadata, not dynamically loaded types.
+
 Workflow delta transport uses parallel occurrence IDs, not public `Message.message_id` rewrites.
 The full selected logical conversation and all response messages remain available for downstream
 projection. Private forwarding provenance is internal checkpoint data, not application metadata.
@@ -194,6 +224,8 @@ An older unknown receipt still prevents reruns. Strict migration can require tru
 but a possibly pruned legacy transcript without an error is not proof of success. The default
 legacy-compatible path retains duplicate protection. Fresh acceptance-only responses do not record
 completion, and fire-and-forget acceptance remains distinct from completion.
+
+When no mailbox exists, migration can enrich an existing receipt with an absent outcome to `failed` from affirmative retained legacy evidence, including typed `errorResponse`. Known receipt outcomes and independent mailboxes take precedence. Enrichment preserves the original timestamp and other receipt fields without reopening delivery or recreating a mailbox.
 
 The shared [retention telemetry](../packages/durabletask/README.md#retention-telemetry) measures staged
 deletion, not committed deletion. A `set_state` return or failure leaves commit status unknown.
@@ -276,6 +308,8 @@ docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 mcr.microsoft.com/dt
 The DTS dashboard will be available at `http://localhost:8082`.
 
 ### Environment Configuration
+
+First configure an isolated version-2 hub/deployment and point every sample worker and client at it. Only after verifying that setup should the operator set `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2` for samples that omit an explicit deployment mode. Do not enable acknowledgement automatically for an existing or shared production hub. Starting the emulator alone does not establish isolation.
 
 Each sample reads configuration from environment variables. You'll need to set the following environment variables:
 

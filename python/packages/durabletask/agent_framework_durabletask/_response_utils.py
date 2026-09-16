@@ -69,6 +69,58 @@ def _load_message(data: Any) -> Message:
     return Message(**fields)
 
 
+def preserve_input_envelope(message: Message, raw: dict[str, Any]) -> None:
+    """Attach inert input extras to their original objects, not their list positions."""
+    message._durable_original_core_message = deepcopy(raw)  # type: ignore[attr-defined]
+
+    def attach(content: Content, payload: dict[str, Any]) -> None:
+        content._durable_original_core_content = deepcopy(payload)  # type: ignore[attr-defined]
+        if isinstance(content.function_call, Content) and isinstance(payload.get("function_call"), dict):
+            attach(content.function_call, payload["function_call"])
+        names = ["items", "inputs"]
+        if content.type in ("code_interpreter_tool_result", "shell_tool_result"):
+            names.append("outputs")
+        for name in names:
+            values = getattr(content, name, None)
+            originals = payload.get(name)
+            if isinstance(values, list) and isinstance(originals, list):
+                for value, original in zip(cast("list[Any]", values), cast("list[Any]", originals)):
+                    if isinstance(value, Content) and isinstance(original, dict):
+                        attach(value, cast("dict[str, Any]", original))
+
+    for content, payload in zip(message.contents, raw.get("contents", [])):
+        if isinstance(payload, dict):
+            attach(content, cast("dict[str, Any]", payload))
+
+
+def serialize_input_content(content: Content) -> dict[str, Any]:
+    """Restore inert extras from the same content occurrence, retaining current fields."""
+    current = deepcopy(content.to_dict())
+    raw_value = getattr(content, "_durable_original_core_content", None)
+    raw = cast("dict[str, Any]", raw_value) if isinstance(raw_value, dict) else {}
+    if raw.get("type") == content.type:
+        fields = set(_constructor_fields(Content))
+        defaults = {
+            key: deepcopy(value)
+            for key, value in raw.items()
+            if key not in fields or (key != "raw_representation" and getattr(content, key, object()) == value)
+        }
+        current = {**defaults, **current}
+    if isinstance(content.function_call, Content):
+        current["function_call"] = serialize_input_content(content.function_call)
+    names = ["items", "inputs"]
+    if content.type in ("code_interpreter_tool_result", "shell_tool_result"):
+        names.append("outputs")
+    for name in names:
+        values = getattr(content, name, None)
+        if isinstance(values, list):
+            current[name] = [
+                serialize_input_content(value) if isinstance(value, Content) else deepcopy(value)
+                for value in cast("list[Any]", values)
+            ]
+    return current
+
+
 def _serialize_model_value(value: BaseModel) -> tuple[Any, bool]:
     """Prefer alias JSON; use field-name JSON when serialization aliases are not inputs."""
     payload = value.model_dump(mode="json", by_alias=True, round_trip=True)
