@@ -20,6 +20,7 @@ from agent_framework import (
     AgentResponseUpdate,
     AgentSession,
     Content,
+    HistoryProvider,
     Message,
     ResponseStream,
     SupportsAgentRun,
@@ -444,8 +445,17 @@ class AgentEntity:
 
     def reset(self) -> None:
         """Clear local history/session context without erasing execution receipts."""
-        if self._has_context_pipeline() and self._find_durable_history_provider() is None:
-            raise NotImplementedError("Reset of external history requires a provider-owned clear operation.")
+        if self._has_context_pipeline():
+            providers = cast("Sequence[Any]", self.agent.context_providers)  # type: ignore[attr-defined]
+            # A durable audit sink does not own the primary's history. Keep its
+            # normal flush/capture path separate from reset admission.
+            if any(
+                isinstance(provider, HistoryProvider)
+                and provider.load_messages
+                and not isinstance(provider, DurableHistoryProvider)
+                for provider in providers
+            ):
+                raise NotImplementedError("Reset of external history requires a provider-owned clear operation.")
         original = self.state
         self._state_provider.replace_cached_state(deepcopy(original))
         try:

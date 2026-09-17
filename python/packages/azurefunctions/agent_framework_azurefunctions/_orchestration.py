@@ -7,7 +7,7 @@ This module provides support for using agents inside Durable Function orchestrat
 
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 import azure.durable_functions as df
 from agent_framework import AgentSession
@@ -116,6 +116,21 @@ class AgentTask(_TypedCompoundTask):
                 )
 
                 try:
+                    if isinstance(raw_result, dict):
+                        raw_result = cast(dict[str, Any], raw_result)
+                        if (
+                            raw_result.get("status") == "error"
+                            and isinstance(raw_result.get("error"), str)
+                            and "type" not in raw_result
+                            and "messages" not in raw_result
+                        ):
+                            # The wrapper reported a failure, not an AgentResponse.
+                            # Preserve its diagnostic, not an invented AgentResponse
+                            # or a parsing error. Ignore opaque sibling metadata.
+                            raise ValueError(
+                                f"Agent entity operation failed for correlation_id {self._correlation_id}: "
+                                f"{raw_result['error']}"
+                            )
                     response = load_agent_response(raw_result)
 
                     if self._response_format is not None:
