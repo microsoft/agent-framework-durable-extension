@@ -30,6 +30,9 @@ after response expiry or unavailability. Azure Functions HTTP returns `410` with
 structured values, including explicit null.
 Typed shared results require a present `value` and a JSON-preserving projection rather than
 text inference, type coercion or discarded fields.
+The Core `agent_response` snapshot carries a versioned `_durable_value_policy` marker so the
+matching loader preserves these restrictions after JSON transport. It conveys no execution
+or completion authority and does not duplicate the value.
 Available failed results and state decode errors return `500`. Transient storage reads retry
 within the bounded polling limit.
 

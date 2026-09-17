@@ -26,6 +26,9 @@ looks up canonical results and completion receipts without lifecycle writes. Unk
 remain inert in storage. A targeted unsupported profile projection may fail without changing
 the original snapshot. Typed shared results require a present `value` and a JSON-preserving
 projection. Consumers do not infer it from text, coerce types or discard unknown value fields.
+`serialize_agent_response()` carries these restrictions through Core JSON using the versioned
+`_durable_value_policy` marker. It does not duplicate the value, identify a runtime class or
+establish completion authority. Use the matching loader when consuming that snapshot.
 
 Both Durable Task and Azure Functions polling consumers read canonical results and retain
 known completion outcomes when response delivery expires or is unavailable. Durable Task

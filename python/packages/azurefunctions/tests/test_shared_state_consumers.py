@@ -588,6 +588,61 @@ async def test_http_snapshot_reaches_public_proxy_typed_task_without_reparsing_t
     _assert_one_delivery(client, sleep, raw)
 
 
+@pytest.mark.parametrize("precompleted", [False, True])
+@pytest.mark.parametrize("shape", ["absent", "coerced", "dropped-field", "valid", "null"])
+async def test_http_shared_value_policy_survives_loading_and_typed_task_delivery(
+    precompleted: bool,
+    shape: str,
+    handlers: tuple[HttpHandler, McpHandler],
+    sleep: AsyncMock,
+) -> None:
+    from agent_framework_durabletask import ensure_response_format, serialize_agent_response
+
+    from agent_framework_azurefunctions._orchestration import AgentTask
+
+    stored = _wire_response('{"answer":42}')
+    values = {
+        "coerced": {"answer": "42"},
+        "dropped-field": {"answer": 42, "future": False},
+        "valid": {"answer": 42},
+        "null": None,
+    }
+    if shape != "absent":
+        stored["value"] = deepcopy(values[shape])
+    raw = _shared_state(response=stored)
+    client = _client(raw)
+    http = await handlers[0](_request(), client)
+    assert http.status_code == 200
+    snapshot = json.loads(http.get_body())["agent_response"]
+    original_snapshot = deepcopy(snapshot)
+    response_format = NullAnswer if shape == "null" else Answer
+    valid = shape in ("valid", "null")
+    for _ in range(2):
+        direct = load_agent_response(deepcopy(snapshot))
+        if valid:
+            ensure_response_format(response_format, CORRELATION_ID, direct)
+            assert isinstance(direct.value, response_format)
+            assert direct.value.model_dump(mode="json") == values[shape]
+        else:
+            with pytest.raises(ValueError, match="no structured value|cannot preserve"):
+                ensure_response_format(response_format, CORRELATION_ID, direct)
+        child = AtomicTask(7, NoOpAction())
+        if precompleted:
+            child.set_value(is_error=False, value=deepcopy(snapshot))
+        task = AgentTask(child, response_format, CORRELATION_ID)
+        if not precompleted:
+            child.set_value(is_error=False, value=deepcopy(snapshot))
+        assert task.state is (TaskState.SUCCEEDED if valid else TaskState.FAILED)
+        # A second consumer serialization must not remove the policy either.
+        snapshot = json.loads(json.dumps(serialize_agent_response(load_agent_response(snapshot))))
+        assert ("value" in snapshot) is (shape != "absent")
+        if shape != "absent":
+            assert snapshot["value"] == values[shape]
+    assert client.read_entity_state.return_value.entity_state == raw
+    assert json.loads(http.get_body())["agent_response"] == original_snapshot
+    _assert_one_delivery(client, sleep, raw)
+
+
 @pytest.mark.parametrize("status", ["error", "timeout", "accepted"])
 def test_empty_non_success_text_still_uses_diagnostic(status: str, app: AgentFunctionApp) -> None:
     assert app._convert_payload_to_text({"status": status, "response": "", "error": "Diagnostic"}) == "Diagnostic"
