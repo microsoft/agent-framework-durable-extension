@@ -1,0 +1,226 @@
+[
+  {
+    "description": "Version-scoped correlation IDs and optional binding",
+    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json" },
+    "tests": [
+      {
+        "description": "V2 with empty transcript and no binding",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "V2 request without a correlation",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "request" }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "V2 response without a correlation",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "response" }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "V2 error response without a correlation",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "errorResponse" }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "V2 request with a valid correlation",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "request", "correlationId": "Case-sensitive-id" }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "V2 response with a valid correlation",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "response", "correlationId": "Case-sensitive-id" }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "V2 error response with a valid correlation",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "errorResponse", "correlationId": "Case-sensitive-id" }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "V2 blank request correlation is rejected",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "request", "correlationId": "" }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": false
+      },
+      {
+        "description": "V2 whitespace response correlation is rejected",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "response", "correlationId": "   " }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": false
+      },
+      {
+        "description": "V2 control-character error correlation is rejected",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "errorResponse", "correlationId": "id\u0000" }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": false
+      },
+      {
+        "description": "V2 trailing newline correlation is rejected",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "request", "correlationId": "id\n" }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": false
+      },
+      {
+        "description": "V2 null correlation is not omission",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "response", "correlationId": null }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": false
+      },
+      {
+        "description": "Legacy blank correlation remains unchanged",
+        "data": { "schemaVersion": "1.0.0", "data": { "conversationHistory": [{ "$type": "request", "correlationId": "" }] } },
+        "valid": true
+      },
+      {
+        "description": "Legacy whitespace correlation remains unchanged",
+        "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "$type": "response", "correlationId": "   " }] } },
+        "valid": true
+      },
+      {
+        "description": "Proposed 1.2 control-character correlation remains unchanged",
+        "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "$type": "errorResponse", "correlationId": "id\u0000" }] } },
+        "valid": true
+      },
+      {
+        "description": "V2 compaction still has no correlation",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "compaction" }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "V2 compaction rejects even a valid correlation",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "compaction", "correlationId": "valid-id" }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": false
+      },
+      {
+        "description": "Unknown V2 entry discriminator is rejected",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "future" }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": false
+      },
+      {
+        "description": "Shared validation preserves opaque profile data without approving it for restoration",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": {}, "completionReceipts": {}, "historyBinding": {} } },
+        "valid": true
+      },
+      {
+        "description": "Opaque null profile is preserved, not interpreted as a usable profile",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": {}, "completionReceipts": {}, "historyBinding": null } },
+        "valid": true
+      },
+      {
+        "description": "Binding remains forbidden in legacy state",
+        "data": { "schemaVersion": "1.2.0", "data": { "historyBinding": { "version": 1, "ownerKind": "historyProvider", "providerKey": "example.config" } } },
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "Schema 2.0 lossless message content",
+    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/v2ChatMessage" },
+    "tests": [
+      { "description": "Developer role", "data": { "role": "developer", "contents": [] }, "valid": true },
+      { "description": "Unknown role remains invalid", "data": { "role": "future" }, "valid": false },
+      {
+        "description": "Verbatim non-JSON function arguments",
+        "data": { "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": " { \"partial\": " }] },
+        "valid": true
+      },
+      {
+        "description": "Original empty string arguments",
+        "data": { "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": "" }] },
+        "valid": true
+      },
+      {
+        "description": "Object arguments remain valid",
+        "data": { "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": { "presentNull": null } }] },
+        "valid": true
+      },
+      {
+        "description": "Missing arguments remain absent",
+        "data": { "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f" }] },
+        "valid": true
+      },
+      {
+        "description": "Malformed known argument type remains invalid",
+        "data": { "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": false }] },
+        "valid": false
+      },
+      {
+        "description": "URI media type may be absent",
+        "data": { "role": "assistant", "contents": [{ "$type": "uri", "uri": "https://example.test/media" }] },
+        "valid": true
+      },
+      {
+        "description": "URI media type remains valid when supplied",
+        "data": { "role": "assistant", "contents": [{ "$type": "uri", "uri": "https://example.test/media", "mediaType": "image/png" }] },
+        "valid": true
+      },
+      {
+        "description": "URI media type must not be null",
+        "data": { "role": "assistant", "contents": [{ "$type": "uri", "uri": "https://example.test/media", "mediaType": null }] },
+        "valid": false
+      },
+      {
+        "description": "URI itself remains required",
+        "data": { "role": "assistant", "contents": [{ "$type": "uri" }] },
+        "valid": false
+      },
+      {
+        "description": "Complete unmodeled JSON including inert type names",
+        "data": { "role": "assistant", "contents": [{ "$type": "unknown", "content": { "$type": "future", "$runtimeType": "data-only", "metadata": { "null": null, "false": false, "empty": [] } } }] },
+        "valid": true
+      },
+      {
+        "description": "Explicit opaque null",
+        "data": { "role": "assistant", "contents": [{ "$type": "unknown", "content": null }] },
+        "valid": true
+      },
+      {
+        "description": "Explicit opaque scalar",
+        "data": { "role": "assistant", "contents": [{ "$type": "unknown", "content": "verbatim" }] },
+        "valid": true
+      },
+      {
+        "description": "Explicit opaque array",
+        "data": { "role": "assistant", "contents": [{ "$type": "unknown", "content": [0, false, null] }] },
+        "valid": true
+      },
+      {
+        "description": "Opaque wrapper must include original content",
+        "data": { "role": "assistant", "contents": [{ "$type": "unknown" }] },
+        "valid": false
+      },
+      {
+        "description": "Unwrapped unknown wire discriminator remains invalid",
+        "data": { "role": "assistant", "contents": [{ "$type": "future", "content": { "preserve": true } }] },
+        "valid": false
+      },
+      {
+        "description": "Known malformed text is not an opaque fallback",
+        "data": { "role": "assistant", "contents": [{ "$type": "text", "text": 0, "content": { "preserve": true } }] },
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "Named terminal structured value",
+    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/terminalResponse" },
+    "tests": [
+      { "description": "Absent value", "data": { "messages": [] }, "valid": true },
+      { "description": "Present null", "data": { "messages": [], "value": null }, "valid": true },
+      { "description": "Present false", "data": { "messages": [], "value": false }, "valid": true },
+      { "description": "Present zero", "data": { "messages": [], "value": 0 }, "valid": true },
+      { "description": "Present empty string", "data": { "messages": [], "value": "" }, "valid": true },
+      { "description": "Present empty array", "data": { "messages": [], "value": [] }, "valid": true },
+      { "description": "Present empty object", "data": { "messages": [], "value": {} }, "valid": true },
+      { "description": "Nested JSON remains intact", "data": { "messages": [], "value": { "items": [null, false, 0, [], {}], "$runtimeType": "inert" } }, "valid": true },
+      { "description": "Value does not replace required messages", "data": { "value": false }, "valid": false }
+    ]
+  },
+  {
+    "description": "Legacy highest-seen ingestion scalar",
+    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/data/properties/ingestedPositions" },
+    "tests": [
+      { "description": "Highest seen three does not encode gaps", "data": { "producer": 3 }, "valid": true },
+      { "description": "Zero remains valid", "data": { "producer": 0 }, "valid": true },
+      { "description": "Negative position remains invalid", "data": { "producer": -1 }, "valid": false },
+      { "description": "Receipt sets cannot masquerade as the legacy scalar", "data": { "producer": [1, 3] }, "valid": false }
+    ]
+  }
+]

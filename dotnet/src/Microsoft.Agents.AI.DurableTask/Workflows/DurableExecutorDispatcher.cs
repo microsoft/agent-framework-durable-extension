@@ -176,7 +176,7 @@ internal static class DurableExecutorDispatcher
         AgentSession session = await agent.CreateSessionAsync().ConfigureAwait(true);
         AgentResponse response = await agent.RunAsync(input, session).ConfigureAwait(true);
 
-        return response.Text;
+        return CreateExecutorOutputEnvelope(response.Text ?? string.Empty);
     }
 
     /// <summary>

@@ -33,6 +33,20 @@ public sealed class DurableWorkflowOptions
     public IReadOnlyDictionary<string, Workflow> Workflows => this._workflows;
 
     /// <summary>
+    /// Gets or sets the maximum number of supersteps a workflow can execute. Defaults to 100.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when the value is less than one.</exception>
+    public int MaxSupersteps
+    {
+        get;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value, nameof(this.MaxSupersteps));
+            field = value;
+        }
+    } = 100;
+
+    /// <summary>
     /// Gets the executor registry for direct executor lookup.
     /// </summary>
     internal ExecutorRegistry Executors { get; } = new();
