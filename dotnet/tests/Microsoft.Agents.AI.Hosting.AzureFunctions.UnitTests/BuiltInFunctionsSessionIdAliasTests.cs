@@ -222,7 +222,7 @@ public sealed class BuiltInFunctionsSessionIdAliasTests
 
         // Assert
         Assert.True(response.Object.Headers.TryGetValues("Deprecation", out IEnumerable<string>? deprecation));
-        Assert.Equal("true", Assert.Single(deprecation));
+        Assert.Equal("@1789430400", Assert.Single(deprecation));
         Assert.True(response.Object.Headers.TryGetValues("Link", out IEnumerable<string>? links));
         Assert.Contains("rel=\"deprecation\"", Assert.Single(links), StringComparison.Ordinal);
         Assert.True(response.Object.Headers.TryGetValues("Warning", out IEnumerable<string>? warnings));

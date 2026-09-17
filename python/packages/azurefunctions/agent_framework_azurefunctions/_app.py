@@ -74,6 +74,7 @@ _AGENT_WAIT_FOR_RESPONSE_FIELD = "waitForResponse"
 _AGENT_CORRELATION_ID_FIELD = "correlationId"
 _LEGACY_AGENT_CORRELATION_ID_FIELD = "correlation_id"
 _AGENT_HTTP_DEPRECATION_HEADER = "Deprecation"
+_AGENT_HTTP_DEPRECATION_DATE = "@1789430400"
 _AGENT_HTTP_LINK_HEADER = "Link"
 _AGENT_HTTP_WARNING_HEADER = "Warning"
 _AGENT_HTTP_MIGRATION_GUIDE_URL = (
@@ -1489,7 +1490,10 @@ class AgentFunctionApp(DFAppBase):
             session_id=session_id,
             status="success",
             correlation_id=correlation_id,
-            extra_fields={ApiResponseFields.MESSAGE_COUNT: state.message_count},
+            extra_fields={
+                "messageCount": state.message_count,
+                ApiResponseFields.MESSAGE_COUNT: state.message_count,
+            },
         )
 
     def _build_request_data(
@@ -1642,7 +1646,7 @@ class AgentFunctionApp(DFAppBase):
             return headers
 
         merged = dict(headers or {})
-        merged[_AGENT_HTTP_DEPRECATION_HEADER] = "true"
+        merged[_AGENT_HTTP_DEPRECATION_HEADER] = _AGENT_HTTP_DEPRECATION_DATE
         merged[_AGENT_HTTP_LINK_HEADER] = f'<{_AGENT_HTTP_MIGRATION_GUIDE_URL}>; rel="deprecation"'
         merged[_AGENT_HTTP_WARNING_HEADER] = (
             '299 - "Deprecated agent HTTP field names are supported temporarily; '

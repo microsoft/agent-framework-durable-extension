@@ -928,6 +928,30 @@ class TestHttpRunRoute:
         assert "session_id" not in run_request
         assert "thread_id" not in run_request
 
+    def test_http_run_success_includes_camel_case_message_count(self) -> None:
+        """A synchronous JSON response emits both message count spellings."""
+        state = Mock()
+        state.message_count = 2
+        app = AgentFunctionApp(enable_http_endpoints=False, enable_health_check=False)
+        result = app._build_success_result(
+            response_message="Hello",
+            message="Hello",
+            session_id="session-1",
+            correlation_id="correlation-1",
+            state=state,
+        )
+
+        response = app._create_http_response(
+            payload=result,
+            status_code=200,
+            request_response_format="json",
+            session_id="session-1",
+        )
+        assert response.status_code == 200
+        payload = json.loads(response.get_body())
+        assert payload["messageCount"] == 2
+        assert payload["message_count"] == payload["messageCount"]
+
     async def test_http_run_accept_header_returns_json(self) -> None:
         """Test that Accept header requesting JSON results in JSON response."""
         mock_agent = Mock()
@@ -981,7 +1005,7 @@ class TestHttpRunRoute:
             response = await handler(request, client)
 
         assert response.status_code == 202
-        assert response.headers["Deprecation"] == "true"
+        assert response.headers["Deprecation"] == "@1789430400"
         assert "http-api-camelcase-migration.md" in response.headers["Link"]
         assert "Deprecated agent HTTP field names" in response.headers["Warning"]
         assert "Deprecated agent HTTP field names were used" in caplog.text
@@ -1013,7 +1037,7 @@ class TestHttpRunRoute:
         response = await handler(request, client)
 
         assert response.status_code == 400
-        assert response.headers["Deprecation"] == "true"
+        assert response.headers["Deprecation"] == "@1789430400"
         assert "Conflicting session identifiers" in response.get_body().decode("utf-8")
         client.signal_entity.assert_not_called()
 

@@ -28,6 +28,7 @@ internal static class BuiltInFunctions
 
     private const string WaitForResponseHeaderName = "x-ms-wait-for-response";
     private const string DeprecationHeaderName = "Deprecation";
+    private const string AgentHttpDeprecationDate = "@1789430400";
     private const string LinkHeaderName = "Link";
     private const string WarningHeaderName = "Warning";
     private const string AgentHttpMigrationGuideUrl =
@@ -802,7 +803,7 @@ internal static class BuiltInFunctions
             return;
         }
 
-        response.Headers.Add(DeprecationHeaderName, "true");
+        response.Headers.Add(DeprecationHeaderName, AgentHttpDeprecationDate);
         response.Headers.Add(LinkHeaderName, $"<{AgentHttpMigrationGuideUrl}>; rel=\"deprecation\"");
         response.Headers.Add(
             WarningHeaderName,

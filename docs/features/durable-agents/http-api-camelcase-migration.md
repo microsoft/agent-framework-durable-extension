@@ -19,12 +19,12 @@ The `x-ms-session-id` and `x-ms-wait-for-response` headers did not change.
 
 The old snake_case names are still accepted on requests so existing callers can migrate gradually. JSON responses temporarily include both the canonical camelCase fields and their legacy snake_case equivalents where those fields already existed.
 
-If a request supplies more than one alias for the same value, all aliases must match. For example, `sessionId=abc` and `session_id=abc` is accepted, but `sessionId=abc` and `session_id=def` returns HTTP 400.
+Session identifier aliases must match across the query string and request body. For example, `sessionId=abc` and `session_id=abc` is accepted, but `sessionId=abc` and `session_id=def` returns HTTP 400. For `waitForResponse`, conflicting aliases are rejected only when both forms occur in the query string or both occur in the request body. Resolution uses the `x-ms-wait-for-response` header first, then query parameters, then the request body; camelCase wins when both aliases in the same source agree.
 
 Responses to requests that use legacy agent HTTP aliases include these migration signals:
 
 ```http
-Deprecation: true
+Deprecation: @1789430400
 Link: <https://github.com/microsoft/agent-framework-durable-extension/blob/main/docs/features/durable-agents/http-api-camelcase-migration.md>; rel="deprecation"
 Warning: 299 - "Deprecated agent HTTP field names are supported temporarily; use sessionId and waitForResponse."
 ```
