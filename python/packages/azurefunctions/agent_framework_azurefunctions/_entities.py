@@ -37,8 +37,12 @@ class AzureFunctionEntityStateProvider(AgentEntityStateProviderMixin):
 
     def _get_state_dict(self) -> dict[str, Any]:
         raw_state = self._context.get_state(lambda: {})
-        if not isinstance(raw_state, dict):
+        # The Functions SDK treats None as absent state. Preserve that sentinel,
+        # but never turn other malformed existing values into a fresh entity.
+        if raw_state is None:
             return {}
+        if not isinstance(raw_state, dict):
+            raise ValueError("Durable entity state must be a JSON object.")
         return cast(dict[str, Any], raw_state)
 
     def _set_state_dict(self, state: dict[str, Any]) -> None:

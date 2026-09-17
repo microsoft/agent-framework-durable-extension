@@ -19,7 +19,7 @@ from durabletask.worker import TaskHubGrpcWorker
 
 from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentResponseCallbackProtocol
-from ._entities import AgentEntity, DurableTaskEntityStateProvider
+from ._entities import AgentEntity, AgentEntityStateProviderMixin, DurableTaskEntityStateProvider
 from ._feature_usage import FeatureIndex
 from ._workflows.activity import execute_workflow_activity
 from ._workflows.dt_context import DurableTaskWorkflowContext
@@ -414,7 +414,7 @@ class DurableAIAgentWorker:
             def reset(self) -> None:
                 """Reset the agent's conversation history."""
                 logger.debug("[ConfiguredAgentEntity.reset] Resetting agent: %s", agent_name)
-                self._agent_entity.reset()
+                AgentEntityStateProviderMixin.reset(self)
 
         # Set the entity name to match the prefixed agent name
         # This is used by durabletask to register the entity
