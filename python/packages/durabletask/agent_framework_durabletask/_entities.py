@@ -485,6 +485,7 @@ class AgentEntity:
         else:
             run_request = request
 
+        run_request.validate_context()
         validate_identifier(run_request.correlation_id, "correlationId")
         # A read-compatible legacy layout is not permission to run a new writer.
         self.state.prepare_for_write(delivery_window_seconds=self._response_delivery_window_seconds)
@@ -916,7 +917,9 @@ class AgentEntity:
         kept: list[DurableAgentStateMessage] = []
         for index, message in enumerate(messages):
             identity = occurrence_ids[index] if occurrence_ids is not None else message.message_id
-            if identity:
+            # Blank public IDs are legal but cannot be ingestion keys. Treat them
+            # like anonymous inputs unless an explicit occurrence was supplied.
+            if identity and identity.strip():
                 fingerprint = message.ingestion_identity or message_identity(message.to_chat_message())
                 known = receipts.get(identity, [])
                 if known is None or fingerprint in known:

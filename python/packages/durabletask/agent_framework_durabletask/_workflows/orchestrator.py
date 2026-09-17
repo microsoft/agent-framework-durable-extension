@@ -83,6 +83,8 @@ from .serialization import (
     serialize_workflow_agent_response,
     serialize_workflow_event,
     strip_pickle_markers,
+    validate_workflow_json,
+    validate_workflow_numbers,
 )
 
 logger = logging.getLogger(__name__)
@@ -789,7 +791,7 @@ def _prepare_activity_task(
             HOST_METADATA_REQUEST_PATH_PREFIX: address["request_path_prefix"],
         },
     }
-    activity_input_json = json.dumps(activity_input)
+    activity_input_json = json.dumps(activity_input, allow_nan=False)
     activity_name = workflow_executor_activity_name(workflow_name, executor_id)
     task = ctx.prepare_activity_task(activity_name, activity_input_json)
     if delivery_ledger is not None and staged is not None:
@@ -821,6 +823,7 @@ def _prepare_subworkflow_task(
         SUBWORKFLOW_INPUT_KEY: serialize_value(staged.forwarding_input(message) if staged else message),
         SUBWORKFLOW_ADDRESS_KEY: child_address,
     }
+    validate_workflow_json(child_input)
     task = ctx.call_sub_orchestrator(
         inner_orchestration_name, wrap_workflow_input(child_input), instance_id=child_instance_id
     )
@@ -956,6 +959,7 @@ def _process_activity_result(
 ) -> ExecutorResult:
     """Process an activity result and apply shared state updates."""
     result = json.loads(result_json) if result_json else None
+    validate_workflow_json(result)
 
     if shared_state is not None and result:
         if result.get("shared_state_updates"):
@@ -1041,6 +1045,7 @@ def _process_subworkflow_result(
     already flow back as this node's outputs/messages above, and inner lifecycle
     events (invoked/completed) are child-internal detail.
     """
+    validate_workflow_json(child_result)
     outputs, child_events = _unpack_subworkflow_result(child_result)
 
     sent_messages: list[dict[str, Any]] = []
@@ -1314,6 +1319,7 @@ def _coerce_initial_input(workflow: Workflow, raw_value: Any) -> Any:
     in-process ``WorkflowExecutor`` which passes its input straight to the inner
     workflow -- without the HTTP-boundary pickle-marker stripping.
     """
+    validate_workflow_numbers(raw_value)
     unwrapped, inner_input = _try_unwrap_subworkflow_input(raw_value)
     if unwrapped:
         return inner_input
@@ -1346,8 +1352,21 @@ def _coerce_initial_input(workflow: Workflow, raw_value: Any) -> Any:
 # ============================================================================
 
 
+def _validate_hitl_response_json(response: Any) -> None:
+    """Validate public reply data before normalization or consuming a request.
+
+    An internal Content reply has already crossed its checkpoint boundary, so
+    check its public content fields rather than inspecting arbitrary objects.
+    """
+    if isinstance(response, Content):
+        validate_workflow_json(response.to_dict())
+    else:
+        validate_workflow_numbers(response)
+
+
 def _load_agent_hitl_content(request_id: str, original_request: Content, raw_response: Any) -> Content:
     """Rebuild a reply using the fixed local Content type, never a supplied type name."""
+    _validate_hitl_response_json(raw_response)
     sanitized = strip_pickle_markers(raw_response)
     response = (
         Content.from_text(sanitized)
@@ -1356,6 +1375,7 @@ def _load_agent_hitl_content(request_id: str, original_request: Content, raw_res
     )
     if not isinstance(response, Content):
         raise TypeError("Agent user input responses must be Content objects or Content mappings.")
+    _validate_hitl_response_json(response)
     if response.type == "function_approval_response" and response.id != request_id:
         raise ValueError("Agent approval response does not match the pending request id.")
     if response.type == "function_result":
@@ -1447,6 +1467,7 @@ def _deserialize_hitl_response(response_data: Any, response_type_str: str | None
         type(response_data).__name__,
     )
 
+    _validate_hitl_response_json(response_data)
     if response_data is None:
         return None
 
@@ -1509,6 +1530,9 @@ def _prepare_all_tasks(
         delivery_ledger: Replay-local agent delivery receipts shared with sequential
             dispatch and later supersteps. Standalone calls default to a fresh ledger.
     """
+    # Shared state is already checkpoint-encoded. Validate the complete snapshot
+    # before any task kind can be scheduled or advance a dispatch counter.
+    validate_workflow_json(shared_state)
     if delivery_ledger is None:
         delivery_ledger = _WorkflowDeliveryLedger(instance_id=ctx.instance_id)
     all_tasks: list[Any] = []
@@ -1757,6 +1781,7 @@ def run_workflow_orchestrator(
         # (executorId, ordinal) so every child stays addressable behind one top-level surface.
         if subworkflows:
             status["subworkflows"] = subworkflows
+        validate_workflow_json(status)
         ctx.set_custom_status(status)
 
     fan_in_pending: dict[str, dict[str, list[tuple[Any, str]]]] = {
@@ -1903,6 +1928,12 @@ def run_workflow_orchestrator(
                             logger.debug("Parsed JSON string response to: %s", type(raw_response).__name__)
                         except (json.JSONDecodeError, TypeError):
                             logger.debug("Response is not JSON, keeping as string")
+
+                    try:
+                        _validate_hitl_response_json(raw_response)
+                    except (TypeError, ValueError):
+                        logger.warning("Rejected non-JSON HITL response for request %s", request_id)
+                        continue
 
                     # Sanitize against pickle-marker injection in case a caller bypassed
                     # DurableWorkflowClient.send_hitl_response and raised the external

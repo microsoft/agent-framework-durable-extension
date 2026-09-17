@@ -156,19 +156,36 @@ class RunRequest:
         self.created_at = created_at if created_at is not None else datetime.now(tz=timezone.utc)
         self.orchestration_id = orchestration_id
         self.options = options if options is not None else {}
+        self.context_messages = context_messages
+        self.context_message_ids = context_message_ids
+        self.validate_context()
+
+    def validate_context(self) -> None:
+        """Check mutable context envelopes before serialization or entity execution.
+
+        Occurrence IDs are nonblank ingestion keys, not public message IDs. Test
+        whitespace without normalizing valid identities or forbidding revisions.
+        """
+        context_messages = self.context_messages
+        context_message_ids = self.context_message_ids
         if context_messages is not None and (
             not isinstance(context_messages, list) or any(not isinstance(message, dict) for message in context_messages)
         ):
             raise ValueError("contextMessages must be a list of message objects.")
-        self.context_messages = context_messages
+        if context_messages is not None and any(
+            message.get("message_id") is not None and not isinstance(message["message_id"], str)
+            for message in context_messages
+        ):
+            raise ValueError("contextMessages.message_id must be a string or None.")
         if context_message_ids is not None and (
             context_messages is None
             or not isinstance(context_message_ids, list)
             or len(context_message_ids) != len(context_messages)
-            or any(not isinstance(identity, str) or not identity for identity in context_message_ids)
+            or any(not isinstance(identity, str) or not identity.strip() for identity in context_message_ids)
         ):
-            raise ValueError("contextMessageIds must contain one non-empty occurrence ID per context message.")
-        self.context_message_ids = context_message_ids
+            raise ValueError(
+                "contextMessageIds must contain one non-empty, nonblank occurrence ID per context message."
+            )
 
     @staticmethod
     def coerce_role(value: str | None) -> str:
@@ -182,6 +199,7 @@ class RunRequest:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
+        self.validate_context()
         result: dict[str, Any] = {
             "message": self.message,
             "enable_tool_calls": self.enable_tool_calls,

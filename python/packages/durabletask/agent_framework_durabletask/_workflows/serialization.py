@@ -34,7 +34,9 @@ Contents:
 from __future__ import annotations
 
 import importlib
+import json
 import logging
+import math
 from contextlib import suppress
 from dataclasses import is_dataclass
 from typing import Any, cast
@@ -181,16 +183,44 @@ def strip_subworkflow_markers(data: Any) -> Any:
 # ============================================================================
 
 
+def validate_workflow_json(value: Any) -> None:
+    """Reject non-finite numbers in a wire tree, without decoding checkpoint values.
+
+    Run this on encoded transport data or parsed JSON, not reconstructed Python
+    objects. It also catches overflow such as JSON's 1e309 parsed as infinity.
+    """
+    json.dumps(value, allow_nan=False)
+
+
+def validate_workflow_numbers(value: Any) -> None:
+    """Check raw JSON descendants without inspecting native checkpoint objects.
+
+    A reconstructed dictionary may contain typed checkpoint values. Only recurse
+    through actual dictionaries and lists, leaving opaque Python objects alone.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("Workflow JSON numbers must be finite.")
+    if isinstance(value, dict):
+        for key, item in cast(dict[Any, Any], value).items():
+            validate_workflow_numbers(key)
+            validate_workflow_numbers(item)
+    elif isinstance(value, list):
+        for item in cast(list[Any], value):
+            validate_workflow_numbers(item)
+
+
 def serialize_workflow_agent_response(response: AgentResponse) -> dict[str, Any]:
     """Encode a generated agent yield as base-response JSON, without worker types.
 
     Insert this already-encoded envelope directly into output/event containers.
     Passing it through ``serialize_value`` instead treats it as an application dict.
     """
-    return {
+    result = {
         _WORKFLOW_AGENT_RESPONSE_KEY: _WORKFLOW_AGENT_RESPONSE_VERSION,
         "response": serialize_agent_response(response),
     }
+    validate_workflow_json(result)
+    return result
 
 
 def serialize_value(value: Any) -> Any:
