@@ -9,7 +9,8 @@ pip install agent-framework-azurefunctions --pre
 ```
 
 Requires Python 3.10+ and `agent-framework-core>=1.13.0,<2`. The Durable Task dependency requires
-`pydantic>=2.11,<3`. Shared-wire adoption is implemented and locally validated, but not published.
+`pydantic>=2.11,<3`. Shared-wire adoption is available on the prototype branch at `567087f8`,
+not in a released package.
 See [prototype validation](../../samples/README.md#prototype-validation) for current measurements,
 separate historical evidence and remaining gaps.
 
@@ -36,9 +37,14 @@ runs with the canonical implementation. There is no private-prototype detection,
 resume path. A shared version label does not make those layouts compatible. Names are unchanged.
 Reusing an old `@name@key` on an empty new hub is not migration or permission to redeliver old work.
 
-Generated workflow start routes and internal child dispatch wrap new starts with workflow engine
-version 2. Raw/legacy starts reject before revised actions execute. Native custom scheduling must use
-public `wrap_workflow_input` for new instances. It does not authorize input or migrate old histories.
+Generated start routes and internal child dispatch wrap new starts of generated framework workflows
+with workflow engine version 2. A custom scheduler starting one of those generated orchestrators
+must pass `wrap_workflow_input(input)` because the generated entry point calls `unwrap_workflow_input`.
+Those entry points reject unwrapped or legacy starts before revised actions execute.
+
+Do not apply this envelope to ordinary native orchestrations registered with a Functions orchestration
+trigger. They receive their application input directly unless their own entry point explicitly
+implements the matching unwrap protocol. Wrapping does not authorize input or migrate old histories.
 
 Explicit legacy migration needs an empty, separately addressed destination, a quiesced old owner
 and authorized ownership transfer. The backend `migrate` operation implements source-bound

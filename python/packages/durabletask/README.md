@@ -9,7 +9,7 @@ pip install agent-framework-durabletask --pre
 ```
 
 Requires Python 3.10+, `agent-framework-core>=1.13.0,<2` and `pydantic>=2.11,<3`.
-Shared-wire adoption is implemented and locally validated, but not published. See
+Shared-wire adoption is available on the prototype branch at `567087f8`, not in a released package. See
 [prototype validation](../../samples/README.md#prototype-validation) for current measurements,
 separate historical evidence and remaining gaps.
 
@@ -37,9 +37,14 @@ conversion or resume path, and the shared version label does not make the layout
 Names are unchanged. Reusing an old `@name@key` on an empty new hub is not migration or permission
 to redeliver old work.
 
-`DurableWorkflowClient` and internal child dispatch wrap new starts with workflow engine version 2.
-Raw/legacy starts reject before revised actions execute. Native custom scheduling must use public
-`wrap_workflow_input` for new instances. It does not authorize input or migrate old action histories.
+`DurableWorkflowClient` and internal child dispatch wrap new starts of generated framework workflows
+with workflow engine version 2. A custom scheduler starting one of those generated orchestrators
+must pass `wrap_workflow_input(input)` because the generated entry point calls `unwrap_workflow_input`.
+Those entry points reject unwrapped or legacy starts before revised actions execute.
+
+Do not apply this envelope to ordinary native orchestrations registered through `worker.add_orchestrator`.
+They receive their application input directly unless their own entry point explicitly implements
+the matching unwrap protocol. Wrapping does not authorize input or migrate recorded action histories.
 
 ### Explicit legacy migration
 

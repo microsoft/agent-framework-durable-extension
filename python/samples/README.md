@@ -4,7 +4,7 @@ This directory contains samples for durable agent hosting using the Durable Task
 
 ## PR #59 prototype scope
 
-The architecture in [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88) was accepted and merged on September 15, 2026 into `feature/python-durable-thread-compaction` at `7d90e8f`. [PR #59](https://github.com/microsoft/agent-framework-durable-extension/pull/59) remains the integrated prototype, not a merge-as-is implementation or production drop-in. Shared-wire adoption is implemented and locally validated, but not published. The local implementation uses main's canonical `terminalResults` and `completionReceipts` instead of the private `responseMailbox` and `completedCorrelations` layout, with one canonical wire validator rather than parallel contracts. No .NET interoperability is claimed.
+The architecture in [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88) was accepted and merged on September 15, 2026 into `feature/python-durable-thread-compaction` at `7d90e8f`. [PR #59](https://github.com/microsoft/agent-framework-durable-extension/pull/59) remains the integrated prototype, not a merge-as-is implementation or production drop-in. Shared-wire adoption is available on the prototype branch at `567087f8`, not in a released package. It uses main's canonical `terminalResults` and `completionReceipts` instead of the private `responseMailbox` and `completedCorrelations` layout, with one canonical wire validator rather than parallel contracts. No .NET interoperability is claimed.
 
 The prototype's version-2 runtime requires `deployment_mode="isolated_v2"` on `DurableAIAgentWorker`,
 `AgentFunctionApp` and the standalone Functions entity factory, or
@@ -57,19 +57,26 @@ after cold reload or later runs, so they do not refresh grace. Migration does no
 history or move workflow histories. No generated HTTP/MCP migration endpoint is provided. See
 [migration requirements](../packages/durabletask/README.md#explicit-legacy-migration).
 
-The workflow client, generated start routes and child dispatch wrap new starts with protocol version
-2. Native custom schedulers must use public `wrap_workflow_input` for new instances. Old/raw starts
-reject before revised actions execute. Rewrapping old starts is not history migration.
+The workflow client, generated start routes and child dispatch wrap new starts of generated framework
+workflows with protocol version 2. A custom scheduler starting one of those generated orchestrators
+must pass `wrap_workflow_input(input)` because the generated entry point calls `unwrap_workflow_input`.
+Those entry points reject unwrapped or legacy starts before revised actions execute.
+
+Do not apply this envelope to ordinary native orchestrations registered through `worker.add_orchestrator`
+or a Functions orchestration trigger. They receive their application input directly unless their
+own entry point explicitly implements the matching unwrap protocol. Rewrapping old starts is not
+history migration.
 
 ## Prototype validation
 
 ### Current adoption status
 
 Canonical shared-wire adoption, including source-bound completion-evidence migration, is implemented
-and locally validated as of September 16, 2026. These results cover the working tree based on
-`31293f2` plus main `45b7fd8`, not a published implementation or remote CI result. The final
-implementation commit will record this working tree after the documentation update. The complete
-canonical schema tree equals main `45b7fd8`, and the accepted ADR is unchanged.
+and locally validated as of September 16, 2026. These local results cover published prototype commit
+`567087f8`, which merges `31293f2` with main `45b7fd8`. All 12 checks on that commit subsequently
+passed, including Python 3.10 through 3.13 and both hosting integration jobs. Those CI statuses are
+separate from the local counts below and do not establish review approval or a package release.
+The complete canonical schema tree equals main `45b7fd8`, and the accepted ADR is unchanged.
 
 | Current local check | Result | Time |
 | --- | --- | --- |
