@@ -160,12 +160,18 @@ def _completions(source: dict[str, Any], *results: dict[str, Any]) -> dict[str, 
     }
 
 
-def _evidence(source: dict[str, Any], messages: list[Message]) -> dict[str, Any]:
+def _evidence(
+    source: dict[str, Any],
+    messages: list[Message],
+    *,
+    message_positions: list[dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
     return {
         "sourceDigest": state_snapshot_digest(source),
         "evidenceId": "complete-journal",
         "complete": True,
         "messages": [message.to_dict() for message in messages],
+        **({"messagePositions": deepcopy(message_positions)} if message_positions is not None else {}),
     }
 
 
@@ -527,22 +533,26 @@ def test_text_only_migration_preserves_proven_failure_but_never_fabricates_succe
 
 @pytest.mark.parametrize("retained_contents", [[], [{"$type": "text", "text": "pruned portion"}]])
 @pytest.mark.parametrize("journal_kind", ["empty", "other-custom", "workflow"])
-def test_complete_journal_cannot_omit_retained_custom_request_identity(
-    retained_contents: list[dict[str, Any]], journal_kind: str
+@pytest.mark.parametrize("identity", ["custom-id", "wf_retained_7", "wf__3"])
+def test_complete_journal_cannot_omit_retained_public_request_identity(
+    retained_contents: list[dict[str, Any]], journal_kind: str, identity: str
 ) -> None:
     source = _source(contents=retained_contents)
+    source["data"]["conversationHistory"][0]["messages"][0]["messageId"] = identity
     messages: list[Message] = []
+    message_positions: list[dict[str, Any] | None] | None = None
     if journal_kind == "other-custom":
         messages = [Message("user", ["accepted"], message_id="other-custom")]
     elif journal_kind == "workflow":
         source["data"]["ingestedPositions"] = {"upstream": 3}
         messages = [Message("user", ["accepted"], message_id=workflow_message_id("upstream", 3))]
-    evidence = _evidence(source, messages)
+        message_positions = [{"producer": "upstream", "position": 3}]
+    evidence = _evidence(source, messages, message_positions=message_positions)
     # This controlled request-only source has no completions, independently of its delivery journal.
     completions = _completions(source)
     before_source, before_evidence = deepcopy(source), deepcopy(evidence)
     before_completions = deepcopy(completions)
-    with pytest.raises(ValueError, match="must include every retained legacy custom request message ID"):
+    with pytest.raises(ValueError, match="must include every retained legacy request message ID"):
         _migrate(source, evidence=evidence, completion_evidence=completions)
     assert source == before_source
     assert evidence == before_evidence
@@ -550,15 +560,21 @@ def test_complete_journal_cannot_omit_retained_custom_request_identity(
 
 
 @pytest.mark.parametrize("retained_contents", [[], [{"$type": "text", "text": "pruned portion"}]])
-def test_custom_journal_compares_identity_not_the_pruned_body(retained_contents: list[dict[str, Any]]) -> None:
+@pytest.mark.parametrize("identity", ["custom-id", "wf_upstream_3", "wf__3"])
+def test_public_id_journal_compares_identity_not_the_pruned_body(
+    retained_contents: list[dict[str, Any]], identity: str
+) -> None:
     source = _source(contents=retained_contents)
-    original = Message("user", ["complete original accepted input"], message_id="custom-id")
+    source["data"]["conversationHistory"][0]["messages"][0]["messageId"] = identity
+    original = Message("user", ["complete original accepted input"], message_id=identity)
     evidence = _evidence(source, [original])
     completions = _completions(source)
     before_source, before_evidence = deepcopy(source), deepcopy(evidence)
     before_completions = deepcopy(completions)
     state = DurableAgentState.from_json(_migrate(source, evidence=evidence, completion_evidence=completions).to_json())
-    assert state.data.ingested_messages == {"custom-id": [message_identity(original)]}
+    assert state.data.ingested_messages == {identity: [message_identity(original)]}
+    assert state.data.ingested_positions is None
+    assert "ingestedPositions" not in state.to_dict()["data"]
     assert state.data.completed_correlations == state.data.response_mailbox == {}
     assert state.to_dict()["data"]["conversationHistory"] == source["data"]["conversationHistory"]
     assert source == before_source
@@ -578,7 +594,7 @@ def test_custom_journal_compares_identity_not_the_pruned_body(retained_contents:
         {"arbitrary": [False, 0, None, {"items": "not receipts"}]},
     ],
 )
-def test_no_delivery_journal_keeps_custom_identity_markers_without_fabricating_workflow_receipts(opaque: Any) -> None:
+def test_no_delivery_journal_keeps_public_identity_markers_without_fabricating_exact_receipts(opaque: Any) -> None:
     source = _source(contents=[])
     source["data"]["conversationHistory"][0]["messages"].append({
         "role": "user",
@@ -592,23 +608,36 @@ def test_no_delivery_journal_keeps_custom_identity_markers_without_fabricating_w
     state = DurableAgentState.from_json(_migrate(source, completion_evidence=completions).to_json())
     assert state.data.ingested_messages == {
         "custom-id": None,
+        workflow_message_id("upstream", 3): None,
     }
     assert state.to_dict()["data"]["ingestedMessages"] == before["data"]["ingestedMessages"]
     assert json.dumps(state.to_dict()["data"]["ingestedMessages"], sort_keys=True) == json.dumps(opaque, sort_keys=True)
     assert state.to_dict()["data"]["pythonIngestion"] == {
         "profile": "agent-framework-python.ingestion",
         "version": 1,
-        "messages": {"custom-id": None},
+        "messages": {"custom-id": None, workflow_message_id("upstream", 3): None},
     }
     assert state.data.completed_correlations == {}
     assert state.data.response_mailbox == {}
     assert source == before and completions == before_completions
 
 
-def test_empty_complete_delivery_journal_is_valid_when_no_retained_custom_requests_contradict_it() -> None:
+def test_empty_complete_delivery_journal_rejects_a_retained_workflow_shaped_public_id() -> None:
     source = _source(contents=[])
     history = source["data"]["conversationHistory"]
     history[0]["messages"][0]["messageId"] = workflow_message_id("upstream", 3)
+    history.append({"$type": "request", "messages": [], "futureEntry": {"messageId": "opaque-not-a-request"}})
+    evidence, completions = _evidence(source, []), _completions(source)
+    before_source, before_evidence, before_completions = deepcopy(source), deepcopy(evidence), deepcopy(completions)
+    with pytest.raises(ValueError, match="every retained legacy request message ID"):
+        _migrate(source, evidence=evidence, completion_evidence=completions)
+    assert source == before_source and evidence == before_evidence and completions == before_completions
+
+
+def test_empty_complete_delivery_journal_is_valid_without_retained_public_request_ids() -> None:
+    source = _source(contents=[])
+    history = source["data"]["conversationHistory"]
+    history[0]["messages"] = []
     history.append({"$type": "request", "messages": [], "futureEntry": {"messageId": "opaque-not-a-request"}})
     evidence, completions = _evidence(source, []), _completions(source)
     before_source, before_evidence, before_completions = deepcopy(source), deepcopy(evidence), deepcopy(completions)

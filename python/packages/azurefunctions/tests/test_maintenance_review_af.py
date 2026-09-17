@@ -249,6 +249,7 @@ def _request(*, evidence: bool = False) -> dict[str, Any]:
                 Message("user", [f"accepted {position}"], message_id=f"wf_upstream_{position}").to_dict()
                 for position in (1, 3)
             ],
+            "messagePositions": [{"producer": "upstream", "position": 1}, {"producer": "upstream", "position": 3}],
         }
     return request
 
@@ -480,6 +481,67 @@ def test_af_mismatched_retry_never_replaces_committed_migration(clock: type[Cloc
     assert result["status"] == "error" and "empty" in result["error"]
     assert host.raw == before and host.writes == 1
     host.contexts[-1].set_state.assert_not_called()
+    host.assert_quiet()
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+def test_af_sidecar_only_change_does_not_overwrite_or_refresh_an_import(clock: type[Clock], version: str) -> None:
+    request = _request(evidence=True)
+    request["source"]["schemaVersion"] = version
+    request["sourceDigest"] = _digest(request["source"])
+    for field in ("deliveryEvidence", "completionEvidence"):
+        request[field]["sourceDigest"] = request["sourceDigest"]
+    before_request = deepcopy(request)
+    host = Host()
+    result = host.invoke("migrate", request)
+    assert result["status"] == "migrated"
+    before = deepcopy(host.raw)
+    changed = deepcopy(request)
+    changed["deliveryEvidence"]["messagePositions"][0]["position"] = 2
+    assert _digest(changed) != _digest(request)
+    other = Host()
+    assert other.invoke("migrate", changed)["status"] == "migrated"
+    assert other.raw["data"]["migration"]["requestDigest"] == _digest(changed)
+    clock.current = NOW + timedelta(days=1)
+    assert host.invoke("migrate", deepcopy(request)) == result
+    host.contexts[-1].set_state.assert_not_called()
+    rejected = host.invoke("migrate", changed)
+    assert rejected["status"] == "error" and "empty" in rejected["error"]
+    host.contexts[-1].set_state.assert_not_called()
+    assert host.raw == before and host.writes == 1 and request == before_request
+    host.assert_quiet()
+    other.assert_quiet()
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize("fault", ["missing", "null", "length", "boolean", "maximum", "extra"])
+def test_af_invalid_cursor_attribution_fails_without_write_or_execution(
+    clock: type[Clock], version: str, fault: str
+) -> None:
+    request = _request(evidence=True)
+    request["source"]["schemaVersion"] = version
+    request["sourceDigest"] = _digest(request["source"])
+    for field in ("deliveryEvidence", "completionEvidence"):
+        request[field]["sourceDigest"] = request["sourceDigest"]
+    evidence = request["deliveryEvidence"]
+    if fault == "missing":
+        del evidence["messagePositions"]
+    elif fault == "null":
+        evidence["messagePositions"] = None
+    elif fault == "length":
+        evidence["messagePositions"].pop()
+    elif fault == "boolean":
+        evidence["messagePositions"][0]["position"] = True
+    elif fault == "maximum":
+        evidence["messagePositions"][1]["position"] = 9
+    else:
+        evidence["messagePositions"][0]["extra"] = "not attribution"
+    before = deepcopy(request)
+    host = Host()
+    result = host.invoke("migrate", request)
+    assert result["status"] == "error" and "delivery evidence" in result["error"]
+    host.contexts[-1].set_state.assert_not_called()
+    assert host.raw == {} and host.writes == 0 and request == before
     host.assert_quiet()
 
 

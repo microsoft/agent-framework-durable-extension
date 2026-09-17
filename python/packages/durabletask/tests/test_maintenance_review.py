@@ -198,6 +198,7 @@ def _request(source: dict[str, Any] | None = None, *, evidence: bool = False) ->
             "evidenceId": "operator-journal-1",
             "complete": True,
             "messages": [message.to_dict() for message in messages],
+            "messagePositions": [{"producer": "upstream", "position": 1}, {"producer": "upstream", "position": 3}],
         }
     return request
 
@@ -471,6 +472,81 @@ def test_existing_migration_rejects_reused_identity_with_any_changed_request(clo
     with pytest.raises(ValueError, match="empty|different migration"):
         cold.migrate(changed)
     assert cold_store.raw == before and cold_store.attempts == 0 and cold.state.to_dict() == before
+    _quiet(client, hooks, callback)
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize("cold", [False, True])
+def test_sidecar_only_change_is_a_different_import_without_refreshing_grace(
+    clock: type[Clock], version: str, cold: bool
+) -> None:
+    request = _request(evidence=True)
+    request["source"]["schemaVersion"] = version
+    request["sourceDigest"] = _digest(request["source"])
+    for field in ("deliveryEvidence", "completionEvidence"):
+        request[field]["sourceDigest"] = request["sourceDigest"]
+    before_request = deepcopy(request)
+    store = Store()
+    agent, client, hooks, callback = _agent()
+    entity = AgentEntity(agent, state_provider=store, callback=callback)
+    result = entity.migrate(request)
+    before = deepcopy(store.raw)
+    changed = deepcopy(request)
+    changed["deliveryEvidence"]["messagePositions"][0]["position"] = 2
+    assert _digest(changed) != _digest(request)
+    # Both journals are independently valid: only a sparse nonmaximum position differs.
+    other = Store()
+    AgentEntity(agent, state_provider=other, callback=callback).migrate(changed)
+    assert other.raw["data"]["migration"]["requestDigest"] == _digest(changed)
+    if cold:
+        store = Store(before)
+        entity = AgentEntity(agent, state_provider=store, callback=callback)
+    cached = entity.state
+    writes = store.writes
+    clock.current = NOW + timedelta(days=1)
+    assert entity.migrate(deepcopy(request)) == result
+    with pytest.raises(ValueError, match="empty|different migration"):
+        entity.migrate(changed)
+    assert entity.state is cached and entity.state.to_dict() == before
+    assert store.raw == before and store.writes == store.attempts == writes
+    assert request == before_request
+    _quiet(client, hooks, callback)
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize("fault", ["missing", "null", "length", "boolean", "maximum", "extra"])
+def test_invalid_cursor_attribution_never_reaches_destination_write_or_execution(
+    clock: type[Clock], version: str, fault: str
+) -> None:
+    request = _request(evidence=True)
+    request["source"]["schemaVersion"] = version
+    request["sourceDigest"] = _digest(request["source"])
+    for field in ("deliveryEvidence", "completionEvidence"):
+        request[field]["sourceDigest"] = request["sourceDigest"]
+    evidence = request["deliveryEvidence"]
+    if fault == "missing":
+        del evidence["messagePositions"]
+    elif fault == "null":
+        evidence["messagePositions"] = None
+    elif fault == "length":
+        evidence["messagePositions"].pop()
+    elif fault == "boolean":
+        evidence["messagePositions"][0]["position"] = True
+    elif fault == "maximum":
+        evidence["messagePositions"][1]["position"] = 9
+    else:
+        evidence["messagePositions"][0]["extra"] = "not attribution"
+    before_request = deepcopy(request)
+    store = Store()
+    agent, client, hooks, callback = _agent()
+    entity = AgentEntity(agent, state_provider=store, callback=callback)
+    cached = entity.state
+    before = cached.to_dict()
+    with pytest.raises(ValueError, match="[Rr]ecorded delivery evidence"):
+        entity.migrate(request)
+    assert entity.state is cached and cached.to_dict() == before
+    assert store.raw == {} and store.writes == store.attempts == 0
+    assert request == before_request
     _quiet(client, hooks, callback)
 
 

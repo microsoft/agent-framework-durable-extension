@@ -113,12 +113,18 @@ def _message(position: int, *, text: str = "accepted", producer: str = "upstream
     )
 
 
-def _journal(source: dict[str, Any], messages: list[Message]) -> dict[str, Any]:
+def _journal(
+    source: dict[str, Any],
+    messages: list[Message],
+    *,
+    message_positions: list[dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
     return {
         "sourceDigest": state_snapshot_digest(source),
         "evidenceId": "accepted-journal-1",
         "complete": True,
         "messages": [message.to_dict() for message in messages],
+        **({"messagePositions": deepcopy(message_positions)} if message_positions is not None else {}),
     }
 
 
@@ -250,7 +256,11 @@ def test_migration_imports_originals_without_recording_new_completions(monkeypat
 def test_ambiguous_outcomes_reject_even_with_complete_input_journal(entry: dict[str, Any], strict: bool | None) -> None:
     source = _source(entry)
     source["data"]["ingestedPositions"] = {"upstream": 3}
-    evidence = _journal(source, [_message(1), _message(3)])
+    evidence = _journal(
+        source,
+        [_message(1), _message(3)],
+        message_positions=[{"producer": "upstream", "position": 1}, {"producer": "upstream", "position": 3}],
+    )
     before, evidence_before = deepcopy(source), deepcopy(evidence)
     options = {} if strict is None else {"require_known_outcomes": strict}
     with pytest.raises(ValueError, match="authoritative completion evidence.*new session generation"):
@@ -288,7 +298,7 @@ def test_input_journal_cannot_replace_potentially_lost_completions(loss: str, st
     else:
         source["data"]["conversationHistory"] = [{"$type": "compaction", "createdAt": OLD, "messages": []}]
     source["data"]["ingestedPositions"] = {"upstream": 3}
-    evidence = _journal(source, [_message(3)])
+    evidence = _journal(source, [_message(3)], message_positions=[{"producer": "upstream", "position": 3}])
     before = deepcopy(source)
     _validate(source)
     with pytest.raises(ValueError, match="authoritative completion evidence"):
@@ -406,7 +416,15 @@ def test_full_sparse_input_journal_preserves_evicted_revisions_and_delta_behavio
     })
     source["data"]["ingestedPositions"] = {"upstream": 3}
     source["data"]["ingestedMessages"] = {third.message_id: [message_identity(third)]}
-    evidence = _journal(source, [revised, first, third])
+    evidence = _journal(
+        source,
+        [revised, first, third],
+        message_positions=[
+            {"producer": "upstream", "position": 3},
+            {"producer": "upstream", "position": 1},
+            {"producer": "upstream", "position": 3},
+        ],
+    )
     before, evidence_before = deepcopy(source), deepcopy(evidence)
     result = _cold(_migrate(source, delivery_evidence=evidence, completion_evidence=_completions(source)))
     assert result.data.ingested_messages == {
@@ -460,15 +478,17 @@ def test_input_journal_still_requires_complete_lossless_bound_evidence(fault: st
                 "messages": [{"role": "user", "messageId": "other", "contents": []}],
             }
         ]
-    evidence = _journal(source, [_message(3)])
+    evidence = _journal(source, [_message(3)], message_positions=[{"producer": "upstream", "position": 3}])
     if fault == "digest":
         evidence["sourceDigest"] = "a" * 64
     elif fault == "incomplete":
         evidence["complete"] = False
     elif fault == "maxima":
         evidence["messages"] = [_message(2).to_dict()]
+        evidence["messagePositions"] = [{"producer": "upstream", "position": 2}]
     elif fault == "duplicate":
         evidence["messages"] *= 2
+        evidence["messagePositions"] *= 2
     elif fault == "lossy":
         evidence["messages"][0]["future_unrecognized_field"] = {"must": "survive"}
     before, evidence_before = deepcopy(source), deepcopy(evidence)

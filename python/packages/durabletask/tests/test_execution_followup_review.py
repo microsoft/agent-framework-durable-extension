@@ -671,7 +671,10 @@ async def test_rich_image_context_and_paired_ids_cross_entity_without_decoding_o
     assert request == before
 
 
-async def test_contentless_migrated_workflow_id_never_backfills_an_ingestion_receipt() -> None:
+@pytest.mark.parametrize("with_journal", [False, True])
+async def test_contentless_migrated_public_id_uses_compatibility_or_original_journal_not_pruned_content(
+    with_journal: bool,
+) -> None:
     identity = workflow_message_id("upstream", 3)
     source = {
         "schemaVersion": "1.1.0",
@@ -687,6 +690,13 @@ async def test_contentless_migrated_workflow_id_never_backfills_an_ingestion_rec
         },
     }
     before_source = deepcopy(source)
+    accepted = Message("user", ["original accepted body, not the retained empty projection"], message_id=identity)
+    delivery = {
+        "sourceDigest": state_snapshot_digest(source),
+        "evidenceId": "original-accepted-inputs",
+        "complete": True,
+        "messages": [accepted.to_dict()],
+    }
     migrated = migrate_legacy_state(
         source,
         source_digest=state_snapshot_digest(source),
@@ -694,7 +704,8 @@ async def test_contentless_migrated_workflow_id_never_backfills_an_ingestion_rec
         migration_id="execution-followup",
         ownership_transfer_id="quiesced-owner",
         delivery_window_seconds=3600,
-        # This request-only fixture has no original completions. It supplies no delivery journal.
+        delivery_evidence=delivery if with_journal else None,
+        # This request-only fixture has no original completions.
         completion_evidence={
             "sourceDigest": state_snapshot_digest(source),
             "evidenceId": "request-only-completion-journal",
@@ -702,14 +713,15 @@ async def test_contentless_migrated_workflow_id_never_backfills_an_ingestion_rec
             "results": [],
         },
     )
-    assert migrated.data.ingested_messages == {}
+    expected_receipts = {identity: [message_identity(accepted)] if with_journal else None}
+    assert migrated.data.ingested_messages == expected_receipts
     assert migrated.data.response_mailbox == migrated.data.completed_correlations == {}
     probe = _Inputs()
     client = ToolChatClient(tool_calls=False)
     agent = Agent(client=client, context_providers=[probe])
     provider = JsonStateProvider(_wire(migrated.to_dict()))
     await AgentEntity(agent, state_provider=provider).run({"message": "unrelated turn", "correlationId": "unrelated"})
-    assert _ingested(provider) == {}, "loading old history is not proof of ingestion"
+    assert _ingested(provider) == expected_receipts, "loading pruned history cannot invent exact acceptance"
     cold_provider = JsonStateProvider(_wire(provider.raw))
     message = Message("user", ["complete incoming payload"], message_id=identity)
     request = {"message": "logging only", "correlationId": "incoming", "contextMessages": [message.to_dict()]}
@@ -717,9 +729,14 @@ async def test_contentless_migrated_workflow_id_never_backfills_an_ingestion_rec
     response = await AgentEntity(agent, state_provider=cold_provider).run(request)
 
     assert response.text == "answer-2"
-    assert [item.to_dict() for item in probe.inputs[-1]] == [message.to_dict()]
-    assert [item.text for item in client.received_messages[-1]].count(message.text) == 1
-    assert _ingested(cold_provider) == {identity: [message_identity(message)]}
+    if with_journal:
+        assert [item.to_dict() for item in probe.inputs[-1]] == [message.to_dict()]
+        assert [item.text for item in client.received_messages[-1]].count(message.text) == 1
+        assert _ingested(cold_provider) == {identity: [message_identity(accepted), message_identity(message)]}
+    else:
+        assert probe.inputs[-1] == [], "identity-only compatibility suppresses every revision, not only one body"
+        assert all(item.text != message.text for item in client.received_messages[-1])
+        assert _ingested(cold_provider) == {identity: None}
     stored = _array(_data(cold_provider)["conversationHistory"])
     legacy = next(_object(entry) for entry in stored if _object(entry).get("correlationId") == "legacy")
     assert _object(_array(legacy["messages"])[0])["contents"] == []

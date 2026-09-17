@@ -68,10 +68,27 @@ source-bound journal with `results: []` asserts that fact. It is rejected if any
 `errorResponse` remains. An empty retained response set alone does not prove no completions.
 Only a fresh source with none of these signs of use can omit completion evidence.
 
-Nonempty scalar `ingestedPositions` additionally requires complete `deliveryEvidence`, with exactly
-`sourceDigest`, `evidenceId`, `complete: true` and `messages`. It records lossless `Message.to_dict()`
-accepted inputs, including evicted inputs and all accepted revisions, independently of completion
-outcomes. Exact identities preserve delivery gaps, and matching maxima do not prove a prefix.
+`deliveryEvidence` requires matching `sourceDigest`, a stable nonblank `evidenceId`, `complete: true`
+and `messages`.
+Its only optional field is `messagePositions`, an array aligned one-for-one with `messages`.
+Messages remain complete, canonical, losslessly round-trippable `Message.to_dict()` accepted inputs,
+including `message_id`, all accepted revisions and evicted inputs.
+
+Nonempty scalar `ingestedPositions` requires both this journal and the sidecar. Each sidecar member
+is `null` for no cursor participation or an object with exactly `producer` (nonblank string) and
+`position` (nonnegative integer, never a boolean), recording independently authoritative accepted-input
+cursor attribution. Producer maxima from explicit attributions alone must match the legacy map.
+This checks consistency, not a delivered prefix. Omit the sidecar only with an empty or absent scalar
+map, treating every input as unpositioned. Never derive attribution from public message IDs, guessed
+producer names or a retained partial transcript.
+
+Every retained nonblank public request message ID must occur in a provided complete journal,
+regardless of `wf_` spelling. Internal reconciliation IDs do not substitute. Without an input journal,
+retained-ID-only compatibility markers apply equally to opaque and `wf_`-looking public IDs. These
+markers are not exact fingerprint evidence and cannot reconstruct evicted inputs. Journal authority
+and completeness are privileged operator assertions, not independently proved by `sourceDigest`.
+The accepted-input and completion journals remain independent.
+
 Neither transcript fragments nor source `createdAt` can supply missing original responses or
 completion times. Missing, duplicate or contradictory evidence blocks migration. There is no
 invented or `unknown` v2 outcome, and `requireKnownOutcomes=False` cannot waive the requirement.

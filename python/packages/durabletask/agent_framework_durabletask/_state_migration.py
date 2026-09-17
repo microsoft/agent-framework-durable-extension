@@ -20,7 +20,6 @@ from ._message_identity import message_identity
 from ._response_utils import load_agent_response
 from ._retention import StateCapacityError
 from ._shared_state_validation import validate_identifier, validate_shared_data
-from ._workflows.naming import parse_workflow_message_id
 
 __all__ = ["migrate_legacy_state", "state_snapshot_digest"]
 
@@ -79,13 +78,6 @@ def _positive_int(value: Any, name: str) -> int:
     return value
 
 
-def _workflow_position(identity: str) -> tuple[str, int] | None:
-    parsed = parse_workflow_message_id(identity)
-    if identity.startswith("wf_") and (parsed is None or identity != identity.strip() or not parsed[0].strip()):
-        raise ValueError("Malformed workflow message ID in recorded delivery evidence or legacy receipts.")
-    return parsed
-
-
 def _legacy_positions(data: dict[str, Any]) -> dict[str, int]:
     raw = data.get("ingestedPositions", {})
     if not isinstance(raw, dict):
@@ -102,10 +94,7 @@ def _legacy_positions(data: dict[str, Any]) -> dict[str, int]:
 def _validate_receipts(receipts: dict[str, list[str] | None]) -> None:
     for identity, fingerprints in receipts.items():
         _nonblank(identity, "ingestedMessages ID")
-        workflow = _workflow_position(identity)
         if fingerprints is None:
-            if workflow is not None:
-                raise ValueError("Workflow identity-only markers are not exact recorded delivery evidence.")
             continue
         if not fingerprints or any(_SHA256.fullmatch(value) is None for value in fingerprints):
             raise ValueError("ingestedMessages requires nonempty lists of lowercase SHA-256 fingerprints.")
@@ -116,8 +105,14 @@ def _validate_receipts(receipts: dict[str, list[str] | None]) -> None:
 def _journal_receipts(
     evidence: dict[str, Any], *, source_digest: str, positions: dict[str, int]
 ) -> tuple[str, dict[str, list[str]]]:
-    if not isinstance(evidence, dict) or evidence.keys() != _EVIDENCE_FIELDS:
-        raise ValueError("Recorded delivery evidence requires exactly sourceDigest, evidenceId, complete and messages.")
+    if not isinstance(evidence, dict) or evidence.keys() not in (
+        _EVIDENCE_FIELDS,
+        _EVIDENCE_FIELDS | {"messagePositions"},
+    ):
+        raise ValueError(
+            "Recorded delivery evidence requires exactly sourceDigest, evidenceId, complete and messages, "
+            "with only messagePositions optional."
+        )
     # Detach before constructing any core object. The loader must never touch the caller's journal.
     journal: dict[str, Any] = json.loads(_canonical_json(evidence))
     if journal["sourceDigest"] != source_digest:
@@ -128,15 +123,44 @@ def _journal_receipts(
     messages = journal["messages"]
     if not isinstance(messages, list):
         raise ValueError("Recorded delivery evidence messages must be a list of complete canonical message objects.")
+    messages = cast(list[Any], messages)
+    if "messagePositions" not in journal:
+        if positions:
+            raise ValueError(
+                "Recorded delivery evidence requires explicit messagePositions for legacy ingestedPositions. "
+                "Public message IDs do not establish cursor provenance."
+            )
+        attribution: list[Any] = [None] * len(messages)
+    else:
+        raw_attribution = journal["messagePositions"]
+        if not isinstance(raw_attribution, list):
+            raise ValueError("Recorded delivery evidence messagePositions must contain one entry per message.")
+        attribution = cast(list[Any], raw_attribution)
+        if len(attribution) != len(messages):
+            raise ValueError("Recorded delivery evidence messagePositions must contain one entry per message.")
 
     receipts: dict[str, list[str]] = {}
     maxima: dict[str, int] = {}
-    for raw in cast(list[Any], messages):
+    for raw, position_record in zip(messages, attribution, strict=True):
+        # Attribution comes from the authoritative accepted-input journal, not
+        # from public ID spelling, request orchestration IDs or retained bodies.
+        if position_record is not None:
+            if not isinstance(position_record, dict) or position_record.keys() != {"producer", "position"}:
+                raise ValueError(
+                    "Recorded delivery evidence messagePositions entries must be null or exactly producer and position."
+                )
+            position_record = cast(dict[str, Any], position_record)
+            producer = _nonblank(position_record["producer"], "Recorded delivery evidence messagePositions producer")
+            position = position_record["position"]
+            if isinstance(position, bool) or not isinstance(position, int) or position < 0:
+                raise ValueError(
+                    "Recorded delivery evidence messagePositions position must be a nonnegative integer, not a boolean."
+                )
+            maxima[producer] = max(maxima.get(producer, position), position)
         if not isinstance(raw, dict):
             raise ValueError("Recorded delivery evidence messages must contain canonical message objects.")
         raw = cast(dict[str, Any], raw)
         identity = _nonblank(raw.get("message_id"), "Recorded delivery evidence message_id")
-        workflow = _workflow_position(identity)
         _nonblank(raw.get("role"), "Recorded delivery evidence message role")
         if not isinstance(raw.get("contents"), list):
             raise ValueError("Recorded delivery evidence message contents must be a canonical array.")
@@ -152,9 +176,6 @@ def _journal_receipts(
         if fingerprint in revisions:
             raise ValueError("Recorded delivery evidence contains a duplicate message ID/fingerprint pair.")
         revisions.append(fingerprint)
-        if workflow is not None:
-            producer, position = workflow
-            maxima[producer] = max(maxima.get(producer, position), position)
 
     # This is only a consistency check. Sparse positions are valid; a maximum is never
     # proof of a complete prefix, nor proof that the operator's journal is complete.
@@ -165,17 +186,16 @@ def _journal_receipts(
     return evidence_id, receipts
 
 
-def _retained_custom_request_ids(state: DurableAgentState) -> Iterator[str]:
-    """Yield legacy lookup identities, never fingerprints of possibly pruned content."""
+def _retained_request_ids(state: DurableAgentState) -> Iterator[str]:
+    """Yield opaque public lookup IDs, not reconciliation IDs or inferred provenance."""
     for entry in state.data.conversation_history:
         if isinstance(entry, DurableAgentStateRequest):
             for message in entry.messages:
-                if message.message_id is not None:
-                    if isinstance(message.message_id, str) and not message.message_id.strip():
+                identity = message.public_message_id
+                if identity is not None:
+                    if isinstance(identity, str) and not identity.strip():
                         continue
-                    identity = _nonblank(message.message_id, "Legacy request message ID")
-                    if _workflow_position(identity) is None:
-                        yield identity
+                    yield _nonblank(identity, "Legacy request message ID")
 
 
 def _apply_journal(state: DurableAgentState, journal: dict[str, list[str]]) -> None:
@@ -184,9 +204,9 @@ def _apply_journal(state: DurableAgentState, journal: dict[str, list[str]]) -> N
         recorded = journal.get(identity)
         if recorded is None or (existing is not None and not set(existing).issubset(recorded)):
             raise ValueError("Recorded delivery evidence is inconsistent with existing ingestedMessages receipts.")
-    for identity in _retained_custom_request_ids(state):
+    for identity in _retained_request_ids(state):
         if identity not in journal:
-            raise ValueError("Recorded delivery evidence must include every retained legacy custom request message ID.")
+            raise ValueError("Recorded delivery evidence must include every retained legacy request message ID.")
     for identity, recorded in journal.items():
         existing = receipts.get(identity)
         if existing is None:
@@ -337,7 +357,11 @@ def migrate_legacy_state(
     revision of a message ID. Migration cannot independently verify the evidence's
     authority or completeness. If that journal is unavailable, keep the old session
     on the old engine rather than guessing. Equal maxima check consistency only;
-    no contiguous positions or prefixes are required or inferred.
+    no contiguous positions or prefixes are required or inferred. Cursor attribution
+    is supplied separately in messagePositions, never inferred from public ID spelling.
+    Every retained nonblank public request ID must be covered by a supplied journal.
+    Without a journal, retained IDs preserve identity-only compatibility markers,
+    not exact acceptance fingerprints or evidence for evicted inputs.
 
     Any retained history, truncation, nonempty session or ingestedPositions, or
     nonempty supplied accepted-message journal requires a
@@ -367,9 +391,14 @@ def migrate_legacy_state(
         delivery_window_seconds: Positive bounded grace period for imported original results.
         max_state_bytes: Optional positive resolved budget, measured with default ASCII JSON.
             All migrated data and metadata are protected; oversize states fail without pruning.
-        delivery_evidence: Exactly sourceDigest, nonblank evidenceId, complete=True and
-            messages, a list of complete canonical Message.to_dict() inputs. Unsupported
-            or lossy canonical inputs and duplicate ID/fingerprint pairs are rejected.
+        delivery_evidence: Required sourceDigest, nonblank evidenceId, complete=True and
+            messages, a list of complete canonical Message.to_dict() inputs. The only
+            optional key, messagePositions, is required for nonempty ingestedPositions.
+            It is aligned one-for-one with messages, each entry null for an unpositioned
+            input or exactly producer (nonblank string) and position (nonnegative integer,
+            not boolean) from authoritative acceptance records. Omission means no inputs
+            are positioned. Unsupported or lossy canonical inputs and duplicate
+            ID/fingerprint pairs are rejected. No ID-to-position naming rule is imposed.
         completion_evidence: Exactly sourceDigest, nonblank evidenceId, complete=True and
             results, a list of canonical shared terminalResult objects with correlationId,
             known outcome, authoritative original completedAt, response.messages and error
@@ -455,7 +484,7 @@ def migrate_legacy_state(
             raise ValueError(_COMPLETION_REQUIRED)
         _apply_journal(state, journal)
     else:
-        for identity in _retained_custom_request_ids(state):
+        for identity in _retained_request_ids(state):
             state.data.ingested_messages.setdefault(identity, None)
 
     # Switch the detached root before emitting or validating target maps. The

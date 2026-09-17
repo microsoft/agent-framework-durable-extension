@@ -88,13 +88,28 @@ without restoring a partial Core projection and presenting it as the original re
 duplicate or contradictory evidence blocks migration. There is no invented or `unknown` v2 outcome,
 and `requireKnownOutcomes=False` cannot waive the evidence requirement.
 
-Nonempty scalar `ingestedPositions` additionally requires `deliveryEvidence` with exactly
-`sourceDigest`, `evidenceId`, `complete: true` and `messages`. The messages are complete, losslessly
-round-trippable `Message.to_dict()` inputs, including `message_id`, all accepted revisions and
-evicted inputs. Exact identities preserve gaps. Matching producer maxima checks consistency only,
-not a delivered prefix. This accepted-input journal is independent of the completion journal.
-Completeness assertions and digest checks do not establish authority by themselves. Without the
-required journals, keep the session on the old engine.
+`deliveryEvidence` requires matching `sourceDigest`, a stable nonblank `evidenceId`, `complete: true`
+and `messages`.
+Its only optional field is `messagePositions`, an array aligned one-for-one with `messages`.
+Messages remain complete, canonical, losslessly round-trippable `Message.to_dict()` accepted inputs,
+including `message_id`, all accepted revisions and evicted inputs.
+
+Nonempty scalar `ingestedPositions` requires both this journal and the sidecar. Each sidecar member
+is `null` for no cursor participation or an object with exactly `producer` (nonblank string) and
+`position` (nonnegative integer, never a boolean), recording independently authoritative accepted-input
+cursor attribution. Producer maxima from explicit attributions alone must match the legacy map.
+This checks consistency, not a delivered prefix. Omit the sidecar only with an empty or absent scalar
+map, treating every input as unpositioned. Never derive attribution from public message IDs, guessed
+producer names or a retained partial transcript.
+
+Every retained nonblank public request message ID must occur in a provided complete journal,
+regardless of `wf_` spelling. Internal reconciliation IDs do not substitute. Without an input journal,
+retained-ID-only compatibility markers apply equally to opaque and `wf_`-looking public IDs. These
+markers are not exact fingerprint evidence and cannot reconstruct evicted inputs. Journal authority
+and completeness are privileged operator assertions, not independently proved by `sourceDigest`.
+The accepted-input and completion journals remain independent.
+
+Without the required journals, keep the session on the old engine.
 
 The migrator owns delivery grace. It preserves the original journal `completedAt` strings and sets
 matching result and receipt `resultExpiresAt` to migration time plus the configured

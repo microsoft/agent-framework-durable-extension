@@ -60,12 +60,15 @@ def _journal(source: dict[str, Any], *results: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def _delivery(source: dict[str, Any], *messages: Message) -> dict[str, Any]:
+def _delivery(
+    source: dict[str, Any], *messages: Message, message_positions: list[dict[str, Any] | None] | None = None
+) -> dict[str, Any]:
     return {
         "sourceDigest": state_snapshot_digest(source),
         "evidenceId": "delivery-journal-1",
         "complete": True,
         "messages": [message.to_dict() for message in messages],
+        **({"messagePositions": deepcopy(message_positions)} if message_positions is not None else {}),
     }
 
 
@@ -168,7 +171,11 @@ def test_used_source_without_history_still_requires_completion_journal(loss: str
         source["data"]["truncation"] = {"evictedMessageCount": 2, "firstEvictedAt": OLD, "lastEvictedAt": OLD}
     else:
         source["data"]["ingestedPositions"] = {"upstream": 0}
-        delivery = _delivery(source, Message("user", ["accepted"], message_id=workflow_message_id("upstream", 0)))
+        delivery = _delivery(
+            source,
+            Message("user", ["accepted"], message_id=workflow_message_id("upstream", 0)),
+            message_positions=[{"producer": "upstream", "position": 0}],
+        )
     _assert_rejected(source, None, delivery_evidence=delivery)
 
 
@@ -517,7 +524,17 @@ def test_delivery_journal_stays_separate_and_unversioned_receipts_stay_opaque() 
         "ingestedPositions": {"upstream": 3},
         "ingestedMessages": {"not-runtime-receipts": ["opaque", None, False]},
     })
-    delivery = _delivery(source, revised, first, third)
+    delivery = _delivery(
+        source,
+        revised,
+        first,
+        third,
+        message_positions=[
+            {"producer": "upstream", "position": 3},
+            {"producer": "upstream", "position": 1},
+            {"producer": "upstream", "position": 3},
+        ],
+    )
     evidence = _journal(source)
     before, delivery_before, evidence_before = deepcopy(source), deepcopy(delivery), deepcopy(evidence)
     migrated = _cold(_migrate(source, delivery_evidence=delivery, completion_evidence=evidence))
@@ -533,6 +550,7 @@ def test_delivery_journal_stays_separate_and_unversioned_receipts_stay_opaque() 
     _assert_rejected(source, evidence)  # Completion authority cannot replace accepted-input evidence.
     bad_delivery = deepcopy(delivery)
     bad_delivery["messages"].append(deepcopy(bad_delivery["messages"][0]))
+    bad_delivery["messagePositions"].append(deepcopy(bad_delivery["messagePositions"][0]))
     _assert_rejected(source, evidence, delivery_evidence=bad_delivery)
 
 

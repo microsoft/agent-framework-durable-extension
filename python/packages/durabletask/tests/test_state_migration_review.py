@@ -103,12 +103,18 @@ def _message(position: int, *, producer: str = "upstream", text: str = "accepted
     )
 
 
-def _evidence(source: dict[str, Any], messages: list[Message]) -> dict[str, Any]:
+def _evidence(
+    source: dict[str, Any],
+    messages: list[Message],
+    *,
+    message_positions: list[dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
     return {
         "sourceDigest": state_snapshot_digest(source),
         "evidenceId": "operator-journal-1",
         "complete": True,
         "messages": [message.to_dict() for message in messages],
+        **({"messagePositions": deepcopy(message_positions)} if message_positions is not None else {}),
     }
 
 
@@ -304,7 +310,15 @@ def test_sparse_journal_preserves_exact_revisions_not_an_inferred_prefix_after_c
     assert first.message_id is not None
     assert third.message_id is not None
     source["data"]["ingestedMessages"] = {"opaque": {"keep": [False, None]}}
-    evidence = _evidence(source, [revision, first, third])
+    evidence = _evidence(
+        source,
+        [revision, first, third],
+        message_positions=[
+            {"producer": "upstream", "position": 3},
+            {"producer": "upstream", "position": 1},
+            {"producer": "upstream", "position": 3},
+        ],
+    )
     before_source, before_evidence = deepcopy(source), deepcopy(evidence)
     result = _cold(
         _migrate(source, delivery_evidence=evidence, completion_evidence=_completions(source, _original_result()))
@@ -336,7 +350,15 @@ def test_multiple_producers_allow_sparse_zero_based_and_out_of_order_journal() -
     result = _cold(
         _migrate(
             source,
-            delivery_evidence=_evidence(source, messages),
+            delivery_evidence=_evidence(
+                source,
+                messages,
+                message_positions=[
+                    {"producer": "first_with_underscores", "position": 9},
+                    {"producer": "other", "position": 0},
+                    None,
+                ],
+            ),
             completion_evidence=_completions(source, _original_result()),
         )
     )
@@ -355,7 +377,7 @@ def test_scalar_positions_without_complete_journal_fail_even_with_retained_messa
     assert source == before
 
 
-def test_no_scalar_or_delivery_journal_uses_custom_id_markers_without_interpreting_opaque_legacy_data() -> None:
+def test_no_scalar_or_delivery_journal_uses_public_id_markers_without_interpreting_opaque_legacy_data() -> None:
     source = _source()
     messages = source["data"]["conversationHistory"][0]["messages"]
     messages.extend([
@@ -369,10 +391,10 @@ def test_no_scalar_or_delivery_journal_uses_custom_id_markers_without_interpreti
         "already-exact": None,
         "custom-id": None,
         "cleared-custom": None,
+        workflow_message_id("upstream", 3): None,
     }
     assert result.to_dict()["data"]["ingestedMessages"] == source["data"]["ingestedMessages"]
     assert "old-marker" not in result.data.ingested_messages
-    assert workflow_message_id("upstream", 3) not in result.data.ingested_messages
     assert "answer-id" not in result.data.ingested_messages
 
 
@@ -421,7 +443,8 @@ def test_complete_custom_journal_establishes_content_sensitive_revisions_without
 def test_evidence_binding_envelope_completeness_and_extra_fields_are_validated(field: str, value: Any) -> None:
     source = _source()
     source["data"]["ingestedPositions"] = {"upstream": 3}
-    evidence = _evidence(source, [_message(3)])
+    source["data"]["conversationHistory"][0]["messages"][0]["messageId"] = workflow_message_id("upstream", 3)
+    evidence = _evidence(source, [_message(3)], message_positions=[{"producer": "upstream", "position": 3}])
     evidence[field] = value
     before = deepcopy(evidence)
     with pytest.raises(ValueError, match="[Rr]ecorded delivery evidence"):
@@ -434,21 +457,33 @@ def test_all_evidence_fields_are_required(field: str) -> None:
     source = _source()
     evidence = _evidence(source, [])
     del evidence[field]
-    with pytest.raises(ValueError, match="requires exactly"):
+    with pytest.raises(ValueError, match="requires.*sourceDigest.*evidenceId.*complete.*messages"):
         _migrate(source, delivery_evidence=evidence, completion_evidence=_completions(source, _original_result()))
 
 
 @pytest.mark.parametrize(
-    "messages",
-    [[], [_message(1)], [_message(4)], [_message(3, producer="other")], [_message(3), _message(0, producer="extra")]],
+    ("messages", "message_positions"),
+    [
+        ([], []),
+        ([_message(1)], [{"producer": "upstream", "position": 1}]),
+        ([_message(4)], [{"producer": "upstream", "position": 4}]),
+        ([_message(3, producer="other")], [{"producer": "other", "position": 3}]),
+        (
+            [_message(3), _message(0, producer="extra")],
+            [{"producer": "upstream", "position": 3}, {"producer": "extra", "position": 0}],
+        ),
+    ],
 )
-def test_evidence_workflow_producer_set_and_maxima_must_match(messages: list[Message]) -> None:
+def test_evidence_explicit_producer_set_and_maxima_must_match(
+    messages: list[Message], message_positions: list[dict[str, Any] | None]
+) -> None:
     source = _source()
     source["data"]["ingestedPositions"] = {"upstream": 3}
+    custom = Message("user", ["complete original accepted input"], message_id="custom-id")
     with pytest.raises(ValueError, match="producers and maximum positions"):
         _migrate(
             source,
-            delivery_evidence=_evidence(source, messages),
+            delivery_evidence=_evidence(source, [*messages, custom], message_positions=[*message_positions, None]),
             completion_evidence=_completions(source, _original_result()),
         )
 
@@ -463,31 +498,55 @@ def test_all_legacy_cursor_entries_require_named_producers_and_nonbool_nonnegati
     with pytest.raises(ValueError, match="ingested[Pp]osition|ingested position"):
         _migrate(
             source,
-            delivery_evidence=_evidence(source, []),
+            delivery_evidence=_evidence(source, [], message_positions=[]),
             completion_evidence=_completions(source, _original_result()),
         )
 
 
-@pytest.mark.parametrize(
-    "identity", [None, "", "  ", True, 7, "wf_upstream_-1", "wf_upstream_true", "wf__3", "wf_upstream_3\n"]
-)
-def test_evidence_rejects_missing_blank_nonstring_and_malformed_workflow_ids(identity: Any) -> None:
+@pytest.mark.parametrize("identity", [None, "", "  ", True, 7])
+def test_evidence_rejects_missing_blank_and_nonstring_public_ids(identity: Any) -> None:
     source = _source()
     source["data"]["ingestedPositions"] = {"upstream": 3}
-    evidence = _evidence(source, [_message(3)])
+    source["data"]["conversationHistory"][0]["messages"][0]["messageId"] = workflow_message_id("upstream", 3)
+    evidence = _evidence(source, [_message(3)], message_positions=[{"producer": "upstream", "position": 3}])
     evidence["messages"][0]["message_id"] = identity
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="message_id.*nonblank string"):
         _migrate(source, delivery_evidence=evidence, completion_evidence=_completions(source, _original_result()))
+
+
+@pytest.mark.parametrize(
+    "identity",
+    ["wf_upstream_-1", "wf_upstream_true", "wf__3", "wf_upstream_3\n", "wf_other_99", "custom-id"],
+)
+def test_nonblank_public_ids_are_opaque_to_explicit_position_attribution(identity: str) -> None:
+    source = _source()
+    source["data"]["ingestedPositions"] = {"upstream": 3}
+    source["data"]["conversationHistory"][0]["messages"] = [{"role": "user", "messageId": identity, "contents": []}]
+    original = Message("user", ["complete original accepted input"], message_id=identity)
+    evidence = _evidence(source, [original], message_positions=[{"producer": "upstream", "position": 3}])
+    before_source, before_evidence = deepcopy(source), deepcopy(evidence)
+    result = _cold(
+        _migrate(source, delivery_evidence=evidence, completion_evidence=_completions(source, _original_result()))
+    )
+    assert result.data.ingested_positions == {"upstream": 3}
+    assert result.data.ingested_messages == {identity: [message_identity(original)]}
+    assert result.to_dict()["data"]["conversationHistory"] == before_source["data"]["conversationHistory"]
+    assert source == before_source and evidence == before_evidence
 
 
 def test_exact_duplicate_evidence_is_rejected_but_revisions_are_not() -> None:
     source = _source()
     source["data"]["ingestedPositions"] = {"upstream": 3}
+    source["data"]["conversationHistory"][0]["messages"][0]["messageId"] = workflow_message_id("upstream", 3)
     message = _message(3)
     with pytest.raises(ValueError, match="duplicate message ID/fingerprint"):
         _migrate(
             source,
-            delivery_evidence=_evidence(source, [message, message]),
+            delivery_evidence=_evidence(
+                source,
+                [message, message],
+                message_positions=[{"producer": "upstream", "position": 3}, {"producer": "upstream", "position": 3}],
+            ),
             completion_evidence=_completions(source, _original_result()),
         )
 
@@ -496,7 +555,8 @@ def test_exact_duplicate_evidence_is_rejected_but_revisions_are_not() -> None:
 def test_journal_never_hashes_a_lossy_or_malformed_message_projection(change: str) -> None:
     source = _source()
     source["data"]["ingestedPositions"] = {"upstream": 3}
-    evidence = _evidence(source, [_message(3)])
+    source["data"]["conversationHistory"][0]["messages"][0]["messageId"] = workflow_message_id("upstream", 3)
+    evidence = _evidence(source, [_message(3)], message_positions=[{"producer": "upstream", "position": 3}])
     message = evidence["messages"][0]
     if change == "unknown-field":
         message["future_unrecognized_message_field"] = {"must-not-disappear": [1]}
@@ -532,7 +592,15 @@ def test_journal_fingerprints_cover_complete_canonical_inputs(mutation: str) -> 
     result = _cold(
         _migrate(
             source,
-            delivery_evidence=_evidence(source, [original, changed, custom]),
+            delivery_evidence=_evidence(
+                source,
+                [original, changed, custom],
+                message_positions=[
+                    {"producer": "upstream", "position": 3},
+                    {"producer": "upstream", "position": 3},
+                    None,
+                ],
+            ),
             completion_evidence=_completions(source, _original_result()),
         )
     )
@@ -573,14 +641,18 @@ def test_unversioned_legacy_ingested_messages_are_arbitrary_opaque_json(opaque: 
     assert source == before
 
 
-def test_complete_journal_must_include_every_retained_custom_request_identity() -> None:
+@pytest.mark.parametrize("identity", ["custom-id", "wf_retained_7", "wf__3"])
+def test_complete_journal_must_include_every_retained_public_request_identity(identity: str) -> None:
     source = _source()
     source["data"]["ingestedPositions"] = {"upstream": 3}
+    source["data"]["conversationHistory"][0]["messages"][0]["messageId"] = identity
     before = deepcopy(source)
-    with pytest.raises(ValueError, match="every retained legacy custom request"):
+    with pytest.raises(ValueError, match="every retained legacy request message ID"):
         _migrate(
             source,
-            delivery_evidence=_evidence(source, [_message(3)]),
+            delivery_evidence=_evidence(
+                source, [_message(3)], message_positions=[{"producer": "upstream", "position": 3}]
+            ),
             completion_evidence=_completions(source, _original_result()),
         )
     assert source == before
@@ -809,7 +881,11 @@ def test_budget_includes_metadata_receipts_mailbox_session_and_ascii_escaped_unk
     source["futureRoot"] = {"unicode": "雪😀" * 20}
     custom = Message("user", ["complete original accepted input"], message_id="custom-id")
     messages = [_message(1), _message(3), custom]
-    evidence = _evidence(source, messages)
+    evidence = _evidence(
+        source,
+        messages,
+        message_positions=[{"producer": "upstream", "position": 1}, {"producer": "upstream", "position": 3}, None],
+    )
     before_source, before_evidence = deepcopy(source), deepcopy(evidence)
     completions = _completions(source, _original_result())
     result = _migrate(source, delivery_evidence=evidence, completion_evidence=completions)
