@@ -11,6 +11,7 @@ Use these names for new code:
 | `session_id` | `sessionId` | Agent run query parameter and JSON request/response field |
 | `wait_for_response` | `waitForResponse` | Agent run query parameter and Python JSON request field |
 | `correlation_id` | `correlationId` | Python agent run JSON response field; not a request field |
+| `message_count` | `messageCount` | Python synchronous agent run JSON response field |
 | `thread_id` | `sessionId` | Deprecated alias for the same session key |
 
 The `x-ms-session-id` and `x-ms-wait-for-response` headers did not change.
