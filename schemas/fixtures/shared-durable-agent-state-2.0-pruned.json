@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "2.0.0",
+  "data": {
+    "conversationHistory": [],
+    "terminalResults": {
+      "corr-failed": {
+        "correlationId": "corr-failed",
+        "outcome": "failed",
+        "completedAt": "2026-09-10T06:00:00Z",
+        "response": {
+          "messages": []
+        },
+        "error": {
+          "code": "example_dependency_unavailable",
+          "message": "The example dependency could not complete the request.",
+          "details": {
+            "synthetic": true
+          }
+        }
+      }
+    },
+    "completionReceipts": {
+      "corr-failed": {
+        "correlationId": "corr-failed",
+        "outcome": "failed",
+        "completedAt": "2026-09-10T06:00:00Z",
+        "resultState": "available"
+      },
+      "corr-pruned": {
+        "correlationId": "corr-pruned",
+        "outcome": "succeeded",
+        "completedAt": "2026-09-09T06:00:00Z",
+        "resultState": "unavailable",
+        "resultExpiresAt": "2026-09-10T06:00:00Z",
+        "resultUnavailableAt": "2026-09-10T06:00:01Z"
+      }
+    },
+    "historyBinding": {
+      "version": 1,
+      "ownerKind": "durableState",
+      "providerKey": "example.local-history.v1"
+    },
+    "session": {
+      "exampleContinuation": {
+        "cursor": "synthetic-cursor",
+        "$runtimeType": "opaque-user-data"
+      }
+    },
+    "expirationTimeUtc": "2026-10-10T06:00:00Z",
+    "ingestedPositions": {
+      "example-producer": 3
+    },
+    "truncation": {
+      "evictedMessageCount": 4,
+      "firstEvictedAt": "2026-09-10T06:00:02Z",
+      "lastEvictedAt": "2026-09-10T06:00:03Z"
+    }
+  }
+}

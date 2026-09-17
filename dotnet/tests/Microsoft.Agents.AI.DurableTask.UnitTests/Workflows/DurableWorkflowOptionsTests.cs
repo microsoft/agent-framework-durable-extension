@@ -11,6 +11,35 @@ namespace Microsoft.Agents.AI.DurableTask.UnitTests.Workflows;
 public sealed class DurableWorkflowOptionsTests
 {
     [Fact]
+    public void MaxSupersteps_DefaultsTo100()
+    {
+        DurableWorkflowOptions options = new DurableOptions().Workflows;
+
+        Assert.Equal(100, options.MaxSupersteps);
+    }
+
+    [Fact]
+    public void MaxSupersteps_CanBeConfigured()
+    {
+        DurableWorkflowOptions options = new DurableOptions().Workflows;
+
+        options.MaxSupersteps = 3;
+
+        Assert.Equal(3, options.MaxSupersteps);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void MaxSupersteps_ThrowsWhenValueIsNotPositive(int value)
+    {
+        DurableWorkflowOptions options = new DurableOptions().Workflows;
+
+        ArgumentOutOfRangeException exception = Assert.Throws<ArgumentOutOfRangeException>(() => options.MaxSupersteps = value);
+        Assert.Equal(nameof(DurableWorkflowOptions.MaxSupersteps), exception.ParamName);
+    }
+
+    [Fact]
     public void AddWorkflow_ThrowsWhenDifferentWorkflowUsesRegisteredName()
     {
         // Arrange

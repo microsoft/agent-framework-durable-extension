@@ -1,0 +1,77 @@
+{
+  "schemaVersion": "2.0.0",
+  "data": {
+    "conversationHistory": [
+      {
+        "$type": "request",
+        "correlationId": "corr-lossless",
+        "messages": [
+          {
+            "role": "developer",
+            "contents": [
+              {
+                "$type": "text",
+                "text": "Preserve the original result."
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "terminalResults": {
+      "corr-lossless": {
+        "correlationId": "corr-lossless",
+        "outcome": "succeeded",
+        "completedAt": "2026-09-11T10:00:00Z",
+        "response": {
+          "messages": [
+            {
+              "role": "assistant",
+              "contents": [
+                {
+                  "$type": "functionCall",
+                  "callId": "tool-example",
+                  "name": "example_tool",
+                  "arguments": " { \"partial\": "
+                },
+                {
+                  "$type": "uri",
+                  "uri": "https://example.test/media/1"
+                },
+                {
+                  "$type": "unknown",
+                  "content": {
+                    "$type": "example_unmodeled_media",
+                    "$runtimeType": "opaque-data-only",
+                    "bytes": "AQID",
+                    "metadata": {
+                      "presentNull": null,
+                      "empty": [],
+                      "annotations": [
+                        {
+                          "kind": "synthetic"
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "value": false
+        }
+      }
+    },
+    "completionReceipts": {
+      "corr-lossless": {
+        "correlationId": "corr-lossless",
+        "outcome": "succeeded",
+        "completedAt": "2026-09-11T10:00:00Z",
+        "resultState": "available"
+      }
+    },
+    "ingestedPositions": {
+      "legacy-producer": 3
+    }
+  }
+}
