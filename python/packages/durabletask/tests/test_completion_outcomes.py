@@ -15,9 +15,10 @@ from typing_extensions import Self
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState, migrate_legacy_state, state_snapshot_digest
 from agent_framework_durabletask import _durable_agent_state as state_module
-from agent_framework_durabletask._response_utils import serialize_agent_response
+from agent_framework_durabletask._response_utils import invocation_outcome, serialize_agent_response
 
 NOW = datetime(2026, 9, 11, 12, tzinfo=timezone.utc)
+ORIGINAL_COMPLETED_AT = "2026-09-11T12:00:01.123456789Z"
 WINDOW = 60
 CORRELATION = "outcome-correlation"
 
@@ -89,16 +90,25 @@ def test_new_receipt_retains_invocation_outcome_without_payload_after_expiry(
     response = _response(kind)
     state = _state(kind)
     expected = "failed" if kind.startswith("error-") else "succeeded"
-    receipt = {"completedAt": NOW.isoformat(), "outcome": expected}
+    receipt = {
+        "correlationId": CORRELATION,
+        "completedAt": NOW.isoformat(),
+        "outcome": expected,
+        "resultExpiresAt": (NOW + timedelta(seconds=WINDOW)).isoformat(),
+        "resultState": "available",
+    }
     assert state.data.completed_correlations[CORRELATION] == receipt
     Clock.current = NOW + timedelta(seconds=WINDOW, microseconds=-1)
     delivered = state.try_get_agent_response(CORRELATION)
     assert delivered is not None
+    assert invocation_outcome(delivered) == expected
+    # Existing status or native error content already represents failure. Delivery must not rewrite it.
     assert serialize_agent_response(delivered) == serialize_agent_response(response)
 
     Clock.current = NOW + timedelta(seconds=WINDOW)
     if cleanup:
         state.expire_responses(now=Clock.current)
+        receipt.update(resultState="unavailable", resultUnavailableAt=Clock.current.isoformat())
     if cold:
         state = _cold(state)
     before = state.to_json()
@@ -120,44 +130,49 @@ def test_new_receipt_retains_invocation_outcome_without_payload_after_expiry(
     assert state.to_json() == before
 
 
-@pytest.mark.parametrize("kind", ["success", "error-content"])
-@pytest.mark.parametrize("legacy", [False, True])
-def test_old_receipt_uses_only_independent_result_evidence_before_cleanup(kind: str, legacy: bool) -> None:
-    state = _state(kind)
-    receipt = state.data.completed_correlations[CORRELATION]
-    receipt.pop("outcome", None)
-    receipt["future"] = {"keep": [1]}
-    if legacy:
-        receipt["legacy"] = True
-    state = _cold(state)
-    original_receipt = deepcopy(state.data.completed_correlations[CORRELATION])
-    Clock.current = NOW + timedelta(seconds=WINDOW)
-    expected = "failed" if kind == "error-content" else "unknown" if legacy else "succeeded"
-    before = state.to_json()
-    response = state.try_get_agent_response(CORRELATION)
-    assert response is not None and response.additional_properties["durable_outcome"] == expected
-    assert state.to_json() == before, "lookup cannot rewrite persisted evidence"
-    state.expire_responses(now=Clock.current)
-    state = _cold(state)
-    assert state.data.response_mailbox == {}
-    assert state.data.completed_correlations[CORRELATION] == {
-        **original_receipt,
-        **({"outcome": expected} if expected != "unknown" else {}),
-    }
-    expired = state.try_get_agent_response(CORRELATION)
-    assert expired is not None and expired.additional_properties["durable_outcome"] == expected
+@pytest.mark.parametrize("messages", [[], [{"role": "assistant", "contents": [{"$type": "text", "text": "partial"}]}]])
+@pytest.mark.parametrize("cold", [False, True])
+def test_authoritative_failed_result_delivers_failure_even_without_error_content(
+    messages: list[Any], cold: bool
+) -> None:
+    raw = _state("error-content").to_dict()
+    result = raw["data"]["terminalResults"][CORRELATION]
+    result["response"] = {"messages": messages}
+    result["error"] = {"code": "ProviderFailed", "message": "authoritative failure", "details": {"retry": False}}
+    before = deepcopy(raw)
+    state = DurableAgentState.from_dict(raw)
+    if cold:
+        state = _cold(state)
+    delivered = state.try_get_agent_response(CORRELATION)
+    assert delivered is not None and invocation_outcome(delivered) == "failed"
+    assert delivered.additional_properties["durable_status"] == "error"
+    errors = [content for message in delivered.messages for content in message.contents if content.type == "error"]
+    assert len(errors) == 1
+    assert errors[0].message == "authoritative failure" and errors[0].error_code == "ProviderFailed"
+    assert errors[0].error_details == {"retry": False}
+    if messages:
+        assert delivered.messages[0].text == "partial"
+    assert state.to_dict() == before and raw == before
 
 
 @pytest.mark.parametrize("cold", [False, True])
-async def test_old_unknown_receipt_still_suppresses_execution_and_survives_reset(cold: bool) -> None:
+@pytest.mark.parametrize("outcome", ["succeeded", "failed"])
+async def test_unavailable_known_receipt_suppresses_execution_and_survives_reset(cold: bool, outcome: str) -> None:
     state = DurableAgentState()
-    state.data.completed_correlations[CORRELATION] = {"completedAt": NOW.isoformat(), "future": {"keep": True}}
+    state.data.completed_correlations[CORRELATION] = {
+        "correlationId": CORRELATION,
+        "completedAt": NOW.isoformat(),
+        "outcome": outcome,
+        "resultState": "unavailable",
+        "resultUnavailableAt": NOW.isoformat(),
+        "future": {"keep": True},
+    }
     original = deepcopy(state.to_dict())
     client: Any = RecordingChatClient()
     provider = JsonStateProvider(_cold(state).to_dict() if cold else state.to_dict())
     entity = AgentEntity(Agent(client=client), state_provider=provider)
     response = await entity.run({"message": "never rerun", "correlationId": CORRELATION})
-    assert response.additional_properties["durable_outcome"] == "unknown"
+    assert response.additional_properties["durable_outcome"] == outcome
     assert response.additional_properties["durable_status"] == "already_completed"
     assert client.received_messages == [] and provider.writes == 0 and provider.raw == original
     entity.reset()
@@ -168,9 +183,9 @@ async def test_old_unknown_receipt_still_suppresses_execution_and_survives_reset
 @pytest.mark.parametrize("invalid", [None, "", "success", "FAILED", "unknown", 1, False, [], {}])
 def test_invalid_present_outcome_is_rejected_at_read_and_warm_boundaries(invalid: Any) -> None:
     state = _state()
-    state.data.response_mailbox.clear()
+    raw = state.to_dict()
     state.data.completed_correlations[CORRELATION]["outcome"] = invalid
-    raw = {"schemaVersion": "2.0.0", "data": {"completedCorrelations": deepcopy(state.data.completed_correlations)}}
+    raw["data"]["completionReceipts"][CORRELATION]["outcome"] = invalid
     with pytest.raises(ValueError, match="outcome"):
         DurableAgentState.from_dict(raw)
     with pytest.raises(ValueError, match="outcome"):
@@ -181,6 +196,27 @@ def test_invalid_present_outcome_is_rejected_at_read_and_warm_boundaries(invalid
         state.prepare_for_write(delivery_window_seconds=WINDOW)
     with pytest.raises(ValueError, match="outcome"):
         state.try_get_agent_response(CORRELATION)
+
+
+@pytest.mark.parametrize("boundary", ["serialize", "prepare", "lookup", "cleanup", "backfill", "record"])
+def test_missing_outcome_is_not_repaired_at_warm_boundaries(boundary: str) -> None:
+    state = _state()
+    del state.data.completed_correlations[CORRELATION]["outcome"]
+    before = deepcopy((state.data.response_mailbox, state.data.completed_correlations))
+    with pytest.raises(ValueError, match="outcome"):
+        if boundary == "serialize":
+            state.to_dict()
+        elif boundary == "prepare":
+            state.prepare_for_write(delivery_window_seconds=WINDOW)
+        elif boundary == "lookup":
+            state.try_get_agent_response(CORRELATION)
+        elif boundary == "cleanup":
+            state.expire_responses(now=NOW + timedelta(days=1))
+        elif boundary == "backfill":
+            state._backfill_completion_outcomes()
+        else:
+            state.record_response("new", _response("success"), delivery_window_seconds=WINDOW)
+    assert (state.data.response_mailbox, state.data.completed_correlations) == before
 
 
 def _migrate(source: dict[str, Any], **kwargs: Any) -> DurableAgentState:
@@ -196,78 +232,121 @@ def _migrate(source: dict[str, Any], **kwargs: Any) -> DurableAgentState:
     )
 
 
-@pytest.mark.parametrize("mailbox", [False, True])
-def test_known_outcome_import_requires_authoritative_evidence_and_preserves_completion_time(mailbox: bool) -> None:
-    source = _state("error-content").to_dict()
-    source["schemaVersion"] = "1.1.0"
-    source["data"]["completedCorrelations"][CORRELATION].pop("outcome", None)
-    if not mailbox:
-        source["data"].pop("responseMailbox")
-    before = deepcopy(source)
-    if mailbox:
-        result = _cold(_migrate(source, require_known_outcomes=True))
-        assert result.data.completed_correlations[CORRELATION] == {"completedAt": NOW.isoformat(), "outcome": "failed"}
-        assert result.data.response_mailbox == before["data"]["responseMailbox"]
-    else:
-        with pytest.raises(ValueError, match="outcome.*evidence"):
-            _migrate(source, require_known_outcomes=True)
-        compatible = _cold(_migrate(source))
-        assert compatible.data.completed_correlations == source["data"]["completedCorrelations"]
-        assert compatible.data.response_mailbox == {}
-        response = compatible.try_get_agent_response(CORRELATION)
-        assert response is not None and response.additional_properties["durable_outcome"] == "unknown"
-    assert source == before
-
-
-def test_existing_mailbox_backfill_uses_original_completion_timestamp_not_migration_time() -> None:
-    source = _state().to_dict()
-    source["schemaVersion"] = "1.1.0"
-    source["data"].pop("completedCorrelations")
-    result = _cold(_migrate(source, require_known_outcomes=True))
-    assert result.data.completed_correlations[CORRELATION] == {
-        "completedAt": NOW.isoformat(),
-        "outcome": "succeeded",
-        "legacy": True,
-    }
-    assert result.data.response_mailbox == source["data"]["responseMailbox"]
-
-
-def test_partial_legacy_transcript_is_not_proof_of_success() -> None:
-    source: dict[str, Any] = {
+def _legacy_source(kind: str = "response", *, messages: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    return {
         "schemaVersion": "1.1.0",
         "data": {
             "conversationHistory": [
                 {
-                    "$type": "response",
+                    "$type": kind,
                     "correlationId": CORRELATION,
                     "createdAt": NOW.isoformat(),
-                    "messages": [],
+                    "messages": [] if messages is None else messages,
                 }
-            ]
+            ],
         },
     }
+
+
+def _original_failure(*, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    # Fixture ground truth from the original invocation, not inferred from its retained transcript.
+    return {
+        "correlationId": CORRELATION,
+        "outcome": "failed",
+        "completedAt": ORIGINAL_COMPLETED_AT,
+        "response": {"createdAt": NOW.isoformat(), "messages": deepcopy(messages)},
+        "error": {"code": "provider_error", "message": "Original provider invocation failed."},
+    }
+
+
+def _completions(source: dict[str, Any], *results: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "sourceDigest": state_snapshot_digest(source),
+        "evidenceId": "outcome-completion-journal",
+        "complete": True,
+        "results": deepcopy(list(results)),
+    }
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("kind", ["errorResponse", "response"])
+def test_legacy_failure_import_preserves_original_completion_and_new_delivery_grace(strict: bool, kind: str) -> None:
+    source = _legacy_source(
+        kind,
+        messages=[{"role": "assistant", "contents": [{"$type": "error", "message": "provider failed"}]}],
+    )
+    before = deepcopy(source)
+    original = _original_failure(
+        messages=[
+            {
+                "role": "assistant",
+                "contents": [{"$type": "error", "message": "Original provider invocation failed."}],
+            }
+        ]
+    )
+    evidence = _completions(source, original)
+    before_evidence = deepcopy(evidence)
+    result = _cold(_migrate(source, require_known_outcomes=strict, completion_evidence=evidence))
+    expires_at = (NOW + timedelta(days=1, seconds=WINDOW)).isoformat()
+    assert result.data.completed_correlations[CORRELATION] == {
+        "correlationId": CORRELATION,
+        "completedAt": ORIGINAL_COMPLETED_AT,
+        "outcome": "failed",
+        "resultExpiresAt": expires_at,
+        "resultState": "available",
+    }
+    terminal = result.data.response_mailbox[CORRELATION]
+    assert terminal == {**original, "resultExpiresAt": expires_at}
+    assert terminal["response"]["createdAt"] == NOW.isoformat()
+    assert result.to_dict()["data"]["conversationHistory"] == before["data"]["conversationHistory"]
+    assert source == before and evidence == before_evidence
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_contentless_legacy_error_response_import_uses_original_failed_result(strict: bool) -> None:
+    source = _legacy_source("errorResponse")
+    original = _original_failure(messages=[])
+    evidence = _completions(source, original)
+    before_source, before_evidence = deepcopy(source), deepcopy(evidence)
+    result = _cold(_migrate(source, require_known_outcomes=strict, completion_evidence=evidence))
+    assert result.data.completed_correlations[CORRELATION]["outcome"] == "failed"
+    assert result.data.completed_correlations[CORRELATION]["completedAt"] == ORIGINAL_COMPLETED_AT
+    assert result.data.response_mailbox[CORRELATION] == {
+        **original,
+        "resultExpiresAt": (NOW + timedelta(days=1, seconds=WINDOW)).isoformat(),
+    }
+    response = result.try_get_agent_response(CORRELATION)
+    assert response is not None and invocation_outcome(response) == "failed"
+    assert source == before_source and evidence == before_evidence
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("text", [None, "", "plausible success"])
+def test_partial_legacy_transcript_is_not_proof_of_success(strict: bool, text: str | None) -> None:
+    messages: list[dict[str, Any]] = (
+        [] if text is None else [{"role": "assistant", "contents": [{"$type": "text", "text": text}]}]
+    )
+    source = _legacy_source(messages=messages)
+    before = deepcopy(source)
     with pytest.raises(ValueError, match="outcome.*evidence"):
-        _migrate(source, require_known_outcomes=True)
-    compatible = _cold(_migrate(source))
-    assert "outcome" not in compatible.data.completed_correlations[CORRELATION]
-    compatible.expire_responses(now=NOW + timedelta(days=2))
-    assert compatible.try_get_agent_response(CORRELATION).additional_properties["durable_outcome"] == "unknown"  # type: ignore[union-attr]
+        _migrate(source, require_known_outcomes=strict)
+    assert source == before
 
 
-def test_strict_entity_import_rejects_unknown_without_any_write_or_model_call() -> None:
-    source = DurableAgentState("1.1.0")
-    source.data.completed_correlations[CORRELATION] = {"completedAt": NOW.isoformat()}
+@pytest.mark.parametrize("strict", [False, True])
+def test_entity_import_rejects_ambiguous_legacy_without_any_write_or_model_call(strict: bool) -> None:
+    source = _legacy_source()
     provider = JsonStateProvider()
     client: Any = RecordingChatClient()
     entity = AgentEntity(Agent(client=client), state_provider=provider)
     request = {
-        "source": source.to_dict(),
-        "sourceDigest": state_snapshot_digest(source.to_dict()),
+        "source": source,
+        "sourceDigest": state_snapshot_digest(source),
         "sourceSessionId": "original-session",
         "destinationSessionId": provider.core_session_id,
         "migrationId": "strict-import",
         "ownershipTransferId": "authorized-transfer",
-        "requireKnownOutcomes": True,
+        "requireKnownOutcomes": strict,
     }
     with pytest.raises(ValueError, match="outcome.*evidence"):
         entity.migrate(request)
@@ -275,9 +354,15 @@ def test_strict_entity_import_rejects_unknown_without_any_write_or_model_call() 
 
 
 @pytest.mark.parametrize("status", ["accepted", "already_completed"])
-def test_new_completion_requires_outcome_not_an_acceptance_or_unavailable_status(status: str) -> None:
+@pytest.mark.parametrize("outcome", [None, "succeeded", "failed"])
+def test_new_completion_requires_outcome_not_an_acceptance_or_unavailable_status(
+    status: str, outcome: str | None
+) -> None:
     state = DurableAgentState()
-    response = AgentResponse(messages=[], additional_properties={"durable_status": status})
+    properties = {"durable_status": status}
+    if outcome is not None:
+        properties["durable_outcome"] = outcome
+    response = AgentResponse(messages=[], additional_properties=properties)
     before = state.to_dict()
     with pytest.raises(ValueError, match="completion.*outcome"):
         state.record_response(CORRELATION, response, delivery_window_seconds=WINDOW)

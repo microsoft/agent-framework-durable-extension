@@ -31,7 +31,7 @@ from agent_framework import (
     annotate_message_groups,
     tool,
 )
-from test_durable_history_provider import RecordingChatClient, _InMemoryStateProvider
+from test_durable_history_provider import RecordingChatClient, _ingestion_messages, _InMemoryStateProvider
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState, DurableHistoryProvider
 from agent_framework_durabletask._durable_agent_state import (
@@ -55,6 +55,7 @@ from agent_framework_durabletask._history_provider import (
     unbind_durable_history,
 )
 from agent_framework_durabletask._message_identity import message_identity
+from agent_framework_durabletask._shared_response import load_terminal_response, serialize_terminal_response
 
 OLD = datetime(2026, 1, 1, tzinfo=timezone.utc)
 PROMPT = "Use lookup for durable."
@@ -602,9 +603,11 @@ async def test_failed_second_service_call_commits_actual_tool_result_and_cold_re
 
     raw = provider._get_state_dict()
     data = raw["data"]
-    assert data["responseMailbox"]["failed-tool"]["response"] == failed.to_dict()
-    assert "failed-tool" in data["completedCorrelations"]
-    assert data["ingestedMessages"] == {"projected-input": [message_identity(message)]}
+    payload = data["terminalResults"]["failed-tool"]["response"]
+    assert payload == serialize_terminal_response(failed)
+    assert load_terminal_response(payload).to_dict() == failed.to_dict()
+    assert data["completionReceipts"]["failed-tool"]["outcome"] == "failed"
+    assert _ingestion_messages(raw) == {"projected-input": [message_identity(message)]}
     assert history.source_id not in data["session"]["state"]
     assert data["session"]["state"]["foreign-provider"] == foreign_state
     cold_provider = _InMemoryStateProvider(raw=raw)
@@ -631,10 +634,8 @@ async def test_failed_second_service_call_commits_actual_tool_result_and_cold_re
     assert calls[0].call_id == results[0].call_id == actual_result.call_id
     assert results[0].result == actual_result.result
     assert tool_calls == ["durable"] and cold_provider.writes == 1
-    assert cold_provider.state.data.response_mailbox["failed-tool"] == data["responseMailbox"]["failed-tool"]
-    assert (
-        cold_provider.state.data.completed_correlations["failed-tool"] == (data["completedCorrelations"]["failed-tool"])
-    )
+    assert cold_provider.state.data.response_mailbox["failed-tool"] == data["terminalResults"]["failed-tool"]
+    assert cold_provider.state.data.completed_correlations["failed-tool"] == data["completionReceipts"]["failed-tool"]
 
 
 @pytest.mark.parametrize("per_call", [False, True], ids=["per-run", "per-service-call"])
@@ -801,7 +802,7 @@ async def test_failed_inputs_preserve_matched_groups_metadata_and_original_inges
         assert saved.ingestion_identity == message_identity(Message.from_dict(original))
         assert saved.message_id and saved.message_id != message_id
         assert result.message_id == message_id
-        assert [content.to_dict()["result"] for content in saved.contents] == [
+        assert [content.result for content in saved.to_chat_message().contents] == [
             {"values": ["call-1"]},
             {"values": ["call-2"]},
         ]
@@ -812,7 +813,7 @@ async def test_failed_inputs_preserve_matched_groups_metadata_and_original_inges
         assert saved.extension_data == {"trace": {"tags": ["original"]}}
         history.flush(state)
         assert saved.extension_data == {"trace": {"tags": ["original", "compaction"]}}
-        assert saved.contents[0].to_dict()["result"] == {"values": ["call-1"]}
+        assert saved.to_chat_message().contents[0].result == {"values": ["call-1"]}
         assert_current_positions(provider, state)
         snapshot = deepcopy(provider.state.to_dict())
         ordinal = binding.append_ordinal
@@ -909,13 +910,23 @@ async def test_generic_save_appends_anonymous_messages_with_stable_write_time_id
         ]
         assert [message.message_id for message in messages] == [None, None]
         assert [message.text for message in transcript(provider)] == ["repeat"] * 3
+        rows = [message.to_dict() for message in transcript(provider)]
+        assert all("messageId" not in row for row in rows)
+        assert [row["pythonHistoryId"] for row in rows] == ids(provider)
+        assert len(set(ids(provider))) == 3
         if state is not None:
+            assert [message.message_id for message in state[WORKING_BUFFER_KEY]] == [None] * 3
+            assert [getattr(message, "_durable_history_id", None) for message in state[WORKING_BUFFER_KEY]] == ids(
+                provider
+            )
             assert_current_positions(provider, state)
     assert provider.writes == 0
     cold = _InMemoryStateProvider(raw=json.loads(provider.state.to_json()))
     with bound(cold, "append"):
         loaded = await history.get_messages("session")
-    assert [message.message_id for message in loaded] == ids(provider)
+    assert [message.message_id for message in loaded] == [None] * 3
+    assert [getattr(message, "_durable_history_id", None) for message in loaded] == ids(provider)
+    assert ids(cold) == ids(provider)
     assert [message.text for message in loaded] == ["repeat"] * 3
 
 
@@ -944,6 +955,16 @@ async def test_reused_ids_get_internal_revisions_without_changing_external_ids()
     assert ids(provider)[0] == "shared"
     assert all(message_id and message_id.startswith("durable_revision_") for message_id in ids(provider)[1:])
     assert [message.text for message in transcript(provider)] == ["version one", "answer-1", "version two", "answer-2"]
+    rows = [message.to_dict() for message in transcript(provider)]
+    assert [row["messageId"] for row in rows] == ["shared"] * 4
+    assert "pythonHistoryId" not in rows[0] and "pythonHistoryIdentity" not in rows[0]
+    assert [row["pythonHistoryId"] for row in rows[1:]] == ids(provider)[1:]
+    assert all(
+        row["pythonHistoryIdentity"] == {"profile": "agent-framework-python.history-identity", "version": 1}
+        and type(row["pythonHistoryIdentity"]["version"]) is int
+        for row in rows[1:]
+    )
+    assert all("originalMessageId" not in row for row in rows)
     before = deepcopy(provider.state.to_dict())
     inputs[0].contents[0].text = "caller changed input"
     responses[-1].messages[0].additional_properties["model_metadata"]["tags"].append("caller changed output")
@@ -995,11 +1016,11 @@ async def test_append_and_flush_never_alias_tool_payloads_or_response_annotation
         working = state[WORKING_BUFFER_KEY][-1]
         working.additional_properties["trace"]["tags"].append("compaction")
         working.contents[0].result["values"].append(2)
-        assert transcript(provider)[-1].contents[0].to_dict()["result"] == {"values": [1]}
+        assert transcript(provider)[-1].to_chat_message().contents[0].result == {"values": [1]}
         assert (transcript(provider)[-1].extension_data or {})["trace"] == {"tags": ["original"]}
         history.flush(state)
         assert (transcript(provider)[-1].extension_data or {})["trace"] == {"tags": ["original", "compaction"]}
-        assert transcript(provider)[-1].contents[0].to_dict()["result"] == {"values": [1]}
+        assert transcript(provider)[-1].to_chat_message().contents[0].result == {"values": [1]}
         assert response.to_dict() == before
         working.additional_properties["trace"]["tags"].append("not flushed")
         assert (transcript(provider)[-1].extension_data or {})["trace"] == {"tags": ["original", "compaction"]}
@@ -1197,12 +1218,15 @@ async def test_reused_summary_ids_keep_older_links_and_original_contents(
 
 @pytest.mark.parametrize("entry_type", [DurableAgentStateRequest, DurableAgentStateResponse])
 @pytest.mark.parametrize("message_count", [2, 4])
+@pytest.mark.parametrize("created_at", [OLD, None], ids=["timestamp", "no-timestamp"])
 async def test_multiple_mid_entry_summaries_keep_exact_order_metadata_and_receipts(
-    entry_type: type[DurableAgentStateRequest] | type[DurableAgentStateResponse], message_count: int
+    entry_type: type[DurableAgentStateRequest] | type[DurableAgentStateResponse],
+    message_count: int,
+    created_at: datetime | None,
 ) -> None:
     provider = _InMemoryStateProvider()
     source_ids = [f"item-{index}" for index in range(message_count)]
-    owner = entry_type("old", OLD, [stored(message_id, message_id) for message_id in source_ids])
+    owner = entry_type("old", created_at, [stored(message_id, message_id) for message_id in source_ids])
     owner.extension_data = {"envelope": {"tags": ["original"]}}
     owner.unknown_fields = {"futureField": {"keep": [1]}}
     if isinstance(owner, DurableAgentStateRequest):
@@ -1210,9 +1234,11 @@ async def test_multiple_mid_entry_summaries_keep_exact_order_metadata_and_receip
         owner.response_schema = {"properties": {"value": {"type": "string"}}}
     else:
         owner.usage = DurableAgentStateUsage(input_token_count=7)
-    unknown = DurableAgentStateUnknownEntry({"$type": "futureKind", "future": {"opaque": [1, 2]}})
+    barrier = DurableAgentStateRequest("barrier", OLD, [])
+    barrier.unknown_fields = {"future": {"opaque": [1, 2]}}
+    barrier_before = deepcopy(barrier.to_dict())
     current = DurableAgentStateRequest("current", OLD, [stored("current", "current")])
-    provider.state.data.conversation_history.extend([unknown, owner, current])
+    provider.state.data.conversation_history.extend([barrier, owner, current])
     provider.state.record_response(
         "old",
         AgentResponse(messages=[Message("assistant", ["original answer"])]),
@@ -1248,7 +1274,9 @@ async def test_multiple_mid_entry_summaries_keep_exact_order_metadata_and_receip
         ]
         assert len(envelopes) == message_count
         for entry in envelopes:
-            assert entry.correlation_id == "old" and entry.created_at == OLD
+            assert entry.correlation_id == "old" and entry.created_at == created_at
+            if created_at is None:
+                assert "createdAt" not in entry.to_dict()
             assert entry.extension_data == owner.extension_data and entry.unknown_fields == owner.unknown_fields
             assert all(
                 message.message_id and not message.message_id.startswith("summary-") for message in entry.messages
@@ -1290,7 +1318,7 @@ async def test_multiple_mid_entry_summaries_keep_exact_order_metadata_and_receip
         snapshot = deepcopy(cold.state.to_dict())
         history.flush(state)
         assert cold.state.to_dict() == snapshot
-        assert cold.state.data.conversation_history[0].to_dict() == unknown.to_dict()
+        assert cold.state.data.conversation_history[0].to_dict() == barrier_before
         assert cold.state.data.response_mailbox == mailbox
         assert cold.state.data.completed_correlations == receipts
 
@@ -1359,9 +1387,11 @@ async def test_eager_pruning_protects_system_and_current_exchange_with_exact_cou
     )
     current = DurableAgentStateRequest("current", OLD, [stored("current-input", "keep")])
     answer = DurableAgentStateResponse("current", OLD, [stored("current-answer", "keep", "assistant")])
-    opaque = DurableAgentStateUnknownEntry({"$type": "futureKind", "payload": {"keep": [1]}})
+    barrier = DurableAgentStateRequest("barrier", OLD, [])
+    barrier.unknown_fields = {"payload": {"keep": [1]}}
+    barrier_before = deepcopy(barrier.to_dict())
     empty = DurableAgentStateRequest("already-empty", OLD, [])
-    provider.state.data.conversation_history.extend([opaque, empty, old, metadata, current, answer])
+    provider.state.data.conversation_history.extend([barrier, empty, old, metadata, current, answer])
     provider.state.record_response(
         "old",
         AgentResponse(messages=[Message("assistant", ["mailbox original"])]),
@@ -1369,7 +1399,12 @@ async def test_eager_pruning_protects_system_and_current_exchange_with_exact_cou
     )
     mailbox = deepcopy(provider.state.data.response_mailbox)
     receipts = deepcopy(provider.state.data.completed_correlations)
-    provider.state.data.truncation = {"evictedMessageCount": 7, "firstEvictedAt": OLD.isoformat(), "future": [1]}
+    provider.state.data.truncation = {
+        "evictedMessageCount": 7,
+        "firstEvictedAt": OLD.isoformat(),
+        "lastEvictedAt": OLD.isoformat(),
+        "future": [1],
+    }
     history = DurableHistoryProvider(prune_excluded=True)
     state: dict[str, Any] = {}
     with bound(provider, correlation_id) as binding:
@@ -1380,7 +1415,8 @@ async def test_eager_pruning_protects_system_and_current_exchange_with_exact_cou
         history.flush(state)
         assert ids(provider) == ["system", "current-input", "current-answer"]
         assert metadata.messages == [] and metadata in provider.state.data.conversation_history
-        assert empty in provider.state.data.conversation_history and opaque in provider.state.data.conversation_history
+        assert empty in provider.state.data.conversation_history and barrier in provider.state.data.conversation_history
+        assert barrier.to_dict() == barrier_before
         assert (provider.state.data.truncation or {})["evictedMessageCount"] == 9
         assert (provider.state.data.truncation or {})["firstEvictedAt"] == OLD.isoformat()
         assert (provider.state.data.truncation or {})["future"] == [1]
@@ -1537,7 +1573,9 @@ async def test_entity_does_not_bypass_provider_store_choices(
         *(["input"] if store_inputs else []),
         *(["reply-1"] if store_outputs else []),
     ]
-    assert provider.state.data.response_mailbox["choices"]["response"] == response.to_dict()
+    payload = provider.state.data.response_mailbox["choices"]["response"]
+    assert payload == serialize_terminal_response(response)
+    assert load_terminal_response(payload).to_dict() == response.to_dict()
     assert len(client.received_messages) == provider.writes == 1
 
 
@@ -1549,6 +1587,8 @@ async def test_entity_failure_before_history_hook_is_mailbox_only() -> None:
     )
     response = await entity.run({"message": "not saved", "correlationId": "failed"})
     assert provider.state.data.conversation_history == []
-    assert provider.state.data.response_mailbox["failed"]["response"] == response.to_dict()
+    payload = provider.state.data.response_mailbox["failed"]["response"]
+    assert payload == serialize_terminal_response(response)
+    assert load_terminal_response(payload).to_dict() == response.to_dict()
     assert any(content.type == "error" for message in response.messages for content in message.contents)
     assert provider.writes == 1

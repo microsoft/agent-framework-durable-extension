@@ -27,6 +27,7 @@ from agent_framework import (
     ResponseStream,
     SessionContext,
 )
+from test_durable_history_provider import _ingestion_messages
 from test_history_pipeline_revision import NonStreamingAgent, ToolChatClient, lookup
 from test_revision_contract import JsonStateProvider
 
@@ -62,6 +63,32 @@ def _projection(correlation: str, messages: Sequence[Message], occurrences: Sequ
 
 def _rows(provider: JsonStateProvider) -> list[dict[str, Any]]:
     return [message for entry in provider.raw["data"]["conversationHistory"] for message in entry["messages"]]
+
+
+def _history_id(row: dict[str, Any]) -> str:
+    if "pythonHistoryId" in row:
+        assert row["pythonHistoryIdentity"] == {
+            "profile": "agent-framework-python.history-identity",
+            "version": 1,
+        }
+        assert type(row["pythonHistoryIdentity"]["version"]) is int
+        assert isinstance(row["pythonHistoryId"], str) and row["pythonHistoryId"]
+        assert row["pythonHistoryId"] != row.get("messageId")
+        return row["pythonHistoryId"]
+    assert "pythonHistoryIdentity" not in row
+    assert isinstance(row["messageId"], str) and row["messageId"]
+    return row["messageId"]
+
+
+def _core_fields(content: dict[str, Any]) -> dict[str, Any]:
+    assert "coreContent" not in content.get("extensionData", {})
+    profile = content.get("pythonCoreFields")
+    if profile is None:
+        return {}
+    assert profile["profile"] == "agent-framework-python.core-fields"
+    assert type(profile["version"]) is int and profile["version"] == 1
+    assert isinstance(profile["fields"], dict)
+    return profile["fields"]
 
 
 def _assert_no_private_fields(value: Any) -> None:
@@ -184,9 +211,10 @@ async def test_public_ids_survive_two_appends_and_a_cold_third_model_probe_and_a
         assert agent.context_providers is original_providers
         _assert_no_private_fields(response.to_dict())
     rows = _rows(provider)
-    assert len({row["messageId"] for row in rows}) == len(rows) == 4
-    assert [row.get("originalMessageId", row["messageId"]) for row in rows] == expected_ids
-    assert ["originalMessageId" in row for row in rows] == ([False, True, True, True] if duplicate else [False] * 4)
+    assert len({_history_id(row) for row in rows}) == len(rows) == 4
+    assert [row["messageId"] for row in rows] == expected_ids
+    assert ["pythonHistoryId" in row for row in rows] == ([False, True, True, True] if duplicate else [False] * 4)
+    assert all("originalMessageId" not in row for row in rows)
     assert DurableAgentState.from_dict(raw).to_dict() == raw
     client.response_message_id = "third-answer"
     cold = JsonStateProvider(raw)
@@ -200,7 +228,7 @@ async def test_public_ids_survive_two_appends_and_a_cold_third_model_probe_and_a
         _assert_no_private_fields([message.to_dict() for message in batch])
     assert audit.saved[-1][-1].message_id == "third-answer"
     assert [message.message_id for message in probe.inputs[-1]] == ["third-input"]
-    assert cold.raw["data"]["ingestedMessages"] == {
+    assert _ingestion_messages(cold.raw) == {
         **{f"occ-{index}": [message_identity(message)] for index, message in enumerate(messages)},
         "occ-third": [message_identity(third)],
     }
@@ -219,7 +247,9 @@ def _seed_history() -> dict[str, Any]:
             message.original_message_id = "shared"
             state.data.conversation_history.append(entry_type(correlation, when, [message]))
     state.data.session = AgentSession(session_id="revision-session").to_dict()
-    state.data.ingested_messages = {"old-occurrence": ["old-fingerprint"]}
+    state.data.ingested_messages = {
+        "old-occurrence": [message_identity(Message("user", ["equal"], message_id="shared"))]
+    }
     return _wire(state.to_dict())
 
 
@@ -294,7 +324,7 @@ async def test_compaction_targets_one_equal_occurrence_and_restores_public_ids(p
             if getattr(message, "_durable_history_id", None) != "occurrence-summary"
             and message.message_id != "occurrence-summary"
         )
-    rows = {row["messageId"]: row for row in _rows(provider)}
+    rows = {_history_id(row): row for row in _rows(provider)}
     assert ("stored-user-1" in rows) is not prune
     assert "stored-user-0" in rows and "stored-user-2" in rows
     for key in ("stored-user-0", "stored-user-2"):
@@ -402,8 +432,8 @@ async def test_compaction_scopes_are_isolated_for_two_entities_sharing_one_agent
         assert provider.writes == 1
         assert all(message.message_id == "shared" for message in strategy.aliases[correlation])
         assert {row["extensionData"]["operation_annotation"] for row in _rows(provider)} == {correlation}
-        assert provider.raw["data"]["ingestedMessages"] == {
-            "old-occurrence": ["old-fingerprint"],
+        assert _ingestion_messages(provider.raw) == {
+            "old-occurrence": [message_identity(Message("user", ["equal"], message_id="shared"))],
             f"{correlation}-occ": [message_identity(Message("user", [f"{correlation} input"], message_id="shared"))],
         }
         witness = provider.raw["data"]["session"]["state"][probe.source_id]
@@ -473,7 +503,7 @@ async def test_public_save_override_transforms_batches_without_losing_response_p
     assert _rows(provider)[0]["contents"][0]["text"] == "stored:use lookup"
     assert _rows(provider)[-1]["contents"][0]["text"] == "stored:answer-2"
     assert not any(message.additional_properties.get("validated") for message in response.messages)
-    assert provider.raw["data"]["ingestedMessages"] == {
+    assert _ingestion_messages(provider.raw) == {
         "occ": [message_identity(Message.from_dict(before["contextMessages"][0]))]
     }
     assert history.source_id not in provider.raw["data"]["session"]["state"]
@@ -496,11 +526,11 @@ async def test_public_save_override_can_reject_without_promoting_unsaved_inputs(
     assert response.additional_properties["durable_status"] == "error"
     assert len(client.received_messages) == 1 and len(history.calls) == (2 if mode == "raise-output" else 1)
     assert [row["role"] for row in _rows(provider)] == (["user"] * 2 if mode == "raise-output" else [])
-    assert provider.raw["data"].get("ingestedMessages", {}) == (
+    assert _ingestion_messages(provider.raw) == (
         {key: [message_identity(message)] for key in ("o1", "o2")} if mode == "raise-output" else {}
     )
     assert all(binding.append_response is None for binding in history.bindings)
-    assert provider.raw["data"]["completedCorrelations"]["rejected"]["outcome"] == "failed"
+    assert provider.raw["data"]["completionReceipts"]["rejected"]["outcome"] == "failed"
     _assert_no_private_fields(provider.raw)
 
 
@@ -567,7 +597,7 @@ async def test_failed_external_runs_keep_only_affirmative_completed_primary_rece
     assert external.save_messages == original_save
     assert probe.agents[0].context_providers[1].__wrapped__ is external
     assert external.accepted_during_save == ([set()] if "save-start" in external.events else [])
-    expected = {"old-occurrence": ["old-fingerprint"]}
+    expected = {"old-occurrence": [message_identity(Message("user", ["equal"], message_id="shared"))]}
     if accepted:
         expected.update({key: [message_identity(message)] for key in ("o1", "o2")})
         assert external.events == ["before", "load", "save-start", "save-return"]
@@ -587,9 +617,9 @@ async def test_failed_external_runs_keep_only_affirmative_completed_primary_rece
     else:
         assert [item.role for item in external.saved] == ["assistant"] and probe.accepted == [set()]
     assert len(client.received_messages) == int(mode not in ("before-failure", "load-failure"))
-    assert provider.raw["data"].get("ingestedMessages", {}) == expected
+    assert _ingestion_messages(provider.raw) == expected
     assert provider.raw["data"]["conversationHistory"] == _seed_history()["data"]["conversationHistory"]
-    assert provider.raw["data"]["completedCorrelations"]["failed"]["outcome"] == "failed"
+    assert provider.raw["data"]["completionReceipts"]["failed"]["outcome"] == "failed"
     _assert_no_private_fields(provider.raw)
     probe.fail_at = None
     external.mode = "completed"
@@ -614,7 +644,7 @@ async def test_completed_store_only_sink_is_not_evidence_of_primary_acceptance()
     assert response.additional_properties["durable_status"] == "error"
     assert [[item.role for item in batch] for batch in sink.saved] == [["user", "assistant"]]
     assert probe.agents[0].context_providers[-1] is sink
-    assert probe.accepted == [set()] and provider.raw["data"].get("ingestedMessages", {}) == {}
+    assert probe.accepted == [set()] and _ingestion_messages(provider.raw) == {}
     assert provider.raw["data"]["conversationHistory"] == []
 
 
@@ -671,7 +701,7 @@ async def test_service_completion_not_dispatch_or_local_model_response_affirms_a
     request = {**_projection("failed", [message, deepcopy(message)], ["o1", "o2"]), "options": {"store": service_owned}}
     response = await AgentEntity(agent, state_provider=provider).run(request)
     assert response.additional_properties["durable_status"] == "error" and len(client.received_messages) == 1
-    expected = {"old-occurrence": ["old-fingerprint"]}
+    expected = {"old-occurrence": [message_identity(Message("user", ["equal"], message_id="shared"))]}
     if service_owned and not interrupted:
         expected.update({key: [message_identity(message)] for key in ("o1", "o2")})
         assert probe.accepted == [{(key, message_identity(message)) for key in ("o1", "o2")}]
@@ -682,9 +712,9 @@ async def test_service_completion_not_dispatch_or_local_model_response_affirms_a
         assert provider.raw["data"]["session"]["service_session_id"] == (
             "unconfirmed-service" if interrupted else "prior-service"
         )
-    assert provider.raw["data"]["ingestedMessages"] == expected
+    assert _ingestion_messages(provider.raw) == expected
     assert provider.raw["data"]["conversationHistory"] == raw["data"]["conversationHistory"]
-    assert provider.raw["data"]["completedCorrelations"]["failed"]["outcome"] == "failed"
+    assert provider.raw["data"]["completionReceipts"]["failed"]["outcome"] == "failed"
     assert client.received_options[0].get("conversation_id") == ("prior-service" if service_owned else None)
     _assert_no_private_fields(provider.raw)
     cold_probe = _Probe()
@@ -741,7 +771,7 @@ async def test_optional_input_json_survives_append_and_cold_flush_without_overwr
     assert saved["extensionData"]["known"] == [2]
     assert saved["extensionData"].get("validated", False) is transform
     assert saved.get("future_message") == (opaque if scope in ("message", "both") else None)
-    assert saved["contents"][0].get("extensionData", {}).get("coreContent", {}).get("future_content") == (
+    assert _core_fields(saved["contents"][0]).get("future_content") == (
         opaque if scope in ("content", "both") else None
     )
     assert DurableAgentState.from_dict(provider.raw).to_dict() == provider.raw
@@ -768,13 +798,63 @@ async def test_optional_input_json_survives_append_and_cold_flush_without_overwr
     _assert_no_private_fields(snapshot)
 
 
-@pytest.mark.parametrize("invalid", [None, False, 17, [], {}])
-def test_present_original_message_id_requires_a_string(invalid: Any) -> None:
-    raw = {"role": "user", "contents": [{"$type": "text", "text": "input"}], "messageId": "internal"}
-    with pytest.raises(ValueError, match="originalMessageId"):
-        DurableAgentStateMessage.from_dict({**raw, "originalMessageId": invalid})
-    control = DurableAgentStateMessage.from_dict(raw)
-    assert control.public_message_id == "internal" and "originalMessageId" not in control.to_dict()
-    restored = DurableAgentStateMessage.from_dict({**raw, "originalMessageId": "shared"})
-    assert restored.message_id == "internal" and restored.to_chat_message().message_id == "shared"
-    assert restored.to_dict()["originalMessageId"] == "shared"
+@pytest.mark.parametrize("opaque", [None, False, 17, [], {}, "old-prototype-id"])
+def test_original_message_id_is_an_opaque_shared_sibling(opaque: Any) -> None:
+    raw = {
+        "role": "user",
+        "contents": [{"$type": "text", "text": "input"}],
+        "messageId": "public-id",
+        "originalMessageId": deepcopy(opaque),
+    }
+    before = deepcopy(raw)
+    restored = DurableAgentStateMessage.from_dict(raw)
+    assert restored.message_id == restored.public_message_id == "public-id"
+    projected = restored.to_chat_message()
+    assert projected.message_id == "public-id" and projected.text == "input"
+    assert not hasattr(projected, "originalMessageId")
+    assert restored.to_dict() == raw == before
+    restored.extension_data = {"annotation": True}
+    assert restored.to_dict() == {**before, "extensionData": {"annotation": True}}
+
+
+@pytest.mark.parametrize("public_id", ["", "shared"])
+def test_identified_python_history_id_is_distinct_from_shared_public_identity(public_id: str) -> None:
+    raw = {
+        "role": "user",
+        "contents": [{"$type": "text", "text": "input"}],
+        "messageId": public_id,
+        "pythonHistoryId": "internal-occurrence",
+        "pythonHistoryIdentity": {"profile": "agent-framework-python.history-identity", "version": 1},
+        "futureSibling": {"opaque": [None, False, {}]},
+    }
+    before = deepcopy(raw)
+    restored = DurableAgentStateMessage.from_dict(raw)
+    assert restored.message_id == _history_id(raw) == "internal-occurrence"
+    assert restored.public_message_id == restored.to_chat_message().message_id == public_id
+    assert restored.to_dict() == raw == before
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        None,
+        {},
+        {"profile": "foreign", "version": 1},
+        {"profile": "agent-framework-python.history-identity", "version": 2},
+        {"profile": "agent-framework-python.history-identity", "version": True},
+    ],
+)
+def test_unidentified_python_history_id_remains_opaque(profile: Any) -> None:
+    raw = {
+        "role": "user",
+        "contents": [{"$type": "text", "text": "input"}],
+        "messageId": "public-id",
+        "pythonHistoryId": "not-an-active-occurrence",
+    }
+    if profile is not None:
+        raw["pythonHistoryIdentity"] = deepcopy(profile)
+    before = deepcopy(raw)
+    restored = DurableAgentStateMessage.from_dict(raw)
+    assert restored.message_id == restored.public_message_id == "public-id"
+    assert restored.to_chat_message().message_id == "public-id"
+    assert restored.to_dict() == raw == before

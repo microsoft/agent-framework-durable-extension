@@ -5,11 +5,17 @@
 import json
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import Mock
 
+import pytest
 from agent_framework import (
     AgentExecutorResponse,
     AgentResponse,
+    Executor,
     Message,
+    WorkflowBuilder,
+    WorkflowContext,
+    handler,
 )
 from agent_framework._workflows._edge import (
     FanInEdgeGroup,
@@ -23,7 +29,50 @@ from agent_framework._workflows._edge import (
 from agent_framework_azurefunctions._workflow import (
     build_agent_executor_response,
     route_message_through_edge_groups,
+    run_workflow_orchestrator,
 )
+
+
+class _RoutingSource(Executor):
+    @handler
+    async def handle(self, message: str, ctx: WorkflowContext[str]) -> None:
+        await ctx.send_message(message)
+
+
+@pytest.mark.parametrize("selected", [["other_target"], ["target_a", "other_target"], ["other_target", "target_a"]])
+def test_invalid_selector_fails_before_scheduling_next_superstep(selected: list[str]) -> None:
+    source, target_a, target_b, other_target = [
+        _RoutingSource(id=name) for name in ("source", "target_a", "target_b", "other_target")
+    ]
+    workflow = (
+        WorkflowBuilder(start_executor=source, name="selector_routing")
+        .add_fan_out_edges(source, [target_a, target_b])
+        .add_edge(target_a, other_target)
+        .build()
+    )
+    group = next(group for group in workflow.edge_groups if isinstance(group, FanOutEdgeGroup))
+    group._selection_func = lambda message, targets: json.loads(message)
+    assert other_target.id in workflow.executors
+    assert other_target.id not in group.target_executor_ids
+    context = Mock(instance_id="routing-test", is_replaying=False)
+    message = json.dumps(selected)
+    orchestrator = run_workflow_orchestrator(context, workflow, message)
+
+    next(orchestrator)
+    context.call_activity.assert_called_once()
+    assert context.call_activity.call_args.args[0] == "dafx-selector_routing-source"
+    source_result = json.dumps({"sent_messages": [{"message": message, "target_id": None}]})
+
+    try:
+        with pytest.raises(RuntimeError, match="Invalid selection result"):
+            orchestrator.send([source_result])
+        # Reject the entire selection, including any valid prefix, before the
+        # next superstep can schedule activities, agents, or child workflows.
+        context.call_activity.assert_called_once()
+        context.call_entity.assert_not_called()
+        context.call_sub_orchestrator.assert_not_called()
+    finally:
+        orchestrator.close()
 
 
 class TestRouteMessageThroughEdgeGroups:

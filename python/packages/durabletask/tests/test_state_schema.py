@@ -22,6 +22,8 @@ from agent_framework_durabletask import (
 )
 from agent_framework_durabletask._durable_agent_state import DurableAgentStateEntryJsonType
 from agent_framework_durabletask._message_identity import message_identity
+from agent_framework_durabletask._response_utils import serialize_agent_response
+from agent_framework_durabletask._shared_response import load_terminal_response, serialize_terminal_response
 
 SCHEMA_PATH = Path(__file__).resolve().parents[4] / "schemas" / "durable-agent-entity-state.json"
 
@@ -85,10 +87,10 @@ def test_message_identity_and_annotations_are_declared(schema: dict[str, Any]) -
     assert "extensionData" in properties
 
 
-def test_delivery_and_exact_ingestion_fields_are_declared(schema: dict[str, Any]) -> None:
+def test_shared_delivery_fields_are_declared(schema: dict[str, Any]) -> None:
     properties = schema["$defs"]["data"]["properties"]
-    assert {"responseMailbox", "completedCorrelations", "ingestedMessages"} <= properties.keys()
-    assert properties["ingestedPositions"]["deprecated"] is True
+    assert {"terminalResults", "completionReceipts", "ingestedPositions"} <= properties.keys()
+    assert "ingestedMessages" not in properties
 
 
 def test_session_is_left_opaque(schema: dict[str, Any]) -> None:
@@ -103,7 +105,12 @@ def test_session_is_left_opaque(schema: dict[str, Any]) -> None:
 
     dotnet_shaped = {
         "schemaVersion": DurableAgentState.SCHEMA_VERSION,
-        "data": {"conversationHistory": [], "session": {"conversationId": "abc", "stateBag": {}}},
+        "data": {
+            "conversationHistory": [],
+            "terminalResults": {},
+            "completionReceipts": {},
+            "session": {"conversationId": "abc", "stateBag": {}},
+        },
     }
     _validate(dotnet_shaped, schema)
 
@@ -118,10 +125,16 @@ def test_state_survives_a_round_trip_through_the_schema(schema: dict[str, Any]) 
 
     assert stored.message_id == "wf_writer_1"
     assert (stored.extension_data or {}).get("_excluded") is True
-    assert restored.data.ingested_messages == payload["data"]["ingestedMessages"]
+    assert payload["data"]["pythonIngestion"]["profile"] == "agent-framework-python.ingestion"
+    assert type(payload["data"]["pythonIngestion"]["version"]) is int
+    assert payload["data"]["pythonIngestion"]["version"] == 1
+    assert "ingestedMessages" not in payload["data"]
+    assert restored.data.ingested_messages == payload["data"]["pythonIngestion"]["messages"]
     delivered = restored.try_get_agent_response("c0")
     assert isinstance(delivered, AgentResponse)
-    assert delivered.to_dict() == payload["data"]["responseMailbox"]["c0"]["response"]
+    wire = payload["data"]["terminalResults"]["c0"]["response"]
+    assert serialize_terminal_response(delivered) == wire
+    assert serialize_agent_response(delivered) == serialize_agent_response(load_terminal_response(wire))
 
 
 def _entry_of_each_kind() -> DurableAgentState:
@@ -177,48 +190,31 @@ def test_an_entry_without_a_correlation_omits_the_field(schema: dict[str, Any]) 
 
 
 def test_the_discriminator_is_required(schema: dict[str, Any]) -> None:
-    """An entry that does not say what it is must not validate.
-
-    The four entry schemas existed before but nothing referenced them, so `conversationHistory`
-    accepted any loosely entry-shaped object and `$type` was documentation rather than contract.
-    """
-    payload = {
-        "schemaVersion": DurableAgentState.SCHEMA_VERSION,
-        "data": {"conversationHistory": [{"createdAt": datetime.now(tz=timezone.utc).isoformat(), "messages": []}]},
-    }
-
+    payload = _populated_state().to_dict()
+    del payload["data"]["conversationHistory"][0]["$type"]
     with pytest.raises(jsonschema.ValidationError):
         _validate(payload, schema)
 
 
-def test_future_entries_and_unknown_properties_validate_and_round_trip(schema: dict[str, Any]) -> None:
+def test_unknown_sibling_properties_validate_and_round_trip(schema: dict[str, Any]) -> None:
     payload = _populated_state().to_dict()
-    payload["schemaVersion"] = "2.7.3"
     payload["futureRoot"] = {"nested": [1, {"opaque": True}]}
     payload["data"]["futureData"] = {"nested": [None, "keep"]}
     payload["data"]["conversationHistory"][0]["futureEntry"] = {"nested": [2, 3]}
-    payload["data"]["responseMailbox"]["c0"]["futureDelivery"] = {"nested": [4, 5]}
-    payload["data"]["completedCorrelations"]["c0"]["futureReceipt"] = {"nested": [6, 7]}
-    payload["data"]["conversationHistory"].append({
-        "$type": "futureKind",
-        "payload": {"owned": [1, 2]},
-        "messages": {"futureShape": True},
-    })
+    payload["data"]["terminalResults"]["c0"]["futureDelivery"] = {"nested": [4, 5]}
+    payload["data"]["completionReceipts"]["c0"]["futureReceipt"] = {"nested": [6, 7]}
+    message = payload["data"]["terminalResults"]["c0"]["response"]["messages"][0]
+    message["futureMessage"] = {"keep": None}
+    message["contents"][0]["futureContent"] = [False, 0]
     _validate(payload, schema)
     restored = DurableAgentState.from_json(json.dumps(payload))
     assert restored.to_dict() == payload
 
 
-def test_opaque_entry_branch_excludes_exactly_the_known_discriminators(schema: dict[str, Any]) -> None:
+def test_entry_union_contains_exactly_the_known_discriminators(schema: dict[str, Any]) -> None:
     kinds = {kind.value for kind in DurableAgentStateEntryJsonType}
-    opaque = schema["$defs"]["opaqueConversationEntry"]
-    assert set(opaque["properties"]["$type"]["not"]["enum"]) == kinds
-    entries = schema["$defs"]["data"]["properties"]["conversationHistory"]["items"]["oneOf"]
-    typed_kinds = {
-        definition["properties"]["$type"]["const"]
-        for entry in entries
-        if "const" in (definition := schema["$defs"][entry["$ref"].split("/")[-1]])["properties"]["$type"]
-    }
+    entries = schema["allOf"][0]["then"]["properties"]["data"]["properties"]["conversationHistory"]["items"]["oneOf"]
+    typed_kinds = {schema["$defs"][entry["$ref"].split("/")[-1]]["properties"]["$type"]["const"] for entry in entries}
     assert typed_kinds == kinds
 
 
@@ -235,39 +231,49 @@ def test_opaque_entry_branch_excludes_exactly_the_known_discriminators(schema: d
 def test_known_entries_cannot_bypass_their_contract_as_opaque_entries(
     schema: dict[str, Any], kind: DurableAgentStateEntryJsonType, invalid_fields: dict[str, Any]
 ) -> None:
-    payload = {
-        "schemaVersion": DurableAgentState.SCHEMA_VERSION,
-        "data": {"conversationHistory": [{"$type": kind.value, **invalid_fields}]},
-    }
+    payload = DurableAgentState().to_dict()
+    payload["data"]["conversationHistory"] = [{"$type": kind.value, **invalid_fields}]
     with pytest.raises(jsonschema.ValidationError):
         _validate(payload, schema)
 
 
-@pytest.mark.parametrize("kind", [None, False, 0, "", [], {}])
-def test_invalid_discriminators_are_not_future_entry_kinds(schema: dict[str, Any], kind: Any) -> None:
-    payload = {
-        "schemaVersion": DurableAgentState.SCHEMA_VERSION,
-        "data": {"conversationHistory": [{"$type": kind}]},
-    }
+@pytest.mark.parametrize("kind", [None, False, 0, "", [], {}, "futureKind"])
+def test_unsupported_entry_discriminators_are_rejected(schema: dict[str, Any], kind: Any) -> None:
+    payload = DurableAgentState().to_dict()
+    payload["data"]["conversationHistory"] = [{"$type": kind}]
     with pytest.raises(jsonschema.ValidationError):
         _validate(payload, schema)
+    with pytest.raises(ValueError):
+        DurableAgentState.from_dict(payload)
 
 
-def test_default_schema_version_matches_the_distinct_version_two_writer(schema: dict[str, Any]) -> None:
-    assert schema["properties"]["schemaVersion"]["default"] == DurableAgentState.SCHEMA_VERSION == "2.0.0"
+def test_exact_schema_versions_include_the_version_two_writer(schema: dict[str, Any]) -> None:
+    assert schema["properties"]["schemaVersion"]["enum"] == ["1.0.0", "1.1.0", "1.2.0", "2.0.0"]
+    assert DurableAgentState.SCHEMA_VERSION == "2.0.0"
 
 
-@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0", "2.0.0", "2.7.3"])
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0", "2.0.0"])
 def test_reader_versions_remain_valid_without_implicit_upgrade(schema: dict[str, Any], version: str) -> None:
-    payload = {"schemaVersion": version, "data": {"conversationHistory": []}}
+    payload: dict[str, Any] = {"schemaVersion": version, "data": {"conversationHistory": []}}
+    if version == "2.0.0":
+        payload["data"].update(terminalResults={}, completionReceipts={})
     _validate(payload, schema)
-    assert DurableAgentState.from_json(json.dumps(payload)).to_dict() == payload
+    state = DurableAgentState.from_json(json.dumps(payload))
+    assert state.to_dict() == payload
+    if version != "2.0.0":
+        with pytest.raises(ValueError, match="read-only"):
+            state.prepare_for_write(delivery_window_seconds=60)
+        assert state.to_dict() == payload
 
 
-@pytest.mark.parametrize("version", [None, False, 2, "", "0.1.0", "3.0.0", "2.0", "2.0.0-preview", "2.0.0\n"])
+@pytest.mark.parametrize(
+    "version", [None, False, 2, "", "0.1.0", "1.3.0", "2.7.3", "3.0.0", "2.0", "2.0.0-preview", "2.0.0\n"]
+)
 def test_schema_rejects_unsupported_or_malformed_versions(schema: dict[str, Any], version: Any) -> None:
+    payload = DurableAgentState().to_dict()
+    payload["schemaVersion"] = version
     with pytest.raises(jsonschema.ValidationError):
-        _validate({"schemaVersion": version, "data": {}}, schema)
+        _validate(payload, schema)
 
 
 @pytest.mark.parametrize("field", ["schemaVersion", "data"])
@@ -278,17 +284,18 @@ def test_root_fields_are_required(schema: dict[str, Any], field: str) -> None:
         _validate(payload, schema)
 
 
-@pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
 def test_legacy_scalar_positions_remain_readable(schema: dict[str, Any], version: str) -> None:
     payload = {"schemaVersion": version, "data": {"conversationHistory": [], "ingestedPositions": {"executor": 3}}}
     _validate(payload, schema)
     assert DurableAgentState.from_json(json.dumps(payload)).to_dict() == payload
 
 
-@pytest.mark.parametrize("field", ["responseMailbox", "completedCorrelations", "ingestedMessages"])
+@pytest.mark.parametrize("field", ["terminalResults", "completionReceipts"])
 @pytest.mark.parametrize("value", [None, False, 0, "", [], "not-an-object"])
 def test_delivery_containers_are_typed(schema: dict[str, Any], field: str, value: Any) -> None:
-    payload = {"schemaVersion": DurableAgentState.SCHEMA_VERSION, "data": {field: value}}
+    payload = DurableAgentState().to_dict()
+    payload["data"][field] = value
     with pytest.raises(jsonschema.ValidationError):
         _validate(payload, schema)
 
@@ -296,10 +303,14 @@ def test_delivery_containers_are_typed(schema: dict[str, Any], field: str, value
 @pytest.mark.parametrize(
     ("record_name", "required_field"),
     [
-        ("responseMailbox", "response"),
-        ("responseMailbox", "createdAt"),
-        ("responseMailbox", "expiresAt"),
-        ("completedCorrelations", "completedAt"),
+        ("terminalResults", "response"),
+        ("terminalResults", "correlationId"),
+        ("terminalResults", "outcome"),
+        ("terminalResults", "completedAt"),
+        ("completionReceipts", "correlationId"),
+        ("completionReceipts", "outcome"),
+        ("completionReceipts", "completedAt"),
+        ("completionReceipts", "resultState"),
     ],
 )
 def test_delivery_record_fields_are_required(schema: dict[str, Any], record_name: str, required_field: str) -> None:
@@ -311,58 +322,93 @@ def test_delivery_record_fields_are_required(schema: dict[str, Any], record_name
 
 @pytest.mark.parametrize(
     ("record_name", "field"),
-    [("responseMailbox", "createdAt"), ("responseMailbox", "expiresAt"), ("completedCorrelations", "completedAt")],
+    [
+        ("terminalResults", "completedAt"),
+        ("terminalResults", "resultExpiresAt"),
+        ("completionReceipts", "completedAt"),
+        ("completionReceipts", "resultExpiresAt"),
+    ],
 )
 @pytest.mark.parametrize("value", [None, False, 0, "not-a-timestamp"])
 def test_delivery_timestamps_are_validated(schema: dict[str, Any], record_name: str, field: str, value: Any) -> None:
     payload = _populated_state().to_dict()
     payload["data"][record_name]["c0"][field] = value
+    structural = jsonschema.Draft202012Validator(schema)
+    if isinstance(value, str):
+        # date-time is an annotation. FormatChecker also needs the optional RFC3339 checker.
+        # Runtime readers must reject malformed strings independently of that extra.
+        structural.validate(payload)
+    else:
+        with pytest.raises(jsonschema.ValidationError):
+            structural.validate(payload)
+        with pytest.raises(jsonschema.ValidationError):
+            _validate(payload, schema)
+    with pytest.raises(ValueError):
+        DurableAgentState.from_dict(payload)
+    with pytest.raises(ValueError):
+        DurableAgentState.from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("field", ["conversationHistory", "terminalResults", "completionReceipts"])
+def test_version_two_requires_all_shared_data_containers(schema: dict[str, Any], field: str) -> None:
+    payload = _populated_state().to_dict()
+    del payload["data"][field]
     with pytest.raises(jsonschema.ValidationError):
         _validate(payload, schema)
 
 
-def test_delivery_timestamp_shape_is_checked_without_optional_format_extras(schema: dict[str, Any]) -> None:
+@pytest.mark.parametrize(
+    "response",
+    [None, [], "{}", {}, {"messages": [{"role": "assistant", "contents": [{"type": "text", "text": "Core"}]}]}],
+)
+def test_terminal_result_requires_shared_response_json(schema: dict[str, Any], response: Any) -> None:
     payload = _populated_state().to_dict()
-    payload["data"]["responseMailbox"]["c0"]["expiresAt"] = "not-a-timestamp"
-    with pytest.raises(jsonschema.ValidationError):
-        jsonschema.Draft202012Validator(schema).validate(payload)
-
-
-@pytest.mark.parametrize("response", [None, [], "{}", {}, {"$type": "response", "messages": []}])
-def test_mailbox_requires_inline_core_response_json(schema: dict[str, Any], response: Any) -> None:
-    payload = _populated_state().to_dict()
-    payload["data"]["responseMailbox"]["c0"]["response"] = response
+    payload["data"]["terminalResults"]["c0"]["response"] = response
     with pytest.raises(jsonschema.ValidationError):
         _validate(payload, schema)
 
 
-@pytest.mark.parametrize("legacy", [None, 0, 1, "true", [], {}])
-def test_legacy_receipt_marker_is_boolean(schema: dict[str, Any], legacy: Any) -> None:
+@pytest.mark.parametrize("outcome", [None, "unknown", "", "success", "FAILED", False, 0, [], {}])
+@pytest.mark.parametrize("container", ["terminalResults", "completionReceipts"])
+def test_known_outcome_is_required(schema: dict[str, Any], outcome: Any, container: str) -> None:
     payload = _populated_state().to_dict()
-    payload["data"]["completedCorrelations"]["c0"]["legacy"] = legacy
+    payload["data"][container]["c0"]["outcome"] = outcome
     with pytest.raises(jsonschema.ValidationError):
         _validate(payload, schema)
 
 
-@pytest.mark.parametrize("fingerprints", [None, [], ["a" * 64, "b" * 64]])
-def test_ingestion_accepts_hash_lists_or_legacy_known_id_markers(schema: dict[str, Any], fingerprints: Any) -> None:
-    payload = {"schemaVersion": DurableAgentState.SCHEMA_VERSION, "data": {"ingestedMessages": {"id": fingerprints}}}
+@pytest.mark.parametrize("opaque", [None, False, 0, "owner-value", [], {"id": "not-a-fingerprint-list"}])
+def test_unprofiled_ingestion_is_opaque_not_exact_delivery_evidence(schema: dict[str, Any], opaque: Any) -> None:
+    payload = DurableAgentState().to_dict()
+    payload["data"]["ingestedMessages"] = opaque
     _validate(payload, schema)
+    state = DurableAgentState.from_json(json.dumps(payload))
+    assert state.data.ingested_messages == {}
+    assert state.to_dict() == payload
 
 
-@pytest.mark.parametrize("fingerprints", [False, 0, "a" * 64, {}, [None], [1], ["a" * 64, False]])
-def test_ingestion_rejects_invalid_receipts(schema: dict[str, Any], fingerprints: Any) -> None:
-    payload = {"schemaVersion": DurableAgentState.SCHEMA_VERSION, "data": {"ingestedMessages": {"id": fingerprints}}}
+@pytest.mark.parametrize("location", ["transcript", "terminal"])
+def test_unknown_wire_discriminators_require_an_explicit_unknown_wrapper(schema: dict[str, Any], location: str) -> None:
+    payload = _populated_state().to_dict()
+    messages = (
+        payload["data"]["conversationHistory"][0]["messages"]
+        if location == "transcript"
+        else payload["data"]["terminalResults"]["c0"]["response"]["messages"]
+    )
+    messages[0]["contents"][0] = {"$type": "futureContent", "payload": None}
     with pytest.raises(jsonschema.ValidationError):
         _validate(payload, schema)
+    with pytest.raises(ValueError):
+        DurableAgentState.from_dict(payload)
+    messages[0]["contents"][0] = {"$type": "unknown", "content": {"$type": "futureContent", "payload": None}}
+    _validate(payload, schema)
+    assert DurableAgentState.from_dict(payload).to_dict() == payload
 
 
 def test_opaque_session_preserves_owner_message_shaped_data(schema: dict[str, Any]) -> None:
     session = {"owner": "external", "state": {"provider": {"messages": [{"custom": "keep"}], "cursor": [1, 2]}}}
-    payload = {
-        "schemaVersion": DurableAgentState.SCHEMA_VERSION,
-        "data": {"conversationHistory": [], "session": session},
-    }
+    payload = DurableAgentState().to_dict()
+    payload["data"]["session"] = session
     original = deepcopy(payload)
     _validate(payload, schema)
     assert DurableAgentState.from_json(json.dumps(payload)).to_dict() == original

@@ -12,7 +12,7 @@ from agent_framework import Agent, AgentSession, CompactionProvider, Content, In
 from test_durable_history_provider import _InMemoryStateProvider
 from test_history_pipeline_revision import OLD, ToolChatClient, bound, ids, seed, stored, transcript
 
-from agent_framework_durabletask import AgentEntity, DurableHistoryProvider
+from agent_framework_durabletask import AgentEntity, DurableAgentState, DurableHistoryProvider
 from agent_framework_durabletask._durable_agent_state import (
     DurableAgentStateCompaction,
     DurableAgentStateMessage,
@@ -285,15 +285,12 @@ async def test_after_strategy_list_removal_survives_cold_next_turn(retention: An
         message_id="kept-summary",
         additional_properties={"_group": {"_summary_of_message_ids": ["seed-user", "seed-assistant"]}},
     )
-    unknown = DurableAgentStateUnknownEntry({"$type": "futureKind", "payload": {"keep": [None, False, {"x": 1}]}})
-    provider.state.data.conversation_history.insert(0, unknown)
     provider.state.data.conversation_history.insert(
-        1, DurableAgentStateRequest("system", OLD, [stored("system", "instructions", "system")])
+        0, DurableAgentStateRequest("system", OLD, [stored("system", "instructions", "system")])
     )
     provider.state.data.conversation_history.append(
         DurableAgentStateCompaction(OLD, [DurableAgentStateMessage.from_chat_message(summary)])
     )
-    unknown_before = deepcopy(unknown.to_dict())
     source_metadata = deepcopy(originals[0].extension_data)
     assert source_metadata is not None
     core_strategy = SliceOldExchange()
@@ -331,7 +328,6 @@ async def test_after_strategy_list_removal_survives_cold_next_turn(retention: An
         "seed-user",
         "seed-assistant",
     ]
-    assert unknown.to_dict() == unknown_before
     delivered = provider.state.try_get_agent_response("current")
     assert delivered is not None and delivered.to_dict() == response.to_dict()
     cold_provider = _InMemoryStateProvider(raw=provider._get_state_dict())
@@ -352,9 +348,26 @@ async def test_after_strategy_list_removal_survives_cold_next_turn(retention: An
             "next",
         ]
     )
-    assert cold_provider.state.data.conversation_history[0].to_dict() == unknown_before
     delivered = cold_provider.state.try_get_agent_response("current")
     assert delivered is not None and delivered.to_dict() == response.to_dict()
+
+
+def test_version_two_rejects_unsupported_entry_instead_of_compacting_it() -> None:
+    provider = _InMemoryStateProvider()
+    seed(provider)
+    before_storage = provider._get_state_dict()
+    raw = deepcopy(provider.state.to_dict())
+    unsupported = {"$type": "futureKind", "payload": {"keep": [None, False, {"x": 1}]}}
+    raw["data"]["conversationHistory"].insert(0, deepcopy(unsupported))
+    before_raw = deepcopy(raw)
+    with pytest.raises(ValueError):
+        DurableAgentState.from_dict(raw)
+    provider.state.data.conversation_history.insert(0, DurableAgentStateUnknownEntry(deepcopy(unsupported)))
+    with pytest.raises(ValueError):
+        provider.state.to_dict()
+    assert raw == before_raw
+    assert provider.state.data.conversation_history[0].to_dict() == unsupported
+    assert provider._get_state_dict() == before_storage and provider.writes == 0
 
 
 @pytest.mark.parametrize(
@@ -474,3 +487,47 @@ async def test_unloaded_empty_payload_is_not_mistaken_for_a_strategy_removal(pru
         snapshot = deepcopy(provider.state.to_dict())
         history.flush(state)
         assert provider.state.to_dict() == snapshot
+
+
+async def test_missing_shared_entry_timestamps_do_not_fabricate_wallclock_identity() -> None:
+    raw: dict[str, Any] = {
+        "schemaVersion": "2.0.0",
+        "data": {
+            "conversationHistory": [
+                {
+                    "$type": "compaction",
+                    "messages": [{"role": "assistant", "contents": [{"$type": "text", "text": "same"}]}],
+                    "futureSibling": {"occurrence": occurrence, "opaque": [None, False]},
+                }
+                for occurrence in range(2)
+            ],
+            "terminalResults": {},
+            "completionReceipts": {},
+        },
+    }
+    before = deepcopy(raw)
+    snapshots: list[dict[str, Any]] = []
+    for _ in range(2):
+        provider = _InMemoryStateProvider(raw=raw)
+        assert provider.state.to_dict() == before
+        assert all(entry.created_at is None for entry in provider.state.data.conversation_history)
+        history = DurableHistoryProvider(prune_excluded=False)
+        state: dict[str, Any] = {}
+        with bound(provider):
+            loaded = await history.get_messages("session", state=state)
+            assert [message.text for message in loaded] == ["same", "same"]
+            assert all(ids(provider)) and len(set(ids(provider))) == 2
+            history.flush(state)
+            snapshot = deepcopy(provider.state.to_dict())
+            history.flush(state)
+            assert provider.state.to_dict() == snapshot
+        entries = snapshot["data"]["conversationHistory"]
+        assert all("createdAt" not in entry for entry in entries)
+        assert [entry["futureSibling"] for entry in entries] == [
+            entry["futureSibling"] for entry in before["data"]["conversationHistory"]
+        ]
+        assert provider.writes == 0 and raw == before
+        snapshots.append(snapshot)
+    assert snapshots[0] == snapshots[1]
+    cold = _InMemoryStateProvider(raw=snapshots[0])
+    assert cold.state.to_dict() == snapshots[0]

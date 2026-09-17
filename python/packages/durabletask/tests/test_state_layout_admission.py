@@ -1,11 +1,11 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Reject known incompatible delivery layouts instead of reopening completed work."""
+"""Admit canonical shared state and reject malformed known fields before execution."""
 
 import json
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 from agent_framework import Agent, AgentResponse, Message
@@ -13,9 +13,13 @@ from test_durable_history_provider import RecordingChatClient
 from test_revision_contract import JsonStateProvider
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState
+from agent_framework_durabletask._response_utils import invocation_outcome, serialize_agent_response
+
+FIXTURES = Path(__file__).resolve().parents[4] / "schemas" / "fixtures"
+SHARED_FIXTURE_PATHS = sorted(FIXTURES.glob("shared-durable-agent-state-2.0*.json"))
 
 
-def _foreign_state(*, expired: bool = False) -> dict[str, Any]:
+def _shared_state(*, expired: bool = False) -> dict[str, Any]:
     receipt: dict[str, Any] = {
         "correlationId": "completed",
         "outcome": "succeeded",
@@ -46,58 +50,67 @@ def _foreign_state(*, expired: bool = False) -> dict[str, Any]:
 
 @pytest.mark.parametrize("expired", [False, True], ids=["available", "expired"])
 @pytest.mark.parametrize("json_boundary", [False, True], ids=["dict", "json"])
-def test_incompatible_layout_is_rejected_even_with_the_same_schema_version(expired: bool, json_boundary: bool) -> None:
-    payload = _foreign_state(expired=expired)
+def test_canonical_layout_is_admitted_without_rewriting_raw_results(expired: bool, json_boundary: bool) -> None:
+    payload = _shared_state(expired=expired)
     before = deepcopy(payload)
-    with pytest.raises(ValueError, match="incompatible.*delivery|delivery.*incompatible"):
-        if json_boundary:
-            DurableAgentState.from_json(json.dumps(payload))
-        else:
-            DurableAgentState.from_dict(payload)
+    state = DurableAgentState.from_json(json.dumps(payload)) if json_boundary else DurableAgentState.from_dict(payload)
+    assert state.data.response_mailbox == payload["data"]["terminalResults"]
+    assert state.data.completed_correlations == payload["data"]["completionReceipts"]
+    response = state.try_get_agent_response("completed")
+    assert response is not None
+    if expired:
+        assert response.additional_properties["durable_status"] == "already_completed"
+        assert response.additional_properties["durable_outcome"] == "succeeded"
+    else:
+        assert response.text == "answer"
+        assert serialize_agent_response(response)["type"] == "agent_response"
+    assert state.to_dict() == before
     assert payload == before
 
 
 @pytest.mark.parametrize("field", ["terminalResults", "completionReceipts"])
-@pytest.mark.parametrize("value", [{}, None, []], ids=["empty", "null", "malformed"])
-@pytest.mark.parametrize("mixed", [False, True])
-def test_reserved_alternate_containers_never_hide_as_optional_metadata(field: str, value: Any, mixed: bool) -> None:
-    state = DurableAgentState()
-    if mixed:
-        state.record_response("native", AgentResponse(messages=[]), delivery_window_seconds=3600)
-    raw = state.to_dict()
+@pytest.mark.parametrize("value", [None, [], False, 0, ""], ids=["null", "array", "boolean", "zero", "empty-string"])
+def test_known_delivery_containers_reject_invalid_types(field: str, value: Any) -> None:
+    raw = _shared_state()
     raw["data"][field] = value
     before = deepcopy(raw)
-    with pytest.raises(ValueError, match="incompatible.*delivery|delivery.*incompatible"):
+    with pytest.raises(ValueError, match=field):
         DurableAgentState.from_dict(raw)
     assert raw == before
 
 
 @pytest.mark.parametrize("operation", ["run", "reset", "expire_responses"])
 @pytest.mark.parametrize("expired", [False, True])
-async def test_entity_refuses_incompatible_state_before_model_calls_or_writes(operation: str, expired: bool) -> None:
-    provider = JsonStateProvider(_foreign_state(expired=expired))
+async def test_entity_accepts_shared_completions_without_reexecuting(operation: str, expired: bool) -> None:
+    provider = JsonStateProvider(_shared_state(expired=expired))
     before = deepcopy(provider.raw)
     client: Any = RecordingChatClient()
     entity = AgentEntity(Agent(client=client), state_provider=provider)
-    with pytest.raises(ValueError, match="incompatible.*delivery|delivery.*incompatible"):
-        if operation == "run":
-            await entity.run({"message": "do not repeat", "correlationId": "completed"})
+    if operation == "run":
+        response = await entity.run({"message": "do not repeat", "correlationId": "completed"})
+        if expired:
+            assert response.additional_properties["durable_outcome"] == "succeeded"
         else:
-            getattr(entity, operation)()
+            assert response.text == "answer"
+        assert provider.writes == 0 and provider.raw == before
+    else:
+        getattr(entity, operation)()
+    assert entity.state.data.response_mailbox == before["data"]["terminalResults"]
+    assert entity.state.data.completed_correlations == before["data"]["completionReceipts"]
     assert client.received_messages == []
-    assert provider.writes == 0 and provider.raw == before
 
 
-@pytest.mark.parametrize("field", ["terminalResults", "completionReceipts"])
+@pytest.mark.parametrize("field", ["response_mailbox", "completed_correlations"])
 @pytest.mark.parametrize("operation", ["read", "serialize", "write", "run"])
-async def test_cached_state_cannot_bypass_delivery_layout_admission(field: str, operation: str) -> None:
-    provider = JsonStateProvider()
-    provider.state.data.unknown_fields[field] = {"completed": {"outcome": "succeeded"}}
+async def test_cached_state_cannot_bypass_known_field_validation(field: str, operation: str) -> None:
+    provider = JsonStateProvider(_shared_state())
     state = provider.state
-    before = deepcopy(state.data.unknown_fields)
+    getattr(state.data, field)["completed"]["outcome"] = "unknown"
+    before = deepcopy((state.data.response_mailbox, state.data.completed_correlations))
+    committed = deepcopy(provider.raw)
     client: Any = RecordingChatClient()
     entity = AgentEntity(Agent(client=client), state_provider=provider)
-    with pytest.raises(ValueError, match="incompatible.*delivery|delivery.*incompatible"):
+    with pytest.raises(ValueError, match="outcome"):
         if operation == "read":
             state.try_get_agent_response("completed")
         elif operation == "serialize":
@@ -106,7 +119,8 @@ async def test_cached_state_cannot_bypass_delivery_layout_admission(field: str, 
             state.prepare_for_write(delivery_window_seconds=60)
         else:
             await entity.run({"message": "do not repeat", "correlationId": "completed"})
-    assert state.data.unknown_fields == before
+    assert (state.data.response_mailbox, state.data.completed_correlations) == before
+    assert provider.raw == committed
     assert provider.writes == 0 and client.received_messages == []
 
 
@@ -127,9 +141,47 @@ def test_native_empty_delivery_and_unrelated_nested_metadata_remain_supported() 
     assert response is not None and response.text == "native answer"
 
 
-def test_alternate_completion_is_rejected_before_any_response_deserialization(monkeypatch: pytest.MonkeyPatch) -> None:
-    loader = Mock(side_effect=AssertionError("Unsupported state must not be interpreted as a response"))
-    monkeypatch.setattr("agent_framework_durabletask._durable_agent_state.load_agent_response", loader)
-    with pytest.raises(ValueError, match="incompatible.*delivery|delivery.*incompatible"):
-        DurableAgentState.from_dict(_foreign_state())
-    loader.assert_not_called()
+def test_published_shared_fixture_corpus_is_present() -> None:
+    assert SHARED_FIXTURE_PATHS
+
+
+@pytest.mark.parametrize("path", SHARED_FIXTURE_PATHS, ids=lambda path: path.stem)
+def test_published_shared_fixtures_round_trip_without_normalizing_unknown_siblings(path: Path) -> None:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    before = deepcopy(raw)
+    state = DurableAgentState.from_json(json.dumps(raw))
+    assert state.to_dict() == before
+    assert state.data.response_mailbox == raw["data"]["terminalResults"]
+    assert state.data.completed_correlations == raw["data"]["completionReceipts"]
+    for correlation, receipt in raw["data"]["completionReceipts"].items():
+        response = state.try_get_agent_response(correlation)
+        assert response is not None
+        if receipt["resultState"] == "unavailable":
+            assert response.additional_properties["durable_status"] == "already_completed"
+            assert response.additional_properties["durable_outcome"] == receipt["outcome"]
+        elif "resultExpiresAt" not in receipt:
+            assert invocation_outcome(response) == receipt["outcome"]
+    assert state.to_dict() == before and raw == before
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"messages": None},
+        {"messages": [{"role": "future-role"}]},
+        {"messages": [{"role": "assistant", "contents": [{"$type": "text", "text": False}]}]},
+        {"messages": [{"role": "assistant", "contents": [{"$type": "futureContent"}]}]},
+        {"messages": [], "usage": {"inputTokenCount": True}},
+    ],
+)
+async def test_invalid_known_response_fields_reject_before_model_or_writes(invalid: dict[str, Any]) -> None:
+    raw = _shared_state()
+    raw["data"]["terminalResults"]["completed"]["response"] = invalid
+    before = deepcopy(raw)
+    provider = JsonStateProvider(raw)
+    client: Any = RecordingChatClient()
+    entity = AgentEntity(Agent(client=client), state_provider=provider)
+    with pytest.raises(ValueError):
+        await entity.run({"message": "do not repeat", "correlationId": "completed"})
+    assert provider.raw == before and provider.writes == 0
+    assert client.received_messages == [] and raw == before

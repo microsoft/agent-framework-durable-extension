@@ -27,14 +27,17 @@ from agent_framework_durabletask import DurableAgentState, serialize_agent_respo
 from agent_framework_durabletask import _durable_agent_state as state_module
 from agent_framework_durabletask import _entities as entities_module
 from agent_framework_durabletask import _retention as retention_module
+from agent_framework_durabletask import _shared_state_validation as validation_module
 from agent_framework_durabletask import _state_migration as migration_module
 from agent_framework_durabletask._message_identity import message_identity
+from agent_framework_durabletask._shared_response import load_terminal_response, serialize_terminal_response
 from typing_extensions import Self
 
 from agent_framework_azurefunctions import _entities as af_entities
 from agent_framework_azurefunctions._entities import AzureFunctionEntityStateProvider, create_agent_entity
 
 NOW = datetime(2040, 1, 1, 12, tzinfo=timezone.utc)
+ORIGINAL_COMPLETED_AT = "2024-01-02T03:04:05.123456789Z"
 SOURCE_ID = "@dafx-maintenance@legacy-source"
 DESTINATION_ID = "@dafx-maintenance@destination"
 
@@ -56,7 +59,7 @@ class Clock(datetime, metaclass=_ClockType):
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> type[Clock]:
     monkeypatch.setattr(Clock, "current", NOW)
-    for module in (state_module, entities_module, retention_module, migration_module):
+    for module in (state_module, entities_module, retention_module, migration_module, validation_module):
         monkeypatch.setattr(module, "datetime", Clock)
     return Clock
 
@@ -168,7 +171,7 @@ class Host:
         assert self.model.calls == [] and self.hooks.calls == [] and self.callback.mock_calls == []
 
 
-def _source() -> dict[str, Any]:
+def _source(*, failed: bool = True) -> dict[str, Any]:
     return {
         "schemaVersion": "1.1.0",
         "futureRoot": {"keep": ["雪", None]},
@@ -188,12 +191,32 @@ def _source() -> dict[str, Any]:
                 }
                 for kind, role, text in (
                     ("request", "user", "retained legacy input"),
-                    ("response", "assistant", "retained legacy answer"),
+                    ("errorResponse" if failed else "response", "assistant", "retained legacy answer"),
                 )
             ],
             "session": {"session_id": SOURCE_ID, "state": {"opaque": {"keep": [1, 3]}}},
             "futureData": {"keep": [False, 0]},
         },
+    }
+
+
+def _original_result() -> dict[str, Any]:
+    # Independent authoritative fixture for the known failed legacy invocation.
+    return {
+        "correlationId": "legacy-done",
+        "outcome": "failed",
+        "completedAt": ORIGINAL_COMPLETED_AT,
+        "response": {
+            "createdAt": "2024-01-01T00:00:00Z",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "contents": [{"$type": "text", "text": "original legacy failure"}],
+                }
+            ],
+            "extensionData": {"durable_status": "error"},
+        },
+        "error": {"code": "provider_error", "message": "Original invocation failed."},
     }
 
 
@@ -210,6 +233,12 @@ def _request(*, evidence: bool = False) -> dict[str, Any]:
         "destinationSessionId": DESTINATION_ID,
         "migrationId": "migration-1",
         "ownershipTransferId": "operator-transfer-1",
+        "completionEvidence": {
+            "sourceDigest": digest,
+            "evidenceId": "operator-completions-1",
+            "complete": True,
+            "results": [_original_result()],
+        },
     }
     if evidence:
         request["deliveryEvidence"] = {
@@ -225,11 +254,20 @@ def _request(*, evidence: bool = False) -> dict[str, Any]:
 
 
 def _mailboxes() -> dict[str, Any]:
-    raw = _source()
-    raw["schemaVersion"] = "2.0.0"
-    state = DurableAgentState.from_dict(raw)
+    source = DurableAgentState.from_dict(_source())
+    state = DurableAgentState()
+    state.data.conversation_history = deepcopy(source.data.conversation_history)
+    state.data.session = deepcopy(source.data.session)
+    state.unknown_fields = deepcopy(source.unknown_fields)
+    state.data.unknown_fields = deepcopy(source.data.unknown_fields)
     state.data.ingested_messages = {"old-input": ["a" * 64]}
-    state.data.completed_correlations["long-gone"] = {"completedAt": "2020-01-01T00:00:00+00:00"}
+    state.record_response(
+        "long-gone",
+        AgentResponse(messages=[Message("assistant", ["known original result"])]),
+        delivery_window_seconds=60,
+        now=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+    state.expire_responses(now=NOW - timedelta(minutes=3))
     for correlation, error in (("expired-success", False), ("expired-error", True), ("live", False)):
         response = AgentResponse[Any](
             messages=[
@@ -251,25 +289,34 @@ def _mailboxes() -> dict[str, Any]:
             delivery_window_seconds=60,
             now=NOW if correlation == "live" else NOW - timedelta(minutes=2),
         )
-        assert state.data.response_mailbox[correlation]["response"] == serialize_agent_response(response)
+        assert state.data.response_mailbox[correlation]["response"] == serialize_terminal_response(response)
     return _wire(state.to_dict())
 
 
-def _without_expired(raw: dict[str, Any]) -> dict[str, Any]:
+def _without_results(raw: dict[str, Any], correlations: Sequence[str], *, now: datetime) -> dict[str, Any]:
     result = deepcopy(raw)
-    for correlation in ("expired-success", "expired-error"):
-        del result["data"]["responseMailbox"][correlation]
+    for correlation in correlations:
+        del result["data"]["terminalResults"][correlation]
+        result["data"]["completionReceipts"][correlation].update({
+            "resultState": "unavailable",
+            "resultUnavailableAt": now.isoformat(),
+        })
     return result
+
+
+def _without_expired(raw: dict[str, Any]) -> dict[str, Any]:
+    return _without_results(raw, ("expired-success", "expired-error"), now=NOW)
 
 
 @pytest.mark.parametrize(
     ("operation", "correlation"),
     [("run", "new"), ("run", "legacy-done"), ("run_agent", "legacy-done"), ("reset", None), ("expire_responses", None)],
 )
+@pytest.mark.parametrize("failed", [False, True])
 def test_af_legacy_lookup_allowed_but_actual_writer_rejected_before_model_hooks_or_write(
-    operation: str, correlation: str | None
+    operation: str, correlation: str | None, failed: bool
 ) -> None:
-    raw = _source()
+    raw = _source(failed=failed)
     lookup = DurableAgentState.from_dict(raw).try_get_agent_response("legacy-done")
     assert lookup is not None and lookup.text == "retained legacy answer"
     host = Host(raw)
@@ -286,7 +333,7 @@ def test_af_migrate_uses_actual_destination_raw_digest_and_optional_evidence(
 ) -> None:
     request = _request(evidence=evidence)
     before = deepcopy(request)
-    assert request["sourceDigest"] != _digest(DurableAgentState.from_dict(request["source"]).to_dict())
+    assert request["sourceDigest"] == _digest(request["source"])
     host = Host(response_delivery_window_seconds=17)
     result = host.invoke("migrate", request)
     assert result == {"status": "migrated", "migrationId": "migration-1", "sessionId": DESTINATION_ID}
@@ -305,10 +352,25 @@ def test_af_migrate_uses_actual_destination_raw_digest_and_optional_evidence(
         "requestDigest": _digest(request),
         "ownershipTransferId": "operator-transfer-1",
         "createdAt": NOW.isoformat(),
+        "completionEvidenceId": "operator-completions-1",
         **({"evidenceId": "operator-journal-1"} if evidence else {}),
     }
-    assert state.data.response_mailbox["legacy-done"]["expiresAt"] == (NOW + timedelta(seconds=17)).isoformat()
-    assert state.data.completed_correlations["legacy-done"]["legacy"] is True
+    completion = {
+        "correlationId": "legacy-done",
+        "outcome": "failed",
+        "completedAt": ORIGINAL_COMPLETED_AT,
+        "resultExpiresAt": (NOW + timedelta(seconds=17)).isoformat(),
+    }
+    assert host.raw["data"]["completionReceipts"]["legacy-done"] == {**completion, "resultState": "available"}
+    terminal = host.raw["data"]["terminalResults"]["legacy-done"]
+    assert {key: terminal[key] for key in completion} == completion
+    assert terminal == {
+        **request["completionEvidence"]["results"][0],
+        "resultExpiresAt": completion["resultExpiresAt"],
+    }
+    assert terminal["error"]["code"] and terminal["error"]["message"]
+    assert "terminalResults" not in request["source"]["data"]
+    assert "completionReceipts" not in request["source"]["data"]
     if evidence:
         assert state.data.ingested_messages == {
             message["message_id"]: [message_identity(Message.from_dict(deepcopy(message)))]
@@ -317,6 +379,33 @@ def test_af_migrate_uses_actual_destination_raw_digest_and_optional_evidence(
         assert "wf_upstream_2" not in state.data.ingested_messages
     assert host.raw["futureRoot"] == request["source"]["futureRoot"]
     assert host.raw["data"]["futureData"] == request["source"]["data"]["futureData"]
+    host.assert_quiet()
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
+@pytest.mark.parametrize("evidence", [False, True])
+def test_af_ambiguous_legacy_completion_is_readable_but_cannot_be_migrated(version: str, evidence: bool) -> None:
+    request = _request(evidence=evidence)
+    # Delivery evidence alone never authorizes an invocation outcome or completion time.
+    del request["completionEvidence"]
+    request["source"]["schemaVersion"] = version
+    request["source"]["data"]["conversationHistory"][1]["$type"] = "response"
+    request["sourceDigest"] = _digest(request["source"])
+    if evidence:
+        request["deliveryEvidence"]["sourceDigest"] = request["sourceDigest"]
+    before = deepcopy(request)
+    legacy = DurableAgentState.from_dict(request["source"])
+    response = legacy.try_get_agent_response("legacy-done")
+    assert response is not None and response.text == "retained legacy answer"
+    assert legacy.to_dict() == request["source"]
+    host = Host()
+
+    result = host.invoke("migrate", request)
+
+    assert result["status"] == "error"
+    assert "authoritative completion evidence" in result["error"]
+    assert host.raw == {} and host.writes == 0 and request == before
+    host.contexts[-1].set_state.assert_not_called()
     host.assert_quiet()
 
 
@@ -339,8 +428,7 @@ def test_af_exact_cold_retry_after_v2_run_does_not_rewrite_or_refresh_expiry(clo
     assert host.raw == before and host.writes == 2
     assert len(host.model.calls) == 1 and host.hooks.calls == hooks and host.callback.mock_calls == callbacks
     assert host.invoke("expire_responses") == {"expired": 2}
-    expected = deepcopy(before)
-    del expected["data"]["responseMailbox"]
+    expected = _without_results(before, list(before["data"]["terminalResults"]), now=clock.current)
     assert host.raw == expected and host.writes == 3
     assert request == before_request
 
@@ -351,7 +439,9 @@ def test_af_exact_cold_retry_after_v2_run_does_not_rewrite_or_refresh_expiry(clo
 def test_af_migration_invalid_identity_or_digest_returns_error_without_write(invalid: str) -> None:
     request = _request()
     if invalid == "sourceDigest":
-        request[invalid] = _digest(DurableAgentState.from_dict(request["source"]).to_dict())
+        different_source = deepcopy(request["source"])
+        different_source["futureRoot"]["keep"].append("changed snapshot")
+        request[invalid] = _digest(different_source)
     elif invalid == "destinationSessionId":
         request[invalid] = "@dafx-other@destination"
     elif invalid == "sourceSessionId":
@@ -367,7 +457,7 @@ def test_af_migration_invalid_identity_or_digest_returns_error_without_write(inv
     host.assert_quiet()
 
 
-@pytest.mark.parametrize("change", ["source", "ownershipTransferId", "migrationId"])
+@pytest.mark.parametrize("change", ["source", "ownershipTransferId", "migrationId", "completionEvidence"])
 def test_af_mismatched_retry_never_replaces_committed_migration(clock: type[Clock], change: str) -> None:
     request = _request()
     host = Host()
@@ -377,8 +467,15 @@ def test_af_mismatched_retry_never_replaces_committed_migration(clock: type[Cloc
     if change == "source":
         changed["source"]["futureRoot"]["keep"].append("changed source")
         changed["sourceDigest"] = _digest(changed["source"])
+    elif change == "completionEvidence":
+        changed[change]["evidenceId"] += "-different"
     else:
         changed[change] += "-different"
+    for field in ("deliveryEvidence", "completionEvidence"):
+        if field in changed:
+            changed[field]["sourceDigest"] = changed["sourceDigest"]
+    assert before["data"]["migration"]["requestDigest"] == _digest(request)
+    assert _digest(changed) != _digest(request)
     result = host.invoke("migrate", changed)
     assert result["status"] == "error" and "empty" in result["error"]
     assert host.raw == before and host.writes == 1
@@ -410,7 +507,7 @@ def test_af_expired_duplicate_removes_physical_mailbox_without_reexecution(
         "durable_outcome": "failed" if correlation == "expired-error" else "succeeded",
     }
     assert result["messages"][0]["contents"][0]["error_code"] == "response_expired"
-    assert raw["data"]["responseMailbox"][correlation]["response"]["response_id"] == f"response-{correlation}"
+    assert raw["data"]["terminalResults"][correlation]["response"]["responseId"] == f"response-{correlation}"
     assert host.raw == _without_expired(raw) and host.writes == 1
     host.assert_quiet()
 
@@ -424,16 +521,16 @@ def test_af_idle_expiry_preserves_live_original_history_and_forever_completion_r
     host.contexts[-1].set_state.assert_not_called()
     assert host.writes == 1
     live = host.invoke("run", {"message": "duplicate", "correlationId": "live"})
-    assert live == raw["data"]["responseMailbox"]["live"]["response"]
+    assert live == serialize_agent_response(load_terminal_response(raw["data"]["terminalResults"]["live"]["response"]))
     assert host.writes == 1
     clock.current = NOW + timedelta(days=36500)
     assert host.invoke("expire_responses") == {"expired": 1}
-    expected = _without_expired(raw)
-    del expected["data"]["responseMailbox"]
+    expected = _without_results(_without_expired(raw), ("live",), now=clock.current)
     assert host.raw == expected and host.writes == 2
-    for correlation in raw["data"]["completedCorrelations"]:
+    for correlation, receipt in raw["data"]["completionReceipts"].items():
         result = host.invoke("run", {"message": "old duplicate", "correlationId": correlation})
         assert result["additional_properties"]["durable_status"] == "already_completed"
+        assert result["additional_properties"]["durable_outcome"] == receipt["outcome"]
     assert host.raw == expected and host.writes == 2
     host.assert_quiet()
 
@@ -483,6 +580,7 @@ def test_af_strict_maintenance_budget_includes_full_retained_floor_and_metadata(
     request = _request()
     request["source"]["data"]["conversationHistory"][0]["messages"][0]["contents"][0]["text"] = "雪" * 500
     request["sourceDigest"] = _digest(request["source"])
+    request["completionEvidence"]["sourceDigest"] = request["sourceDigest"]
     before_request = deepcopy(request)
     sizing = Host(raw)
     expected_result = sizing.invoke(operation, request)
@@ -498,7 +596,7 @@ def test_af_strict_maintenance_budget_includes_full_retained_floor_and_metadata(
         assert expected["data"]["conversationHistory"] == normalized["data"]["conversationHistory"]
     else:
         assert expected == _without_expired(raw)
-        assert full_size > _size(expected["data"]["responseMailbox"])
+        assert full_size > _size(expected["data"]["terminalResults"])
     rejected = Host(raw, max_state_bytes=full_size - 1)
     result = rejected.invoke(operation, request)
     assert result["status"] == "error" and "max_state_bytes" in result["error"]

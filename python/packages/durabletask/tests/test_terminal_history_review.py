@@ -35,6 +35,7 @@ from agent_framework import (
     tool,
 )
 from pydantic import BaseModel, ValidationError
+from test_durable_history_provider import _ingestion_messages
 
 from agent_framework_durabletask import AgentEntity, AgentEntityStateProviderMixin, DurableHistoryProvider, RunRequest
 from agent_framework_durabletask._callbacks import AgentCallbackContext
@@ -53,6 +54,7 @@ from agent_framework_durabletask._history_provider import (
 )
 from agent_framework_durabletask._message_identity import message_identity
 from agent_framework_durabletask._response_utils import is_terminal_agent_response, serialize_agent_response
+from agent_framework_durabletask._shared_response import load_terminal_response, serialize_terminal_response
 
 
 def _json(value: Any) -> Any:
@@ -94,7 +96,18 @@ def _seed() -> dict[str, Any]:
 
 
 def _mailbox(provider: _JsonState, correlation: str) -> dict[str, Any]:
-    return provider.raw["data"]["responseMailbox"][correlation]["response"]
+    return provider.raw["data"]["terminalResults"][correlation]["response"]
+
+
+def _assert_terminal_snapshot(provider: _JsonState, correlation: str, response: AgentResponse[Any]) -> None:
+    core = _json(serialize_agent_response(response))
+    shared = _mailbox(provider, correlation)
+    assert shared == serialize_terminal_response(core)
+    assert serialize_agent_response(load_terminal_response(shared)) == core
+    assert "response_id" not in shared and "additional_properties" not in shared
+    for message in shared["messages"]:
+        assert "message_id" not in message and "additional_properties" not in message
+        assert all("$type" in content and "type" not in content for content in message["contents"])
 
 
 def _request() -> dict[str, Any]:
@@ -160,7 +173,7 @@ async def test_lazy_value_failure_is_mailbox_only_and_never_legacy_history(text:
         assert response.messages[0].contents[0].error_code == "ValidationError"
         assert response.text.startswith("ValidationError:")
         assert original.text == text
-    assert _mailbox(provider, "first") == _json(serialize_agent_response(response))
+    _assert_terminal_snapshot(provider, "first", response)
     entries = provider.raw["data"]["conversationHistory"]
     assert entries[0] == seed["data"]["conversationHistory"][0]
     assert [entry["$type"] for entry in entries[1:]] == (["request", "response"] if valid else ["request"])
@@ -169,7 +182,7 @@ async def test_lazy_value_failure_is_mailbox_only_and_never_legacy_history(text:
     next_agent = _LegacyAgent(AgentResponse(messages=[Message("assistant", ["next answer"])]))
     cold = AgentEntity(cast(SupportsAgentRun, next_agent), state_provider=cold_provider)
     duplicate = await cold.run(request)
-    assert serialize_agent_response(duplicate) == _mailbox(provider, "first")
+    _assert_terminal_snapshot(provider, "first", duplicate)
     assert next_agent.inputs == [] and cold_provider.writes == 0
     await cold.run({"message": "second input", "correlationId": "second"})
     assert [message.text for message in next_agent.inputs[0]] == [
@@ -269,7 +282,7 @@ async def test_real_core_terminal_outputs_are_not_replayed_after_json_reload(
     assert response.text == output.text and len(client.inputs) == 1 and provider.writes == 1
     assert [content.to_dict() for content in response.messages[0].contents] == [c.to_dict() for c in output.contents]
     assert output.to_dict() == before_output and request == original_request
-    assert _mailbox(provider, "first") == _json(serialize_agent_response(response))
+    _assert_terminal_snapshot(provider, "first", response)
     entries = provider.raw["data"]["conversationHistory"]
     assert entries[0] == seed["data"]["conversationHistory"][0]
     assert [entry["$type"] for entry in entries[1:]] == ["request", "errorResponse" if terminal else "response"]
@@ -284,7 +297,7 @@ async def test_real_core_terminal_outputs_are_not_replayed_after_json_reload(
     ]
     assert provider.raw["data"]["session"]["state"] == seed["data"]["session"]["state"]
     message = Message.from_dict(request["contextMessages"][0])
-    assert provider.raw["data"]["ingestedMessages"] == {"input-occurrence": [message_identity(message)]}
+    assert _ingestion_messages(provider.raw) == {"input-occurrence": [message_identity(message)]}
 
     cold_provider = _JsonState(provider.raw)
     cold_client = _ScriptedClient([Message("assistant", ["next answer"])])
@@ -292,7 +305,9 @@ async def test_real_core_terminal_outputs_are_not_replayed_after_json_reload(
         agent_type(client=cold_client, require_per_service_call_history_persistence=per_call),
         state_provider=cold_provider,
     )
-    assert (await cold.run(request)).to_dict() == _mailbox(provider, "first")
+    duplicate = await cold.run(request)
+    assert duplicate.to_dict() == response.to_dict()
+    _assert_terminal_snapshot(provider, "first", duplicate)
     assert cold_client.inputs == [] and cold_provider.writes == 0
     await cold.run({"message": "second input", "correlationId": "second"})
     assert [m.text for m in cold_client.inputs[0]] == [
@@ -361,7 +376,7 @@ async def test_later_terminal_call_keeps_prior_tool_pair_and_final_hook_group_me
     assert len(last_after.groups) == 2
     assert len({group[GROUP_ID_KEY] for group in last_after.groups.values()}) == 1
     assert not any(c.type == "error" for batch in history.buffers for m in batch for c in m.contents)
-    assert _mailbox(provider, "first") == _json(serialize_agent_response(response))
+    _assert_terminal_snapshot(provider, "first", response)
 
     cold_client = _ScriptedClient([Message("assistant", ["next answer"])])
     cold_provider = _JsonState(provider.raw)
@@ -405,9 +420,9 @@ async def test_terminal_core_hooks_respect_storage_flags_and_service_ownership(
     )
     assert [entry["$type"] for entry in entries[1:]] == expected
     # A completed service response affirms receipt independently of the inactive local storage flags.
-    assert bool(provider.raw["data"].get("ingestedMessages")) is (service_owned or store_inputs)
+    assert bool(_ingestion_messages(provider.raw)) is (service_owned or store_inputs)
     assert [m.text for m in client.inputs[0]] == ([] if service_owned else ["previous valid answer"]) + ["first input"]
-    assert _mailbox(provider, "first") == _json(serialize_agent_response(response))
+    _assert_terminal_snapshot(provider, "first", response)
     assert provider.writes == 1
 
 
@@ -492,9 +507,9 @@ async def test_aggregated_terminal_batch_does_not_erase_or_duplicate_prior_tool_
             history.flush(state)
         assert isinstance(provider.state.data.conversation_history[-1], DurableAgentStateErrorResponse)
         assert provider.state.data.conversation_history[-2].to_dict() == prior_entry
-        provider.persist_state()
     finally:
         unbind_durable_history(token)
+    provider.persist_state()
 
     cold = _JsonState(provider.raw)
     token = bind_durable_history(DurableHistoryBinding(cold, "next"))
@@ -529,6 +544,30 @@ async def test_real_core_pending_approval_still_skips_lazy_typed_validation(per_
     with pytest.raises(ValidationError):
         _ = deepcopy(response).value
     assert "value" not in _mailbox(provider, "first")
+    approval = next(
+        content
+        for message in _mailbox(provider, "first")["messages"]
+        for content in message["contents"]
+        if content["$type"] == "unknown"
+    )
+    assert approval["pythonContentEncoding"] == {"profile": "agent-framework-python.content", "version": 1}
+    assert type(approval["pythonContentEncoding"]["version"]) is int
+    assert approval["content"]["type"] == "function_approval_request"
+    restored = load_terminal_response(_mailbox(provider, "first"))
+    assert [item.to_dict() for item in restored.user_input_requests] == [
+        item.to_dict() for item in response.user_input_requests
+    ]
+    foreign = deepcopy(_mailbox(provider, "first"))
+    for message in foreign["messages"]:
+        for content in message["contents"]:
+            content.pop("pythonContentEncoding", None)
+    opaque = load_terminal_response(foreign)
+    assert opaque.user_input_requests == []
+    opaque_content = next(
+        content for message in opaque.messages for content in message.contents if content.type == "unknown"
+    )
+    assert opaque_content.additional_properties["content"] == approval["content"]
+    assert serialize_terminal_response(opaque) == foreign
     assert [entry["$type"] for entry in provider.raw["data"]["conversationHistory"]] == ["request", "response"]
 
 
@@ -593,6 +632,8 @@ class _Callback:
 async def test_nonstreaming_signature_fallback_and_final_callback_contract_are_unchanged() -> None:
     assert list(signature(_LegacyAgent.run).parameters) == ["self", "messages", "options"]
     original = AgentResponse(messages=[Message("assistant", ['{"count":7}'])], response_format=_Count)
+    # The final callback observes Core's public response before the entity resolves its lazy value.
+    callback_snapshot = deepcopy(original.to_dict())
     agent = _LegacyAgent(original)
     callback = _Callback()
     provider = _JsonState()
@@ -605,5 +646,7 @@ async def test_nonstreaming_signature_fallback_and_final_callback_contract_are_u
     assert response is original and response.value == _Count(count=7)
     assert response.text == '{"count":7}' and callback.responses[0].text == "callback copy only"
     assert callback.responses[0] is not response and callback.responses[0]._response_format is _Count
+    callback_snapshot["messages"][0]["contents"][0]["text"] = "callback copy only"
+    assert callback.responses[0].to_dict() == callback_snapshot
     assert callback.contexts == [AgentCallbackContext("legacy-review", "first", "terminal-review", "first input")]
-    assert _mailbox(provider, "first") == _json(serialize_agent_response(response))
+    _assert_terminal_snapshot(provider, "first", response)

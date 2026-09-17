@@ -44,6 +44,7 @@ from agent_framework_durabletask._history_provider import (
 from agent_framework_durabletask._invocation_safety import DurableToolGuard
 from agent_framework_durabletask._message_identity import message_identity
 from agent_framework_durabletask._response_utils import ensure_response_format, serialize_agent_response
+from agent_framework_durabletask._shared_response import serialize_terminal_response
 from agent_framework_durabletask._state_migration import migrate_legacy_state, state_snapshot_digest
 from agent_framework_durabletask._workflows.naming import workflow_message_id
 
@@ -68,7 +69,17 @@ def _data(provider: JsonStateProvider) -> dict[str, object]:
 
 
 def _mailbox(provider: JsonStateProvider, correlation: str) -> dict[str, object]:
-    return _object(_object(_object(_data(provider)["responseMailbox"])[correlation])["response"])
+    return _object(_object(_object(_data(provider)["terminalResults"])[correlation])["response"])
+
+
+def _ingested(provider: JsonStateProvider) -> dict[str, object]:
+    data = _data(provider)
+    if "pythonIngestion" not in data:
+        return {}
+    profile = _object(data["pythonIngestion"])
+    assert profile["profile"] == "agent-framework-python.ingestion"
+    assert type(profile["version"]) is int and profile["version"] == 1
+    return _object(profile["messages"])
 
 
 def _delivered(provider: JsonStateProvider, correlation: str) -> AgentResponse[Any]:
@@ -264,7 +275,7 @@ def _assert_missing_error(provider: JsonStateProvider, response: AgentResponse[A
     errors = [content for message in response.messages for content in message.contents if content.type == "error"]
     assert len(errors) == 1 and errors[0].error_code == "_PreviousResponseMissing"
     assert _delivered(provider, correlation).to_dict() == response.to_dict()
-    assert correlation in _object(_data(provider)["completedCorrelations"])
+    assert correlation in _object(_data(provider)["completionReceipts"])
     assert provider.writes == 1
 
 
@@ -471,7 +482,7 @@ async def test_final_callback_keeps_model_format_and_detaches_value_content_and_
         assert isinstance(snapshot.raw_representation, _SDKPayload)
         assert snapshot.raw_representation is not sdk and snapshot.raw_representation.labels == ["original", "callback"]
     assert _wire(serialize_agent_response(original)) == expected
-    assert _mailbox(provider, "typed-callback") == expected
+    assert _mailbox(provider, "typed-callback") == serialize_terminal_response(expected)
     assert "raw_representation" not in expected and "response_format" not in expected
     delivered = _delivered(provider, "typed-callback")
     ensure_response_format(ReviewValue, "typed-callback", delivered)
@@ -629,12 +640,12 @@ async def test_rich_image_context_and_paired_ids_cross_entity_without_decoding_o
         assert item.contents[0].outputs == outputs
         assert isinstance(item.contents[0].outputs[0], dict)
     assert request == before and message.contents[0].outputs == outputs
-    assert _data(provider)["ingestedMessages"] == {
+    assert _ingested(provider) == {
         identity: [message_identity(message)] for identity in ("image-occurrence-1", "image-occurrence-2")
     }
     raw = _wire(provider.raw)
-    mailbox = _object(_object(_object(_object(raw["data"])["responseMailbox"])["rich-input"])["response"])
-    assert mailbox == _wire(serialize_agent_response(response))
+    mailbox = _object(_object(_object(_object(raw["data"])["terminalResults"])["rich-input"])["response"])
+    assert mailbox == _wire(serialize_terminal_response(serialize_agent_response(response)))
     mailbox["future_response"] = {"opaque": [3]}
     # Simulate a newer writer adding optional fields to the actual committed model response.
     saved_message = _object(_array(mailbox["messages"])[0])
@@ -683,14 +694,22 @@ async def test_contentless_migrated_workflow_id_never_backfills_an_ingestion_rec
         migration_id="execution-followup",
         ownership_transfer_id="quiesced-owner",
         delivery_window_seconds=3600,
+        # This request-only fixture has no original completions. It supplies no delivery journal.
+        completion_evidence={
+            "sourceDigest": state_snapshot_digest(source),
+            "evidenceId": "request-only-completion-journal",
+            "complete": True,
+            "results": [],
+        },
     )
     assert migrated.data.ingested_messages == {}
+    assert migrated.data.response_mailbox == migrated.data.completed_correlations == {}
     probe = _Inputs()
     client = ToolChatClient(tool_calls=False)
     agent = Agent(client=client, context_providers=[probe])
     provider = JsonStateProvider(_wire(migrated.to_dict()))
     await AgentEntity(agent, state_provider=provider).run({"message": "unrelated turn", "correlationId": "unrelated"})
-    assert _data(provider).get("ingestedMessages", {}) == {}, "loading old history is not proof of ingestion"
+    assert _ingested(provider) == {}, "loading old history is not proof of ingestion"
     cold_provider = JsonStateProvider(_wire(provider.raw))
     message = Message("user", ["complete incoming payload"], message_id=identity)
     request = {"message": "logging only", "correlationId": "incoming", "contextMessages": [message.to_dict()]}
@@ -700,7 +719,7 @@ async def test_contentless_migrated_workflow_id_never_backfills_an_ingestion_rec
     assert response.text == "answer-2"
     assert [item.to_dict() for item in probe.inputs[-1]] == [message.to_dict()]
     assert [item.text for item in client.received_messages[-1]].count(message.text) == 1
-    assert _data(cold_provider)["ingestedMessages"] == {identity: [message_identity(message)]}
+    assert _ingested(cold_provider) == {identity: [message_identity(message)]}
     stored = _array(_data(cold_provider)["conversationHistory"])
     legacy = next(_object(entry) for entry in stored if _object(entry).get("correlationId") == "legacy")
     assert _object(_array(legacy["messages"])[0])["contents"] == []
@@ -717,14 +736,14 @@ async def test_new_direct_context_same_application_id_uses_actual_ingestion_rece
     assert (await AgentEntity(agent, state_provider=provider).run(request)).text == "answer-1"
     assert [item.to_dict() for item in probe.inputs[0]] == [message.to_dict()]
     expected_receipts = {"application-id": [message_identity(message)]}
-    assert _data(provider)["ingestedMessages"] == expected_receipts
+    assert _ingested(provider) == expected_receipts
     cold_provider = JsonStateProvider(_wire(provider.raw))
 
     response = await AgentEntity(agent, state_provider=cold_provider).run({**request, "correlationId": "direct-next"})
 
     assert response.text == "answer-2" and probe.inputs[-1] == []
     assert [item.text for item in client.received_messages[-1]].count(message.text) == 1
-    assert _data(cold_provider)["ingestedMessages"] == expected_receipts
+    assert _ingested(cold_provider) == expected_receipts
     assert request["contextMessages"] == [message.to_dict()]
 
 

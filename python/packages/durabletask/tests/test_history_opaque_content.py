@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from agent_framework import Agent, Content, Message
+from test_history_identity_acceptance import _core_fields
 from test_history_pipeline_revision import ToolChatClient
 from test_revision_contract import JsonStateProvider
 
@@ -230,7 +231,7 @@ async def test_nested_content_edges_keep_future_fields_in_persisted_core_overlay
 
     saved = _assert_persisted(provider, raw)
     root = saved["contents"][0]
-    payload = root["content"] if root["$type"] == "unknown" else root["extensionData"]["coreContent"]
+    payload = root["content"] if root["$type"] == "unknown" else _core_fields(root)
     assert _at(payload, path) == _at(content, path)
     assert _at(payload, path)["future_content"] == _OPAQUE
 
@@ -282,11 +283,9 @@ async def test_reordered_same_type_contents_keep_future_markers_with_their_origi
 
     assert len(history.transformed) == 1
     saved = _assert_persisted(provider, expected)
-    stored = saved["contents"][0]["extensionData"]["coreContent"]["items"] if nested else saved["contents"]
+    stored = _core_fields(saved["contents"][0])["items"] if nested else saved["contents"]
     assert [item["text"] for item in stored] == ["second", "first"]
-    markers = [
-        item["future_content"] if nested else item["extensionData"]["coreContent"]["future_content"] for item in stored
-    ]
+    markers = [item["future_content"] if nested else _core_fields(item)["future_content"] for item in stored]
     assert markers == [{"owner": "second"}, {"owner": "first"}]
 
 
@@ -371,4 +370,4 @@ async def test_content_call_id_alias_is_opaque_data_not_an_active_durable_field(
     assert client.received_messages[0][0].contents[0].call_id == "nested-call"
     saved = _assert_persisted(provider, raw)
     assert saved["contents"][0]["callId"] == "nested-call"
-    assert saved["contents"][0]["extensionData"]["coreContent"]["callId"] == _CALL["callId"]
+    assert _core_fields(saved["contents"][0])["callId"] == _CALL["callId"]

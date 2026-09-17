@@ -405,11 +405,14 @@ class TestMailboxDeliverySurvivesTranscriptEviction:
         restored.expire_responses(now=expiry)
 
         assert restored.data.response_mailbox == {}
-        assert restored.data.completed_correlations == completed
+        assert restored.data.completed_correlations == {
+            "c0": {**completed["c0"], "resultState": "unavailable", "resultUnavailableAt": expiry.isoformat()}
+        }
         expired = DurableAgentState.from_json(restored.to_json()).try_get_agent_response("c0")
         assert expired is not None
         assert expired.additional_properties["durable_status"] == "already_completed"
         assert expired.additional_properties["correlation_id"] == "c0"
+        assert expired.additional_properties["durable_outcome"] == "succeeded"
         assert expired.messages[0].contents[0].error_code == "response_expired"
 
 
@@ -419,7 +422,9 @@ def _tool_state(turns: int, *, chars: int = 400) -> DurableAgentState:
     This is the shape that broke the budget. A function call serializes to as much storage as
     prose of the same length, but reading ``.text`` off it returns an empty string.
     """
-    state = DurableAgentState(schema_version="1.2.0")
+    # Original string function arguments are a v2 shape. This budget fixture has
+    # no polling dependency on the historical transcript-delivery format.
+    state = DurableAgentState()
     now = datetime.now(tz=timezone.utc)
     for index in range(turns):
         occurred_at = now - timedelta(minutes=turns - index)
@@ -706,6 +711,19 @@ class TestTheWholeLoopStaysUnderBudget:
     LIMIT = 60_000
     TURNS = 20
 
+    @pytest.fixture(autouse=True)
+    def _delivery_clock(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.clock_time = datetime.now(tz=timezone.utc)
+        owner = self
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> Any:
+                return cls.fromtimestamp(owner.clock_time.timestamp(), tz=tz)
+
+        monkeypatch.setattr("agent_framework_durabletask._durable_agent_state.datetime", Clock)
+        monkeypatch.setattr("agent_framework_durabletask._shared_state_validation.datetime", Clock)
+
     async def _drive(self, **entity_kwargs: Any) -> tuple[_EntityState, list[str]]:
         client = _VerboseClient()
         agent = Agent(client=cast(Any, client), name="verbose")
@@ -728,14 +746,9 @@ class TestTheWholeLoopStaysUnderBudget:
                 assert _size(persisted) < int(budget * HIGH_WATERMARK)
 
             if turn < self.TURNS - 1:
-                # Simulate the next operation arriving after delivery expires, but only after
-                # polling this result. Let the entity remove the payload on its next operation;
-                # neither transcript timestamps nor completion receipts are changed here.
-                persisted.data.response_mailbox[correlation_id]["expiresAt"] = (
-                    datetime.now(tz=timezone.utc) - timedelta(seconds=1)
-                ).isoformat()
-                provider.replace_cached_state(persisted)
-                provider.persist_state()
+                # Advance the actual delivery clock, never rewrite immutable
+                # completion facts just to make an old result expire.
+                self.clock_time += timedelta(seconds=DELIVERY_WINDOW_SECONDS + 1)
         return provider, replies
 
     @pytest.mark.parametrize("budget", [BUDGET, LIMIT])

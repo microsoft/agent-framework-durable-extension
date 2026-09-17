@@ -22,11 +22,13 @@ from agent_framework import (
     SessionContext,
     tool,
 )
+from test_durable_history_provider import _ingestion_messages
 from test_execution_followup_review import _DelegatingClient, _ObservedAgent
 from test_history_identity_acceptance import (
     _assert_no_private_fields,
     _assert_positions,
     _bound,
+    _history_id,
     _Probe,
     _projection,
     _rows,
@@ -50,6 +52,12 @@ _RESERVED_EXTRAS = [
     pytest.param("authorName", "forged-author", id="author"),
     pytest.param("createdAt", "2026-01-01T00:00:00+00:00", id="created-at"),
     pytest.param("extensionData", {"forged": True}, id="extension-data"),
+    pytest.param("pythonHistoryId", "forged-internal-id", id="python-history-id"),
+    pytest.param(
+        "pythonHistoryIdentity",
+        {"profile": "agent-framework-python.history-identity", "version": 1},
+        id="python-history-profile",
+    ),
 ]
 
 
@@ -149,7 +157,7 @@ async def test_model_output_reserved_extra_cannot_commit_poisoned_history(value:
     assert provider.writes == 1, "a failed completion may be committed, but never the invalid output"
     rows = _rows(provider)
     assert all("originalMessageId" not in row and row.get("messageId") != "real-output-id" for row in rows)
-    assert provider.raw["data"]["completedCorrelations"]["output-extra"]["outcome"] == "failed"
+    assert provider.raw["data"]["completionReceipts"]["output-extra"]["outcome"] == "failed"
     restored = DurableAgentState.from_dict(_wire(provider.raw))
     assert restored.to_dict() == provider.raw
     delivered = restored.try_get_agent_response("output-extra")
@@ -164,6 +172,8 @@ async def test_reserved_names_remain_opaque_inside_additional_properties() -> No
         "authorName": [False, ""],
         "createdAt": "business timestamp, not a durable timestamp",
         "extensionData": {"originalMessageId": {"nested": [None, False, 0]}},
+        "pythonHistoryId": "business value, not an occurrence",
+        "pythonHistoryIdentity": {"profile": "agent-framework-python.history-identity", "version": 1},
     }
     message = Message("user", ["opaque metadata"], message_id="public-input", additional_properties=deepcopy(opaque))
     request = _projection("opaque-reserved", [message], ["opaque-occ"])
@@ -204,8 +214,9 @@ async def _assert_empty_id_cold_reconciliation(provider: JsonStateProvider, text
         _assert_positions(provider, state)
     rows = [row for entry in snapshot["data"]["conversationHistory"] for row in entry["messages"]]
     users_raw = [row for row in rows if row["role"] == "user"]
-    assert [row["messageId"] for row in users_raw] == private_ids
-    assert [row["originalMessageId"] for row in users_raw] == ["", ""]
+    assert [_history_id(row) for row in users_raw] == private_ids
+    assert [row["messageId"] for row in users_raw] == ["", ""]
+    assert all("originalMessageId" not in row for row in users_raw)
     assert "second_only" not in users_raw[0].get("extensionData", {})
     assert users_raw[1]["extensionData"]["second_only"] is True
     _assert_no_private_fields(snapshot)
@@ -219,8 +230,9 @@ async def _assert_empty_id_cold_reconciliation(provider: JsonStateProvider, text
     assert [message.message_id for message in model_users] == ["", "", "third-id"]
     assert [message.text for message in model_users] == [*texts, "third"]
     cold_users = [row for row in _rows(cold) if row["role"] == "user"]
-    assert [row["messageId"] for row in cold_users[:2]] == private_ids
-    assert [row["originalMessageId"] for row in cold_users[:2]] == ["", ""]
+    assert [_history_id(row) for row in cold_users[:2]] == private_ids
+    assert [row["messageId"] for row in cold_users[:2]] == ["", ""]
+    assert all("originalMessageId" not in row for row in cold_users[:2])
     assert DurableAgentState.from_dict(cold.raw).to_dict() == cold.raw
 
 
@@ -235,7 +247,7 @@ async def test_two_new_empty_public_ids_survive_append_reconciliation_and_cold_m
     assert response.text == "answer-1" and provider.writes == 1
     assert [message.message_id for message in client.received_messages[0]] == ["", ""]
     assert request == before and [message.message_id for message in messages] == ["", ""]
-    assert provider.raw["data"]["ingestedMessages"] == {
+    assert _ingestion_messages(provider.raw) == {
         f"empty-{index}": [message_identity(message)] for index, message in enumerate(messages)
     }
     await _assert_empty_id_cold_reconciliation(
@@ -243,8 +255,45 @@ async def test_two_new_empty_public_ids_survive_append_reconciliation_and_cold_m
     )
 
 
-async def test_two_legacy_empty_ids_keep_empty_originals_and_distinct_cold_occurrences() -> None:
-    # Legacy-shaped rows in an admitted v2 envelope isolate identity repair from schema migration.
+@pytest.mark.parametrize("opaque_shape", ["matching-prototype", "arbitrary-json"])
+async def test_unversioned_ingestion_is_preserved_but_does_not_suppress_new_input(opaque_shape: str) -> None:
+    message = Message("user", ["must reach the model"], message_id="public-id")
+    fingerprint = message_identity(message)
+    opaque: Any = {"occ": [fingerprint]} if opaque_shape == "matching-prototype" else [None, False, {}]
+    raw = DurableAgentState().to_dict()
+    raw["data"]["ingestedMessages"] = deepcopy(opaque)
+    raw["data"]["futureSibling"] = {"opaque": [None, False, {}]}
+    before = deepcopy(raw)
+    provider = JsonStateProvider(raw)
+    assert provider.state.data.ingested_messages == {}
+    assert provider.state.to_dict() == before
+    request = _projection("first", [message], ["occ"])
+    before_request = deepcopy(request)
+    client = ToolChatClient(tool_calls=False)
+    probe = _Probe()
+    agent = Agent(client=client, context_providers=[DurableHistoryProvider(prune_excluded=False), probe])
+
+    response = await AgentEntity(agent, state_provider=provider).run(request)
+
+    assert response.text == "answer-1" and response.additional_properties.get("durable_status") != "error"
+    assert [item.to_dict() for item in client.received_messages[0]] == [message.to_dict()]
+    assert [item.to_dict() for item in probe.inputs[0]] == [message.to_dict()]
+    assert provider.writes == 1 and request == before_request and raw == before
+    assert _ingestion_messages(provider.raw) == {"occ": [fingerprint]}
+    assert provider.raw["data"]["ingestedMessages"] == opaque
+    assert provider.raw["data"]["futureSibling"] == before["data"]["futureSibling"]
+    cold = JsonStateProvider(_wire(provider.raw))
+    assert cold.state.data.ingested_messages == {"occ": [fingerprint]}
+    next_response = await AgentEntity(agent, state_provider=cold).run({**request, "correlationId": "next"})
+    assert next_response.text == "answer-2" and probe.inputs[-1] == []
+    assert len(client.received_messages) == 2 and cold.writes == 1
+    assert _ingestion_messages(cold.raw) == {"occ": [fingerprint]}
+    assert cold.raw["data"]["ingestedMessages"] == opaque
+    assert cold.raw["data"]["futureSibling"] == before["data"]["futureSibling"]
+
+
+async def test_two_shared_empty_ids_keep_public_identity_and_distinct_cold_occurrences() -> None:
+    # Shared rows without Python profiles isolate identity repair from schema migration.
     raw = DurableAgentState().to_dict()
     raw["data"]["conversationHistory"] = [
         {
@@ -332,8 +381,8 @@ async def test_agent_middleware_preserves_completed_service_receipt_after_provid
     assert caller_list == caller_before and agent.middleware is registered_middleware
     assert request == before_request and provider.writes == 1
     assert provider.raw["data"]["session"]["service_session_id"] == "service-thread"
-    assert provider.raw["data"]["ingestedMessages"] == {
-        "old-occurrence": ["old-fingerprint"],
+    assert _ingestion_messages(provider.raw) == {
+        "old-occurrence": [message_identity(Message("user", ["equal"], message_id="shared"))],
         "service-occ": [message_identity(message)],
     }
     assert probe.accepted == [{("service-occ", message_identity(message))}]
@@ -342,7 +391,7 @@ async def test_agent_middleware_preserves_completed_service_receipt_after_provid
     assert sum(isinstance(item, DurableServiceAcceptance) for item in forwarded) == 1
     assert sum(isinstance(item, DurableToolGuard) for item in forwarded) == 1
     assert provider.raw["data"]["conversationHistory"] == raw["data"]["conversationHistory"]
-    assert provider.raw["data"]["completedCorrelations"]["middleware-failed"]["outcome"] == "failed"
+    assert provider.raw["data"]["completionReceipts"]["middleware-failed"]["outcome"] == "failed"
     cold = JsonStateProvider(_wire(provider.raw))
     calls = len(inner.received_messages)
     assert (await AgentEntity(agent, state_provider=cold).run(request)).to_dict() == response.to_dict()

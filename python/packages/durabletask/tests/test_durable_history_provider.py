@@ -30,8 +30,23 @@ from agent_framework_durabletask import (
     DurableHistoryProvider,
 )
 from agent_framework_durabletask._history_provider import replayable_entries
+from agent_framework_durabletask._shared_response import load_terminal_response, serialize_terminal_response
 
 KEEP_LAST_MESSAGES = 2
+
+
+def _ingestion_messages(raw: dict[str, Any]) -> dict[str, list[str]]:
+    profile = raw["data"].get("pythonIngestion")
+    if profile is None:
+        return {}
+    assert profile["profile"] == "agent-framework-python.ingestion"
+    assert type(profile["version"]) is int and profile["version"] == 1
+    messages = profile["messages"]
+    assert isinstance(messages, dict)
+    assert all(
+        isinstance(values, list) and all(isinstance(value, str) for value in values) for values in messages.values()
+    )
+    return messages
 
 
 class RecordingChatClient:
@@ -560,6 +575,8 @@ class TestDurableHistoryProvider:
         for entry in raw["data"]["conversationHistory"]:
             for message in entry["messages"]:
                 message.pop("messageId", None)
+                message.pop("pythonHistoryId", None)
+                message.pop("pythonHistoryIdentity", None)
 
         async def _synthesized_ids() -> list[str]:
             restarted_provider = _InMemoryStateProvider()
@@ -988,8 +1005,10 @@ class TestARequestIsAnsweredOnce:
         first = await entity.run({"message": "hello", "correlationId": "dup"})
         assert len(client.received_messages) == 1, "a failed stream must not trigger another agent execution"
         raw = json.loads(json.dumps(provider._get_state_dict()))
-        assert raw["data"]["responseMailbox"]["dup"]["response"] == first.to_dict()
-        assert "dup" in raw["data"]["completedCorrelations"]
+        payload = raw["data"]["terminalResults"]["dup"]["response"]
+        assert payload == serialize_terminal_response(first)
+        assert load_terminal_response(payload).to_dict() == first.to_dict()
+        assert raw["data"]["completionReceipts"]["dup"]["outcome"] == "failed"
         restarted_provider = _InMemoryStateProvider(raw=raw)
         restarted = _make_entity(_build_agent(client), restarted_provider)
         second = await restarted.run({"message": "hello", "correlationId": "dup"})

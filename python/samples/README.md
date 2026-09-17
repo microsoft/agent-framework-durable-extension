@@ -4,7 +4,7 @@ This directory contains samples for durable agent hosting using the Durable Task
 
 ## PR #59 prototype scope
 
-The architecture in [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88) was accepted and merged on September 15, 2026 into `feature/python-durable-thread-compaction` at `7d90e8f`. [PR #59](https://github.com/microsoft/agent-framework-durable-extension/pull/59) remains the integrated prototype, not a merge-as-is implementation. Focused, stacked implementation PRs will deliver the accepted architecture. The private prototype delivery layout does not establish shared-schema interoperability, and the prototype is not a production drop-in.
+The architecture in [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88) was accepted and merged on September 15, 2026 into `feature/python-durable-thread-compaction` at `7d90e8f`. [PR #59](https://github.com/microsoft/agent-framework-durable-extension/pull/59) remains the integrated prototype, not a merge-as-is implementation or production drop-in. Shared-wire adoption is implemented and locally validated, but not published. The local implementation uses main's canonical `terminalResults` and `completionReceipts` instead of the private `responseMailbox` and `completedCorrelations` layout, with one canonical wire validator rather than parallel contracts. No .NET interoperability is claimed.
 
 The prototype's version-2 runtime requires `deployment_mode="isolated_v2"` on `DurableAIAgentWorker`,
 `AgentFunctionApp` and the standalone Functions entity factory, or
@@ -12,14 +12,50 @@ The prototype's version-2 runtime requires `deployment_mode="isolated_v2"` on `D
 host environment accordingly. This is operator acknowledgement, not proof of isolation. Use a
 separate hub/deployment with compatible workers and clients. Old workers and workflow histories,
 including paused legacy HITL, must stay on the old engine.
-This gate applies to every prototype host, including samples and tests. A sample or localhost endpoint does not establish isolation on the operator's behalf.
+This gate applies to every prototype host, including samples and tests. A sample, localhost endpoint or passing schema validation never establishes isolation or activates version-2 writes.
 
-Only `2.0.0` entity state is writable. Legacy and supported future-minor state is read-only.
-Names are unchanged, so using an old `@name@key` on an empty new hub is not migration. Explicit
-backend migration needs an empty, separately addressed destination and authorized ownership transfer.
-Scalar legacy ingestion cursors require a complete accepted-message journal, including evicted
-inputs. If that journal is unavailable, keep the session on the old engine. Migration does not move
-workflow history or reconstruct missing original responses.
+Only canonical `2.0.0` entity state is writable. Exact legacy `1.0.0`, `1.1.0` and `1.2.0` snapshots
+remain read-only. Unsupported versions, including future `2.x`, are rejected. The unreleased private
+`2.0.0` state and in-flight runs are abandoned. Start fresh, isolated runs, with no private-prototype
+detection, conversion or resume path. Names are unchanged, so reusing an old `@name@key` on an empty
+new hub is not migration or permission to redeliver old work.
+
+Explicit legacy migration needs an empty, separately addressed destination, a quiesced old owner
+and authorized ownership transfer. Both hosts implement backend `migrate` with required request keys
+`source`, `sourceDigest`, `sourceSessionId`, `destinationSessionId`, `migrationId` and
+`ownershipTransferId`. Only `deliveryEvidence`, `completionEvidence` and the deprecated boolean
+`requireKnownOutcomes` are optional keys. `sourceDigest` is `state_snapshot_digest(source)` for the
+unmodified export. The destination ID must match the receiving entity and differ from the source ID.
+
+`completionEvidence` has exactly `sourceDigest`, a stable nonblank `evidenceId`, `complete: true`
+and `results`. Its digest must match the source. Results are original canonical `terminalResults`
+objects without `resultExpiresAt`, not even null. Each has `correlationId`, known `outcome`, original
+authoritative `completedAt` and full inline `response.messages`. Optional `value`, metadata and
+unknown JSON are preserved without a lossy Core projection. Failure requires a canonical error,
+while success forbids one. The journal covers all completions, including results lost from history.
+
+Completion evidence is required for any nonempty history (even request-only), nonempty session-only
+state, a `truncation` field, nonempty scalar `ingestedPositions` or a supplied nonempty accepted-input
+journal. If such a source has no completed requests, supply an explicit complete source-bound journal
+with `results: []`. It is rejected if any retained response or `errorResponse` remains. No retained
+responses alone does not prove no completions. Only a fresh source with none of these signs of use
+can omit completion evidence.
+
+Nonempty scalar `ingestedPositions` additionally requires complete `deliveryEvidence` with exactly
+`sourceDigest`, `evidenceId`, `complete: true` and `messages`. This independent journal contains
+lossless `Message.to_dict()` accepted inputs, including evicted inputs and all accepted revisions.
+Exact identities preserve gaps, and matching maxima do not establish a delivered prefix. Assertions
+and matching digests do not establish journal authority. Missing, duplicate or contradictory evidence
+blocks migration, with no invented or `unknown` outcome or `requireKnownOutcomes=False` waiver.
+Partial transcript projections and source `createdAt` cannot supply missing original results or
+completion times. If the required journals are unavailable, keep the session on the old engine.
+
+The migrator preserves original journal `completedAt` strings and sets matching result and receipt
+`resultExpiresAt` to migration time plus configured `response_delivery_window_seconds`, never before
+completion. Exact request retries return the recorded migration without rewriting state, including
+after cold reload or later runs, so they do not refresh grace. Migration does not copy external
+history or move workflow histories. No generated HTTP/MCP migration endpoint is provided. See
+[migration requirements](../packages/durabletask/README.md#explicit-legacy-migration).
 
 The workflow client, generated start routes and child dispatch wrap new starts with protocol version
 2. Native custom schedulers must use public `wrap_workflow_input` for new instances. Old/raw starts
@@ -27,10 +63,45 @@ reject before revised actions execute. Rewrapping old starts is not history migr
 
 ## Prototype validation
 
-### Post-acceptance correctness validation
+### Current adoption status
 
-The post-acceptance follow-up was validated locally with these results. Check the PR head and
-remote checks separately before treating a local result as a published CI result.
+Canonical shared-wire adoption, including source-bound completion-evidence migration, is implemented
+and locally validated as of September 16, 2026. These results cover the working tree based on
+`31293f2` plus main `45b7fd8`, not a published implementation or remote CI result. The final
+implementation commit will record this working tree after the documentation update. The complete
+canonical schema tree equals main `45b7fd8`, and the accepted ADR is unchanged.
+
+| Current local check | Result | Time |
+| --- | --- | --- |
+| Python 3.13 / core 1.16 | 5,724 passed, 0 failures/errors/skips | 135.712 s |
+| Python 3.13 / real cached core 1.13 | 5,704 passed, 0 failures/errors/skips | 130.802 s |
+| Python 3.10 / core 1.16 | 5,724 passed, 0 failures/errors/skips | 144.628 s |
+| Full DTS integration suite | 45 passed | 368.370 s |
+| Full Functions / Azure Storage integration suite | 45 passed | 908.867 s |
+
+The 20-case core-version difference comes from conditional middleware forms unavailable on core
+1.13, not skipped tests. Shared structural coverage includes 96 cases and four fixtures with full
+raw JSON round-trips, already included in the unit totals.
+
+Both source Pyright checks reported zero errors. Linux MyPy checked 89 Durable Task and 40 Azure
+Functions files with zero errors. Ruff reported zero findings, formatting passed for 174 files,
+the 148-package offline lock check passed, and both packages' wheels and source distributions built
+successfully. Markdown and local-link checks passed with no new Markdown lint findings before this
+documentation-only update.
+
+Host validation used local DTS and Azure Functions with Azure Storage through Azurite. It covers
+real Foundry text scenarios and deterministic binary-media/model-boundary scenarios, not hosted-model
+media acceptance. It does not establish compiled .NET interoperability, actual scheduler-limit or
+offload behavior, or a resume path for old private `2.0.0` runs. Exact Pydantic 2.11 remains unverified
+because its earlier artifact download failed with a TLS handshake error. Local validation does not
+make PR #59 mergeable as-is or establish production readiness. The historical records below remain
+separate from these current results.
+
+### Historical post-acceptance record
+
+The following local results belong to historical published baseline `31293f2`, recorded when
+shared-wire adoption began on September 16, 2026. They are not current-revision or green CI results.
+CI at that head was skipped because of a merge conflict.
 
 | Check | Result |
 | --- | --- |
@@ -42,8 +113,8 @@ remote checks separately before treating a local result as a published CI result
 | Package lint, 165-file format check, both source analyzers and Linux test typing | Passed |
 | Offline lock, wheel and source distributions for both packages | Passed |
 
-The 20-case difference on core 1.13 comes from middleware singleton/bundle forms that the older
-core does not expose. Shared list-form cases run on both versions. The regression coverage includes
+The earlier record attributes the 20-case difference on core 1.13 to middleware singleton/bundle
+forms that the older core does not expose. Its shared list-form cases ran on both versions. That coverage included
 literal workflow dictionaries, explicit null routing, public history IDs, acknowledged-input
 receipts, nested opaque input metadata, middleware composition, cold mailbox reads, conservative
 legacy outcome enrichment, MCP timeouts and sample entrypoints. Real host tests retain the limits
@@ -57,7 +128,7 @@ unverified because its isolated artifact download failed with a TLS handshake er
 ### Historical outcome and retention validation
 
 The results below are the historical local outcome, media, failure-boundary and telemetry follow-up to
-[prototype baseline 9b4550d](https://github.com/microsoft/agent-framework-durable-extension/commit/9b4550d), not the post-acceptance follow-up above.
+[prototype baseline 9b4550d](https://github.com/microsoft/agent-framework-durable-extension/commit/9b4550d), retained in this record on September 16, 2026, not the post-acceptance follow-up above.
 These pinned counts are not current remote CI status or a claim of release readiness. See
 [PR #59 checks](https://github.com/microsoft/agent-framework-durable-extension/pull/59/checks)
 for remote results.
@@ -110,8 +181,8 @@ these tests. Remaining release validation includes actual scheduler-limit/offloa
 capabilities are enabled, exact Pydantic 2.11 runtime validation (artifact downloads
 remain blocked), and shared reader/writer, client, replay and rollback compatibility. The reduced
 live budget is not a scheduler-limit test. No compiled C# or cross-runtime schema acceptance is
-claimed. Existing .NET readers and legacy workflow histories remain incompatible with the revised
-contract. These gaps do not replace or defer the ADR's required validation.
+claimed. Shared-wire adoption does not establish .NET compatibility or allow legacy workflow
+history replay. These gaps do not replace or defer the ADR's required validation.
 
 ## Import convention
 
@@ -205,27 +276,45 @@ branches. Do not assume universal unchanged-hook semantics or retry-safe externa
 
 The default `DurableHistoryProvider.after_run()` calls public `save_messages()` for request and response batches. Overrides can validate, transform or reject each batch, and one core hook can produce two saves for provenance. A completed save through an external primary's default hook, or a completed service-owned `ChatResponse`, preserves affirmative input acceptance after a later invocation failure. Opaque custom after-run hooks and interrupted saves do not permit inferred acknowledgement. Store-only sinks do not establish primary acceptance. Existing core and provider APIs are unchanged.
 
-Durable history preserves repeated public IDs through optional string `originalMessageId` in its private layout while keeping unique internal `messageId` values. Public history loads, normal model calls, other providers and audits use public IDs. Configured `CompactionProvider` hooks temporarily see internal IDs and must use those IDs for internal summary/source links. Arbitrary custom hooks that depend on public IDs or substitute different input IDs are not guaranteed transparent behavior. Private occurrence attributes are not serialized into public message envelopes. Unknown optional input message/content envelope fields remain inert metadata, not dynamically loaded types.
+Canonical `messageId` remains the public producer ID, including repeated IDs. Version-1 `pythonHistoryIdentity` uses `pythonHistoryId` for internal occurrences without exposing reconciliation metadata as application message metadata. Public history loads, normal model calls, other providers and audits use public IDs. Configured `CompactionProvider` hooks temporarily see internal IDs and must use those IDs for internal summary/source links. Arbitrary custom hooks that depend on public IDs or substitute different input IDs are not guaranteed transparent behavior.
+
+Full raw JSON preservation is separate from Core projection. Keep canonical metadata and unknown
+fields at their original locations, separate from explicit `extensionData`, without loading types
+from stored data. Versioned `pythonIngestion` uses profile `agent-framework-python.ingestion`,
+version 1, for exact message receipts that preserve delivery gaps. `pythonCoreFields` uses the
+`core-fields` profile, and `pythonContinuationEncoding` identifies JSON-dictionary/base64 encoding.
+Foreign profiles remain inert for readers. A runtime relying on one must validate it or block
+dependent restoration and writes. Optional opaque `historyBinding` imposes no shared fixed-owner
+policy. Raw preservation and continuation encoding are not .NET or provider interoperability claims.
+See [shared JSON and Python profiles](../packages/durabletask/README.md#shared-json-and-python-runtime-profiles).
 
 Workflow delta transport uses parallel occurrence IDs, not public `Message.message_id` rewrites.
 The full selected logical conversation and all response messages remain available for downstream
 projection. Private forwarding provenance is internal checkpoint data, not application metadata.
 Typed/cache-only requests, agent approval/HITL and output-designated agents are supported locally.
 
-Delivery expires logically even while an idle entity retains its payload. New runs, duplicate runs,
-reset and backend `expire_responses` clean expired payloads without erasing completion receipts.
-Idle physical cleanup needs an application-owned schedule or explicit backend signal/manual
-operation. No public HTTP/MCP cleanup endpoint is generated. Receipts can exhaust capacity, and
-entity commits do not provide a distributed transaction or exactly-once external tool execution.
+`terminalResults` retains immutable canonical response envelopes independently of model history.
+Results and `completionReceipts` require authoritative `outcome` (`succeeded` or `failed`) and
+`completedAt`, with matching correlation identities and optional `resultExpiresAt`. Results include
+the full inline response and canonical metadata, with an error required for failure. Receipt
+`resultState` is required. `available` requires a matching result, while `unavailable` forbids one
+and requires `resultUnavailableAt`. Results and receipts must commit atomically with all other
+entity-local changes for the operation. No v2 `unknown` outcome or transcript-based success inference
+is permitted. Acceptance-only and fire-and-forget responses do not establish terminal completion.
 
-New receipts retain invocation success/failure after payload expiry. Expired lookup exposes
-`durable_outcome` as `succeeded`, `failed` or `unknown`, without changing original response payloads.
-An older unknown receipt still prevents reruns. Strict migration can require trustworthy outcomes,
-but a possibly pruned legacy transcript without an error is not proof of success. The default
-legacy-compatible path retains duplicate protection. Fresh acceptance-only responses do not record
-completion, and fire-and-forget acceptance remains distinct from completion.
+When expiry is configured, delivery expires logically even while an idle entity retains its payload.
+Lookup reports completed-but-result-unavailable with the retained outcome, without returning an
+expired payload, reporting pending or rerunning work. Cleanup removes the result and records
+`resultUnavailableAt` no earlier than completion and, for expiry, no earlier than the deadline.
+New runs, duplicate runs, reset and backend `expire_responses` clean expired payloads without erasing
+receipts. Idle physical cleanup needs an application-owned schedule or explicit backend signal/manual
+operation. No public HTTP/MCP cleanup endpoint is generated.
 
-When no mailbox exists, migration can enrich an existing receipt with an absent outcome to `failed` from affirmative retained legacy evidence, including typed `errorResponse`. Known receipt outcomes and independent mailboxes take precedence. Enrichment preserves the original timestamp and other receipt fields without reopening delivery or recreating a mailbox.
+Receipts can exhaust capacity. Whole-entity TTL/deletion also removes duplicate protection and needs
+an explicit late-duplicate policy. Entity commits do not make external appends or tool effects
+transactional or exactly once. Callbacks and host write returns are not confirmation of persisted
+completion. Applications need their own external idempotency strategy. An invalid service conversation
+must fail without silently falling back to a new conversation or local history.
 
 The shared [retention telemetry](../packages/durabletask/README.md#retention-telemetry) measures staged
 deletion, not committed deletion. A `set_state` return or failure leaves commit status unknown.

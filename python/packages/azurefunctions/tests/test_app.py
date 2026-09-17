@@ -23,6 +23,8 @@ from agent_framework_durabletask import (
     AgentEntity,
     AgentEntityStateProviderMixin,
     DurableAgentState,
+    DurableAgentStateRequest,
+    RunRequest,
     workflow_orchestrator_name,
     wrap_workflow_input,
 )
@@ -642,29 +644,16 @@ class TestAgentEntityFactory:
         # Reset an admitted v2 target, not a legacy session.
         mock_context = Mock()
         mock_context.operation_name = "reset"
-        mock_context.get_state.return_value = {
-            "schemaVersion": DurableAgentState.SCHEMA_VERSION,
-            "data": {
-                "conversationHistory": [
-                    {
-                        "$type": "request",
-                        "correlationId": "corr-reset-test",
-                        "createdAt": "2024-01-01T00:00:00Z",
-                        "messages": [
-                            {
-                                "role": "user",
-                                "contents": [
-                                    {
-                                        "$type": "text",
-                                        "text": "test",
-                                    }
-                                ],
-                            }
-                        ],
-                    }
-                ],
-            },
-        }
+        state = DurableAgentState()
+        state.record_response(
+            "corr-reset-test",
+            AgentResponse(messages=[Message("assistant", ["test"])]),
+            delivery_window_seconds=3600,
+        )
+        state.data.conversation_history.append(
+            DurableAgentStateRequest.from_run_request(RunRequest(message="test", correlation_id="corr-reset-test"))
+        )
+        mock_context.get_state.return_value = state.to_dict()
 
         # Execute entity function
         entity_function(mock_context)
@@ -673,6 +662,12 @@ class TestAgentEntityFactory:
         assert mock_context.set_result.called
         result_call = mock_context.set_result.call_args[0][0]
         assert result_call["status"] == "reset"
+        persisted = mock_context.set_state.call_args.args[0]
+        assert persisted["data"]["conversationHistory"] == []
+        assert (
+            persisted["data"]["completionReceipts"] == mock_context.get_state.return_value["data"]["completionReceipts"]
+        )
+        assert persisted["data"]["terminalResults"] == mock_context.get_state.return_value["data"]["terminalResults"]
 
     def test_entity_function_handles_unknown_operation(self) -> None:
         """Test that the entity function handles an unknown operation."""
@@ -751,6 +746,10 @@ class TestAgentEntityFactory:
             entity_function(mock_context)
 
         from_dict_mock.assert_called_once_with(existing_state)
+        result = mock_context.set_result.call_args.args[0]
+        assert result["status"] == "error" and "read-only" in result["error"]
+        mock_agent.run.assert_not_called()
+        mock_context.set_state.assert_not_called()
 
 
 class TestErrorHandling:

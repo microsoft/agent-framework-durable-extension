@@ -6,7 +6,7 @@ Run with: pytest tests/test_entities.py -v
 """
 
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, TypeVar
 from unittest.mock import AsyncMock, Mock
 
@@ -248,8 +248,10 @@ class TestDurableTaskEntityStateProvider:
         mock_agent = Mock()
 
         existing_state = {
-            "schemaVersion": "1.0.0",
+            "schemaVersion": "2.0.0",
             "data": {
+                "terminalResults": {},
+                "completionReceipts": {},
                 "conversationHistory": [
                     {
                         "$type": "request",
@@ -257,7 +259,7 @@ class TestDurableTaskEntityStateProvider:
                         "createdAt": "2024-01-01T00:00:00Z",
                         "messages": [{"role": "user", "contents": [{"$type": "text", "text": "msg1"}]}],
                     }
-                ]
+                ],
             },
         }
 
@@ -484,7 +486,7 @@ class TestAgentEntityRunAgent:
             conversation_history=[
                 DurableAgentStateRequest(
                     correlation_id="corr-entity-prev-request",
-                    created_at=datetime.now(),
+                    created_at=datetime.now(timezone.utc),
                     messages=[
                         DurableAgentStateMessage(
                             role="user",
@@ -494,7 +496,7 @@ class TestAgentEntityRunAgent:
                 ),
                 DurableAgentStateResponse(
                     correlation_id="corr-entity-prev-response",
-                    created_at=datetime.now(),
+                    created_at=datetime.now(timezone.utc),
                     messages=[
                         DurableAgentStateMessage(
                             role="assistant",
@@ -527,7 +529,7 @@ class TestAgentEntityReset:
         entity.state.data.conversation_history = [
             DurableAgentStateRequest(
                 correlation_id="test-1",
-                created_at=datetime.now(),
+                created_at=datetime.now(timezone.utc),
                 messages=[
                     DurableAgentStateMessage(
                         role="user",

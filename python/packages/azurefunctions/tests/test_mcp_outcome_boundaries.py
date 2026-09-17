@@ -114,8 +114,8 @@ async def test_mcp_poll_exhaustion_is_identifiable_and_unresolved(
     assert all(call.args == (0.01,) for call in sleep.await_args_list)
     assert client.read_entity_state.return_value.entity_state == before
     if before is not None:
-        assert before["data"].get("completedCorrelations", {}) == {}
-        assert before["data"].get("responseMailbox", {}) == {}
+        assert before["data"]["completionReceipts"] == {}
+        assert before["data"]["terminalResults"] == {}
 
 
 @pytest.mark.parametrize("expired", [False, True])
@@ -218,7 +218,10 @@ async def test_mcp_wait_ending_does_not_cancel_core_execution_and_later_poll_com
         assert response.text == "boundary answer"
         assert provider.writes == 1
         committed = deepcopy(provider.raw)
-        assert committed["data"]["completedCorrelations"][CORRELATION_ID]["outcome"] == "succeeded"
+        receipt = committed["data"]["completionReceipts"][CORRELATION_ID]
+        assert receipt["outcome"] == "succeeded"
+        assert receipt["correlationId"] == CORRELATION_ID
+        assert receipt["resultState"] == "available"
         backend.pause = False
 
         # Resume observation of the same correlation, not a new MCP invocation.

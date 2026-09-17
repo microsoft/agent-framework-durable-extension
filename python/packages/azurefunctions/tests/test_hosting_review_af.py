@@ -23,8 +23,14 @@ from agent_framework import (
     Message,
     WorkflowExecutor,
 )
-from agent_framework_durabletask import DurableAgentState, ensure_response_format, load_agent_response
+from agent_framework_durabletask import (
+    DurableAgentState,
+    ensure_response_format,
+    load_agent_response,
+    serialize_agent_response,
+)
 from agent_framework_durabletask._configuration import AgentRegistrationSettings
+from agent_framework_durabletask._shared_response import serialize_terminal_response
 from pydantic import BaseModel
 
 from agent_framework_azurefunctions import AgentFunctionApp
@@ -413,12 +419,78 @@ def test_absent_state_still_initializes(raw: Any) -> None:
     context.set_state.assert_not_called()
 
 
+@pytest.mark.parametrize("field", ["conversationHistory", "terminalResults", "completionReceipts"])
+def test_existing_v2_state_requires_all_canonical_data_fields(field: str) -> None:
+    raw = DurableAgentState().to_dict()
+    del raw["data"][field]
+    before = deepcopy(raw)
+    provider, context = _provider(raw)
+
+    with pytest.raises(ValueError, match=rf"data requires {field}"):
+        _ = provider.state
+
+    assert raw == before
+    context.set_state.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("change", "diagnostic"),
+    [
+        ("unknown_outcome", r"receipt\.outcome.*unsupported"),
+        ("missing_correlation", r"receipt requires correlationId"),
+        ("wrong_correlation", r"receipt\.correlationId.*map key"),
+        ("missing_completed_at", r"receipt requires completedAt"),
+        ("missing_result_state", r"receipt\.resultState.*missing"),
+        ("missing_result", r"available receipt requires a matching terminal result"),
+        ("unavailable_with_result", r"unavailable receipt must not have a terminal result"),
+        ("outcome_mismatch", r"Result and receipt must agree on outcome"),
+        ("failure_in_success", r"succeeded terminal result conflicts.*failure evidence"),
+    ],
+)
+def test_existing_v2_completion_is_validated_before_adapter_delivery(change: str, diagnostic: str) -> None:
+    state = DurableAgentState()
+    state.record_response(
+        "correlation", AgentResponse(messages=[Message("assistant", ["answer"])]), delivery_window_seconds=3600
+    )
+    raw = state.to_dict()
+    receipt = raw["data"]["completionReceipts"]["correlation"]
+    terminal = raw["data"]["terminalResults"]["correlation"]
+    if change == "unknown_outcome":
+        receipt["outcome"] = "unknown"
+    elif change == "missing_correlation":
+        del receipt["correlationId"]
+    elif change == "wrong_correlation":
+        receipt["correlationId"] = "other"
+    elif change == "missing_completed_at":
+        del receipt["completedAt"]
+    elif change == "missing_result_state":
+        del receipt["resultState"]
+    elif change == "missing_result":
+        del raw["data"]["terminalResults"]["correlation"]
+    elif change == "unavailable_with_result":
+        receipt["resultState"] = "unavailable"
+    elif change == "outcome_mismatch":
+        receipt["outcome"] = "failed"
+    else:
+        assert change == "failure_in_success"
+        terminal["response"]["messages"].append({
+            "role": "system",
+            "contents": [{"$type": "error", "message": "original failure", "errorCode": "runtime"}],
+        })
+    before = deepcopy(raw)
+    provider, context = _provider(raw)
+
+    with pytest.raises(ValueError, match=diagnostic):
+        _ = provider.state
+
+    assert raw == before
+    context.set_state.assert_not_called()
+
+
 def test_future_state_fields_survive_adapter_read_and_write() -> None:
-    raw: dict[str, Any] = {
-        "schemaVersion": "2.0.0",
-        "futureEnvelope": {"opaque": [1, {"nested": True}]},
-        "data": {"conversationHistory": [], "futureSidecar": {"records": [{"version": 9}]}},
-    }
+    raw = DurableAgentState().to_dict()
+    raw["futureEnvelope"] = {"opaque": [1, {"nested": True}]}
+    raw["data"]["futureSidecar"] = {"records": [{"version": 9}]}
     before = deepcopy(raw)
     provider, context = _provider(raw)
     assert provider._get_state_dict() is raw
@@ -495,11 +567,16 @@ async def test_http_uses_shared_terminal_classification_and_canonical_delivery(
     result = json.loads(response.get_body())
     assert result["status"] == ("success" if expected == 200 else "error")
     assert result["agent_response"]["type"] == "agent_response"
-    assert result["agent_response"] == stored["data"]["responseMailbox"]["correlation"]["response"]
+    assert stored["data"]["terminalResults"]["correlation"]["response"] == serialize_terminal_response(original)
+    outcome = "succeeded" if expected == 200 else "failed"
+    assert stored["data"]["terminalResults"]["correlation"]["outcome"] == outcome
+    assert stored["data"]["completionReceipts"]["correlation"]["outcome"] == outcome
+    expected_response = serialize_agent_response(original)
+    assert result["agent_response"] == expected_response
     assert stored == before
     delivered = load_agent_response(result["agent_response"])
     assert type(delivered) is AgentResponse
-    assert delivered.to_dict() == original.to_dict()
+    assert serialize_agent_response(delivered) == expected_response
     if expected == 200:
         ensure_response_format(Answer, "correlation", delivered)
         assert delivered.value == Answer(answer=42)

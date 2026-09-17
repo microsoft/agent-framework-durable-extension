@@ -17,7 +17,8 @@ from agent_framework_durabletask._configuration import validate_runtime_deployme
 
 SAMPLES = Path(__file__).resolve().parents[3] / "samples" / "azure_functions"
 TEMPLATES = sorted(SAMPLES.glob("*/local.settings.json.template"))
-SETTINGS = sorted([*TEMPLATES, *SAMPLES.glob("*/local.settings.json.sample")])
+SAMPLE_SETTINGS = sorted(SAMPLES.glob("*/local.settings.json.sample"))
+SETTINGS = sorted([*TEMPLATES, *SAMPLE_SETTINGS])
 MAF_APPS = sorted(path for path in SAMPLES.glob("*/function_app.py") if '"--maf"' in path.read_text(encoding="utf-8"))
 
 
@@ -28,11 +29,13 @@ def _documented_settings():
 
 
 def test_sample_settings_categories_are_complete():
-    # Nine templates, not fourteen. The five workflow examples use .sample files.
+    # Workflow .sample files count as settings, not as additional templates.
     assert len(TEMPLATES) == 9
-    assert len(SETTINGS) == 14
-    assert len(MAF_APPS) == 5
-    assert {path.parent for path in SETTINGS} == {path.parent for path in SAMPLES.glob("*/function_app.py")}
+    app_dirs = {path.parent for path in SAMPLES.glob("*/function_app.py")}
+    assert len(SETTINGS) == len(app_dirs)
+    assert {path.parent for path in SETTINGS} == app_dirs
+    assert {path.parent for path in TEMPLATES}.isdisjoint(path.parent for path in SAMPLE_SETTINGS)
+    assert {path.parent for path in MAF_APPS} == {path.parent for path in SAMPLE_SETTINGS}
 
 
 @pytest.mark.parametrize("path", TEMPLATES, ids=lambda path: path.parent.name)

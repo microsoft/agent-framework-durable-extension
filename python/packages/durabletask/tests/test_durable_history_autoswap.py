@@ -21,6 +21,7 @@ from agent_framework import (
     ResponseStream,
     SessionContext,
 )
+from test_durable_history_provider import _ingestion_messages
 
 from agent_framework_durabletask import (
     AgentEntity,
@@ -30,6 +31,7 @@ from agent_framework_durabletask import (
     _entities,
 )
 from agent_framework_durabletask._history_provider import ensure_durable_history
+from agent_framework_durabletask._shared_response import load_terminal_response, serialize_terminal_response
 
 
 class _StubClient:
@@ -535,7 +537,9 @@ class TestWeDoNotKeepASecondCopyOfSomeoneElsesConversation:
             response = restored.try_get_agent_response(f"c{index}")
             assert response is not None
             assert response.text == f"reply-{index + 1}"
-            assert response.to_dict() == restored.data.response_mailbox[f"c{index}"]["response"]
+            payload = restored.data.response_mailbox[f"c{index}"]["response"]
+            assert serialize_terminal_response(response) == payload
+            assert load_terminal_response(payload).to_dict() == response.to_dict()
 
     async def test_completion_is_recorded_separately_from_the_transcript(self) -> None:
         external = _StoringExternalProvider()
@@ -544,8 +548,8 @@ class TestWeDoNotKeepASecondCopyOfSomeoneElsesConversation:
 
         data = json.loads(entity.state.to_json())["data"]
         assert data["conversationHistory"] == []
-        assert set(data["completedCorrelations"]) == {f"c{index}" for index in range(4)}
-        assert all(receipt["completedAt"] for receipt in data["completedCorrelations"].values())
+        assert set(data["completionReceipts"]) == {f"c{index}" for index in range(4)}
+        assert all(receipt["completedAt"] for receipt in data["completionReceipts"].values())
 
     @pytest.mark.parametrize("include_new_message", [False, True], ids=["repeated-only", "repeated-and-new"])
     async def test_custom_context_ids_are_deduplicated_after_json_cold_reload(self, include_new_message: bool) -> None:
@@ -564,7 +568,7 @@ class TestWeDoNotKeepASecondCopyOfSomeoneElsesConversation:
         raw = json.loads(json.dumps(provider._get_state_dict()))
         assert raw["schemaVersion"] == "2.0.0"
         assert raw["data"]["conversationHistory"] == []
-        original_receipt = raw["data"]["ingestedMessages"]["custom-source-id"]
+        original_receipt = _ingestion_messages(raw)["custom-source-id"]
         assert original_receipt
         assert external.saved_batches[0][0].message_id == "custom-source-id"
 
@@ -690,9 +694,15 @@ class TestServiceManagedSessions:
                 message.text for entry in entity.state.data.conversation_history for message in entry.messages
             ]
             assert local_texts == ([] if external is not None else expected_local_history[index])
-            assert set(data["responseMailbox"]) == set(originals)
-            assert set(data["completedCorrelations"]) == set(originals)
-            assert {key: entry["response"] for key, entry in data["responseMailbox"].items()} == originals
+            assert set(data["terminalResults"]) == set(originals)
+            assert set(data["completionReceipts"]) == set(originals)
+            assert {
+                key: load_terminal_response(entry["response"]).to_dict()
+                for key, entry in data["terminalResults"].items()
+            } == originals
+            assert {key: entry["response"] for key, entry in data["terminalResults"].items()} == {
+                key: serialize_terminal_response(original) for key, original in originals.items()
+            }
 
         expected_active_ids = [None, None, None, "service-branch-1"]
         assert [entry["service_session_id"] for entry in observer.before] == [

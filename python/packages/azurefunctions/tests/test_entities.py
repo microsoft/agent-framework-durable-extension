@@ -11,7 +11,13 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from agent_framework import AgentResponse, Message
-from agent_framework_durabletask import DurableAgentState, migrate_legacy_state, state_snapshot_digest
+from agent_framework_durabletask import (
+    DurableAgentState,
+    DurableAgentStateRequest,
+    RunRequest,
+    migrate_legacy_state,
+    state_snapshot_digest,
+)
 
 from agent_framework_azurefunctions._entities import create_agent_entity
 
@@ -70,24 +76,12 @@ class TestCreateAgentEntity:
         # Reset an admitted v2 target, not a legacy session.
         mock_context = Mock()
         mock_context.operation_name = "reset"
-        mock_context.get_state.return_value = {
-            "schemaVersion": DurableAgentState.SCHEMA_VERSION,
-            "data": {
-                "conversationHistory": [
-                    {
-                        "$type": "request",
-                        "correlationId": "test-correlation-id",
-                        "createdAt": "2024-01-01T00:00:00Z",
-                        "messages": [
-                            {
-                                "role": "user",
-                                "contents": [{"$type": "text", "text": "test"}],
-                            }
-                        ],
-                    }
-                ]
-            },
-        }
+        state = DurableAgentState()
+        state.record_response("test-correlation-id", _agent_response("test"), delivery_window_seconds=3600)
+        state.data.conversation_history.append(
+            DurableAgentStateRequest.from_run_request(RunRequest(message="test", correlation_id="test-correlation-id"))
+        )
+        mock_context.get_state.return_value = state.to_dict()
 
         # Execute
         entity_function(mock_context)
@@ -99,8 +93,12 @@ class TestCreateAgentEntity:
 
         # Verify state was cleared
         assert mock_context.set_state.called
-        state = mock_context.set_state.call_args[0][0]
-        assert state["data"]["conversationHistory"] == []
+        persisted = mock_context.set_state.call_args[0][0]
+        assert persisted["data"]["conversationHistory"] == []
+        assert (
+            persisted["data"]["completionReceipts"] == mock_context.get_state.return_value["data"]["completionReceipts"]
+        )
+        assert persisted["data"]["terminalResults"] == mock_context.get_state.return_value["data"]["terminalResults"]
 
     def test_entity_function_handles_unknown_operation(self) -> None:
         """Test that the entity function handles unknown operations."""
@@ -140,7 +138,7 @@ class TestCreateAgentEntity:
         assert result["status"] == "reset"
         assert mock_context.set_state.called
         state = mock_context.set_state.call_args[0][0]
-        assert state["data"] == {"conversationHistory": []}
+        assert state["data"] == {"conversationHistory": [], "terminalResults": {}, "completionReceipts": {}}
 
     def test_entity_function_restores_existing_state(self) -> None:
         """Test that the entity function can operate when existing state is present."""
@@ -169,7 +167,7 @@ class TestCreateAgentEntity:
                         ],
                     },
                     {
-                        "$type": "response",
+                        "$type": "errorResponse",
                         "correlationId": "corr-existing-1",
                         "createdAt": "2024-01-01T00:05:00Z",
                         "messages": [
@@ -193,6 +191,25 @@ class TestCreateAgentEntity:
         mock_context.entity_key = "destination"
         mock_context.operation_name = "reset"
         # Import the legacy history explicitly before the normal reset operation.
+        # The operator fixture supplies original result/time independently of retained history.
+        completion_evidence = {
+            "sourceDigest": state_snapshot_digest(existing_state),
+            "evidenceId": "restore-completions-1",
+            "complete": True,
+            "results": [
+                {
+                    "correlationId": "corr-existing-1",
+                    "outcome": "failed",
+                    "completedAt": "2024-01-01T00:06:00Z",
+                    "response": {
+                        "messages": [
+                            {"role": "assistant", "contents": [{"$type": "text", "text": "original failure"}]}
+                        ],
+                    },
+                    "error": {"code": "provider_error", "message": "Original invocation failed."},
+                }
+            ],
+        }
         migrated = migrate_legacy_state(
             existing_state,
             source_digest=state_snapshot_digest(existing_state),
@@ -200,6 +217,7 @@ class TestCreateAgentEntity:
             migration_id="restore-migration-1",
             ownership_transfer_id="restore-transfer-1",
             delivery_window_seconds=3600,
+            completion_evidence=completion_evidence,
         ).to_dict()
         mock_context.get_state.return_value = migrated
 
@@ -212,10 +230,16 @@ class TestCreateAgentEntity:
         assert mock_context.set_state.called
         persisted_state = mock_context.set_state.call_args[0][0]
         assert persisted_state["data"]["conversationHistory"] == []
-        assert persisted_state["data"]["completedCorrelations"] == migrated["data"]["completedCorrelations"]
-        assert persisted_state["data"]["responseMailbox"] == migrated["data"]["responseMailbox"]
+        assert persisted_state["data"]["completionReceipts"] == migrated["data"]["completionReceipts"]
+        assert persisted_state["data"]["terminalResults"] == migrated["data"]["terminalResults"]
+        receipt = persisted_state["data"]["completionReceipts"]["corr-existing-1"]
+        assert receipt["outcome"] == "failed"
+        assert receipt["completedAt"] == "2024-01-01T00:06:00Z"
+        assert receipt["resultState"] == "available"
         assert persisted_state["data"]["migration"] == migrated["data"]["migration"]
         assert existing_state["schemaVersion"] == "1.0.0"
+        assert "terminalResults" not in existing_state["data"]
+        assert "completionReceipts" not in existing_state["data"]
 
     def test_entity_function_handles_string_input(self) -> None:
         """Test that the entity function handles non-dict input by converting to string."""

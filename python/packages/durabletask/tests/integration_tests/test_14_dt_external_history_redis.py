@@ -26,6 +26,7 @@ import pytest
 import redis.asyncio as aioredis
 
 from agent_framework_durabletask import DurableAgentState, DurableAIAgentClient, serialize_agent_response
+from agent_framework_durabletask._shared_response import serialize_terminal_response
 
 
 class AgentClientFactoryProtocol(Protocol):
@@ -127,8 +128,8 @@ class TestExternalHistoryProvider:
             response = agent.run(prompt, session=session)
             assert response.text
             assert all(content.type != "error" for message in response.messages for content in message.contents)
-            expected = json.loads(json.dumps(serialize_agent_response(response)))
-            assert expected["created_at"], "the Foundry result timestamp was lost"
+            expected = json.loads(json.dumps(serialize_terminal_response(serialize_agent_response(response))))
+            assert expected["createdAt"], "the Foundry result timestamp was lost"
 
             state = self._read_state(session.durable_session_id)
             assert state.data.conversation_history == [], "external history must not create a local transcript mirror"
@@ -148,15 +149,27 @@ class TestExternalHistoryProvider:
             assert correlation_id in state.data.response_mailbox
             assert set(state.data.response_mailbox) <= completed
             mailbox = state.data.response_mailbox[correlation_id]
-            assert mailbox["response"] == expected
-            assert mailbox["response"]["created_at"] == expected["created_at"]
+            assert mailbox == {
+                "correlationId": correlation_id,
+                "outcome": "succeeded",
+                "completedAt": mailbox["completedAt"],
+                "resultExpiresAt": mailbox["resultExpiresAt"],
+                "response": expected,
+            }
+            assert mailbox["response"]["createdAt"] == expected["createdAt"]
             assert len(mailbox["response"]["messages"]) == len(response.messages)
-            assert state.data.completed_correlations[correlation_id]["completedAt"] == mailbox["createdAt"]
-            assert datetime.fromisoformat(mailbox["expiresAt"]) > datetime.fromisoformat(mailbox["createdAt"])
+            assert state.data.completed_correlations[correlation_id] == {
+                "correlationId": correlation_id,
+                "outcome": "succeeded",
+                "completedAt": mailbox["completedAt"],
+                "resultState": "available",
+                "resultExpiresAt": mailbox["resultExpiresAt"],
+            }
+            assert datetime.fromisoformat(mailbox["resultExpiresAt"]) > datetime.fromisoformat(mailbox["completedAt"])
 
             delivered = state.try_get_agent_response(correlation_id)
             assert delivered is not None
-            assert json.loads(json.dumps(serialize_agent_response(delivered))) == expected
+            assert json.loads(json.dumps(serialize_terminal_response(delivered))) == expected
 
         assert len(completed) == 2, "two completed turns must not require two local transcript exchanges"
 

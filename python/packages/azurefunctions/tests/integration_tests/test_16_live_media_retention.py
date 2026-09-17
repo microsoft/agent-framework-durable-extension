@@ -190,9 +190,11 @@ class _Host:
 
         def committed() -> dict[str, Any] | None:
             raw = self.get("retention/state", missing_ok=True)
-            if raw and correlation in raw.get("data", {}).get("completedCorrelations", {}):
-                receipt = raw["data"]["completedCorrelations"][correlation]
+            if raw and correlation in raw.get("data", {}).get("completionReceipts", {}):
+                receipt = raw["data"]["completionReceipts"][correlation]
                 assert receipt["outcome"] == "succeeded", "The real Functions agent operation failed"
+                assert receipt["correlationId"] == correlation
+                assert receipt["resultState"] == "available"
                 return raw
             return None
 
@@ -369,7 +371,7 @@ def test_live_functions_media_pressure_cold_json_and_exact_next_model(
             (tmp_path / f"warm-{index}-state.json").write_text(json.dumps(raw), encoding="utf-8")
         assert removed >= 4, "Must actually evict messages, not merely round-trip media"
         assert sum(message["role"] == "user" for message in previous) >= 2, "Keep older media for cold replay"
-        assert len(raw["data"]["completedCorrelations"]) == len(raw["data"]["responseMailbox"]) == TURNS
+        assert len(raw["data"]["completionReceipts"]) == len(raw["data"]["terminalResults"]) == TURNS
 
     with _host(app, env, deadline, "cold", harness) as cold:
         initial = cold.get("retention/capture")
@@ -390,17 +392,29 @@ def test_live_functions_media_pressure_cold_json_and_exact_next_model(
         assert evicted.isdisjoint(ids), "Cold projected replay resurrected evicted media"
         assert {"cold-input", "cold-input-answer"} <= ids
         _metrics(cold, cold_boot, total_removed - removed, 1)
+        for state in (raw, final):
+            profile = state["data"]["pythonIngestion"]
+            assert profile["profile"] == "agent-framework-python.ingestion"
+            assert type(profile["version"]) is int and profile["version"] == 1
+        old_receipts = raw["data"]["pythonIngestion"]["messages"]
+        new_receipts = final["data"]["pythonIngestion"]["messages"]
         _equal(
-            {key: final["data"]["ingestedMessages"][key] for key in raw["data"]["ingestedMessages"]},
-            raw["data"]["ingestedMessages"],
+            {key: new_receipts[key] for key in old_receipts},
+            old_receipts,
             "cold replay preserves ingestion receipts",
         )
-        assert set(final["data"]["ingestedMessages"]) == {*raw["data"]["ingestedMessages"], "cold-input"}
-        for field in ("completedCorrelations", "responseMailbox"):
+        assert set(new_receipts) == {*old_receipts, "cold-input"}
+        for field in ("completionReceipts", "terminalResults"):
             _equal({key: final["data"][field][key] for key in raw["data"][field]}, raw["data"][field], field)
             assert set(final["data"][field]) == {*raw["data"][field], "cold"}
-        for mailbox in final["data"]["responseMailbox"].values():
+        for correlation, terminal in final["data"]["terminalResults"].items():
+            receipt = final["data"]["completionReceipts"][correlation]
+            assert terminal["correlationId"] == receipt["correlationId"] == correlation
+            assert terminal["outcome"] == receipt["outcome"] == "succeeded"
+            assert receipt["resultState"] == "available"
+            assert terminal["completedAt"] == receipt["completedAt"]
+            assert terminal["resultExpiresAt"] == receipt["resultExpiresAt"]
             assert (
-                datetime.fromisoformat(mailbox["expiresAt"]) - datetime.fromisoformat(mailbox["createdAt"])
+                datetime.fromisoformat(terminal["resultExpiresAt"]) - datetime.fromisoformat(terminal["completedAt"])
             ).total_seconds() == DELIVERY_WINDOW_SECONDS
         (tmp_path / "cold-final-state.json").write_text(json.dumps(final), encoding="utf-8")

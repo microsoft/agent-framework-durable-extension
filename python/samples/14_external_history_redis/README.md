@@ -3,6 +3,14 @@
 Shows an agent whose conversation history lives in a **user-chosen external store** rather than in
 durable entity state, using the same configuration you would write for in-process Agent Framework.
 
+> [!WARNING]
+> This is an isolated PR #59 prototype, not a production drop-in. Use a fresh hub with compatible
+> canonical `2.0.0` workers and all clients, and explicitly acknowledge it with `isolated_v2`.
+> The abandoned private `2.0.0` state and in-flight runs have no detection, conversion or resume path.
+> Keep old workflow histories on the old engine. Schema validation and localhost do not prove
+> isolation. Broader validation remains ongoing, with no .NET interoperability claim. See
+> [prototype scope](../README.md#pr-59-prototype-scope).
+
 ## What this demonstrates
 
 The agent is built with an ordinary `HistoryProvider` that happens to be backed by Redis:
@@ -30,10 +38,22 @@ Registering that agent with the durable runtime changes nothing about how you co
 - **The provider owns transcript writes.** Core calls it according to `store_inputs`,
   `store_outputs`, `store_context_messages`, and `store_context_from`. This sample uses the default
   input/output storage flags and `store=False` so the provider supplies model context.
-- **Delivery is separate from history.** Fresh durable entity state has an empty
-  `conversationHistory`, not metadata-only exchange envelopes or a local transcript mirror. It
-  stores session state, original responses in `responseMailbox` by correlation id, and completion
-  evidence in `completedCorrelations`. Delivery payloads expire independently of Redis history.
+- **Delivery is separate from history.** Fresh durable entity state has an empty `conversationHistory`, not metadata-only exchange envelopes or a local transcript mirror. It stores session state, original response envelopes in canonical `terminalResults` by correlation ID, and matching `completionReceipts`. Delivery expiry is independent of Redis history.
+
+Each result and receipt has `correlationId`, known `outcome` (`succeeded` or `failed`) and `completedAt`.
+The result includes the full inline `response`, including `messages`, optional structured `value`
+(even null or falsey values) and metadata. Failure also requires canonical `error.code` and
+`error.message`. Success forbids `error`. Receipt `resultState="available"` requires a matching
+result. `unavailable` forbids a result and requires `resultUnavailableAt`. Completion facts and
+optional `resultExpiresAt` must agree between result and receipt.
+
+The Python runtime assigns a delivery deadline, though `resultExpiresAt` is optional in the shared
+contract. At or after a configured deadline, lookup reports completed-but-result-unavailable with
+the retained outcome, even before physical cleanup. It does not return the expired payload, report
+pending work, rerun the request or reconstruct an original response from Redis history. Cleanup
+removes the result and records `resultUnavailableAt` without changing completion facts. Idle physical
+cleanup needs an application-owned schedule or backend operation. There is no `unknown` v2 outcome.
+See the [delivery contract](../../packages/durabletask/README.md#service-ownership-delivery-and-reset).
 
 The [Redis provider](redis_history_provider.py) is deliberately small, using a list read and a blind
 `RPUSH`. It is not an exactly-once storage implementation. If Redis accepts an append but the durable
@@ -67,8 +87,8 @@ until entity deletion. Existing local history from before an ownership change is
 
 2. Copy `.env.example` to `.env` and set `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`.
 
-   Choose a **new isolated task hub** for `TASKHUB`, shared only with compatible schema 2
-   workers and upgraded clients. Use the same hub for the worker and client. Keep old
+   Choose a **new isolated task hub** for `TASKHUB`, shared only with compatible canonical `2.0.0`
+   workers and clients. Use the same hub for the worker and client. Keep old
    workflow histories on the old engine, not on this hub.
 
    Only after verifying those conditions, explicitly set the following in `.env`.

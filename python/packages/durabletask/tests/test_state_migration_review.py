@@ -16,10 +16,12 @@ from agent_framework_durabletask import migrate_legacy_state, state_snapshot_dig
 from agent_framework_durabletask._durable_agent_state import DurableAgentState, DurableAgentStateEntryJsonType
 from agent_framework_durabletask._message_identity import message_identity
 from agent_framework_durabletask._retention import StateCapacityError
+from agent_framework_durabletask._shared_response import load_terminal_response
 from agent_framework_durabletask._workflows.naming import workflow_message_id
 
 NOW = datetime(2026, 9, 9, 12, tzinfo=timezone.utc)
 OLD = datetime(2024, 1, 1, tzinfo=timezone.utc)
+ORIGINAL_COMPLETED_AT = "2024-01-02T03:04:05.123456789Z"
 SESSION_ID = "dafx-agent:original-session"
 WINDOW = 60
 
@@ -27,7 +29,7 @@ WINDOW = 60
 def _entry(kind: str, correlation: str, *, message_id: str = "custom-id") -> dict[str, Any]:
     return {
         "$type": kind,
-        "correlationId": correlation,
+        **({"correlationId": correlation} if kind != "compaction" else {}),
         "createdAt": OLD.isoformat(),
         "messages": [
             {
@@ -45,9 +47,36 @@ def _source() -> dict[str, Any]:
         "data": {
             "conversationHistory": [
                 _entry("request", "done"),
-                _entry("response", "done", message_id="answer-id"),
+                _entry("errorResponse", "done", message_id="answer-id"),
             ]
         },
+    }
+
+
+def _original_result(correlation: str = "done", *, outcome: str = "failed") -> dict[str, Any]:
+    # Explicit synthetic ground truth. Never reconstruct completion time from retained entries.
+    return {
+        "correlationId": correlation,
+        "outcome": outcome,
+        "completedAt": ORIGINAL_COMPLETED_AT,
+        "response": {
+            "createdAt": OLD.isoformat(),
+            "messages": [{"role": "assistant", "contents": [{"$type": "text", "text": "original result"}]}],
+        },
+        **(
+            {"error": {"code": "provider_error", "message": "Original invocation failed."}}
+            if outcome == "failed"
+            else {}
+        ),
+    }
+
+
+def _completions(source: dict[str, Any], *results: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "sourceDigest": state_snapshot_digest(source),
+        "evidenceId": "completion-journal-1",
+        "complete": True,
+        "results": deepcopy(list(results)),
     }
 
 
@@ -84,7 +113,16 @@ def _evidence(source: dict[str, Any], messages: list[Message]) -> dict[str, Any]
 
 
 def _cold(state: DurableAgentState) -> DurableAgentState:
-    return DurableAgentState.from_json(json.dumps(state.to_dict(), allow_nan=False))
+    raw = state.to_dict()
+    if state.data.ingested_messages:
+        assert raw["data"]["pythonIngestion"] == {
+            "profile": "agent-framework-python.ingestion",
+            "version": 1,
+            "messages": state.data.ingested_messages,
+        }
+    restored = DurableAgentState.from_json(json.dumps(raw, allow_nan=False))
+    assert restored.to_dict() == raw
+    return restored
 
 
 def _existing_delivery() -> dict[str, Any]:
@@ -134,94 +172,147 @@ def test_digest_rejects_cycles_and_nonobject_source() -> None:
 
 
 @pytest.mark.parametrize("kind", list(DurableAgentStateEntryJsonType))
-def test_only_recorded_response_kinds_backfill_completion(kind: str) -> None:
+@pytest.mark.parametrize("strict", [False, True])
+def test_every_used_history_kind_needs_an_explicit_completion_journal(kind: str, strict: bool) -> None:
     source = _source()
     source["data"]["conversationHistory"] = [_entry(kind, "done")]
-    result = _cold(_migrate(source))
-    is_response = kind in (DurableAgentStateEntryJsonType.RESPONSE, DurableAgentStateEntryJsonType.ERROR_RESPONSE)
-    assert ("done" in result.data.completed_correlations) is is_response
-    assert ("done" in result.data.response_mailbox) is is_response
+    before = deepcopy(source)
+    with pytest.raises(ValueError, match="authoritative completion evidence"):
+        _migrate(source, require_known_outcomes=strict)
+    assert source == before
+    originals: list[dict[str, Any]] = []
+    if kind in (DurableAgentStateEntryJsonType.RESPONSE, DurableAgentStateEntryJsonType.ERROR_RESPONSE):
+        outcome = "failed" if kind == DurableAgentStateEntryJsonType.ERROR_RESPONSE else "succeeded"
+        originals.append(_original_result(outcome=outcome))
+    result = _cold(
+        _migrate(source, require_known_outcomes=strict, completion_evidence=_completions(source, *originals))
+    )
+    assert set(result.data.completed_correlations) == {item["correlationId"] for item in originals}
+    assert set(result.data.response_mailbox) == {item["correlationId"] for item in originals}
     assert result.to_dict()["data"]["conversationHistory"] == source["data"]["conversationHistory"]
-    if is_response:
-        assert result.data.completed_correlations["done"] == {
-            "completedAt": NOW.isoformat(),
-            "legacy": True,
-            **({"outcome": "failed"} if kind == DurableAgentStateEntryJsonType.ERROR_RESPONSE else {}),
-        }
+    if originals:
+        receipt = result.data.completed_correlations["done"]
         mailbox = result.data.response_mailbox["done"]
-        assert mailbox["createdAt"] == NOW.isoformat()
-        assert mailbox["expiresAt"] == (NOW + timedelta(seconds=WINDOW)).isoformat()
-        assert mailbox["response"]["messages"][0]["contents"][0]["text"] == "retained portion"
-        assert mailbox["response"]["created_at"] == OLD.isoformat()
+        assert receipt["correlationId"] == mailbox["correlationId"] == "done"
+        assert receipt["outcome"] == mailbox["outcome"] == originals[0]["outcome"]
+        assert receipt["resultState"] == "available"
+        assert receipt["completedAt"] == mailbox["completedAt"] == ORIGINAL_COMPLETED_AT
+        assert receipt["resultExpiresAt"] == mailbox["resultExpiresAt"] == (NOW + timedelta(seconds=WINDOW)).isoformat()
+        assert mailbox == {**originals[0], "resultExpiresAt": receipt["resultExpiresAt"]}
+    assert source == before
 
 
-def test_partial_and_contentless_recorded_responses_are_not_claimed_as_originals() -> None:
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("contents", [[], [{"$type": "text", "text": "apparently successful partial answer"}]])
+def test_partial_and_contentless_recorded_responses_cannot_establish_success(
+    strict: bool, contents: list[dict[str, Any]]
+) -> None:
+    source = _source()
+    history = source["data"]["conversationHistory"]
+    history[1]["$type"] = "response"
+    history[1]["messages"][0]["contents"] = contents
+    before = deepcopy(source)
+    with pytest.raises(ValueError, match="outcome.*evidence"):
+        _migrate(source, require_known_outcomes=strict)
+    original = _original_result(outcome="succeeded")
+    result = _cold(_migrate(source, require_known_outcomes=strict, completion_evidence=_completions(source, original)))
+    assert result.data.response_mailbox["done"] == {
+        **original,
+        "resultExpiresAt": (NOW + timedelta(seconds=WINDOW)).isoformat(),
+    }
+    assert result.data.completed_correlations["done"]["completedAt"] == ORIGINAL_COMPLETED_AT
+    assert result.to_dict()["data"]["conversationHistory"] == history
+    assert source == before
+
+
+def test_failure_usage_contentless_failure_and_unfinished_requests_remain_distinct() -> None:
     source = _source()
     history = source["data"]["conversationHistory"]
     history[1]["usage"] = {"inputTokenCount": 3, "futureUsage": {"keep": [1]}}
-    history.append(_entry("response", "empty"))
+    history.append(_entry("errorResponse", "empty"))
     history[-1]["messages"] = []
-    history.append(_entry("request", "old-pruned-without-response"))
+    history.append(_entry("request", "accepted-without-response"))
     history[-1]["messages"][0]["contents"] = []
     history.append(_entry("request", "unfinished"))
-    source["data"]["truncation"] = {"evictedMessageCount": 20, "future": [1]}
-    result = _cold(_migrate(source))
+    before = deepcopy(source)
+    original, empty = _original_result(), _original_result("empty")
+    original["response"]["usage"] = {"inputTokenCount": 3, "futureUsage": {"keep": [1]}}
+    empty["response"]["messages"] = []
+    result = _cold(_migrate(source, completion_evidence=_completions(source, original, empty)))
 
     assert set(result.data.completed_correlations) == {"done", "empty"}
     assert set(result.data.response_mailbox) == {"done", "empty"}
     assert result.data.response_mailbox["empty"]["response"]["messages"] == []
-    assert result.data.response_mailbox["done"]["response"]["usage_details"] == {"input_token_count": 3}
-    assert all(record["legacy"] is True for record in result.data.completed_correlations.values())
-    assert result.try_get_agent_response("old-pruned-without-response") is None
+    response = load_terminal_response(result.data.response_mailbox["done"]["response"])
+    assert response.usage_details == {"input_token_count": 3}
+    assert all(record["outcome"] == "failed" for record in result.data.completed_correlations.values())
+    assert result.try_get_agent_response("accepted-without-response") is None
     assert result.try_get_agent_response("unfinished") is None
     assert result.to_dict()["data"]["conversationHistory"] == history
+    assert source == before
 
 
-@pytest.mark.parametrize("keep_mailbox", [False, True])
-def test_existing_completion_and_mailbox_are_not_overwritten_or_reopened(keep_mailbox: bool) -> None:
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("loss", ["truncation", "compaction"])
+@pytest.mark.parametrize("with_delivery_journal", [False, True])
+def test_history_loss_requires_completion_journal_independently_of_complete_input_journal(
+    strict: bool, loss: str, with_delivery_journal: bool
+) -> None:
     source = _source()
-    delivery = _existing_delivery()
-    delivery["completedCorrelations"]["done"]["future"] = {"keep": [1]}
-    source["data"]["completedCorrelations"] = delivery["completedCorrelations"]
-    if keep_mailbox:
-        delivery["responseMailbox"]["done"]["response"]["futureResponse"] = {"keep": [2]}
-        source["data"]["responseMailbox"] = delivery["responseMailbox"]
-    result = _cold(_migrate(source))
-    assert result.data.completed_correlations == delivery["completedCorrelations"]
-    assert result.data.response_mailbox == (delivery["responseMailbox"] if keep_mailbox else {})
-
-
-def test_existing_mailbox_without_receipt_is_preserved_with_completion_backfill() -> None:
-    source = _source()
-    source["data"]["responseMailbox"] = _existing_delivery()["responseMailbox"]
-    result = _cold(_migrate(source))
-    assert result.data.response_mailbox == source["data"]["responseMailbox"]
-    assert result.data.completed_correlations["done"] == {
-        "completedAt": OLD.isoformat(),
-        "legacy": True,
-        "outcome": "succeeded",
+    if loss == "truncation":
+        source["data"]["truncation"] = {
+            "evictedMessageCount": 20,
+            "firstEvictedAt": OLD.isoformat(),
+            "lastEvictedAt": OLD.isoformat(),
+            "future": [1],
+        }
+    else:
+        source["data"]["conversationHistory"].append(_entry("compaction", "unused"))
+    journal = _evidence(source, [Message("user", ["complete accepted input"], message_id="custom-id")])
+    before_source, before_journal = deepcopy(source), deepcopy(journal)
+    with pytest.raises(ValueError, match="outcome.*evidence"):
+        _migrate(source, require_known_outcomes=strict, delivery_evidence=journal if with_delivery_journal else None)
+    originals = [_original_result(), _original_result("pruned", outcome="succeeded")]
+    completions = _completions(source, *originals)
+    result = _cold(
+        _migrate(
+            source,
+            require_known_outcomes=strict,
+            delivery_evidence=journal if with_delivery_journal else None,
+            completion_evidence=completions,
+        )
+    )
+    assert result.data.response_mailbox == {
+        original["correlationId"]: {**original, "resultExpiresAt": (NOW + timedelta(seconds=WINDOW)).isoformat()}
+        for original in originals
     }
+    assert result.to_dict()["data"]["conversationHistory"] == before_source["data"]["conversationHistory"]
+    if loss == "truncation":
+        assert result.to_dict()["data"]["truncation"] == before_source["data"]["truncation"]
+    assert source == before_source and journal == before_journal
 
 
 def test_sparse_journal_preserves_exact_revisions_not_an_inferred_prefix_after_cold_reload() -> None:
     source = _source()
     source["data"]["ingestedPositions"] = {"upstream": 3}
-    # Neither the original accepted input nor the missing position can be recovered
-    # from this compacted/pruned transcript. It must not contribute fingerprints.
+    # The contentless request cannot establish the original accepted input or gaps.
+    # Only the complete journal contributes exact fingerprints.
     source["data"]["conversationHistory"][0]["messages"] = [
         {"role": "user", "messageId": workflow_message_id("upstream", 3), "contents": []}
     ]
     first, third, revision = _message(1), _message(3), _message(3, text="accepted revision")
     assert first.message_id is not None
     assert third.message_id is not None
-    source["data"]["ingestedMessages"] = {third.message_id: [message_identity(third)]}
+    source["data"]["ingestedMessages"] = {"opaque": {"keep": [False, None]}}
     evidence = _evidence(source, [revision, first, third])
     before_source, before_evidence = deepcopy(source), deepcopy(evidence)
-    result = _cold(_migrate(source, delivery_evidence=evidence))
+    result = _cold(
+        _migrate(source, delivery_evidence=evidence, completion_evidence=_completions(source, _original_result()))
+    )
 
     assert result.data.ingested_messages == {
         first.message_id: [message_identity(first)],
-        third.message_id: [message_identity(third), message_identity(revision)],
+        third.message_id: [message_identity(revision), message_identity(third)],
     }
     assert workflow_message_id("upstream", 0) not in result.data.ingested_messages
     assert workflow_message_id("upstream", 2) not in result.data.ingested_messages
@@ -229,10 +320,11 @@ def test_sparse_journal_preserves_exact_revisions_not_an_inferred_prefix_after_c
     assert fingerprints is not None
     assert message_identity(_message(3, text="new revision")) not in fingerprints
     assert result.data.ingested_positions == {"upstream": 3}
+    assert result.to_dict()["data"]["ingestedMessages"] == before_source["data"]["ingestedMessages"]
     assert result.data.unknown_fields["migration"]["evidenceId"] == "operator-journal-1"
     assert source == before_source and evidence == before_evidence
     evidence["messages"][0]["contents"][0]["additional_properties"]["nested"]["labels"].append("caller edit")
-    assert result.data.ingested_messages[third.message_id] == [message_identity(third), message_identity(revision)]
+    assert result.data.ingested_messages[third.message_id] == [message_identity(revision), message_identity(third)]
 
 
 def test_multiple_producers_allow_sparse_zero_based_and_out_of_order_journal() -> None:
@@ -241,7 +333,13 @@ def test_multiple_producers_allow_sparse_zero_based_and_out_of_order_journal() -
     # Supply the accepted custom input explicitly, not a fingerprint inferred from its retained portion.
     custom = Message("user", ["complete original accepted input"], message_id="custom-id")
     messages = [_message(9, producer="first_with_underscores"), _message(0, producer="other"), custom]
-    result = _cold(_migrate(source, delivery_evidence=_evidence(source, messages)))
+    result = _cold(
+        _migrate(
+            source,
+            delivery_evidence=_evidence(source, messages),
+            completion_evidence=_completions(source, _original_result()),
+        )
+    )
     assert result.data.ingested_messages == {message.message_id: [message_identity(message)] for message in messages}
 
 
@@ -253,11 +351,11 @@ def test_scalar_positions_without_complete_journal_fail_even_with_retained_messa
     source["data"]["ingestedMessages"] = {workflow_message_id("upstream", position): ["a" * 64]}
     before = deepcopy(source)
     with pytest.raises(ValueError, match="recorded delivery evidence.*old engine"):
-        _migrate(source)
+        _migrate(source, completion_evidence=_completions(source, _original_result()))
     assert source == before
 
 
-def test_no_scalar_no_journal_uses_only_custom_id_markers_and_preserves_exact_receipts() -> None:
+def test_no_scalar_or_delivery_journal_uses_custom_id_markers_without_interpreting_opaque_legacy_data() -> None:
     source = _source()
     messages = source["data"]["conversationHistory"][0]["messages"]
     messages.extend([
@@ -266,13 +364,15 @@ def test_no_scalar_no_journal_uses_only_custom_id_markers_and_preserves_exact_re
         {"role": "user", "messageId": "already-exact", "contents": []},
     ])
     source["data"]["ingestedMessages"] = {"already-exact": ["b" * 64, "a" * 64], "old-marker": None}
-    result = _cold(_migrate(source))
+    result = _cold(_migrate(source, completion_evidence=_completions(source, _original_result())))
     assert result.data.ingested_messages == {
-        "already-exact": ["b" * 64, "a" * 64],
-        "old-marker": None,
+        "already-exact": None,
         "custom-id": None,
         "cleared-custom": None,
     }
+    assert result.to_dict()["data"]["ingestedMessages"] == source["data"]["ingestedMessages"]
+    assert "old-marker" not in result.data.ingested_messages
+    assert workflow_message_id("upstream", 3) not in result.data.ingested_messages
     assert "answer-id" not in result.data.ingested_messages
 
 
@@ -284,18 +384,25 @@ def test_anonymous_legacy_request_ids_are_preserved_without_receipts(identity: A
         message.pop("messageId")
     else:
         message["messageId"] = identity
-    result = _cold(_migrate(source))
+    result = _cold(_migrate(source, completion_evidence=_completions(source, _original_result())))
     assert result.data.ingested_messages == {}
     assert result.to_dict()["data"]["conversationHistory"][0] == source["data"]["conversationHistory"][0]
 
 
-def test_complete_custom_journal_replaces_identity_marker_with_content_sensitive_revisions() -> None:
+def test_complete_custom_journal_establishes_content_sensitive_revisions_without_interpreting_opaque_data() -> None:
     source = _source()
     source["data"]["ingestedMessages"] = {"custom-id": None}
     old = Message("user", ["original"], message_id="custom-id")
     revised = Message("user", ["revision"], message_id="custom-id")
-    result = _cold(_migrate(source, delivery_evidence=_evidence(source, [old, revised])))
+    result = _cold(
+        _migrate(
+            source,
+            delivery_evidence=_evidence(source, [old, revised]),
+            completion_evidence=_completions(source, _original_result()),
+        )
+    )
     assert result.data.ingested_messages == {"custom-id": [message_identity(old), message_identity(revised)]}
+    assert result.to_dict()["data"]["ingestedMessages"] == {"custom-id": None}
 
 
 @pytest.mark.parametrize(
@@ -318,7 +425,7 @@ def test_evidence_binding_envelope_completeness_and_extra_fields_are_validated(f
     evidence[field] = value
     before = deepcopy(evidence)
     with pytest.raises(ValueError, match="[Rr]ecorded delivery evidence"):
-        _migrate(source, delivery_evidence=evidence)
+        _migrate(source, delivery_evidence=evidence, completion_evidence=_completions(source, _original_result()))
     assert evidence == before
 
 
@@ -328,7 +435,7 @@ def test_all_evidence_fields_are_required(field: str) -> None:
     evidence = _evidence(source, [])
     del evidence[field]
     with pytest.raises(ValueError, match="requires exactly"):
-        _migrate(source, delivery_evidence=evidence)
+        _migrate(source, delivery_evidence=evidence, completion_evidence=_completions(source, _original_result()))
 
 
 @pytest.mark.parametrize(
@@ -339,7 +446,11 @@ def test_evidence_workflow_producer_set_and_maxima_must_match(messages: list[Mes
     source = _source()
     source["data"]["ingestedPositions"] = {"upstream": 3}
     with pytest.raises(ValueError, match="producers and maximum positions"):
-        _migrate(source, delivery_evidence=_evidence(source, messages))
+        _migrate(
+            source,
+            delivery_evidence=_evidence(source, messages),
+            completion_evidence=_completions(source, _original_result()),
+        )
 
 
 @pytest.mark.parametrize(
@@ -349,8 +460,12 @@ def test_evidence_workflow_producer_set_and_maxima_must_match(messages: list[Mes
 def test_all_legacy_cursor_entries_require_named_producers_and_nonbool_nonnegative_ints(positions: Any) -> None:
     source = _source()
     source["data"]["ingestedPositions"] = positions
-    with pytest.raises(ValueError, match="ingestedPositions"):
-        _migrate(source, delivery_evidence=_evidence(source, []))
+    with pytest.raises(ValueError, match="ingested[Pp]osition|ingested position"):
+        _migrate(
+            source,
+            delivery_evidence=_evidence(source, []),
+            completion_evidence=_completions(source, _original_result()),
+        )
 
 
 @pytest.mark.parametrize(
@@ -362,7 +477,7 @@ def test_evidence_rejects_missing_blank_nonstring_and_malformed_workflow_ids(ide
     evidence = _evidence(source, [_message(3)])
     evidence["messages"][0]["message_id"] = identity
     with pytest.raises(ValueError):
-        _migrate(source, delivery_evidence=evidence)
+        _migrate(source, delivery_evidence=evidence, completion_evidence=_completions(source, _original_result()))
 
 
 def test_exact_duplicate_evidence_is_rejected_but_revisions_are_not() -> None:
@@ -370,7 +485,11 @@ def test_exact_duplicate_evidence_is_rejected_but_revisions_are_not() -> None:
     source["data"]["ingestedPositions"] = {"upstream": 3}
     message = _message(3)
     with pytest.raises(ValueError, match="duplicate message ID/fingerprint"):
-        _migrate(source, delivery_evidence=_evidence(source, [message, message]))
+        _migrate(
+            source,
+            delivery_evidence=_evidence(source, [message, message]),
+            completion_evidence=_completions(source, _original_result()),
+        )
 
 
 @pytest.mark.parametrize("change", ["unknown-field", "raw-representation", "wrong-contents", "bad-content", "bad-role"])
@@ -390,7 +509,7 @@ def test_journal_never_hashes_a_lossy_or_malformed_message_projection(change: st
     else:
         message["role"] = ""
     with pytest.raises(ValueError):
-        _migrate(source, delivery_evidence=evidence)
+        _migrate(source, delivery_evidence=evidence, completion_evidence=_completions(source, _original_result()))
 
 
 @pytest.mark.parametrize("mutation", ["author", "role", "text", "message-metadata", "content-metadata"])
@@ -410,7 +529,13 @@ def test_journal_fingerprints_cover_complete_canonical_inputs(mutation: str) -> 
     else:
         changed.contents[0].additional_properties["nested"]["labels"].append("different")
     custom = Message("user", ["complete original accepted input"], message_id="custom-id")
-    result = _cold(_migrate(source, delivery_evidence=_evidence(source, [original, changed, custom])))
+    result = _cold(
+        _migrate(
+            source,
+            delivery_evidence=_evidence(source, [original, changed, custom]),
+            completion_evidence=_completions(source, _original_result()),
+        )
+    )
     assert message_identity(original) != message_identity(changed)
     assert original.message_id is not None
     assert result.data.ingested_messages == {
@@ -420,8 +545,13 @@ def test_journal_fingerprints_cover_complete_canonical_inputs(mutation: str) -> 
 
 
 @pytest.mark.parametrize(
-    "receipts",
+    "opaque",
     [
+        None,
+        [],
+        False,
+        0,
+        "arbitrary legacy value",
         {"custom": []},
         {"custom": ["short"]},
         {"custom": ["A" * 64]},
@@ -433,20 +563,27 @@ def test_journal_fingerprints_cover_complete_canonical_inputs(mutation: str) -> 
         {"wf_upstream_3": None},
     ],
 )
-def test_existing_receipts_reject_invalid_fingerprint_shapes_and_workflow_markers(receipts: Any) -> None:
+def test_unversioned_legacy_ingested_messages_are_arbitrary_opaque_json(opaque: Any) -> None:
     source = _source()
-    source["data"]["ingestedMessages"] = receipts
-    with pytest.raises(ValueError):
-        _migrate(source)
+    source["data"]["ingestedMessages"] = deepcopy(opaque)
+    before = deepcopy(source)
+    result = _cold(_migrate(source, completion_evidence=_completions(source, _original_result())))
+    assert result.to_dict()["data"]["ingestedMessages"] == opaque
+    assert result.data.ingested_messages == {"custom-id": None}
+    assert source == before
 
 
-@pytest.mark.parametrize("receipt", [{"other-custom": None}, {"wf_upstream_3": ["a" * 64]}])
-def test_complete_journal_must_include_existing_identity_and_exact_receipts(receipt: Any) -> None:
+def test_complete_journal_must_include_every_retained_custom_request_identity() -> None:
     source = _source()
     source["data"]["ingestedPositions"] = {"upstream": 3}
-    source["data"]["ingestedMessages"] = receipt
-    with pytest.raises(ValueError, match="inconsistent with existing"):
-        _migrate(source, delivery_evidence=_evidence(source, [_message(3)]))
+    before = deepcopy(source)
+    with pytest.raises(ValueError, match="every retained legacy custom request"):
+        _migrate(
+            source,
+            delivery_evidence=_evidence(source, [_message(3)]),
+            completion_evidence=_completions(source, _original_result()),
+        )
+    assert source == before
 
 
 def test_raw_unknown_nested_fields_order_session_and_source_are_preserved() -> None:
@@ -466,10 +603,13 @@ def test_raw_unknown_nested_fields_order_session_and_source_are_preserved() -> N
     history[0]["messages"][0]["futureMessage"] = {"nested": [6]}
     history[0]["messages"][0]["contents"][0]["futureContent"] = {"nested": [7]}
     history[1]["usage"] = {"inputTokenCount": 0, "futureUsage": {"nested": [8]}}
-    history.append({"$type": "futureEntryKind", "opaque": [None], "messages": {"unknown": [9]}})
-    history[0]["messages"][0]["contents"].append({"$type": "futureContentKind", "payload": None})
+    history.append({"$type": "request", "opaque": [None], "futureEntry": {"unknown": [9]}, "messages": []})
+    history[0]["messages"][0]["contents"].append({
+        "$type": "unknown",
+        "content": {"$type": "futureContentKind", "payload": None},
+    })
     before = deepcopy(source)
-    migrated = _migrate(source)
+    migrated = _migrate(source, completion_evidence=_completions(source, _original_result()))
     result = _cold(migrated)
     serialized = result.to_dict()
     assert serialized["futureRoot"] == source["futureRoot"]
@@ -500,26 +640,29 @@ def test_raw_unknown_nested_fields_order_session_and_source_are_preserved() -> N
 )
 def test_missing_logical_session_identity_is_filled_without_random_or_provider_state_reset(session: Any) -> None:
     source = _source()
-    source["data"]["session"] = session
-    result = _cold(_migrate(source))
+    if session is not None:
+        source["data"]["session"] = session
+    result = _cold(_migrate(source, completion_evidence=_completions(source, _original_result())))
     expected = deepcopy(session) if session is not None else {}
     expected["session_id"] = SESSION_ID
     expected.setdefault("state", {})
     assert result.data.session == expected
 
 
-@pytest.mark.parametrize("session", [{"session_id": "destination-id"}, {"session_id": True}, []])
+@pytest.mark.parametrize("session", [{"session_id": "destination-id"}, {"session_id": True}, [], None])
 def test_conflicting_or_malformed_session_identity_fails(session: Any) -> None:
     source = _source()
     source["data"]["session"] = session
     with pytest.raises(ValueError, match="session"):
-        _migrate(source)
+        _migrate(source, completion_evidence=_completions(source, _original_result()))
 
 
 def test_metadata_exact_contract_fixed_now_repeatability_and_parent_owned_idempotency() -> None:
     source = _source()
     before = deepcopy(source)
-    first, second = _migrate(source), _migrate(source)
+    evidence = _completions(source, _original_result())
+    first = _migrate(source, completion_evidence=evidence)
+    second = _migrate(source, completion_evidence=evidence)
     assert first.to_dict() == second.to_dict()
     assert first is not second
     assert first.data.unknown_fields["migration"] == {
@@ -528,16 +671,18 @@ def test_metadata_exact_contract_fixed_now_repeatability_and_parent_owned_idempo
         "sourceSessionId": SESSION_ID,
         "ownershipTransferId": "transfer-1",
         "createdAt": NOW.isoformat(),
+        "completionEvidenceId": "completion-journal-1",
     }
     assert first.data.session == {"session_id": SESSION_ID, "state": {}}
-    later = _migrate(source, now=NOW + timedelta(days=1))
-    assert later.data.response_mailbox["done"]["expiresAt"] != first.data.response_mailbox["done"]["expiresAt"]
+    later = _migrate(source, now=NOW + timedelta(days=1), completion_evidence=evidence)
+    assert later.data.unknown_fields["migration"]["createdAt"] != first.data.unknown_fields["migration"]["createdAt"]
+    assert later.data.completed_correlations["done"]["completedAt"] == ORIGINAL_COMPLETED_AT
     with pytest.raises(ValueError, match="never a v2 source"):
         _migrate(first.to_dict())
     assert source == before
 
 
-def test_one_utc_clock_capture_for_all_backfills(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_one_utc_clock_capture_for_migration_metadata_and_bounded_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
     from agent_framework_durabletask import _state_migration as migration_module
 
     calls: list[Any] = []
@@ -549,12 +694,22 @@ def test_one_utc_clock_capture_for_all_backfills(monkeypatch: pytest.MonkeyPatch
             return cls(2026, 9, 9, 12, tzinfo=timezone.utc)
 
     source = _source()
-    source["data"]["conversationHistory"].append(_entry("response", "another"))
+    source["data"]["conversationHistory"].append(_entry("errorResponse", "another"))
     monkeypatch.setattr(migration_module, "datetime", Clock)
-    result = _migrate(source, now=None)
+    result = _migrate(
+        source, now=None, completion_evidence=_completions(source, _original_result(), _original_result("another"))
+    )
     assert calls == [timezone.utc]
-    assert {record["createdAt"] for record in result.data.response_mailbox.values()} == {NOW.isoformat()}
-    assert {record["completedAt"] for record in result.data.completed_correlations.values()} == {NOW.isoformat()}
+    assert result.data.unknown_fields["migration"]["createdAt"] == NOW.isoformat()
+    assert {record["resultExpiresAt"] for record in result.data.response_mailbox.values()} == {
+        (NOW + timedelta(seconds=WINDOW)).isoformat()
+    }
+    for correlation, mailbox in result.data.response_mailbox.items():
+        assert (
+            mailbox["completedAt"]
+            == result.data.completed_correlations[correlation]["completedAt"]
+            == (ORIGINAL_COMPLETED_AT)
+        )
 
 
 def test_rfc3339_z_existing_delivery_reloads_without_python311_fromisoformat(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -566,25 +721,45 @@ def test_rfc3339_z_existing_delivery_reloads_without_python311_fromisoformat(mon
             assert not value.endswith(("Z", "z"))
             return super().fromisoformat(value)
 
-    source = _source()
     delivery = _existing_delivery()
-    delivery["responseMailbox"]["done"].update(createdAt="2024-01-01T00:00:00Z", expiresAt="2024-01-01T00:01:00z")
-    delivery["completedCorrelations"]["done"]["completedAt"] = "2024-01-01T00:00:00Z"
-    source["data"].update(
-        responseMailbox=delivery["responseMailbox"], completedCorrelations=delivery["completedCorrelations"]
-    )
+    for field in ("terminalResults", "completionReceipts"):
+        delivery[field]["done"].update(completedAt="2024-01-01T00:00:00Z", resultExpiresAt="2024-01-01T00:01:00z")
+    source = {"schemaVersion": "2.0.0", "data": delivery}
+    before = deepcopy(source)
     monkeypatch.setattr(state_module, "datetime", Python310Datetime)
-    result = _cold(_migrate(source))
-    assert result.data.response_mailbox == delivery["responseMailbox"]
-    assert result.data.completed_correlations == delivery["completedCorrelations"]
+    result = _cold(DurableAgentState.from_dict(source))
+    assert result.to_dict() == before
+    result.expire_responses(now=NOW)
+    assert result.data.response_mailbox == {}
+    assert result.data.completed_correlations["done"] == {
+        **delivery["completionReceipts"]["done"],
+        "resultState": "unavailable",
+        "resultUnavailableAt": NOW.isoformat(),
+    }
+    assert source == before
 
 
-@pytest.mark.parametrize("version", ["2.0.0", "2.3.0", "3.0.0", "1", None, True])
+@pytest.mark.parametrize(
+    "version", ["1.0", "1.3.0", "1.2.1", "1.2.0-preview", "2.0.0", "2.3.0", "3.0.0", "1", None, True]
+)
 def test_migration_is_legacy_only(version: Any) -> None:
     source = _source()
     source["schemaVersion"] = version
     with pytest.raises(ValueError, match="only legacy"):
         _migrate(source)
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize("field", ["terminalResults", "completionReceipts", "historyBinding"])
+@pytest.mark.parametrize("value", [{}, None])
+def test_legacy_source_rejects_shared_v2_fields_even_when_empty(version: str, field: str, value: Any) -> None:
+    source = _source()
+    source["schemaVersion"] = version
+    source["data"][field] = deepcopy(value)
+    before = deepcopy(source)
+    with pytest.raises(ValueError, match="Legacy state must not contain"):
+        _migrate(source)
+    assert source == before
 
 
 @pytest.mark.parametrize("digest", ["a" * 64, "A" * 64, "short", None])
@@ -636,16 +811,20 @@ def test_budget_includes_metadata_receipts_mailbox_session_and_ascii_escaped_unk
     messages = [_message(1), _message(3), custom]
     evidence = _evidence(source, messages)
     before_source, before_evidence = deepcopy(source), deepcopy(evidence)
-    result = _migrate(source, delivery_evidence=evidence)
+    completions = _completions(source, _original_result())
+    result = _migrate(source, delivery_evidence=evidence, completion_evidence=completions)
     assert result.data.ingested_messages == {message.message_id: [message_identity(message)] for message in messages}
     size = len(json.dumps(result.to_dict(), allow_nan=False))
     assert size > len(json.dumps(result.to_dict(), ensure_ascii=False, allow_nan=False).encode("utf-8"))
-    assert _migrate(source, delivery_evidence=evidence, max_state_bytes=size).to_dict() == result.to_dict()
+    assert (
+        _migrate(source, delivery_evidence=evidence, completion_evidence=completions, max_state_bytes=size).to_dict()
+        == result.to_dict()
+    )
     without_metadata = result.to_dict()
     del without_metadata["data"]["migration"]
     for budget in (size - 1, len(json.dumps(without_metadata, allow_nan=False))):
         with pytest.raises(StateCapacityError) as error:
-            _migrate(source, delivery_evidence=evidence, max_state_bytes=budget)
+            _migrate(source, delivery_evidence=evidence, completion_evidence=completions, max_state_bytes=budget)
         assert error.value.size_bytes == error.value.floor_bytes == size
         assert error.value.max_state_bytes == error.value.target_bytes == budget
     assert source == before_source and evidence == before_evidence

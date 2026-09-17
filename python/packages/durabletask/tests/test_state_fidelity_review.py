@@ -13,6 +13,7 @@ import pytest
 from agent_framework import AgentResponse, Content, Message
 from pydantic import BaseModel, Field
 
+from agent_framework_durabletask import DurableHistoryProvider
 from agent_framework_durabletask._constants import ContentTypes
 from agent_framework_durabletask._durable_agent_state import (
     DurableAgentState,
@@ -56,6 +57,14 @@ def _cold(state: DurableAgentState, schema: dict[str, Any]) -> DurableAgentState
     payload = json.loads(state.to_json())
     jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(payload)
     return DurableAgentState.from_dict(payload)
+
+
+def _core_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    profile = raw["pythonCoreFields"]
+    assert profile["profile"] == "agent-framework-python.core-fields"
+    assert type(profile["version"]) is int and profile["version"] == 1
+    assert isinstance(profile["fields"], dict)
+    return profile["fields"]
 
 
 @pytest.mark.parametrize("kind", get_args(get_type_hints(Content.__init__)["type"]))
@@ -103,15 +112,16 @@ def test_every_core_kind_preserves_metadata_in_transcript(kind: Any, schema: dic
 
 def test_typed_content_mapping_covers_shared_schema_kinds(schema: dict[str, Any]) -> None:
     known = {value for key, value in vars(ContentTypes).items() if key.isupper()}
-    branches = schema["$defs"]["chatContentItem"]["oneOf"]
-    declared = {
-        schema["$defs"][branch["$ref"].split("/")[-1]]["properties"]["$type"]["const"]
-        for branch in branches
-        if "$ref" in branch
-    }
+    branches = schema["$defs"]["v2ChatContentItem"]["oneOf"]
+
+    def definition(branch: dict[str, Any]) -> dict[str, Any]:
+        while "$ref" in branch:
+            branch = schema["$defs"][branch["$ref"].split("/")[-1]]
+        return branch
+
+    declared = {definition(branch)["properties"]["$type"]["const"] for branch in branches}
     assert declared == known
-    opaque = next(branch for branch in branches if "$ref" not in branch)
-    assert set(opaque["properties"]["$type"]["not"]["enum"]) == known
+    assert all("$ref" in branch for branch in branches), "v2 admits only declared discriminators"
     assert {cls.type for cls in DurableAgentStateContent.__subclasses__() if cls.type} == known
     for kind in known - {"unknown"}:
         core_kind = {
@@ -149,7 +159,7 @@ def test_function_result_retains_binary_and_text_items_without_a_transcript_mirr
 
     assert raw["$type"] == "functionResult"
     assert raw["result"] == content.result
-    overlay = raw["extensionData"]["coreContent"]
+    overlay = _core_fields(raw)
     assert overlay["items"] == content.to_dict()["items"]
     assert not {"type", "call_id", "result"} & overlay.keys()
     assert not {"coreMessage", "core_message"} & _stored_message(state).to_dict().keys()
@@ -165,13 +175,13 @@ def test_current_known_content_changes_win_over_metadata(schema: dict[str, Any])
     stored = _stored_message(cold)
     assert isinstance(stored.contents[0], DurableAgentStateTextContent)
     raw = stored.to_dict()["contents"][0]
-    assert "text" not in raw["extensionData"]["coreContent"]
+    assert "text" not in _core_fields(raw)
     stored.contents[0].text = "edited"
     restored = _stored_message(_cold(cold, schema)).to_chat_message()
     assert restored.text == "edited"
     assert restored.contents[0].additional_properties == {"nested": [1]}
     restored.contents[0].additional_properties["nested"].append(2)
-    assert stored.to_dict()["contents"][0]["extensionData"]["coreContent"]["additional_properties"] == {"nested": [1]}
+    assert _core_fields(stored.to_dict()["contents"][0])["additional_properties"] == {"nested": [1]}
 
 
 @pytest.mark.parametrize("arguments", [None, {}, {"type": "text", "opaque": [1]}, '{"x":1}', "{unfinished"])
@@ -214,7 +224,10 @@ def test_unknown_fields_are_owned_by_actual_entry_subtype(kind: str, schema: dic
         entry["usage"] = {"future": {"nested": [6]}}
     else:
         entry["usage"] = {"inputTokenCount": 1, "future": {"nested": [6]}}
-    payload = {"schemaVersion": "2.1.0", "data": {"conversationHistory": [entry]}}
+    payload = {
+        "schemaVersion": "2.0.0",
+        "data": {"conversationHistory": [entry], "terminalResults": {}, "completionReceipts": {}},
+    }
     before = deepcopy(payload)
     loaded = DurableAgentState.from_dict(payload)
     assert _cold(loaded, schema).to_dict() == before
@@ -251,7 +264,7 @@ def test_core_context_preserves_nested_future_items_before_consumer_filtering(sc
     loaded = _cold(state, schema)
     stored = _stored_message(loaded).to_dict()
     assert stored["future_message"] == raw["future_message"]
-    overlay = stored["contents"][0]["extensionData"]["coreContent"]
+    overlay = _core_fields(stored["contents"][0])
     assert overlay["items"] == raw["contents"][0]["items"]
     assert overlay["future_outer"] == {"nested": [3]}
     items = _stored_message(loaded).to_chat_message().contents[0].items
@@ -260,16 +273,27 @@ def test_core_context_preserves_nested_future_items_before_consumer_filtering(sc
     assert loaded.to_dict() == state.to_dict()
 
 
-def test_future_entry_and_content_are_opaque_even_with_unfamiliar_shapes(schema: dict[str, Any]) -> None:
+@pytest.mark.parametrize("level", ["entry", "content"])
+def test_v2_rejects_unknown_discriminators_without_losing_the_original_snapshot(
+    level: str, schema: dict[str, Any]
+) -> None:
     state = _state(Message("assistant", ["hello"]))
     raw = state.to_dict()
-    future_entry = {"$type": "futureEntry", "messages": {"futureShape": [None]}, "usage": [1]}
-    future_content = {"$type": "futureContent", "payload": None, "items": {"futureShape": [2]}}
-    raw["data"]["conversationHistory"].append(future_entry)
-    raw["data"]["conversationHistory"][0]["messages"][0]["contents"].append(future_content)
-    loaded = _cold(DurableAgentState.from_dict(raw), schema)
-    assert loaded.to_dict() == raw
-    assert loaded.data.conversation_history[-1].messages == []
+    if level == "entry":
+        raw["data"]["conversationHistory"].append({"$type": "futureEntry", "messages": [], "future": [None]})
+    else:
+        raw["data"]["conversationHistory"][0]["messages"][0]["contents"].append({
+            "$type": "futureContent",
+            "payload": None,
+            "items": {"futureShape": [2]},
+        })
+    before = deepcopy(raw)
+    assert not jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).is_valid(raw)
+    with pytest.raises(ValueError):
+        DurableAgentState.from_dict(raw)
+    with pytest.raises(ValueError):
+        DurableAgentState.from_json(json.dumps(raw))
+    assert raw == before
 
 
 @pytest.mark.parametrize("level", ["history", "messages", "contents"])
@@ -305,16 +329,18 @@ def test_nonfinite_json_is_rejected_including_unknown_fields(number: float, loca
 
 def _mailbox() -> dict[str, Any]:
     state = DurableAgentState()
-    state.record_response("c", AgentResponse(messages=[Message("assistant", ["42"])]), delivery_window_seconds=60)
+    state.record_response(
+        "c", AgentResponse(messages=[Message("assistant", ["42"])]), delivery_window_seconds=60, now=NOW
+    )
     raw = state.to_dict()
-    raw["data"]["responseMailbox"]["c"].update(createdAt="2026-09-09T00:00:00Z", expiresAt="2099-01-01T00:00:00Z")
-    raw["data"]["completedCorrelations"]["c"]["completedAt"] = "2026-09-09T00:00:00Z"
+    for field in ("terminalResults", "completionReceipts"):
+        raw["data"][field]["c"].update(completedAt="2026-09-09T00:00:00Z", resultExpiresAt="2099-01-01T00:00:00Z")
     return raw
 
 
 def test_poll_uses_versioned_loader_preserving_null_and_future_envelope_fields(schema: dict[str, Any]) -> None:
     raw = _mailbox()
-    response = raw["data"]["responseMailbox"]["c"]["response"]
+    response = raw["data"]["terminalResults"]["c"]["response"]
     response.update(value=None, future_response={"nested": [1]})
     response["messages"][0]["future_message"] = {"nested": [2]}
     response["messages"][0]["contents"][0]["future_content"] = {"nested": [3]}
@@ -335,15 +361,23 @@ def test_poll_preserves_value_by_name_marker(schema: dict[str, Any]) -> None:
         count: int = Field(validation_alias="inputCount", serialization_alias="outputCount")
 
     raw = _mailbox()
-    response = raw["data"]["responseMailbox"]["c"]["response"]
-    response.update(value={"count": 7}, _durable_value_by_name=True)
+    response = raw["data"]["terminalResults"]["c"]["response"]
+    response.update(
+        value={"count": 7},
+        pythonCoreFields={
+            "profile": "agent-framework-python.core-fields",
+            "version": 1,
+            "fields": {"_durable_value_by_name": True},
+        },
+    )
     result = _cold(DurableAgentState.from_dict(raw), schema).try_get_agent_response("c")
     assert result is not None
     ensure_response_format(Aliased, "c", result)
     assert result.value == Aliased(inputCount=7)
 
 
-@pytest.mark.parametrize("field", ["createdAt", "expiresAt", "completedAt"])
+@pytest.mark.parametrize("collection", ["terminalResults", "completionReceipts"])
+@pytest.mark.parametrize("field", ["resultExpiresAt", "completedAt"])
 @pytest.mark.parametrize(
     "timestamp",
     [
@@ -355,29 +389,60 @@ def test_poll_preserves_value_by_name_marker(schema: dict[str, Any]) -> None:
         "2026-09-09T00:00:00+00:60",
     ],
 )
-def test_new_delivery_timestamps_require_valid_rfc3339(field: str, timestamp: Any) -> None:
+def test_new_delivery_timestamps_require_valid_rfc3339(collection: str, field: str, timestamp: Any) -> None:
     raw = _mailbox()
-    collection = "completedCorrelations" if field == "completedAt" else "responseMailbox"
     raw["data"][collection]["c"][field] = timestamp
     with pytest.raises(ValueError):
         DurableAgentState.from_dict(raw)
 
 
-def test_legacy_timestamp_tolerance_and_scalar_migration_remain_unchanged() -> None:
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+def test_legacy_missing_timestamp_and_scalar_state_remain_unchanged(version: str) -> None:
     raw = {
-        "schemaVersion": "1.2.0",
+        "schemaVersion": version,
         "data": {
             "ingestedPositions": {"source": 7},
             "conversationHistory": [
-                {"$type": "request", "createdAt": "2026-09-09", "messages": []},
+                {"$type": "request", "messages": []},
             ],
         },
     }
     state = DurableAgentState.from_dict(raw)
     before = state.to_dict()
+    assert before == raw and state.data.conversation_history[0].created_at is None
     with pytest.raises(ValueError, match="delivery evidence"):
         state.prepare_for_write(delivery_window_seconds=60)
     assert state.to_dict() == before
+
+
+def test_undated_uncorrelated_history_gets_a_deterministic_identity_without_fabricated_time() -> None:
+    raw = {"$type": "request", "messages": [{"role": "user", "contents": [{"$type": "text", "text": "old"}]}]}
+    first = DurableAgentStateRequest.from_dict(deepcopy(raw))
+    second = DurableAgentStateRequest.from_dict(json.loads(json.dumps(raw)))
+    identity = DurableHistoryProvider._synthetic_message_id(first, 0)
+    assert isinstance(identity, str) and identity
+    assert DurableHistoryProvider._synthetic_message_id(second, 0) == identity
+    assert DurableHistoryProvider._synthetic_message_id(second, 1) != identity
+    assert first.created_at is second.created_at is None
+    assert first.to_dict() == second.to_dict() == raw
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0", "2.0.0"])
+@pytest.mark.parametrize("timestamp", [None, "2026-09-09", "2026-09-09T00:00:00", "not-a-date"])
+def test_present_invalid_transcript_timestamp_is_never_replaced_with_now(version: str, timestamp: Any) -> None:
+    raw = {
+        "schemaVersion": version,
+        "data": {
+            "conversationHistory": [{"$type": "request", "createdAt": timestamp, "messages": []}],
+            **({"terminalResults": {}, "completionReceipts": {}} if version == "2.0.0" else {}),
+        },
+    }
+    before = deepcopy(raw)
+    with pytest.raises(ValueError):
+        DurableAgentState.from_dict(raw)
+    with pytest.raises(ValueError):
+        DurableAgentState.from_json(json.dumps(raw))
+    assert raw == before
 
 
 @pytest.mark.parametrize(
@@ -408,9 +473,9 @@ def test_nested_core_edges_are_reconstructed_in_transcript(kind: str, field: str
 
 
 @pytest.mark.parametrize("invalid", [None, "text", {}, [None], ["text"], [42]])
-def test_mailbox_core_contents_reject_malformed_containers(invalid: Any) -> None:
+def test_mailbox_shared_contents_reject_malformed_containers(invalid: Any) -> None:
     raw = _mailbox()
-    raw["data"]["responseMailbox"]["c"]["response"]["messages"][0]["contents"] = invalid
+    raw["data"]["terminalResults"]["c"]["response"]["messages"][0]["contents"] = invalid
     with pytest.raises(ValueError):
         DurableAgentState.from_dict(raw)
 

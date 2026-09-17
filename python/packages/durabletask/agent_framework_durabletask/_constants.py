@@ -142,8 +142,8 @@ class DurableStateFields:
     INGESTED_MESSAGES: Final[str] = "ingestedMessages"
 
     # Result delivery is independent from the model transcript.
-    RESPONSE_MAILBOX: Final[str] = "responseMailbox"
-    COMPLETED_CORRELATIONS: Final[str] = "completedCorrelations"
+    RESPONSE_MAILBOX: Final[str] = "terminalResults"
+    COMPLETED_CORRELATIONS: Final[str] = "completionReceipts"
     RESPONSE: Final[str] = "response"
     EXPIRES_AT: Final[str] = "expiresAt"
     COMPLETED_AT: Final[str] = "completedAt"

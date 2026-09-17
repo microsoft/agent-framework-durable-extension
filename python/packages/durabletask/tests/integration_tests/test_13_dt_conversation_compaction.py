@@ -29,6 +29,7 @@ from agent_framework_durabletask import (
     DurableAIAgentClient,
     serialize_agent_response,
 )
+from agent_framework_durabletask._shared_response import serialize_terminal_response
 
 # Matches worker.py: only the most recent groups stay in the model's context.
 KEEP_LAST_GROUPS = 4
@@ -220,8 +221,8 @@ class TestConversationCompaction:
         response = agent.run("Name a river.", session=session)
         assert response.text
         assert all(content.type != "error" for message in response.messages for content in message.contents)
-        expected = json.loads(json.dumps(serialize_agent_response(response)))
-        assert expected["created_at"], "the Foundry result timestamp was lost"
+        expected = json.loads(json.dumps(serialize_terminal_response(serialize_agent_response(response))))
+        assert expected["createdAt"], "the Foundry result timestamp was lost"
 
         state = self._read_state(session.durable_session_id)
         assert len(state.data.completed_correlations) == 1
@@ -229,12 +230,24 @@ class TestConversationCompaction:
         assert correlation_id
         assert set(state.data.response_mailbox) == {correlation_id}
         mailbox = state.data.response_mailbox[correlation_id]
-        assert mailbox["response"] == expected
+        assert mailbox == {
+            "correlationId": correlation_id,
+            "outcome": "succeeded",
+            "completedAt": mailbox["completedAt"],
+            "resultExpiresAt": mailbox["resultExpiresAt"],
+            "response": expected,
+        }
         # The result's date and message count are not the request's date or the transcript count.
-        assert mailbox["response"]["created_at"] == expected["created_at"]
+        assert mailbox["response"]["createdAt"] == expected["createdAt"]
         assert len(mailbox["response"]["messages"]) == len(response.messages)
-        assert state.data.completed_correlations[correlation_id]["completedAt"] == mailbox["createdAt"]
-        assert datetime.fromisoformat(mailbox["expiresAt"]) > datetime.fromisoformat(mailbox["createdAt"])
+        assert state.data.completed_correlations[correlation_id] == {
+            "correlationId": correlation_id,
+            "outcome": "succeeded",
+            "completedAt": mailbox["completedAt"],
+            "resultState": "available",
+            "resultExpiresAt": mailbox["resultExpiresAt"],
+        }
+        assert datetime.fromisoformat(mailbox["resultExpiresAt"]) > datetime.fromisoformat(mailbox["completedAt"])
 
         # Mutate only this detached read, not scheduler state. Version 2 lookup must still use
         # the mailbox even when no local transcript entry can provide an answer.
@@ -244,4 +257,4 @@ class TestConversationCompaction:
         assert restored.message_count == 0
         delivered = restored.try_get_agent_response(correlation_id)
         assert delivered is not None
-        assert json.loads(json.dumps(serialize_agent_response(delivered))) == expected
+        assert json.loads(json.dumps(serialize_terminal_response(delivered))) == expected

@@ -3,7 +3,7 @@
 """Unit tests for DurableAgentState and related classes."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from agent_framework import Content, Message, UsageDetails
@@ -28,7 +28,7 @@ class TestDurableAgentStateRequestOrchestrationId:
         """Test creating a request with an orchestration_id."""
         request = DurableAgentStateRequest(
             correlation_id="corr-123",
-            created_at=datetime.now(),
+            created_at=datetime.now(timezone.utc),
             messages=[
                 DurableAgentStateMessage(
                     role="user",
@@ -44,7 +44,7 @@ class TestDurableAgentStateRequestOrchestrationId:
         """Test that to_dict includes orchestrationId when set."""
         request = DurableAgentStateRequest(
             correlation_id="corr-123",
-            created_at=datetime.now(),
+            created_at=datetime.now(timezone.utc),
             messages=[
                 DurableAgentStateMessage(
                     role="user",
@@ -63,7 +63,7 @@ class TestDurableAgentStateRequestOrchestrationId:
         """Test that to_dict excludes orchestrationId when not set."""
         request = DurableAgentStateRequest(
             correlation_id="corr-123",
-            created_at=datetime.now(),
+            created_at=datetime.now(timezone.utc),
             messages=[
                 DurableAgentStateMessage(
                     role="user",
@@ -166,7 +166,7 @@ class TestDurableAgentState:
         assert "schemaVersion" in data
         assert "data" in data
         assert data["schemaVersion"] == "2.0.0"
-        assert "conversationHistory" in data["data"]
+        assert data["data"] == {"conversationHistory": [], "terminalResults": {}, "completionReceipts": {}}
 
     def test_from_dict_deserialization(self) -> None:
         """Test that from_dict restores state correctly."""
@@ -201,7 +201,7 @@ class TestDurableAgentState:
         state.data.conversation_history.append(
             DurableAgentStateRequest(
                 correlation_id="test-456",
-                created_at=datetime.now(),
+                created_at=datetime.now(timezone.utc),
                 messages=[
                     DurableAgentStateMessage(
                         role="user",
@@ -467,8 +467,8 @@ class TestDurableAgentStateUnknownContent:
 
         assert unknown.content == {"some": "data"}
 
-    def test_unknown_content_to_ai_content_preserves_future_type(self) -> None:
-        """Core accepts arbitrary content type strings and ignores unknown envelope fields."""
+    def test_unprofiled_unknown_content_keeps_type_like_fields_opaque(self) -> None:
+        """A type-shaped business object is not a recognized Python content profile."""
         future = {
             "type": "bogus_not_a_real_content_type",
             "extra": "stuff",
@@ -478,10 +478,10 @@ class TestDurableAgentStateUnknownContent:
 
         result = unknown.to_ai_content()
 
-        assert result.type == future["type"]
-        assert result.additional_properties == {"opaque": [1]}
+        assert result.type == "unknown"
+        assert result.additional_properties == {"content": future}
         assert not hasattr(result, "extra")
-        result.additional_properties["opaque"].append(2)
+        result.additional_properties["content"]["additional_properties"]["opaque"].append(2)
         assert unknown.to_dict()["content"] == future
         assert future["additional_properties"] == {"opaque": [1]}
 
@@ -518,7 +518,7 @@ class TestDurableAgentStateUnknownContent:
         state.data.conversation_history.append(
             DurableAgentStateRequest(
                 correlation_id="test-mcp",
-                created_at=datetime.now(),
+                created_at=datetime.now(timezone.utc),
                 messages=[message],
             )
         )

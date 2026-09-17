@@ -14,12 +14,13 @@ import pytest
 from agent_framework import GROUP_ANNOTATION_KEY, ChatResponse, CompactionProvider, Content, Message
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader, Sum
-from test_durable_history_provider import RecordingChatClient
+from test_durable_history_provider import RecordingChatClient, _ingestion_messages
 from test_history_pipeline_revision import NonStreamingAgent
 from test_revision_contract import JsonStateProvider
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState, DurableHistoryProvider
 from agent_framework_durabletask import _retention_telemetry as telemetry
+from agent_framework_durabletask._message_identity import message_identity
 from agent_framework_durabletask._retention import RetentionMode, StateCapacityError
 
 MEDIA_CASES = ("inline-png", "inline-text", "uri-image", "hosted-file", "mixed-tool", "large-tool")
@@ -296,9 +297,9 @@ async def test_media_payloads_survive_policy_matrix_json_reload_and_next_model_c
     assert removed.isdisjoint(cold_ids), "a cold flush or replayed transport input must not resurrect deleted payloads"
     for pair in atomic_pairs:
         assert pair <= cold_ids or pair.isdisjoint(cold_ids)
-    assert cold_provider.raw["data"]["ingestedMessages"] == {
-        **raw["data"]["ingestedMessages"],
-        "next-input": cold_provider.raw["data"]["ingestedMessages"]["next-input"],
+    assert _ingestion_messages(cold_provider.raw) == {
+        **_ingestion_messages(raw),
+        "next-input": [message_identity(next_input)],
     }
     assert cold_provider.writes == 1
     final_removed = len(originals) + 2 - len(_messages(cold_provider.raw))

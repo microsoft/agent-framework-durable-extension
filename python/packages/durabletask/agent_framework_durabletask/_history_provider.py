@@ -223,7 +223,7 @@ class DurableHistoryProvider(HistoryProvider):
         """
         # A request and its response share a correlation id, so the entry type is what tells the
         # two sides of an exchange apart.
-        scope = entry.correlation_id or entry.created_at.isoformat()
+        scope = entry.correlation_id or (entry.created_at.isoformat() if entry.created_at is not None else "undated")
         kind = entry.json_type.value if isinstance(entry.json_type, DurableAgentStateEntryJsonType) else entry.json_type
         return f"durable_{kind}_{scope}_{index}"
 
@@ -263,10 +263,8 @@ class DurableHistoryProvider(HistoryProvider):
         for entry, index in self._replayable_entries(binding):
             stored = entry.messages[index]
             if not stored.message_id or stored.message_id in positions:
-                if stored.message_id is not None and stored.original_message_id is None:
-                    stored.original_message_id = stored.message_id
-                stored.message_id = self._unique_message_id(self._synthetic_message_id(entry, index), reserved)
-            positions[stored.message_id] = (entry, index)
+                stored.set_history_id(self._unique_message_id(self._synthetic_message_id(entry, index), reserved))
+            positions[cast(str, stored.message_id)] = (entry, index)
         return positions
 
     async def get_messages(
@@ -401,10 +399,14 @@ class DurableHistoryProvider(HistoryProvider):
             if not stored.message_id or stored.message_id in used:
                 prefix = "durable_revision" if stored.message_id else "durable"
                 candidate = f"{prefix}_{kind.value}_{scope}_{ordinal}_{index}"
-                if stored.message_id is not None and kind != DurableAgentStateEntryJsonType.COMPACTION:
-                    stored.original_message_id = stored.message_id
-                stored.message_id = self._unique_message_id(candidate, reserved)
-            used.add(stored.message_id)
+                internal_id = self._unique_message_id(candidate, reserved)
+                if kind == DurableAgentStateEntryJsonType.COMPACTION:
+                    # These are newly generated summary occurrences. Publish the
+                    # disambiguated identity so their lineage is stable on reload.
+                    stored.message_id = internal_id
+                else:
+                    stored.set_history_id(internal_id)
+            used.add(cast(str, stored.message_id))
             working = copy.deepcopy(message)
             working.message_id = stored.public_message_id
             setattr(working, _HISTORY_ID_ATTRIBUTE, stored.message_id)
@@ -799,7 +801,7 @@ def replayable_entries(
         if (
             isinstance(entry, (DurableAgentStateErrorResponse, DurableAgentStateUnknownEntry))
             or entry.json_type not in tuple(DurableAgentStateEntryJsonType)
-            or entry.json_type == DurableAgentStateEntryJsonType.ERROR_RESPONSE
+            or entry.is_error_response
         ):
             # Runtime-error entries and opaque future entries are not model messages.
             continue

@@ -49,45 +49,46 @@ from dateutil import parser as date_parser
 from ._constants import ContentTypes, DurableStateFields
 from ._message_identity import message_identity
 from ._models import RunRequest, serialize_response_format
-from ._response_utils import invocation_outcome, load_agent_response, serialize_agent_response, serialize_input_content
+from ._response_utils import (
+    invocation_outcome,
+    is_terminal_agent_response,
+    load_agent_response,
+    serialize_agent_response,
+    serialize_input_content,
+)
+from ._shared_response import load_terminal_response, serialize_terminal_response, terminal_error
+from ._shared_state_validation import (
+    timestamp_reached,
+    validate_identifier,
+    validate_shared_data,
+    validate_shared_state,
+)
 
 logger = logging.getLogger("agent_framework.durabletask")
 
 
-def _validate_delivery_layout(data: dict[str, Any]) -> None:
-    """Reject known alternate completion authorities, even with the same version label.
-
-    These top-level data fields describe a different proposed delivery contract.
-    Preserving them as extensions while treating their requests as incomplete would
-    permit duplicate execution. This is rejection, not migration or schema agreement.
-    Unrelated metadata, including nested occurrences of these names, stays opaque.
-    """
-    if "terminalResults" in data or "completionReceipts" in data:
-        raise ValueError(
-            "The durable agent state contains an incompatible delivery layout. "
-            "This prototype requires responseMailbox/completedCorrelations semantics; "
-            "a matching schemaVersion does not authorize interpreting another completion format."
-        )
-
-
 def _validate_completion_outcomes(records: dict[str, dict[str, Any]], mailboxes: dict[str, dict[str, Any]]) -> None:
-    """Reject contradictory known evidence without guessing an unknown legacy outcome."""
+    """Check shared map invariants before delivering or removing any result."""
+    validate_shared_data({
+        "conversationHistory": [],
+        "terminalResults": mailboxes,
+        "completionReceipts": records,
+    })
     for correlation_id, record in records.items():
-        if not isinstance(record, dict):
-            raise ValueError("completedCorrelations must contain objects keyed by correlation ID.")
-        if DurableStateFields.OUTCOME in record and record[DurableStateFields.OUTCOME] not in ("succeeded", "failed"):
-            raise ValueError("completedCorrelations.outcome must be 'succeeded' or 'failed' when present.")
-        outcome = record.get(DurableStateFields.OUTCOME)
         mailbox = mailboxes.get(correlation_id)
-        if outcome is None or mailbox is None:
+        if mailbox is None:
             continue
-        observed = invocation_outcome(
-            load_agent_response(mailbox[DurableStateFields.RESPONSE]), legacy=record.get("legacy", False)
+        # The shared result outcome is authoritative. A success may not carry
+        # affirmative terminal-error evidence in its response projection.
+        response = mailbox[DurableStateFields.RESPONSE]
+        failed = response.get("extensionData", {}).get("durable_status") == "error" or any(
+            content["$type"] == "error"
+            for message in response["messages"]
+            if message["role"] != "tool"
+            for content in message.get("contents", [])
         )
-        # A legacy projection may have lost error content. Only affirmative evidence
-        # can contradict a known receipt, never a success inferred from partial text.
-        if observed is not None and observed != outcome:
-            raise ValueError("completedCorrelations.outcome conflicts with its retained responseMailbox result.")
+        if record["outcome"] == "succeeded" and failed:
+            raise ValueError("A succeeded terminal result conflicts with its response failure evidence.")
 
 
 def _validate_json(value: Any) -> None:
@@ -144,7 +145,15 @@ def _validate_core_message(data: Any) -> None:
 
 def _validate_core_message_keys(data: dict[str, Any]) -> None:
     """Keep public core envelopes from smuggling private persisted-field aliases."""
-    reserved = {"originalMessageId", "messageId", "authorName", "createdAt", "extensionData"}
+    reserved = {
+        "originalMessageId",
+        "messageId",
+        "authorName",
+        "createdAt",
+        "extensionData",
+        "pythonHistoryId",
+        "pythonHistoryIdentity",
+    }
     conflicts = reserved.intersection(data)
     if conflicts:
         raise ValueError(f"Core message contains reserved durable fields: {', '.join(sorted(conflicts))}.")
@@ -168,6 +177,54 @@ def _entry_unknown_fields(entry: DurableAgentStateEntry, data: dict[str, Any]) -
     elif isinstance(entry, DurableAgentStateResponse):
         known.add(DurableStateFields.USAGE)
     return {key: deepcopy(value) for key, value in data.items() if key not in known}
+
+
+class _RawShadow:
+    """Keep original JSON field representations until their typed projection changes."""
+
+    def __init__(self, raw: dict[str, Any], projection: dict[str, Any]) -> None:
+        self.raw: dict[str, Any] = _json_snapshot(raw)
+        self.projection: dict[str, Any] = _json_snapshot(projection)
+
+    def merge(self, projection: dict[str, Any]) -> dict[str, Any]:
+        """Apply changed fields, preserving absence and unmodified timestamp precision."""
+        current: dict[str, Any] = _json_snapshot(projection)
+        result = deepcopy(self.raw)
+        for key in self.projection.keys() | current.keys():
+            # JSON comparison distinguishes false from zero, including inside containers.
+            if (
+                key in self.projection
+                and key in current
+                and json.dumps(self.projection[key], sort_keys=True, allow_nan=False)
+                == json.dumps(current[key], sort_keys=True, allow_nan=False)
+            ):
+                continue
+            if key in current:
+                result[key] = current[key]
+            else:
+                result.pop(key, None)
+        return result
+
+
+def _parse_transcript_created_at(value: Any) -> datetime | None:
+    """Project a persisted timestamp without manufacturing a time for absent fields."""
+    if value is None or isinstance(value, datetime):
+        return value
+    return date_parser.isoparse(value)
+
+
+_HISTORY_IDENTITY_PROFILE = {"profile": "agent-framework-python.history-identity", "version": 1}
+_CONTENT_ENCODING_PROFILE = {"profile": "agent-framework-python.content", "version": 1}
+_CORE_FIELDS_PROFILE = {"profile": "agent-framework-python.core-fields", "version": 1}
+_INGESTION_PROFILE = {"profile": "agent-framework-python.ingestion", "version": 1}
+
+
+def _has_python_profile(value: Any, profile: dict[str, Any]) -> bool:
+    """Recognize the profile identity and exact version, allowing opaque additive fields."""
+    if not isinstance(value, dict):
+        return False
+    value = cast(dict[str, Any], value)
+    return type(value.get("version")) is int and all(value.get(key) == item for key, item in profile.items())
 
 
 class DurableAgentStateEntryJsonType(str, Enum):
@@ -249,8 +306,6 @@ def _parse_history_entries(data_dict: dict[str, Any]) -> list[DurableAgentStateE
             entry_type = entry_dict.get(DurableStateFields.TYPE_DISCRIMINATOR) or entry_dict.get(
                 DurableStateFields.JSON_TYPE
             )
-            if not isinstance(entry_type, str) or not entry_type:
-                raise ValueError("Conversation entries require a non-empty type discriminator.")
             if entry_type == DurableAgentStateEntryJsonType.RESPONSE:
                 deserialized_history.append(DurableAgentStateResponse.from_dict(entry_dict))
             elif entry_type == DurableAgentStateEntryJsonType.ERROR_RESPONSE:
@@ -261,8 +316,6 @@ def _parse_history_entries(data_dict: dict[str, Any]) -> list[DurableAgentStateE
                 deserialized_history.append(DurableAgentStateRequest.from_dict(entry_dict))
             else:
                 deserialized_history.append(DurableAgentStateUnknownEntry(entry_dict))
-            entry = deserialized_history[-1]
-            entry.unknown_fields = _entry_unknown_fields(entry, entry_dict)
         elif isinstance(raw_entry, DurableAgentStateEntry):
             deserialized_history.append(raw_entry)
         else:
@@ -286,7 +339,7 @@ def _parse_contents(data: dict[str, Any]) -> list[DurableAgentStateContent]:
             contents.append(raw_content)
 
         elif isinstance(raw_content, dict):
-            content_dict = cast(dict[str, Any], raw_content)
+            content_dict = deepcopy(cast(dict[str, Any], raw_content))
             content_type: str | None = content_dict.get(DurableStateFields.TYPE_DISCRIMINATOR)
 
             match content_type:
@@ -377,7 +430,16 @@ def _parse_contents(data: dict[str, Any]) -> list[DurableAgentStateContent]:
             content = contents[-1]
             known = content.to_dict().keys() | {DurableStateFields.EXTENSION_DATA}
             content.unknown_fields = {key: deepcopy(value) for key, value in content_dict.items() if key not in known}
-            content.extensionData = deepcopy(content_dict.get(DurableStateFields.EXTENSION_DATA))
+            extension = content_dict.get(DurableStateFields.EXTENSION_DATA)
+            if isinstance(extension, dict):
+                content.extensionData = deepcopy(cast(dict[str, Any], extension))
+            elif DurableStateFields.EXTENSION_DATA in content_dict:
+                # Content extensionData is an arbitrary shared-schema sibling, not
+                # necessarily our optional coreContent object convention.
+                content.unknown_fields[DurableStateFields.EXTENSION_DATA] = deepcopy(extension)
+            content._raw_shadow = _RawShadow(  # pyright: ignore[reportPrivateUsage]
+                content_dict, content.to_persisted_dict()
+            )
         else:
             raise ValueError("contents must contain content objects.")
 
@@ -404,6 +466,7 @@ class DurableAgentStateContent:
     type: str = ""
 
     _NULLABLE_FIELDS: ClassVar[frozenset[str]] = frozenset()
+    _raw_shadow: _RawShadow | None = None
 
     def to_persisted_dict(self) -> dict[str, Any]:
         """Merge opaque fields without replacing mutable, known transcript fields."""
@@ -415,7 +478,7 @@ class DurableAgentStateContent:
         }
         if self.extensionData is not None:
             result[DurableStateFields.EXTENSION_DATA] = self.extensionData
-        return _json_snapshot(result)
+        return self._raw_shadow.merge(result) if self._raw_shadow is not None else _json_snapshot(result)
 
     def core_projection(self) -> dict[str, Any]:
         """Map this subtype's durable fields to canonical core content fields.
@@ -441,9 +504,15 @@ class DurableAgentStateContent:
 
     def to_core_content(self) -> Content:
         """Restore canonical fields through the delivery loader, without dynamic type lookup."""
-        extra = (self.extensionData or {}).get("coreContent")
-        if not isinstance(extra, dict):
+        profile = (self.unknown_fields or {}).get("pythonCoreFields")
+        if not _has_python_profile(profile, _CORE_FIELDS_PROFILE):
             return self.to_ai_content()
+        profile = cast(dict[str, Any], profile)
+        extra = profile.get("fields")
+        if not isinstance(extra, dict):
+            raise ValueError("The Python core-fields profile requires a fields object.")
+        if extra.keys() & (self.core_projection().keys() | {"raw_representation", "response_format"}):
+            raise ValueError("Python core-fields metadata cannot replace known content fields.")
         # The overlay contains extras only. Current text/result/arguments always win.
         payload = {**deepcopy(cast(dict[str, Any], extra)), **self.core_projection()}
         return load_agent_response({"messages": [{"role": "assistant", "contents": [payload]}]}).messages[0].contents[0]
@@ -488,8 +557,11 @@ class DurableAgentStateContent:
             else:
                 mapped = stored.core_projection()
                 # An empty overlay still identifies canonical rather than legacy conversion.
-                stored.extensionData = {
-                    "coreContent": {key: value for key, value in payload.items() if key not in mapped}
+                stored.unknown_fields = {
+                    "pythonCoreFields": {
+                        **_CORE_FIELDS_PROFILE,
+                        "fields": {key: value for key, value in payload.items() if key not in mapped},
+                    }
                 }
         return stored
 
@@ -629,10 +701,32 @@ class DurableAgentStateData:
         self.completed_correlations = completed_correlations or {}
         self.ingested_messages = ingested_messages or {}
         self.unknown_fields = {}
+        self._raw_shadow: _RawShadow | None = None
+        self._ingestion_profile: dict[str, Any] | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        _validate_delivery_layout(self.unknown_fields)
-        _validate_completion_outcomes(self.completed_correlations, self.response_mailbox)
+    def _validate_ingestion(self) -> None:
+        if not isinstance(self.ingested_messages, dict) or any(
+            not isinstance(identity, str)
+            or not identity.strip()
+            or (
+                fingerprints is not None
+                and (
+                    not isinstance(fingerprints, list)
+                    or not fingerprints
+                    or any(
+                        not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                        for value in fingerprints
+                    )
+                    or len(set(fingerprints)) != len(fingerprints)
+                )
+            )
+            for identity, fingerprints in self.ingested_messages.items()
+        ):
+            raise ValueError(
+                "pythonIngestion.messages requires nonblank IDs and unique SHA-256 lists or identity markers."
+            )
+
+    def to_dict(self, *, schema_version: str = "2.0.0") -> dict[str, Any]:
         result: dict[str, Any] = {
             **deepcopy(self.unknown_fields),
             DurableStateFields.CONVERSATION_HISTORY: [entry.to_dict() for entry in self.conversation_history],
@@ -645,21 +739,31 @@ class DurableAgentStateData:
             result[DurableStateFields.INGESTED_POSITIONS] = self.ingested_positions
         if self.truncation:
             result[DurableStateFields.TRUNCATION] = self.truncation
-        if self.response_mailbox:
+        if schema_version == "2.0.0":
             result[DurableStateFields.RESPONSE_MAILBOX] = deepcopy(self.response_mailbox)
-        if self.completed_correlations:
             result[DurableStateFields.COMPLETED_CORRELATIONS] = deepcopy(self.completed_correlations)
-        if self.ingested_messages:
-            result[DurableStateFields.INGESTED_MESSAGES] = deepcopy(self.ingested_messages)
-        return _json_snapshot(result)
+        self._validate_ingestion()
+        if schema_version == "2.0.0" and (self.ingested_messages or self._ingestion_profile is not None):
+            if "pythonIngestion" in self.unknown_fields:
+                raise ValueError("Cannot replace opaque pythonIngestion metadata with a different runtime profile.")
+            result["pythonIngestion"] = {
+                **deepcopy(self._ingestion_profile or _INGESTION_PROFILE),
+                "messages": deepcopy(self.ingested_messages),
+            }
+        result = _json_snapshot(result)
+        if self._raw_shadow is not None:
+            result = self._raw_shadow.merge(result)
+        validate_shared_data(result, version=schema_version)
+        if schema_version == "2.0.0":
+            _validate_completion_outcomes(self.completed_correlations, self.response_mailbox)
+        return result
 
     @classmethod
-    def from_dict(cls, data_dict: dict[str, Any]) -> DurableAgentStateData:
-        _validate_delivery_layout(data_dict)
+    def from_dict(cls, data_dict: dict[str, Any], *, schema_version: str = "2.0.0") -> DurableAgentStateData:
+        validate_shared_data(data_dict, version=schema_version)
         for name in (
             DurableStateFields.RESPONSE_MAILBOX,
             DurableStateFields.COMPLETED_CORRELATIONS,
-            DurableStateFields.INGESTED_MESSAGES,
         ):
             if name in data_dict and not isinstance(data_dict[name], dict):
                 raise ValueError(f"{name} must be an object.")
@@ -671,7 +775,6 @@ class DurableAgentStateData:
             truncation=data_dict.get(DurableStateFields.TRUNCATION),
             response_mailbox=deepcopy(data_dict.get(DurableStateFields.RESPONSE_MAILBOX, {})),
             completed_correlations=deepcopy(data_dict.get(DurableStateFields.COMPLETED_CORRELATIONS, {})),
-            ingested_messages=deepcopy(data_dict.get(DurableStateFields.INGESTED_MESSAGES, {})),
         )
         known = {
             DurableStateFields.CONVERSATION_HISTORY,
@@ -681,46 +784,20 @@ class DurableAgentStateData:
             DurableStateFields.TRUNCATION,
             DurableStateFields.RESPONSE_MAILBOX,
             DurableStateFields.COMPLETED_CORRELATIONS,
-            DurableStateFields.INGESTED_MESSAGES,
         }
+        profile = data_dict.get("pythonIngestion")
+        if schema_version == "2.0.0" and _has_python_profile(profile, _INGESTION_PROFILE):
+            profile = cast(dict[str, Any], profile)
+            if not isinstance(profile.get("messages"), dict):
+                raise ValueError("The Python ingestion profile requires a messages object.")
+            result.ingested_messages = deepcopy(profile["messages"])
+            result._ingestion_profile = deepcopy(profile)
+            result._validate_ingestion()
+            known.add("pythonIngestion")
         result.unknown_fields = {key: deepcopy(value) for key, value in data_dict.items() if key not in known}
-        for name, records in (
-            (DurableStateFields.RESPONSE_MAILBOX, result.response_mailbox),
-            (DurableStateFields.COMPLETED_CORRELATIONS, result.completed_correlations),
-        ):
-            if any(not isinstance(value, dict) for value in records.values()):
-                raise ValueError(f"{name} must contain objects keyed by correlation ID.")
-            for correlation_id, record in records.items():
-                if not isinstance(correlation_id, str) or not correlation_id:
-                    raise ValueError(f"{name} requires non-empty correlation IDs.")
-                timestamps = (
-                    (DurableStateFields.CREATED_AT, DurableStateFields.EXPIRES_AT)
-                    if name == DurableStateFields.RESPONSE_MAILBOX
-                    else (DurableStateFields.COMPLETED_AT,)
-                )
-                for field in timestamps:
-                    try:
-                        _parse_delivery_timestamp(record.get(field))
-                    except ValueError as exc:
-                        raise ValueError(f"{name}.{field} must be an RFC 3339 timestamp with an offset.") from exc
-                if name == DurableStateFields.RESPONSE_MAILBOX:
-                    response = record.get(DurableStateFields.RESPONSE)
-                    if not isinstance(response, dict):
-                        raise ValueError("responseMailbox.response must be an inline agent response.")
-                    response = cast(dict[str, Any], response)
-                    if response.get("type") != "agent_response" or not isinstance(response.get("messages"), list):
-                        raise ValueError("responseMailbox.response must be an inline agent response.")
-                    for message in response["messages"]:
-                        _validate_core_message(message)
-                    load_agent_response(response)
-                elif "legacy" in record and not isinstance(record["legacy"], bool):
-                    raise ValueError("completedCorrelations.legacy must be a boolean.")
-        if not isinstance(result.ingested_messages, dict) or any(
-            values is not None and (not isinstance(values, list) or any(not isinstance(v, str) for v in values))
-            for values in result.ingested_messages.values()
-        ):
-            raise ValueError("ingestedMessages must contain fingerprint lists or legacy identity markers.")
-        _validate_completion_outcomes(result.completed_correlations, result.response_mailbox)
+        if schema_version == "2.0.0":
+            _validate_completion_outcomes(result.completed_correlations, result.response_mailbox)
+        result._raw_shadow = _RawShadow(data_dict, result.to_dict(schema_version=schema_version))
         return result
 
 
@@ -737,14 +814,16 @@ class DurableAgentState:
     - Messages: Individual chat messages with role, content items, and timestamps
     - Content items: Text, function calls, function results, errors, and other content types
 
-    State is serialized to JSON with this structure:
+    A new shared state is serialized with all three required data fields:
     {
         "schemaVersion": "<SCHEMA_VERSION>",
         "data": {
             "conversationHistory": [
                 {"$type": "request", "correlationId": "...", "createdAt": "...", "messages": [...]},
                 {"$type": "response", "correlationId": "...", "createdAt": "...", "messages": [...], "usage": {...}}
-            ]
+            ],
+            "terminalResults": {},
+            "completionReceipts": {}
         }
     }
 
@@ -771,11 +850,13 @@ class DurableAgentState:
         self.unknown_fields: dict[str, Any] = {}
 
     def to_dict(self) -> dict[str, Any]:
-        return _json_snapshot({
+        result = _json_snapshot({
             **deepcopy(self.unknown_fields),
             DurableStateFields.SCHEMA_VERSION: self.schema_version,
-            DurableStateFields.DATA: self.data.to_dict(),
+            DurableStateFields.DATA: self.data.to_dict(schema_version=self.schema_version),
         })
+        validate_shared_state(result)
+        return result
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), allow_nan=False)
@@ -793,18 +874,15 @@ class DurableAgentState:
         schema_version = state.get(DurableStateFields.SCHEMA_VERSION)
         if schema_version is None:
             raise ValueError("The durable agent state is missing schemaVersion; refusing to discard existing state.")
-        if not isinstance(schema_version, str) or not re.fullmatch(r"[12]\.[0-9]+\.[0-9]+", schema_version):
+        if schema_version not in ("1.0.0", "1.1.0", "1.2.0", "2.0.0"):
             raise ValueError(f"Unsupported durable agent state schemaVersion: {schema_version!r}.")
         raw_data = state.get(DurableStateFields.DATA)
         if not isinstance(raw_data, dict):
             raise ValueError("The durable agent state data must be an object.")
 
+        validate_shared_state(state)
         instance = cls(schema_version=schema_version)
-        instance.data = DurableAgentStateData.from_dict(cast(dict[str, Any], raw_data))
-        if schema_version.startswith("2.") and (
-            instance.data.response_mailbox.keys() - instance.data.completed_correlations.keys()
-        ):
-            raise ValueError("Every responseMailbox entry requires a matching completedCorrelations receipt.")
+        instance.data = DurableAgentStateData.from_dict(cast(dict[str, Any], raw_data), schema_version=schema_version)
         instance.unknown_fields = {
             key: deepcopy(value)
             for key, value in state.items()
@@ -841,15 +919,55 @@ class DurableAgentState:
         Returns:
             Retained response, expired-response status, or None when no matching result exists.
         """
-        _validate_delivery_layout(self.data.unknown_fields)
-        _validate_completion_outcomes(self.data.completed_correlations, self.data.response_mailbox)
-        if self.schema_version.startswith("2."):
+        if self.schema_version == "2.0.0":
+            _validate_completion_outcomes(self.data.completed_correlations, self.data.response_mailbox)
             mailbox = self.data.response_mailbox.get(correlation_id)
             if mailbox is not None:
-                expiry = _parse_delivery_timestamp(mailbox[DurableStateFields.EXPIRES_AT])
-                if datetime.now(timezone.utc) < expiry:
-                    return load_agent_response(mailbox[DurableStateFields.RESPONSE])
-            if correlation_id in self.data.completed_correlations or mailbox is not None:
+                expiry = mailbox.get("resultExpiresAt")
+                if expiry is None or not timestamp_reached(expiry, now=datetime.now(timezone.utc)):
+                    response = load_terminal_response(mailbox[DurableStateFields.RESPONSE])
+                    # Availability belongs to the receipt, never to a provider's
+                    # response metadata. Change only the detached Core projection.
+                    properties = response.additional_properties
+                    if properties.get("durable_status") in ("accepted", "already_completed"):
+                        properties.pop("durable_status")
+                    if "durable_outcome" in properties:
+                        properties["durable_outcome"] = mailbox["outcome"]
+                    if mailbox["outcome"] == "failed":
+                        for message in response.messages:
+                            if message.role != "tool":
+                                for content in message.contents:
+                                    if content.type == "error" and content.error_code == "response_expired":
+                                        code = mailbox["error"]["code"]
+                                        content.error_code = code if code != "response_expired" else "agent_error"
+                    if mailbox["outcome"] == "failed" and not is_terminal_agent_response(response):
+                        response.additional_properties = {
+                            **response.additional_properties,
+                            "durable_status": "error",
+                            "correlation_id": correlation_id,
+                        }
+                        if not any(
+                            content.type == "error"
+                            for message in response.messages
+                            if message.role != "tool"
+                            for content in message.contents
+                        ):
+                            error = mailbox["error"]
+                            code = error["code"] if error["code"] != "response_expired" else "agent_error"
+                            response.messages.append(
+                                Message(
+                                    "system",
+                                    [
+                                        Content.from_error(
+                                            message=error["message"],
+                                            error_code=code,
+                                            error_details=error.get("details"),
+                                        )
+                                    ],
+                                )
+                            )
+                    return response
+            if correlation_id in self.data.completed_correlations:
                 return AgentResponse(
                     messages=[
                         Message(
@@ -865,7 +983,7 @@ class DurableAgentState:
                     additional_properties={
                         "durable_status": "already_completed",
                         "correlation_id": correlation_id,
-                        "durable_outcome": self._completion_outcome(correlation_id) or "unknown",
+                        "durable_outcome": self._completion_outcome(correlation_id),
                     },
                 )
             return None
@@ -880,22 +998,11 @@ class DurableAgentState:
         receipt = self.data.completed_correlations.get(correlation_id, {})
         if DurableStateFields.OUTCOME in receipt:
             return receipt[DurableStateFields.OUTCOME]
-        mailbox = self.data.response_mailbox.get(correlation_id)
-        if mailbox is None:
-            return None
-        return invocation_outcome(
-            load_agent_response(mailbox[DurableStateFields.RESPONSE]), legacy=receipt.get("legacy", False)
-        )
+        return None
 
     def _backfill_completion_outcomes(self, *, require_known: bool = False) -> None:
-        """Enrich old receipts from retained evidence without changing time or availability."""
+        """Require complete shared receipts without inferring unknown historical outcomes."""
         _validate_completion_outcomes(self.data.completed_correlations, self.data.response_mailbox)
-        for correlation_id, receipt in self.data.completed_correlations.items():
-            outcome = self._completion_outcome(correlation_id)
-            if outcome is not None:
-                receipt.setdefault(DurableStateFields.OUTCOME, outcome)
-            elif require_known:
-                raise ValueError("A known completion outcome requires authoritative retained result evidence.")
 
     def record_response(
         self,
@@ -917,24 +1024,46 @@ class DurableAgentState:
                 A retained failure proves failure, but missing error content cannot prove success.
         """
         _validate_completion_outcomes(self.data.completed_correlations, self.data.response_mailbox)
+        validate_identifier(correlation_id, "correlationId")
         if correlation_id in self.data.completed_correlations:
             return
+        if self.schema_version != self.SCHEMA_VERSION:
+            raise ValueError("Recording a terminal result requires the writable shared schema version.")
+        if response.additional_properties.get("durable_status") in ("accepted", "already_completed") or any(
+            content.type == "error" and content.error_code == "response_expired"
+            for message in response.messages
+            if message.role != "tool"
+            for content in message.contents
+        ):
+            raise ValueError("A new completion requires a known invocation outcome, not an acknowledgement.")
+        if (
+            isinstance(delivery_window_seconds, bool)
+            or not isinstance(delivery_window_seconds, int)
+            or delivery_window_seconds <= 0
+        ):
+            raise ValueError("delivery_window_seconds must be a positive integer.")
         timestamp = now or datetime.now(timezone.utc)
         _parse_delivery_timestamp(timestamp.isoformat())
-        payload = _json_snapshot(serialize_agent_response(response))
-        outcome = invocation_outcome(load_agent_response(payload), legacy=legacy)
-        if outcome is None and not legacy:
+        core_payload = _json_snapshot(serialize_agent_response(response))
+        outcome = invocation_outcome(load_agent_response(core_payload), legacy=legacy)
+        if outcome is None:
             raise ValueError("A new completion requires a known invocation outcome, not an acknowledgement.")
-        self.data.response_mailbox[correlation_id] = {
-            DurableStateFields.RESPONSE: payload,
-            DurableStateFields.CREATED_AT: timestamp.isoformat(),
-            DurableStateFields.EXPIRES_AT: (timestamp + timedelta(seconds=delivery_window_seconds)).isoformat(),
-        }
-        self.data.completed_correlations[correlation_id] = {
+        payload = serialize_terminal_response(core_payload)
+        completion = {
+            "correlationId": correlation_id,
+            "outcome": outcome,
             DurableStateFields.COMPLETED_AT: timestamp.isoformat(),
-            **({DurableStateFields.OUTCOME: outcome} if outcome is not None else {}),
-            **({"legacy": True} if legacy else {}),
+            "resultExpiresAt": (timestamp + timedelta(seconds=delivery_window_seconds)).isoformat(),
         }
+        result = {**completion, "response": payload}
+        if outcome == "failed":
+            result["error"] = terminal_error(response)
+        receipt = {**completion, "resultState": "available"}
+        results = {**self.data.response_mailbox, correlation_id: result}
+        receipts = {**self.data.completed_correlations, correlation_id: receipt}
+        _validate_completion_outcomes(receipts, results)
+        self.data.response_mailbox[correlation_id] = result
+        self.data.completed_correlations[correlation_id] = receipt
 
     def expire_responses(self, *, now: datetime | None = None) -> None:
         """Expire payloads, preserving the original completion time and known outcome.
@@ -944,15 +1073,14 @@ class DurableAgentState:
         """
         _validate_completion_outcomes(self.data.completed_correlations, self.data.response_mailbox)
         timestamp = now or datetime.now(timezone.utc)
+        _parse_delivery_timestamp(timestamp.isoformat())
         for correlation_id, mailbox in list(self.data.response_mailbox.items()):
-            expiry = _parse_delivery_timestamp(mailbox[DurableStateFields.EXPIRES_AT])
-            if timestamp >= expiry:
-                # Older receipts may lack the outcome. Preserve what their independent
-                # result proves before deleting it, never infer from the transcript.
-                outcome = self._completion_outcome(correlation_id)
-                receipt = self.data.completed_correlations.get(correlation_id)
-                if receipt is not None and outcome is not None:
-                    receipt.setdefault(DurableStateFields.OUTCOME, outcome)
+            if "resultExpiresAt" not in mailbox:
+                continue
+            if timestamp_reached(mailbox["resultExpiresAt"], now=timestamp):
+                receipt = self.data.completed_correlations[correlation_id]
+                receipt["resultState"] = "unavailable"
+                receipt["resultUnavailableAt"] = timestamp.isoformat()
                 del self.data.response_mailbox[correlation_id]
 
     def prepare_for_write(self, *, delivery_window_seconds: int) -> None:
@@ -962,9 +1090,13 @@ class DurableAgentState:
             delivery_window_seconds: Retained for source compatibility; migration now
                 requires an explicit destination operation, including its grace policy.
         """
-        _validate_delivery_layout(self.data.unknown_fields)
         _validate_completion_outcomes(self.data.completed_correlations, self.data.response_mailbox)
         if self.schema_version == self.SCHEMA_VERSION:
+            self.to_dict()
+            if "pythonIngestion" in self.data.unknown_fields:
+                raise ValueError(
+                    "Writing requires a supported Python ingestion profile; opaque bookkeeping cannot be ignored."
+                )
             return
         if re.fullmatch(r"1\.[0-9]+\.[0-9]+", self.schema_version) is None:
             raise ValueError(
@@ -995,7 +1127,7 @@ class DurableAgentStateEntry:
             entries, which answer no request.
         created_at: Timestamp when the entry was created
         messages: List of messages in this entry
-        extensionData: Optional additional metadata (not serialized per schema)
+        extensionData: Optional explicit metadata, separate from unknown sibling fields
 
     Request-only Attributes:
         responseType: Expected response type ("text" or "json") - only for request entries
@@ -1007,7 +1139,7 @@ class DurableAgentStateEntry:
 
     json_type: DurableAgentStateEntryJsonType | str
     correlation_id: str | None
-    created_at: datetime
+    created_at: datetime | None
     messages: list[DurableAgentStateMessage]
     extension_data: dict[str, Any] | None
 
@@ -1015,7 +1147,7 @@ class DurableAgentStateEntry:
         self,
         json_type: DurableAgentStateEntryJsonType | str,
         correlation_id: str | None,
-        created_at: datetime,
+        created_at: datetime | None,
         messages: list[DurableAgentStateMessage],
         extension_data: dict[str, Any] | None = None,
     ) -> None:
@@ -1025,14 +1157,39 @@ class DurableAgentStateEntry:
         self.messages = messages
         self.extension_data = extension_data
         self.unknown_fields: dict[str, Any] = {}
+        self._raw_shadow: _RawShadow | None = None
+
+    @property
+    def is_error_response(self) -> bool:
+        """Identify entry-local failure evidence without excluding its earlier tool exchange."""
+        if self.json_type == DurableAgentStateEntryJsonType.ERROR_RESPONSE:
+            return True
+        return self.json_type == DurableAgentStateEntryJsonType.RESPONSE and (
+            (self.extension_data or {}).get("durable_status") == "error"
+            or any(
+                content.type == ContentTypes.ERROR
+                for message in self.messages
+                if message.role != "tool"
+                for content in message.contents
+            )
+        )
 
     def to_dict(self) -> dict[str, Any]:
+        projection = self._to_dict()
+        return self._raw_shadow.merge(projection) if self._raw_shadow is not None else _json_snapshot(projection)
+
+    def _capture_raw(self, data: dict[str, Any]) -> None:
+        self.unknown_fields = _entry_unknown_fields(self, data)
+        self._raw_shadow = _RawShadow(data, self._to_dict())
+
+    def _to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             **deepcopy(self.unknown_fields),
             DurableStateFields.TYPE_DISCRIMINATOR: self.json_type,
-            DurableStateFields.CREATED_AT: self.created_at.isoformat(),
             DurableStateFields.MESSAGES: [m.to_dict() for m in self.messages],
         }
+        if self.created_at is not None:
+            result[DurableStateFields.CREATED_AT] = self.created_at.isoformat()
         if self.correlation_id is not None:
             # Omitted rather than written as null. A compaction entry answers no request and so has
             # no correlation, and "absent" says that where an explicit null only says the field
@@ -1045,7 +1202,8 @@ class DurableAgentStateEntry:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DurableAgentStateEntry:
-        created_at = _parse_created_at(data.get(DurableStateFields.CREATED_AT))
+        data = deepcopy(data)
+        created_at = _parse_transcript_created_at(data.get(DurableStateFields.CREATED_AT))
         messages = _parse_messages(data)
 
         entry = cls(
@@ -1055,7 +1213,7 @@ class DurableAgentStateEntry:
             messages=messages,
             extension_data=data.get(DurableStateFields.EXTENSION_DATA),
         )
-        entry.unknown_fields = _entry_unknown_fields(entry, data)
+        entry._capture_raw(data)
         return entry
 
 
@@ -1067,7 +1225,7 @@ class DurableAgentStateUnknownEntry(DurableAgentStateEntry):
         super().__init__(
             json_type=str(raw.get(DurableStateFields.TYPE_DISCRIMINATOR, "unknown")),
             correlation_id=raw.get(DurableStateFields.CORRELATION_ID),
-            created_at=datetime.min.replace(tzinfo=timezone.utc),
+            created_at=None,
             messages=[],
         )
 
@@ -1099,7 +1257,7 @@ class DurableAgentStateRequest(DurableAgentStateEntry):
     def __init__(
         self,
         correlation_id: str | None,
-        created_at: datetime,
+        created_at: datetime | None,
         messages: list[DurableAgentStateMessage],
         extension_data: dict[str, Any] | None = None,
         response_type: str | None = None,
@@ -1117,8 +1275,8 @@ class DurableAgentStateRequest(DurableAgentStateEntry):
         self.response_schema = response_schema
         self.orchestration_id = orchestration_id
 
-    def to_dict(self) -> dict[str, Any]:
-        data = super().to_dict()
+    def _to_dict(self) -> dict[str, Any]:
+        data = super()._to_dict()
         if self.orchestration_id is not None:
             data[DurableStateFields.ORCHESTRATION_ID] = self.orchestration_id
         if self.response_type is not None:
@@ -1129,7 +1287,8 @@ class DurableAgentStateRequest(DurableAgentStateEntry):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DurableAgentStateRequest:
-        created_at = _parse_created_at(data.get(DurableStateFields.CREATED_AT))
+        data = deepcopy(data)
+        created_at = _parse_transcript_created_at(data.get(DurableStateFields.CREATED_AT))
         messages = _parse_messages(data)
 
         entry = cls(
@@ -1141,7 +1300,7 @@ class DurableAgentStateRequest(DurableAgentStateEntry):
             response_schema=data.get(DurableStateFields.RESPONSE_SCHEMA),
             orchestration_id=data.get(DurableStateFields.ORCHESTRATION_ID),
         )
-        entry.unknown_fields = _entry_unknown_fields(entry, data)
+        entry._capture_raw(data)
         return entry
 
     @staticmethod
@@ -1185,7 +1344,7 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
     def __init__(
         self,
         correlation_id: str | None,
-        created_at: datetime,
+        created_at: datetime | None,
         messages: list[DurableAgentStateMessage],
         extension_data: dict[str, Any] | None = None,
         usage: DurableAgentStateUsage | None = None,
@@ -1199,15 +1358,16 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
         )
         self.usage = usage
 
-    def to_dict(self) -> dict[str, Any]:
-        data = super().to_dict()
+    def _to_dict(self) -> dict[str, Any]:
+        data = super()._to_dict()
         if self.usage is not None:
             data[DurableStateFields.USAGE] = self.usage.to_dict()
         return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DurableAgentStateResponse:
-        created_at = _parse_created_at(data.get(DurableStateFields.CREATED_AT))
+        data = deepcopy(data)
+        created_at = _parse_transcript_created_at(data.get(DurableStateFields.CREATED_AT))
         messages = _parse_messages(data)
 
         usage_dict = data.get(DurableStateFields.USAGE)
@@ -1224,7 +1384,7 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
             extension_data=data.get(DurableStateFields.EXTENSION_DATA),
             usage=usage,
         )
-        entry.unknown_fields = _entry_unknown_fields(entry, data)
+        entry._capture_raw(data)
         return entry
 
     @classmethod
@@ -1251,7 +1411,7 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
         usage_details = response_entry.usage.to_usage_details() if response_entry.usage is not None else UsageDetails()
 
         return AgentResponse(
-            created_at=response_entry.created_at.isoformat(),
+            created_at=response_entry.to_dict().get(DurableStateFields.CREATED_AT),
             messages=messages,
             usage_details=usage_details,
             additional_properties=(
@@ -1290,7 +1450,7 @@ class DurableAgentStateCompaction(DurableAgentStateEntry):
 
     def __init__(
         self,
-        created_at: datetime,
+        created_at: datetime | None,
         messages: list[DurableAgentStateMessage],
         correlation_id: str | None = None,
         extension_data: dict[str, Any] | None = None,
@@ -1305,13 +1465,14 @@ class DurableAgentStateCompaction(DurableAgentStateEntry):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DurableAgentStateCompaction:
+        data = deepcopy(data)
         entry = cls(
-            created_at=_parse_created_at(data.get(DurableStateFields.CREATED_AT)),
+            created_at=_parse_transcript_created_at(data.get(DurableStateFields.CREATED_AT)),
             messages=_parse_messages(data),
             correlation_id=data.get(DurableStateFields.CORRELATION_ID),
             extension_data=data.get(DurableStateFields.EXTENSION_DATA),
         )
-        entry.unknown_fields = _entry_unknown_fields(entry, data)
+        entry._capture_raw(data)
         return entry
 
 
@@ -1362,13 +1523,28 @@ class DurableAgentStateMessage:
         self.extension_data = extension_data
         self.unknown_fields: dict[str, Any] = {}
         self.original_message_id: str | None = None
+        self._has_original_message_id = False
+        self._history_identity_profile: dict[str, Any] | None = None
+        self._raw_shadow: _RawShadow | None = None
 
     @property
     def public_message_id(self) -> str | None:
         """Return the application ID, independently of the durable reconciliation key."""
-        return self.original_message_id if self.original_message_id is not None else self.message_id
+        if self._has_original_message_id or self.original_message_id is not None:
+            return self.original_message_id
+        return self.message_id
+
+    def set_history_id(self, history_id: str) -> None:
+        """Assign a reconciliation key without changing even an absent public identity."""
+        self.original_message_id = self.public_message_id
+        self._has_original_message_id = True
+        self.message_id = history_id
 
     def to_dict(self) -> dict[str, Any]:
+        projection = self._to_dict()
+        return self._raw_shadow.merge(projection) if self._raw_shadow is not None else _json_snapshot(projection)
+
+    def _to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             **deepcopy(self.unknown_fields),
             DurableStateFields.ROLE: self.role,
@@ -1379,20 +1555,25 @@ class DurableAgentStateMessage:
             result[DurableStateFields.CREATED_AT] = self.created_at.isoformat()
         if self.author_name is not None:
             result[DurableStateFields.AUTHOR_NAME] = self.author_name
-        if self.message_id is not None:
-            result[DurableStateFields.MESSAGE_ID] = self.message_id
-        if self.original_message_id is not None:
-            if not isinstance(self.original_message_id, str):
-                raise ValueError("originalMessageId must be a string when present.")
-            result["originalMessageId"] = self.original_message_id
+        if self.public_message_id is not None:
+            result[DurableStateFields.MESSAGE_ID] = self.public_message_id
+        if self.message_id is not None and (self._has_original_message_id or self.original_message_id is not None):
+            if not isinstance(self.message_id, str) or (
+                self.original_message_id is not None and not isinstance(self.original_message_id, str)
+            ):
+                raise ValueError("Message identities must be strings when present.")
+            if {"pythonHistoryId", "pythonHistoryIdentity"}.intersection(self.unknown_fields):
+                raise ValueError("Cannot replace opaque foreign Python history identity metadata.")
+            result["pythonHistoryId"] = self.message_id
+            result["pythonHistoryIdentity"] = deepcopy(self._history_identity_profile or _HISTORY_IDENTITY_PROFILE)
         if self.extension_data is not None:
             result[DurableStateFields.EXTENSION_DATA] = self.extension_data
         return _json_snapshot(result)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DurableAgentStateMessage:
-        data_created_at = data.get(DurableStateFields.CREATED_AT)
-        created_at = _parse_created_at(data_created_at) if data_created_at else None
+        data = deepcopy(data)
+        created_at = _parse_transcript_created_at(data.get(DurableStateFields.CREATED_AT))
 
         message = cls(
             role=data.get(DurableStateFields.ROLE, ""),
@@ -1402,10 +1583,6 @@ class DurableAgentStateMessage:
             message_id=data.get(DurableStateFields.MESSAGE_ID),
             extension_data=data.get(DurableStateFields.EXTENSION_DATA),
         )
-        if "originalMessageId" in data:
-            if not isinstance(data["originalMessageId"], str):
-                raise ValueError("originalMessageId must be a string when present.")
-            message.original_message_id = data["originalMessageId"]
         known = {
             DurableStateFields.ROLE,
             DurableStateFields.CONTENTS,
@@ -1413,9 +1590,16 @@ class DurableAgentStateMessage:
             DurableStateFields.CREATED_AT,
             DurableStateFields.MESSAGE_ID,
             DurableStateFields.EXTENSION_DATA,
-            "originalMessageId",
         }
+        if _has_python_profile(data.get("pythonHistoryIdentity"), _HISTORY_IDENTITY_PROFILE):
+            history_id = data.get("pythonHistoryId")
+            if not isinstance(history_id, str) or not history_id.strip():
+                raise ValueError("The Python history-identity profile requires a nonblank pythonHistoryId.")
+            message.set_history_id(history_id)
+            message._history_identity_profile = deepcopy(data["pythonHistoryIdentity"])
+            known.update(("pythonHistoryId", "pythonHistoryIdentity"))
         message.unknown_fields = {key: deepcopy(value) for key, value in data.items() if key not in known}
+        message._raw_shadow = _RawShadow(data, message._to_dict())
         return message
 
     @property
@@ -1465,8 +1649,11 @@ class DurableAgentStateMessage:
                 content.content = original
             else:
                 mapped = content.core_projection()
-                content.extensionData = {
-                    "coreContent": {key: value for key, value in original.items() if key not in mapped}
+                content.unknown_fields = {
+                    "pythonCoreFields": {
+                        **_CORE_FIELDS_PROFILE,
+                        "fields": {key: value for key, value in original.items() if key not in mapped},
+                    }
                 }
         known = {"type", "role", "contents", "author_name", "message_id", "additional_properties"}
         stored.unknown_fields = {key: value for key, value in raw.items() if key not in known}
@@ -1597,11 +1784,12 @@ class DurableAgentStateErrorContent(DurableAgentStateContent):
 
     message: str | None = None
     error_code: str | None = None
-    details: str | None = None
+    details: Any = None
 
     type: str = ContentTypes.ERROR
+    _NULLABLE_FIELDS: ClassVar[frozenset[str]] = frozenset({DurableStateFields.DETAILS})
 
-    def __init__(self, message: str | None = None, error_code: str | None = None, details: str | None = None) -> None:
+    def __init__(self, message: str | None = None, error_code: str | None = None, details: Any = None) -> None:
         self.message = message
         self.error_code = error_code
         self.details = details
@@ -1927,6 +2115,7 @@ class DurableAgentStateUsage:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DurableAgentStateUsage:
+        data = deepcopy(data)
         usage = cls(
             input_token_count=data.get(DurableStateFields.INPUT_TOKEN_COUNT),
             output_token_count=data.get(DurableStateFields.OUTPUT_TOKEN_COUNT),
@@ -1947,35 +2136,39 @@ class DurableAgentStateUsage:
         if usage is None:
             return None
 
-        # Collect all non-standard fields into extension_data
+        # Only integer counts map to typed wire fields. Null and other provider
+        # values remain explicit JSON metadata rather than disappearing or coercing.
+        counts = {key: value for key, value in usage.items() if type(value) is int}
         extension_data: dict[str, Any] = {
-            k: v for k, v in usage.items() if k not in DurableAgentStateUsage._STANDARD_USAGE_FIELDS
+            key: deepcopy(value)
+            for key, value in usage.items()
+            if key not in DurableAgentStateUsage._STANDARD_USAGE_FIELDS or key not in counts
         }
 
         return DurableAgentStateUsage(
-            input_token_count=cast("int | None", usage.get(DurableAgentStateUsage._INPUT_TOKEN_COUNT)),
-            output_token_count=cast("int | None", usage.get(DurableAgentStateUsage._OUTPUT_TOKEN_COUNT)),
-            total_token_count=cast("int | None", usage.get(DurableAgentStateUsage._TOTAL_TOKEN_COUNT)),
+            input_token_count=counts.get(DurableAgentStateUsage._INPUT_TOKEN_COUNT),
+            output_token_count=counts.get(DurableAgentStateUsage._OUTPUT_TOKEN_COUNT),
+            total_token_count=counts.get(DurableAgentStateUsage._TOTAL_TOKEN_COUNT),
             extensionData=extension_data if extension_data else None,
         )
 
     def to_usage_details(self) -> UsageDetails:
         # Convert back to AI SDK UsageDetails
-        result = cast(
+        return cast(
             UsageDetails,
             {
-                key: value
-                for key, value in (
-                    (self._INPUT_TOKEN_COUNT, self.input_token_count),
-                    (self._OUTPUT_TOKEN_COUNT, self.output_token_count),
-                    (self._TOTAL_TOKEN_COUNT, self.total_token_count),
-                )
-                if value is not None
+                **deepcopy(self.extensionData or {}),
+                **{
+                    key: value
+                    for key, value in (
+                        (self._INPUT_TOKEN_COUNT, self.input_token_count),
+                        (self._OUTPUT_TOKEN_COUNT, self.output_token_count),
+                        (self._TOTAL_TOKEN_COUNT, self.total_token_count),
+                    )
+                    if value is not None
+                },
             },
         )
-        if self.extensionData:
-            result.update(deepcopy(self.extensionData))  # type: ignore[typeddict-item]
-        return result
 
 
 class DurableAgentStateUsageContent(DurableAgentStateContent):
@@ -2036,7 +2229,9 @@ class DurableAgentStateUnknownContent(DurableAgentStateContent):
     @staticmethod
     def from_unknown_content(content: Any) -> DurableAgentStateUnknownContent:
         if isinstance(content, Content):
-            return DurableAgentStateUnknownContent(content=content.to_dict())
+            stored = DurableAgentStateUnknownContent(content=_json_snapshot(content.to_dict()))
+            stored.unknown_fields = {"pythonContentEncoding": deepcopy(_CONTENT_ENCODING_PROFILE)}
+            return stored
         return DurableAgentStateUnknownContent(content=content)
 
     def to_core_content(self) -> Content:
@@ -2045,7 +2240,13 @@ class DurableAgentStateUnknownContent(DurableAgentStateContent):
 
     def to_ai_content(self) -> Content:
         content_value: Any = self.content
-        if isinstance(content_value, dict) and "type" in content_value:
+        if _has_python_profile((self.unknown_fields or {}).get("pythonContentEncoding"), _CONTENT_ENCODING_PROFILE):
+            if (
+                not isinstance(content_value, dict)
+                or not isinstance(cast(dict[str, Any], content_value).get("type"), str)
+                or not content_value["type"]
+            ):
+                raise ValueError("The Python content profile requires a canonical Core content object.")
             return (
                 load_agent_response({"messages": [{"role": "assistant", "contents": [content_value]}]})
                 .messages[0]

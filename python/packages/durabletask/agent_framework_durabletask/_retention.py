@@ -517,7 +517,9 @@ def _protected_entries(
         for entry in history
         if entry.json_type in (DurableAgentStateEntryJsonType.RESPONSE, DurableAgentStateEntryJsonType.ERROR_RESPONSE)
         and entry.correlation_id not in completed
-        and _as_utc(entry.created_at) > cutoff
+        # Without either independent completion or a recorded time, age cannot
+        # establish safe delivery expiry. Hold the whole exchange conservatively.
+        and (entry.created_at is None or _as_utc(entry.created_at) > cutoff)
     ]
     undelivered = {entry.correlation_id for entry in responses if entry.correlation_id is not None}
     response_ids = {id(entry) for entry in responses}

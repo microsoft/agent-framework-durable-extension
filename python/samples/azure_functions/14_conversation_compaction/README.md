@@ -5,6 +5,14 @@ This sample demonstrates hosting an agent whose conversation history is **persis
 Framework. It is the Azure Functions counterpart to the standalone
 [`13_conversation_compaction`](../../13_conversation_compaction) sample.
 
+> [!WARNING]
+> This is an isolated PR #59 prototype, not a production drop-in. Use a fresh hub with compatible
+> canonical `2.0.0` workers and all clients, and explicitly acknowledge it with `isolated_v2`.
+> The abandoned private `2.0.0` state and in-flight runs have no detection, conversion or resume path.
+> Keep old workflow histories on the old engine. Schema validation and localhost do not prove
+> isolation. Broader validation remains ongoing, with no .NET interoperability claim. See
+> [prototype scope](../../README.md#pr-59-prototype-scope).
+
 ## Key Concepts Demonstrated
 
 - Configuring compaction the ordinary core way, an `InMemoryHistoryProvider` plus a
@@ -39,8 +47,23 @@ app = AgentFunctionApp(
 
 This sample stores inputs and outputs and keeps them with explicit `retention="keep_all"` and
 `max_state_bytes=None`, which are also the host defaults. Original responses live independently
-in the correlation-keyed `responseMailbox` until delivery expiry. `completedCorrelations` keeps
-completion evidence after those payloads expire.
+in canonical `terminalResults`, keyed by correlation ID, with matching `completionReceipts`.
+
+Each result and receipt has `correlationId`, known `outcome` (`succeeded` or `failed`) and `completedAt`.
+The result includes the full inline `response`, including `messages`, optional structured `value`
+(even null or falsey values) and metadata. Failure also requires canonical `error.code` and
+`error.message`. Success forbids `error`. Receipt `resultState="available"` requires a matching
+result. `unavailable` forbids a result and requires `resultUnavailableAt`. Completion facts and
+optional `resultExpiresAt` must agree between result and receipt.
+
+The Python runtime assigns a delivery deadline. `resultExpiresAt` is optional in the shared contract
+and independent of transcript retention. At or after a configured deadline, lookup reports
+completed-but-result-unavailable with the retained outcome, even before physical cleanup. It does
+not return the expired payload, report pending work, rerun the request or rebuild an original from
+compacted history. Cleanup removes the result and records `resultUnavailableAt` without changing
+completion facts. Idle physical cleanup needs an application-owned schedule or backend operation.
+There is no `unknown` v2 outcome. See the
+[delivery contract](../../../packages/durabletask/README.md#service-ownership-delivery-and-reset).
 
 ### Retention and state budgets
 
@@ -67,7 +90,7 @@ responses still owed to callers. A burst of turns can fill a small budget even a
 pruned. Do not shorten delivery expiry to force the sample to fit.
 
 Neither mode gives unlimited capacity. Completion receipts persist until entity deletion, and
-mailbox expiry is separate from transcript retention. These settings do not prune an external
+terminal result expiry is separate from transcript retention. These settings do not prune an external
 store or service-managed history.
 
 ### Client-side vs service-managed history
@@ -83,9 +106,15 @@ control model context rather than Foundry's service-managed history.
 
 ## Prerequisites
 
-Follow the common setup steps in `../README.md` to install tooling, configure Foundry
+Follow the [common setup steps](../README.md) to install tooling, configure Foundry
 credentials, and install the Python dependencies for this sample. This sample uses
 `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`.
+
+Before starting the host, select a new isolated hub in `TASKHUB_NAME` and the `TaskHub` field of
+`DURABLE_TASK_SCHEDULER_CONNECTION_STRING`. Point all compatible workers and clients at that hub.
+Only after verifying isolation, set `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2`. Its template value
+is deliberately blank. The sample relies on this environment acknowledgement, not automatic
+isolation or migration of old state and workflow histories.
 
 ## Running the Sample
 

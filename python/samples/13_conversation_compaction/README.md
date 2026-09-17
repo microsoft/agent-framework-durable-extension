@@ -3,6 +3,14 @@
 Shows an agent whose conversation history is **persisted durably** and **compacted as it grows**,
 using the same configuration you would write for in-process Agent Framework.
 
+> [!WARNING]
+> This is an isolated PR #59 prototype, not a production drop-in. Use a fresh hub with compatible
+> canonical `2.0.0` workers and all clients, and explicitly acknowledge it with `isolated_v2`.
+> The abandoned private `2.0.0` state and in-flight runs have no detection, conversion or resume path.
+> Keep old workflow histories on the old engine. Schema validation and localhost do not prove
+> isolation. Broader validation remains ongoing, with no .NET interoperability claim. See
+> [prototype scope](../README.md#pr-59-prototype-scope).
+
 ## What this demonstrates
 
 The agent is built with a plain `InMemoryHistoryProvider` and a `CompactionProvider`:
@@ -33,9 +41,24 @@ Registering that agent with the durable runtime changes nothing about how you co
   model on the next turn. Individual messages can still be large.
 
 With this sample's storage flags and explicit `retention="keep_all", max_state_bytes=None`,
-compaction does not delete the local transcript. Original responses are also retained temporarily
-in `responseMailbox`, keyed by correlation id, independently of the model's compacted history.
-`completedCorrelations` records completion even after response delivery expires.
+compaction does not delete the local transcript. Original response envelopes live independently
+in canonical `terminalResults`, keyed by correlation ID, with matching `completionReceipts`.
+
+Each result and receipt has `correlationId`, known `outcome` (`succeeded` or `failed`) and `completedAt`.
+The result includes the full inline `response`, including `messages`, optional structured `value`
+(even null or falsey values) and metadata. Failure also requires canonical `error.code` and
+`error.message`. Success forbids `error`. Receipt `resultState="available"` requires a matching
+result. `unavailable` forbids a result and requires `resultUnavailableAt`. Completion facts and
+optional `resultExpiresAt` must agree between result and receipt.
+
+The Python runtime assigns a delivery deadline. `resultExpiresAt` is optional in the shared contract
+and independent of transcript retention. At or after a configured deadline, lookup reports
+completed-but-result-unavailable with the retained outcome, even before physical cleanup. It does
+not return the expired payload, report pending work, rerun the request or rebuild an original from
+compacted history. Cleanup removes the result and records `resultUnavailableAt` without changing
+completion facts. Idle physical cleanup needs an application-owned schedule or backend operation.
+There is no `unknown` v2 outcome. See the
+[delivery contract](../../packages/durabletask/README.md#service-ownership-delivery-and-reset).
 
 ### Retention and state budgets
 
@@ -59,7 +82,7 @@ Use `retention="follow_compaction"` to opt into eager pruning as well. The water
 `0.85` and `0.70`, with `0 < low_watermark < high_watermark <= 1`. Pressure eviction starts at the
 high watermark and aims for the low watermark, or the protected state size if that is larger.
 
-The budget measures the whole serialized entity, including live mailbox payloads, completion
+The budget measures the whole serialized entity, including live terminal results, completion
 receipts, session state, and metadata. Pressure eviction preserves protected state and evicts whole
 atomic transcript groups. If protected state alone reaches the high watermark, the operation fails with
 `StateCapacityError` rather than discarding responses still owed to callers. Size a budget for those
@@ -67,7 +90,7 @@ delivery obligations and the backend limit. A burst of turns can fill a small bu
 transcript pruning. Do not shorten delivery expiry just to make a demo fit.
 
 Neither retention mode provides unlimited capacity. Completion receipts persist until entity
-deletion, and mailbox payloads expire independently of transcript retention. Retention does not
+deletion, and terminal result expiry is independent of transcript retention. Retention does not
 prune an external store or service-managed history.
 
 ### Client-side vs service-managed history
@@ -91,8 +114,8 @@ compaction control model context.
 
 2. Copy `.env.example` to `.env` and set `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`.
 
-   Choose a **new isolated task hub** for `TASKHUB`, shared only with compatible schema 2
-   workers and upgraded clients. Use the same hub for the worker and client. Keep old
+   Choose a **new isolated task hub** for `TASKHUB`, shared only with compatible canonical `2.0.0`
+   workers and clients. Use the same hub for the worker and client. Keep old
    workflow histories on the old engine, not on this hub.
 
    Only after verifying those conditions, explicitly set the following in `.env`.

@@ -4,7 +4,7 @@
 
 import json
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, get_args, get_origin, get_type_hints
 
@@ -19,7 +19,7 @@ from agent_framework_durabletask._response_utils import invocation_outcome, seri
 
 CORRELATION = "completion-under-review"
 OLD = datetime(2024, 1, 1, tzinfo=timezone.utc)
-CONFLICT = "outcome.*conflicts"
+CONFLICT = "agree|conflicts"
 
 
 def _response(outcome: str) -> AgentResponse:
@@ -28,11 +28,10 @@ def _response(outcome: str) -> AgentResponse:
     return AgentResponse(messages=[Message("assistant", ["original success"])])
 
 
-def _snapshot(outcome: str = "succeeded", *, expired: bool = False, legacy: bool = False) -> dict[str, Any]:
+def _snapshot(outcome: str = "succeeded", *, expired: bool = False) -> dict[str, Any]:
     state = DurableAgentState()
-    # An earlier, eligible record catches partial expiry/backfill before a later conflict.
+    # An earlier due result catches partial cleanup before a later conflict.
     state.record_response("earlier", _response("succeeded"), delivery_window_seconds=60, now=OLD)
-    state.data.completed_correlations["earlier"].pop("outcome")
     state.record_response(
         CORRELATION,
         _response(outcome),
@@ -40,13 +39,11 @@ def _snapshot(outcome: str = "succeeded", *, expired: bool = False, legacy: bool
         now=OLD if expired else datetime.now(timezone.utc),
     )
     state.data.completed_correlations[CORRELATION]["opaque"] = {"keep": [0, False, None]}
-    if legacy:
-        state.data.completed_correlations[CORRELATION]["legacy"] = True
     return state.to_dict()
 
 
 def _conflict(raw: dict[str, Any]) -> None:
-    receipt = raw["data"]["completedCorrelations"][CORRELATION]
+    receipt = raw["data"]["completionReceipts"][CORRELATION]
     receipt["outcome"] = "failed" if receipt["outcome"] == "succeeded" else "succeeded"
 
 
@@ -55,11 +52,9 @@ def _evidence(state: DurableAgentState) -> tuple[dict[str, Any], dict[str, Any]]
 
 
 @pytest.mark.parametrize("outcome", ["succeeded", "failed"])
-@pytest.mark.parametrize("version", ["1.1.0", "2.0.0", "2.7.3"])
 @pytest.mark.parametrize("expired", [False, True])
-def test_cold_read_rejects_opposite_recorded_outcomes(outcome: str, version: str, expired: bool) -> None:
+def test_cold_read_rejects_opposite_recorded_outcomes(outcome: str, expired: bool) -> None:
     raw = _snapshot(outcome, expired=expired)
-    raw["schemaVersion"] = version
     _conflict(raw)
     before = deepcopy(raw)
     with pytest.raises(ValueError, match=CONFLICT):
@@ -77,7 +72,7 @@ def test_warm_boundary_rejects_conflict_without_mutating_any_delivery_record(out
     raw = _snapshot(outcome, expired=True)
     state = DurableAgentState.from_dict(raw)
     _conflict(raw)
-    state.data.completed_correlations = deepcopy(raw["data"]["completedCorrelations"])
+    state.data.completed_correlations = deepcopy(raw["data"]["completionReceipts"])
     before = _evidence(state)
     with pytest.raises(ValueError, match=CONFLICT):
         if boundary == "serialize":
@@ -109,7 +104,7 @@ async def test_entity_warm_conflict_prevents_execution_and_state_writes(outcome:
     original = entity.state
     corrupt = deepcopy(raw)
     _conflict(corrupt)
-    original.data.completed_correlations = corrupt["data"]["completedCorrelations"]
+    original.data.completed_correlations = corrupt["data"]["completionReceipts"]
     before = _evidence(original)
     with pytest.raises(ValueError, match=CONFLICT):
         if operation == "run":
@@ -134,15 +129,27 @@ def _migration_request(source: dict[str, Any], *, strict: bool) -> dict[str, Any
     }
 
 
-@pytest.mark.parametrize("outcome", ["succeeded", "failed"])
+def _legacy_source(*, failed: bool) -> dict[str, Any]:
+    return {
+        "schemaVersion": "1.1.0",
+        "data": {
+            "conversationHistory": [
+                {
+                    "$type": "errorResponse" if failed else "response",
+                    "correlationId": CORRELATION,
+                    "createdAt": OLD.isoformat(),
+                    "messages": [{"role": "assistant", "contents": [{"$type": "text", "text": "retained portion"}]}],
+                }
+            ],
+        },
+    }
+
+
 @pytest.mark.parametrize("strict", [False, True])
-@pytest.mark.parametrize("expired", [False, True])
-def test_both_import_modes_reject_conflicting_source_without_commit(outcome: str, strict: bool, expired: bool) -> None:
-    source = _snapshot(outcome, expired=expired)
-    source["schemaVersion"] = "1.1.0"
-    _conflict(source)
+def test_both_import_modes_reject_ambiguous_legacy_completion_without_commit(strict: bool) -> None:
+    source = _legacy_source(failed=False)
     before = deepcopy(source)
-    with pytest.raises(ValueError, match=CONFLICT):
+    with pytest.raises(ValueError, match="outcome.*evidence"):
         migrate_legacy_state(
             source,
             source_digest=state_snapshot_digest(source),
@@ -155,61 +162,95 @@ def test_both_import_modes_reject_conflicting_source_without_commit(outcome: str
     provider = JsonStateProvider()
     client: Any = RecordingChatClient()
     entity = AgentEntity(Agent(client=client), state_provider=provider)
-    with pytest.raises(ValueError, match=CONFLICT):
+    with pytest.raises(ValueError, match="outcome.*evidence"):
         entity.migrate(_migration_request(source, strict=strict))
     assert source == before
     assert provider.raw == {} and provider.writes == 0 and client.received_messages == []
 
 
-@pytest.mark.parametrize("outcome", ["succeeded", "failed"])
-def test_idempotent_migration_retry_validates_warm_destination(outcome: str) -> None:
-    source = _snapshot(outcome)
-    source["schemaVersion"] = "1.1.0"
+def test_idempotent_migration_retry_validates_warm_destination() -> None:
+    source = _legacy_source(failed=True)
     request = _migration_request(source, strict=True)
+    original_result = {
+        "correlationId": CORRELATION,
+        "outcome": "failed",
+        "completedAt": "2024-01-02T03:04:05.123456789Z",
+        "response": {
+            "messages": [{"role": "assistant", "contents": [{"$type": "text", "text": "original partial result"}]}],
+        },
+        "error": {"code": "provider_error", "message": "Original invocation failed."},
+    }
+    request["completionEvidence"] = {
+        "sourceDigest": state_snapshot_digest(source),
+        "evidenceId": "consistency-completion-journal",
+        "complete": True,
+        "results": [deepcopy(original_result)],
+    }
+    before_request = deepcopy(request)
     provider = JsonStateProvider()
     client: Any = RecordingChatClient()
     entity = AgentEntity(Agent(client=client), state_provider=provider)
     expected = entity.migrate(request)
-    assert entity.migrate(request) == expected and provider.writes == 1
     committed = deepcopy(provider.raw)
+    result = committed["data"]["terminalResults"][CORRELATION]
+    assert result == {**original_result, "resultExpiresAt": result["resultExpiresAt"]}
+    assert committed["data"]["completionReceipts"][CORRELATION]["completedAt"] == original_result["completedAt"]
+    assert entity.migrate(request) == expected and provider.writes == 1
+    assert provider.raw == committed and request == before_request
     corrupt = deepcopy(committed)
     _conflict(corrupt)
     original = entity.state
-    original.data.completed_correlations = corrupt["data"]["completedCorrelations"]
+    original.data.completed_correlations = corrupt["data"]["completionReceipts"]
     warm_before = _evidence(original)
     with pytest.raises(ValueError, match=CONFLICT):
         entity.migrate(request)
     assert entity.state is original and _evidence(original) == warm_before
     assert provider.raw == committed and provider.writes == 1
     assert client.received_messages == []
+    assert request == before_request
 
 
-@pytest.mark.parametrize("receipt_outcome", [None, "succeeded", "failed"])
-def test_ambiguous_legacy_text_never_overrides_or_invents_outcome(receipt_outcome: str | None) -> None:
-    raw = _snapshot(legacy=True)
-    receipt = raw["data"]["completedCorrelations"][CORRELATION]
-    if receipt_outcome is None:
-        receipt.pop("outcome")
+@pytest.mark.parametrize("field", ["completedAt", "resultExpiresAt"])
+def test_mismatched_timestamp_instants_are_rejected(field: str) -> None:
+    raw = _snapshot(expired=True)
+    raw["data"]["completionReceipts"][CORRELATION][field] = "2024-01-01T00:00:01Z"
+    before = deepcopy(raw)
+    with pytest.raises(ValueError, match="agree"):
+        DurableAgentState.from_json(json.dumps(raw))
+    assert raw == before
+
+
+@pytest.mark.parametrize("container", ["terminalResults", "completionReceipts"])
+def test_optional_expiry_presence_must_agree(container: str) -> None:
+    raw = _snapshot()
+    del raw["data"][container][CORRELATION]["resultExpiresAt"]
+    with pytest.raises(ValueError, match="agree"):
+        DurableAgentState.from_dict(raw)
+
+
+@pytest.mark.parametrize("expiry", [False, True])
+def test_equal_timestamp_instants_preserve_original_offsets_and_precision(expiry: bool) -> None:
+    raw = _snapshot(expired=True)
+    result = raw["data"]["terminalResults"][CORRELATION]
+    receipt = raw["data"]["completionReceipts"][CORRELATION]
+    result["completedAt"] = "2024-01-01T00:00:00.123456789Z"
+    receipt["completedAt"] = "2024-01-01T05:30:00.1234567890+05:30"
+    if expiry:
+        result["resultExpiresAt"] = "2024-01-01T01:00:00.123456789Z"
+        receipt["resultExpiresAt"] = "2024-01-01T06:30:00.1234567890+05:30"
     else:
-        receipt["outcome"] = receipt_outcome
-    # Historic migration timestamps may differ from an independently retained mailbox.
-    receipt["completedAt"] = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
-    state = DurableAgentState.from_json(json.dumps(raw))
-    assert state.to_dict() == raw
-    expected_receipt = deepcopy(receipt)
-    state.prepare_for_write(delivery_window_seconds=60)
-    state.expire_responses(now=datetime.max.replace(tzinfo=timezone.utc))
-    restored = DurableAgentState.from_json(state.to_json())
-    expired = restored.try_get_agent_response(CORRELATION)
-    assert expired is not None
-    assert expired.additional_properties["durable_outcome"] == (receipt_outcome or "unknown")
-    assert restored.data.completed_correlations[CORRELATION] == expected_receipt
+        del result["resultExpiresAt"]
+        del receipt["resultExpiresAt"]
+    assert DurableAgentState.from_json(json.dumps(raw)).to_dict() == raw
 
 
-def test_legacy_marker_does_not_hide_affirmative_failure_evidence() -> None:
-    raw = _snapshot("failed", legacy=True)
-    _conflict(raw)
-    with pytest.raises(ValueError, match=CONFLICT):
+@pytest.mark.parametrize("field", ["completedAt", "resultExpiresAt"])
+def test_distinct_submicrosecond_instants_do_not_compare_equal(field: str) -> None:
+    raw = _snapshot(expired=True)
+    hour = "00" if field == "completedAt" else "01"
+    raw["data"]["terminalResults"][CORRELATION][field] = f"2024-01-01T{hour}:00:00.123456781Z"
+    raw["data"]["completionReceipts"][CORRELATION][field] = f"2024-01-01T{hour}:00:00.123456782Z"
+    with pytest.raises(ValueError, match="agree"):
         DurableAgentState.from_dict(raw)
 
 
@@ -222,7 +263,12 @@ def test_duplicate_record_does_not_reclassify_the_replacement_argument(outcome: 
     assert state.to_json() == original
     assert replacement._value_parsed is False
     delivered = state.try_get_agent_response(CORRELATION)
-    assert delivered is not None and serialize_agent_response(delivered) == serialize_agent_response(_response(outcome))
+    assert delivered is not None and invocation_outcome(delivered) == outcome
+    assert [message.to_dict() for message in delivered.messages] == [
+        message.to_dict() for message in _response(outcome).messages
+    ]
+    if outcome == "succeeded":
+        assert serialize_agent_response(delivered) == serialize_agent_response(_response(outcome))
 
 
 @pytest.mark.parametrize("kind", ["tool-error", "approval", "status-error"])
@@ -254,14 +300,28 @@ def test_consistency_uses_invocation_semantics_not_any_error_or_pending_action(k
         DurableAgentState.from_dict(raw)
 
 
+@pytest.mark.parametrize("kind", ["content", "status"])
+def test_matching_success_maps_do_not_hide_affirmative_response_failure(kind: str) -> None:
+    raw = _snapshot()
+    raw["data"]["terminalResults"][CORRELATION]["response"] = (
+        {"messages": [{"role": "assistant", "contents": [{"$type": "error", "message": "provider failed"}]}]}
+        if kind == "content"
+        else {"messages": [], "extensionData": {"durable_status": "error"}}
+    )
+    before = deepcopy(raw)
+    with pytest.raises(ValueError, match="conflicts"):
+        DurableAgentState.from_json(json.dumps(raw))
+    assert raw == before
+
+
 @pytest.fixture(scope="module")
-def private_schema() -> dict[str, Any]:
+def shared_schema() -> dict[str, Any]:
     path = Path(__file__).resolve().parents[4] / "schemas" / "durable-agent-entity-state.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_private_schema_declares_the_runtime_outcomes_as_optional(private_schema: dict[str, Any]) -> None:
-    definition = private_schema["$defs"]["completedCorrelation"]
+def test_shared_schema_requires_exact_runtime_outcomes(shared_schema: dict[str, Any]) -> None:
+    definition = shared_schema["$defs"]["completionReceipt"]
     outcome = definition["properties"]["outcome"]
     runtime_outcomes = {
         value
@@ -270,29 +330,94 @@ def test_private_schema_declares_the_runtime_outcomes_as_optional(private_schema
         for value in get_args(branch)
     }
     assert outcome["type"] == "string" and set(outcome["enum"]) == runtime_outcomes
-    assert "outcome" not in definition["required"]
+    assert "outcome" in definition["required"]
 
 
 @pytest.mark.parametrize("value", [None, "unknown", "", "success", "FAILED", False, 0, [], {}])
-def test_private_schema_rejects_invalid_present_outcomes(private_schema: dict[str, Any], value: Any) -> None:
+def test_shared_schema_rejects_invalid_present_outcomes(shared_schema: dict[str, Any], value: Any) -> None:
     raw = _snapshot()
-    raw["data"].pop("responseMailbox")
-    raw["data"]["completedCorrelations"][CORRELATION]["outcome"] = value
-    assert not Draft202012Validator(private_schema, format_checker=FormatChecker()).is_valid(raw)
+    raw["data"]["completionReceipts"][CORRELATION]["outcome"] = value
+    assert not Draft202012Validator(shared_schema, format_checker=FormatChecker()).is_valid(raw)
     with pytest.raises(ValueError, match="outcome"):
         DurableAgentState.from_dict(raw)
 
 
-@pytest.mark.parametrize("outcome", [None, "succeeded", "failed"])
-def test_private_schema_and_runtime_preserve_outcomeless_or_known_receipts(
-    private_schema: dict[str, Any], outcome: str | None
+@pytest.mark.parametrize("outcome", ["succeeded", "failed"])
+def test_shared_schema_and_runtime_preserve_unavailable_known_receipts(
+    shared_schema: dict[str, Any], outcome: str
 ) -> None:
-    raw = _snapshot()
-    raw["data"].pop("responseMailbox")
-    receipt = raw["data"]["completedCorrelations"][CORRELATION]
-    if outcome is None:
-        receipt.pop("outcome")
-    else:
-        receipt["outcome"] = outcome
-    Draft202012Validator(private_schema, format_checker=FormatChecker()).validate(raw)
+    state = DurableAgentState.from_dict(_snapshot(outcome, expired=True))
+    state.expire_responses(now=datetime.now(timezone.utc))
+    raw = state.to_dict()
+    assert raw["data"]["terminalResults"] == {}
+    assert raw["data"]["completionReceipts"][CORRELATION]["outcome"] == outcome
+    Draft202012Validator(shared_schema, format_checker=FormatChecker()).validate(raw)
     assert DurableAgentState.from_json(json.dumps(raw)).to_dict() == raw
+
+
+def test_missing_outcome_is_rejected_not_backfilled_from_a_retained_result(shared_schema: dict[str, Any]) -> None:
+    raw = _snapshot()
+    del raw["data"]["completionReceipts"][CORRELATION]["outcome"]
+    assert not Draft202012Validator(shared_schema, format_checker=FormatChecker()).is_valid(raw)
+    with pytest.raises(ValueError, match="outcome"):
+        DurableAgentState.from_dict(raw)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "result-identity",
+        "receipt-identity",
+        "missing-receipt",
+        "missing-result",
+        "unavailable-with-result",
+        "unavailable-missing-time",
+        "unavailable-before-expiry",
+        "available-with-unavailable-time",
+        "success-with-error",
+        "failure-without-error",
+        "failure-with-malformed-error",
+    ],
+)
+@pytest.mark.parametrize("warm", [False, True])
+def test_malformed_shared_evidence_rejects_before_any_cleanup(change: str, warm: bool) -> None:
+    raw = _snapshot(expired=True)
+    state = DurableAgentState.from_dict(raw)
+    results, receipts = raw["data"]["terminalResults"], raw["data"]["completionReceipts"]
+    result, receipt = results[CORRELATION], receipts[CORRELATION]
+    if change == "result-identity":
+        result["correlationId"] = CORRELATION.upper()
+    elif change == "receipt-identity":
+        receipt["correlationId"] = CORRELATION.upper()
+    elif change == "missing-receipt":
+        del receipts[CORRELATION]
+    elif change == "missing-result":
+        del results[CORRELATION]
+    elif change.startswith("unavailable-"):
+        receipt["resultState"] = "unavailable"
+        if change != "unavailable-with-result":
+            del results[CORRELATION]
+        if change != "unavailable-missing-time":
+            receipt["resultUnavailableAt"] = (
+                "2024-01-01T00:00:01Z" if change == "unavailable-before-expiry" else "2024-01-01T01:00:01Z"
+            )
+    elif change == "available-with-unavailable-time":
+        receipt["resultUnavailableAt"] = "2024-01-01T01:00:01Z"
+    elif change == "success-with-error":
+        result["error"] = {"code": "ProviderFailed", "message": "failure"}
+    else:
+        result["outcome"] = receipt["outcome"] = "failed"
+        if change == "failure-with-malformed-error":
+            result["error"] = {"code": False, "message": "failure"}
+    before = deepcopy(raw)
+    if warm:
+        state.data.response_mailbox = deepcopy(results)
+        state.data.completed_correlations = deepcopy(receipts)
+        evidence = _evidence(state)
+        with pytest.raises(ValueError):
+            state.expire_responses(now=datetime.now(timezone.utc))
+        assert _evidence(state) == evidence
+    else:
+        with pytest.raises(ValueError):
+            DurableAgentState.from_json(json.dumps(raw))
+    assert raw == before

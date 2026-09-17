@@ -9,7 +9,14 @@ from typing import Any, get_args
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from agent_framework import CharacterEstimatorTokenizer, Content, Message, annotate_message_groups, included_token_count
+from agent_framework import (
+    AgentResponse,
+    CharacterEstimatorTokenizer,
+    Content,
+    Message,
+    annotate_message_groups,
+    included_token_count,
+)
 
 from agent_framework_durabletask import _retention as retention
 from agent_framework_durabletask._durable_agent_state import (
@@ -85,21 +92,19 @@ def _smallest_plain_prefix(state: DurableAgentState, target: int) -> tuple[int, 
 
 def _delivery(state: DurableAgentState, correlations: list[str], *, payload_chars: int = 20) -> None:
     # Use the real state data serializer, not a mock that could hide mailbox bytes from the floor.
-    data: Any = state.data
-    data.response_mailbox = {
-        correlation: {
-            "response": {"messages": [Message("assistant", ["r" * payload_chars]).to_dict()], "metadata": {"v": [1]}},
-            "createdAt": NOW.isoformat(),
-            "expiresAt": (NOW + timedelta(seconds=retention.DELIVERY_WINDOW_SECONDS)).isoformat(),
-            "futureMailboxField": {"keep": True},
-        }
-        for correlation in correlations
-    }
-    data.completed_correlations = {
-        correlation: {"completedAt": NOW.isoformat(), "futureReceiptField": [1, 3]} for correlation in correlations
-    }
-    assert state.to_dict()["data"]["responseMailbox"] == data.response_mailbox
-    assert state.to_dict()["data"]["completedCorrelations"] == data.completed_correlations
+    for correlation in correlations:
+        state.record_response(
+            correlation,
+            AgentResponse(
+                messages=[Message("assistant", ["r" * payload_chars])], additional_properties={"metadata": {"v": [1]}}
+            ),
+            now=NOW,
+            delivery_window_seconds=retention.DELIVERY_WINDOW_SECONDS,
+        )
+        state.data.response_mailbox[correlation]["futureMailboxField"] = {"keep": True}
+        state.data.completed_correlations[correlation]["futureReceiptField"] = [1, 3]
+    assert state.to_dict()["data"]["terminalResults"] == state.data.response_mailbox
+    assert state.to_dict()["data"]["completionReceipts"] == state.data.completed_correlations
 
 
 class TestConfiguration:
@@ -277,6 +282,8 @@ class TestProtectedFloor:
 
     async def test_unknown_entry_payloads_contribute_to_the_floor(self, monkeypatch: pytest.MonkeyPatch) -> None:
         state = _state()
+        # Only historical versions admit opaque entry discriminators.
+        state.schema_version = "1.2.0"
         unknown_kind: Any = "futureKind"
         state.data.conversation_history.insert(
             0, DurableAgentStateEntry(unknown_kind, "opaque", OLD, [_message("opaque", text="p" * 30_000)])
@@ -301,7 +308,7 @@ class TestProtectedFloor:
         removed = await retention.enforce_budget(state, max_state_bytes=16_000)
         assert removed > 0 and "a0" not in _ids(state)
         after = state.to_dict()["data"]
-        for field in ("responseMailbox", "completedCorrelations", "session", "ingestedPositions", "extensionData"):
+        for field in ("terminalResults", "completionReceipts", "session", "ingestedPositions", "extensionData"):
             assert after[field] == before[field]
 
     @pytest.mark.parametrize("has_mailbox", [False, True])
@@ -310,7 +317,7 @@ class TestProtectedFloor:
         _delivery(state, ["c0"])
         data: Any = state.data
         if not has_mailbox:
-            data.response_mailbox.clear()
+            state.expire_responses(now=NOW + timedelta(seconds=retention.DELIVERY_WINDOW_SECONDS))
         for entry in state.data.conversation_history[:4]:
             entry.created_at = NOW
         before = deepcopy(data.completed_correlations)
@@ -318,6 +325,30 @@ class TestProtectedFloor:
         assert "a0" not in _ids(state)
         assert {"u1", "a1"} <= set(_ids(state))
         assert data.completed_correlations == before
+
+    @pytest.mark.parametrize("independent_receipt", [False, True])
+    async def test_undated_response_requires_independent_completion_before_eviction(
+        self, independent_receipt: bool
+    ) -> None:
+        state = _state()
+        if independent_receipt:
+            _delivery(state, ["c0"])
+        raw = state.to_dict()
+        for entry in raw["data"]["conversationHistory"][:2]:
+            del entry["createdAt"]
+        state = DurableAgentState.from_json(json.dumps(raw))
+        assert state.to_dict() == raw
+        assert all(entry.created_at is None for entry in state.data.conversation_history[:2])
+        receipts = deepcopy(state.data.completed_correlations)
+        results = deepcopy(state.data.response_mailbox)
+
+        removed = await retention.enforce_budget(state, max_state_bytes=12_000)
+
+        assert removed > 0
+        remaining = [entry.to_dict() for entry in state.data.conversation_history if entry.correlation_id == "c0"]
+        assert remaining == ([] if independent_receipt else raw["data"]["conversationHistory"][:2])
+        assert state.data.completed_correlations == receipts
+        assert state.data.response_mailbox == results
 
     @pytest.mark.parametrize("field", ["response_mailbox", "completed_correlations"])
     async def test_delivery_records_alone_can_fill_the_floor(self, field: str) -> None:
@@ -357,7 +388,9 @@ class TestSelectionAndMeasurements:
         state = _state(0)
         for index in range(30):
             state.data.conversation_history.append(
-                DurableAgentStateEntry(kind, f"old-{index}", OLD, [_message(f"old-{index}")])
+                DurableAgentStateEntry(
+                    kind, None if kind == "compaction" else f"old-{index}", OLD, [_message(f"old-{index}")]
+                )
             )
         state.data.conversation_history.extend(_state(1).data.conversation_history)
         assert await retention.enforce_budget(state, max_state_bytes=8_000) > 0
@@ -382,7 +415,7 @@ class TestSelectionAndMeasurements:
     async def test_error_delivery_protection_applies_only_inside_legacy_window(self, recent: bool) -> None:
         state = _state()
         occurred_at = NOW - timedelta(seconds=30 if recent else retention.DELIVERY_WINDOW_SECONDS)
-        failure = DurableAgentStateErrorResponse("failed", occurred_at.replace(tzinfo=None), [_message("failure")])
+        failure = DurableAgentStateErrorResponse("failed", occurred_at, [_message("failure")])
         state.data.conversation_history.insert(0, failure)
         assert await retention.enforce_budget(state, max_state_bytes=12_000) > 0
         assert ("failure" in _ids(state)) is recent
@@ -494,13 +527,14 @@ class TestSelectionAndMeasurements:
     async def test_summaries_do_not_replace_the_newest_exchange(self) -> None:
         state = _state()
         newest = state.data.conversation_history[-2:]
-        state.data.conversation_history.append(DurableAgentStateCompaction(NOW, [_message("summary")], "summary-cid"))
+        state.data.conversation_history.append(DurableAgentStateCompaction(NOW, [_message("summary")]))
         assert retention._newest_exchange(state.data.conversation_history) == newest
         assert await retention.enforce_budget(state, max_state_bytes=12_000) > 0
         assert {"u39", "a39"} <= set(_ids(state))
 
     async def test_unknown_entries_and_already_empty_envelopes_remain_opaque(self) -> None:
         state = _state()
+        state.schema_version = "1.2.0"
         future_kind: Any = "futureKind"
         opaque = DurableAgentStateEntry(
             future_kind,

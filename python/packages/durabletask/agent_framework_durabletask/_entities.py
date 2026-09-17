@@ -32,7 +32,6 @@ from ._configuration import validate_response_delivery_window
 from ._durable_agent_state import (
     DurableAgentState,
     DurableAgentStateEntry,
-    DurableAgentStateErrorResponse,
     DurableAgentStateMessage,
     DurableAgentStateRequest,
     DurableAgentStateResponse,
@@ -65,6 +64,7 @@ from ._retention import (
     validate_retention,
 )
 from ._retention_telemetry import record_write, retention_operation
+from ._shared_state_validation import validate_completion_transition, validate_identifier
 from ._state_migration import migrate_legacy_state, state_snapshot_digest
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -171,6 +171,7 @@ class AgentEntityStateProviderMixin:
     """
 
     _state_cache: DurableAgentState | None = None
+    _persisted_state_snapshot: dict[str, Any] | None = None
 
     def _get_state_dict(self) -> dict[str, Any]:
         raise NotImplementedError
@@ -233,29 +234,49 @@ class AgentEntityStateProviderMixin:
         if self._state_cache is None:
             raw_state = self._get_state_dict()
             self._state_cache = DurableAgentState.from_dict(raw_state) if raw_state else DurableAgentState()
+            self._persisted_state_snapshot = deepcopy(raw_state)
         return self._state_cache
 
     @state.setter
     def state(self, value: DurableAgentState) -> None:
         self._state_cache = value
-        self.persist_state()
+        try:
+            self.persist_state()
+        except BaseException:
+            self._restore_persisted_cache()
+            raise
 
     def persist_state(self) -> None:
         """Pass state to the host, which may stage rather than confirm a durable write."""
+        from ._history_provider import current_durable_history_binding
+
+        binding = current_durable_history_binding()
+        if binding is not None and binding.state_provider is self:
+            raise ValueError("Provider hooks cannot commit independently of the enclosing agent operation.")
         if self._state_cache is None:
             self._state_cache = DurableAgentState()
         state = self._state_cache
+        if self._persisted_state_snapshot is None:
+            self._persisted_state_snapshot = deepcopy(self._get_state_dict())
         try:
             payload = state.to_dict()
+            validate_completion_transition(self._persisted_state_snapshot, payload)
         except BaseException:
+            self._restore_persisted_cache()
             record_write(state, stage="serialization", outcome="failed")
             raise
         try:
             self._set_state_dict(payload)
         except BaseException:
+            self._restore_persisted_cache()
             record_write(state, stage="set_state", outcome="failed")
             raise
+        self._persisted_state_snapshot = deepcopy(payload)
         record_write(state, stage="set_state", outcome="returned")
+
+    def _restore_persisted_cache(self) -> None:
+        snapshot = self._persisted_state_snapshot
+        self._state_cache = DurableAgentState.from_dict(snapshot) if snapshot else DurableAgentState()
 
     def replace_cached_state(self, state: DurableAgentState) -> None:
         """Stage or restore an operation snapshot without writing to the backend."""
@@ -353,7 +374,8 @@ class AgentEntity:
         Args:
             request: Source snapshot/digest, sourceSessionId, destinationSessionId,
                 migrationId, ownershipTransferId and optional deliveryEvidence and
-                requireKnownOutcomes, which rejects imports without outcome evidence.
+                completionEvidence. Used sources require original completion evidence
+                regardless of the compatibility argument requireKnownOutcomes.
 
         Returns:
             The committed migration ID and destination session identity.
@@ -369,7 +391,7 @@ class AgentEntity:
         if (
             not isinstance(request, dict)
             or not required <= request.keys()
-            or request.keys() - required - {"deliveryEvidence", "requireKnownOutcomes"}
+            or request.keys() - required - {"deliveryEvidence", "completionEvidence", "requireKnownOutcomes"}
         ):
             raise ValueError("Migration requires a complete explicit source and destination request.")
         for name in required - {"source"}:
@@ -400,6 +422,7 @@ class AgentEntity:
             ownership_transfer_id=request["ownershipTransferId"],
             delivery_window_seconds=self._response_delivery_window_seconds,
             delivery_evidence=request.get("deliveryEvidence"),
+            completion_evidence=request.get("completionEvidence"),
             require_known_outcomes=request.get("requireKnownOutcomes", False),
         )
         staged.data.unknown_fields["migration"].update({"requestDigest": digest, "destinationSessionId": destination})
@@ -438,7 +461,7 @@ class AgentEntity:
 
     def _is_error_response(self, entry: DurableAgentStateEntry) -> bool:
         """Check if a conversation history entry records a failed turn."""
-        return isinstance(entry, (DurableAgentStateErrorResponse, DurableAgentStateUnknownEntry))
+        return entry.is_error_response or isinstance(entry, DurableAgentStateUnknownEntry)
 
     async def run(
         self,
@@ -452,6 +475,7 @@ class AgentEntity:
         else:
             run_request = request
 
+        validate_identifier(run_request.correlation_id, "correlationId")
         # A read-compatible legacy layout is not permission to run a new writer.
         self.state.prepare_for_write(delivery_window_seconds=self._response_delivery_window_seconds)
         already_answered = self.state.try_get_agent_response(run_request.correlation_id)

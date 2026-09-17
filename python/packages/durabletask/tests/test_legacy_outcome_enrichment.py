@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Migration-only failure enrichment without restoring expired legacy delivery."""
+"""Legacy failure evidence and ambiguity rejection for the shared completion target."""
 
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -9,11 +9,12 @@ from typing import Any
 import pytest
 
 from agent_framework_durabletask import DurableAgentState
+from agent_framework_durabletask._shared_response import load_terminal_response
 from agent_framework_durabletask._state_migration import migrate_legacy_state, state_snapshot_digest
 
 CORRELATION = "legacy-completion"
 CREATED = "2024-01-01T00:00:00+00:00"
-COMPLETED = "2024-01-02T03:04:05.123400+05:30"
+ORIGINAL_COMPLETED_AT = "2024-01-02T03:04:05.123456789Z"
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 WINDOW = 60
 OPAQUE = {"keep": [0, False, None, {"outcome": "application-value"}]}
@@ -33,36 +34,61 @@ def _entry(
     }
 
 
-def _receipt() -> dict[str, Any]:
-    return {"completedAt": COMPLETED, "future": deepcopy(OPAQUE)}
-
-
-def _source(entry: dict[str, Any] | None, *, receipt: dict[str, Any] | None) -> dict[str, Any]:
+def _source(entry: dict[str, Any] | None) -> dict[str, Any]:
     data: dict[str, Any] = {
         "conversationHistory": [] if entry is None else [entry],
         "future": deepcopy(OPAQUE),
+        "session": {"session_id": "original-session", "state": deepcopy(OPAQUE)},
     }
-    if receipt is not None:
-        data["completedCorrelations"] = {CORRELATION: receipt}
     return {"schemaVersion": "1.1.0", "data": data, "future": deepcopy(OPAQUE)}
 
 
-def _migrate(source: dict[str, Any], *, strict: bool, now: datetime = NOW) -> DurableAgentState:
+def _original_result(*, outcome: str = "failed") -> dict[str, Any]:
+    # Ground truth supplied by the synthetic operator, not inferred from _entry.
+    return {
+        "correlationId": CORRELATION,
+        "outcome": outcome,
+        "completedAt": ORIGINAL_COMPLETED_AT,
+        "response": {
+            "createdAt": CREATED,
+            "messages": [{"role": "assistant", "contents": [{"$type": "text", "text": "original answer"}]}],
+        },
+        **(
+            {"error": {"code": "provider_error", "message": "Original invocation failed."}}
+            if outcome == "failed"
+            else {}
+        ),
+    }
+
+
+def _journal(source: dict[str, Any], *results: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "sourceDigest": state_snapshot_digest(source),
+        "evidenceId": "original-completions",
+        "complete": True,
+        "results": deepcopy(list(results)),
+    }
+
+
+def _migrate(
+    source: dict[str, Any], *, strict: bool, now: datetime = NOW, completion_evidence: dict[str, Any] | None = None
+) -> DurableAgentState:
+    options: dict[str, Any] = {"completion_evidence": completion_evidence} if completion_evidence is not None else {}
     return migrate_legacy_state(
         source,
         source_digest=state_snapshot_digest(source),
         source_session_id="original-session",
-        migration_id="legacy-outcome-enrichment",
+        migration_id="legacy-failure-migration",
         ownership_transfer_id="authorized-transfer",
         delivery_window_seconds=WINDOW,
         require_known_outcomes=strict,
+        **options,
         now=now,
     )
 
 
 @pytest.mark.parametrize("strict", [False, True])
-@pytest.mark.parametrize("existing_receipt", [False, True])
-@pytest.mark.parametrize("legacy", [None, False, True])
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
 @pytest.mark.parametrize(
     "entry",
     [
@@ -72,43 +98,58 @@ def _migrate(source: dict[str, Any], *, strict: bool, now: datetime = NOW) -> Du
         pytest.param(_entry("response", [{"$type": "error", "message": "provider failed"}]), id="error-content"),
     ],
 )
-def test_failure_enrichment_preserves_receipt_and_never_reopens_delivery(
-    entry: dict[str, Any], existing_receipt: bool, strict: bool, legacy: bool | None
+def test_authoritative_failure_migrates_and_expiry_never_reopens_delivery(
+    entry: dict[str, Any], version: str, strict: bool
 ) -> None:
-    """Affirmative failures work in both modes, with receipt-absent backfill as a control."""
-    receipt = _receipt()
-    if legacy is not None:
-        receipt["legacy"] = legacy
-    source = _source(deepcopy(entry), receipt=receipt if existing_receipt else None)
+    """Failure evidence must agree with the journal, which owns the original result and time."""
+    source = _source(deepcopy(entry))
+    source["schemaVersion"] = version
     before = deepcopy(source)
     digest = state_snapshot_digest(source)
-    for now in (NOW, NOW + timedelta(days=7)):
-        migrated = _migrate(source, strict=strict, now=now)
-        migrated = DurableAgentState.from_json(migrated.to_json())
-        if existing_receipt:
-            assert migrated.data.completed_correlations[CORRELATION] == {**receipt, "outcome": "failed"}
-            assert migrated.data.response_mailbox == {}
-            expired = migrated.try_get_agent_response(CORRELATION)
-            assert expired is not None
-            assert expired.additional_properties["durable_status"] == "already_completed"
-            assert expired.additional_properties["durable_outcome"] == "failed"
-        else:
-            assert migrated.data.completed_correlations[CORRELATION] == {
-                "completedAt": now.isoformat(),
-                "outcome": "failed",
-                "legacy": True,
-            }
-            mailbox = migrated.data.response_mailbox[CORRELATION]
-            assert mailbox["createdAt"] == now.isoformat()
-            assert mailbox["expiresAt"] == (now + timedelta(seconds=WINDOW)).isoformat()
-        assert migrated.unknown_fields["future"] == OPAQUE
-        assert migrated.data.unknown_fields["future"] == OPAQUE
-        assert source == before
-        assert state_snapshot_digest(source) == digest
+    original = _original_result()
+    evidence = _journal(source, original)
+    evidence_before = deepcopy(evidence)
+    migrated = DurableAgentState.from_json(_migrate(source, strict=strict, completion_evidence=evidence).to_json())
+    mailbox = migrated.data.response_mailbox[CORRELATION]
+    receipt = deepcopy(migrated.data.completed_correlations[CORRELATION])
+    assert receipt["correlationId"] == mailbox["correlationId"] == CORRELATION
+    assert receipt["outcome"] == mailbox["outcome"] == "failed"
+    assert receipt["completedAt"] == mailbox["completedAt"] == ORIGINAL_COMPLETED_AT
+    assert receipt["resultExpiresAt"] == mailbox["resultExpiresAt"] == (NOW + timedelta(seconds=WINDOW)).isoformat()
+    assert mailbox == {**original, "resultExpiresAt": receipt["resultExpiresAt"]}
+    assert receipt["resultState"] == "available"
+    assert "resultUnavailableAt" not in receipt
+    assert mailbox["error"]["code"] and mailbox["error"]["message"]
+    assert mailbox["response"]["createdAt"] == CREATED
+    response = load_terminal_response(mailbox["response"])
+    assert response.text == "original answer"
+    assert migrated.to_dict()["data"]["conversationHistory"] == before["data"]["conversationHistory"]
+    assert migrated.data.session == before["data"]["session"]
+
+    expired_at = NOW + timedelta(days=1)
+    migrated.expire_responses(now=expired_at)
+    migrated = DurableAgentState.from_json(migrated.to_json())
+    assert migrated.data.response_mailbox == {}
+    assert migrated.data.completed_correlations[CORRELATION] == {
+        **receipt,
+        "resultState": "unavailable",
+        "resultUnavailableAt": expired_at.isoformat(),
+    }
+    expired = migrated.try_get_agent_response(CORRELATION)
+    assert expired is not None
+    assert expired.additional_properties["durable_status"] == "already_completed"
+    assert expired.additional_properties["durable_outcome"] == "failed"
+    after_expiry = migrated.to_dict()
+    migrated.record_response(CORRELATION, response, delivery_window_seconds=WINDOW, now=expired_at, legacy=True)
+    migrated.expire_responses(now=expired_at + timedelta(days=7))
+    assert migrated.to_dict() == after_expiry
+    assert migrated.unknown_fields["future"] == OPAQUE
+    assert migrated.data.unknown_fields["future"] == OPAQUE
+    assert source == before and evidence == evidence_before
+    assert state_snapshot_digest(source) == digest
 
 
 @pytest.mark.parametrize("strict", [False, True])
-@pytest.mark.parametrize("existing_receipt", [False, True])
 @pytest.mark.parametrize(
     "entry",
     [
@@ -125,152 +166,105 @@ def test_failure_enrichment_preserves_receipt_and_never_reopens_delivery(
         ),
     ],
 )
-def test_partial_legacy_evidence_stays_unknown_or_strictly_rejects(
-    entry: dict[str, Any], existing_receipt: bool, strict: bool
+def test_partial_legacy_evidence_rejects_even_when_known_outcomes_flag_is_false(
+    entry: dict[str, Any], strict: bool
 ) -> None:
     """Neither absent errors nor delivery-status errors establish an invocation outcome."""
-    receipt = {**_receipt(), "legacy": True}
-    source = _source(deepcopy(entry), receipt=receipt if existing_receipt else None)
+    source = _source(deepcopy(entry))
     before = deepcopy(source)
-    if strict:
-        with pytest.raises(ValueError, match="outcome.*evidence"):
-            _migrate(source, strict=True)
-    else:
-        migrated = _migrate(source, strict=False)
-        assert "outcome" not in migrated.data.completed_correlations[CORRELATION]
-        if existing_receipt:
-            assert migrated.data.completed_correlations[CORRELATION] == receipt
-            assert migrated.data.response_mailbox == {}
-        else:
-            assert migrated.data.completed_correlations[CORRELATION] == {
-                "completedAt": NOW.isoformat(),
-                "legacy": True,
-            }
-            mailbox = migrated.data.response_mailbox[CORRELATION]
-            assert mailbox["createdAt"] == NOW.isoformat()
-            assert mailbox["expiresAt"] == (NOW + timedelta(seconds=WINDOW)).isoformat()
-        migrated.expire_responses(now=NOW + timedelta(days=1))
-        migrated = DurableAgentState.from_json(migrated.to_json())
-        expired = migrated.try_get_agent_response(CORRELATION)
-        assert expired is not None and expired.additional_properties["durable_outcome"] == "unknown"
+    with pytest.raises(ValueError, match="outcome.*evidence"):
+        _migrate(source, strict=strict)
     assert source == before
 
 
 @pytest.mark.parametrize("strict", [False, True])
-def test_receipt_without_retained_response_is_not_enriched(strict: bool) -> None:
-    """Missing transcript evidence is not proof of either success or failure."""
-    source = _source(None, receipt=_receipt())
+def test_session_only_source_requires_explicit_complete_empty_journal(strict: bool) -> None:
+    source = _source(None)
     before = deepcopy(source)
-    if strict:
-        with pytest.raises(ValueError, match="outcome.*evidence"):
-            _migrate(source, strict=True)
-    else:
-        migrated = _migrate(source, strict=False)
-        assert migrated.data.completed_correlations == source["data"]["completedCorrelations"]
-        assert migrated.data.response_mailbox == {}
-    assert source == before
-
-
-@pytest.mark.parametrize("strict", [False, True])
-@pytest.mark.parametrize("outcome", ["succeeded", "failed"])
-@pytest.mark.parametrize("legacy", [False, True])
-def test_known_receipt_is_immutable_despite_retained_transcript_error(strict: bool, outcome: str, legacy: bool) -> None:
-    """A possibly altered transcript is not an authoritative pair for a known receipt."""
-    receipt = {**_receipt(), "outcome": outcome, "legacy": legacy}
-    source = _source(_entry(), receipt=receipt)
-    before = deepcopy(source)
-    migrated = _migrate(source, strict=strict)
-    assert migrated.data.completed_correlations[CORRELATION] == receipt
+    # Nonempty provider/session state may outlive all retained history.
+    with pytest.raises(ValueError, match="authoritative completion evidence"):
+        _migrate(source, strict=strict)
+    evidence = _journal(source)
+    migrated = DurableAgentState.from_json(_migrate(source, strict=strict, completion_evidence=evidence).to_json())
+    assert migrated.data.completed_correlations == {}
     assert migrated.data.response_mailbox == {}
+    assert migrated.try_get_agent_response(CORRELATION) is None
+    assert migrated.data.session == before["data"]["session"]
     assert source == before
 
 
-def _mailbox(*, failed: bool, expired: bool) -> dict[str, Any]:
-    return {
-        "createdAt": CREATED,
-        "expiresAt": "2024-01-01T00:01:00Z" if expired else "9999-01-01T00:00:00Z",
-        "response": {
-            "type": "agent_response",
-            "messages": [],
-            "additional_properties": {"durable_status": "error"} if failed else {},
-        },
-        "future": deepcopy(OPAQUE),
-    }
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("ambiguous_first", [False, True])
+@pytest.mark.parametrize("same_correlation", [False, True])
+def test_affirmative_failure_cannot_hide_another_ambiguous_response(
+    strict: bool, ambiguous_first: bool, same_correlation: bool
+) -> None:
+    failure = _entry()
+    partial = _entry("response", [{"$type": "text", "text": "partial answer"}])
+    if not same_correlation:
+        partial["correlationId"] = "other-request"
+    source = _source(None)
+    source["data"]["conversationHistory"] = [partial, failure] if ambiguous_first else [failure, partial]
+    before = deepcopy(source)
+    with pytest.raises(ValueError, match="outcome.*evidence"):
+        _migrate(source, strict=strict)
+    assert source == before
 
 
 @pytest.mark.parametrize("strict", [False, True])
-@pytest.mark.parametrize("expired", [False, True])
-@pytest.mark.parametrize("failed", [False, True])
-@pytest.mark.parametrize("legacy", [False, True])
-def test_existing_mailbox_controls_unknown_receipt_even_with_transcript_failure(
-    strict: bool, expired: bool, failed: bool, legacy: bool
-) -> None:
-    """Transcript enrichment cannot replace independent or ambiguous legacy mailbox evidence."""
-    receipt = {**_receipt(), "legacy": legacy}
-    source = _source(_entry(), receipt=receipt)
-    source["data"]["responseMailbox"] = {CORRELATION: _mailbox(failed=failed, expired=expired)}
+@pytest.mark.parametrize("kind", ["response", "errorResponse"])
+def test_affirmative_failure_without_completion_authority_is_not_auto_imported(strict: bool, kind: str) -> None:
+    source = _source(_entry(kind, [{"$type": "error", "message": "provider failed"}]))
     before = deepcopy(source)
-    expected = "failed" if failed else None if legacy else "succeeded"
-    if strict and expected is None:
-        with pytest.raises(ValueError, match="outcome.*evidence"):
-            _migrate(source, strict=True)
+    with pytest.raises(ValueError, match="authoritative completion evidence"):
+        _migrate(source, strict=strict)
+    assert source == before
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_error_response_cannot_be_relabelled_succeeded_by_journal(strict: bool) -> None:
+    source = _source(_entry())
+    evidence = _journal(source, _original_result(outcome="succeeded"))
+    before, evidence_before = deepcopy(source), deepcopy(evidence)
+    with pytest.raises(ValueError, match="outcome conflicts with retained response failure evidence"):
+        _migrate(source, strict=strict, completion_evidence=evidence)
+    assert source == before and evidence == evidence_before
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("correlation", [None, "", " "])
+def test_failure_without_a_request_identity_rejects_without_mutating_source(
+    strict: bool, correlation: str | None
+) -> None:
+    entry = _entry()
+    if correlation is None:
+        del entry["correlationId"]
     else:
-        migrated = _migrate(source, strict=strict)
-        assert migrated.data.completed_correlations[CORRELATION] == {
-            **receipt,
-            **({"outcome": expected} if expected is not None else {}),
-        }
-        assert migrated.data.response_mailbox == before["data"]["responseMailbox"]
-    assert source == before
+        entry["correlationId"] = correlation
+    source = _source(entry)
+    evidence = _journal(source, _original_result())
+    before, evidence_before = deepcopy(source), deepcopy(evidence)
+    with pytest.raises(ValueError, match="correlationId"):
+        _migrate(source, strict=strict, completion_evidence=evidence)
+    assert source == before and evidence == evidence_before
 
 
 @pytest.mark.parametrize("strict", [False, True])
-@pytest.mark.parametrize("expired", [False, True])
-@pytest.mark.parametrize("failed", [False, True])
-def test_authoritative_mailbox_conflict_rejects_without_mutating_source(
-    strict: bool, expired: bool, failed: bool
+@pytest.mark.parametrize("contents", [[], [{"$type": "text", "text": "partial"}]])
+def test_partial_response_can_import_authoritative_original_success(
+    strict: bool, contents: list[dict[str, Any]]
 ) -> None:
-    """Validate all receipts before enriching an earlier eligible transcript failure."""
-    source = _source(_entry(), receipt=_receipt())
-    source["data"]["completedCorrelations"]["conflicting"] = {
-        **_receipt(),
-        "outcome": "succeeded" if failed else "failed",
-        "legacy": failed,
+    entry = _entry("response", contents)
+    del entry["createdAt"]
+    source = _source(entry)
+    original = _original_result(outcome="succeeded")
+    evidence = _journal(source, original)
+    before = deepcopy(source)
+    migrated = DurableAgentState.from_json(_migrate(source, strict=strict, completion_evidence=evidence).to_json())
+    assert migrated.data.response_mailbox[CORRELATION] == {
+        **original,
+        "resultExpiresAt": (NOW + timedelta(seconds=WINDOW)).isoformat(),
     }
-    source["data"]["responseMailbox"] = {"conflicting": _mailbox(failed=failed, expired=expired)}
-    before = deepcopy(source)
-    with pytest.raises(ValueError, match="outcome.*conflicts"):
-        _migrate(source, strict=strict)
-    assert source == before
-
-
-@pytest.mark.parametrize("strict", [False, True])
-@pytest.mark.parametrize("outcome", [None, "", "unknown", "success", "FAILED", True, 0, [], {}])
-def test_invalid_present_outcome_is_not_treated_as_unknown(strict: bool, outcome: Any) -> None:
-    """Only an absent outcome is eligible, invalid present fields must fail closed."""
-    source = _source(_entry(), receipt={**_receipt(), "outcome": outcome})
-    before = deepcopy(source)
-    with pytest.raises(ValueError, match="outcome"):
-        _migrate(source, strict=strict)
-    assert source == before
-
-
-@pytest.mark.parametrize("strict", [False, True])
-@pytest.mark.parametrize(
-    "invalid_receipt",
-    [
-        pytest.param(None, id="null-receipt"),
-        pytest.param([], id="array-receipt"),
-        pytest.param({}, id="missing-time"),
-        pytest.param({"completedAt": "2024-01-01T00:00:00"}, id="no-time-offset"),
-        pytest.param({**_receipt(), "legacy": "true"}, id="nonboolean-legacy"),
-    ],
-)
-def test_malformed_receipt_rejects_without_mutating_source(strict: bool, invalid_receipt: Any) -> None:
-    """Enrichment must not repair malformed completion records into valid evidence."""
-    source = _source(_entry(), receipt=_receipt())
-    source["data"]["completedCorrelations"][CORRELATION] = deepcopy(invalid_receipt)
-    before = deepcopy(source)
-    with pytest.raises(ValueError, match="completedCorrelations"):
-        _migrate(source, strict=strict)
+    assert migrated.data.completed_correlations[CORRELATION]["completedAt"] == ORIGINAL_COMPLETED_AT
+    assert migrated.to_dict()["data"]["conversationHistory"] == [entry]
     assert source == before

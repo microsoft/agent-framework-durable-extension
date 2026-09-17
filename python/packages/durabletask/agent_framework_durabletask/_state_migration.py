@@ -11,26 +11,33 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
-from ._constants import DurableStateFields
 from ._durable_agent_state import (
     DurableAgentState,
     DurableAgentStateRequest,
-    DurableAgentStateResponse,
     _validate_json,  # pyright: ignore[reportPrivateUsage]
 )
 from ._message_identity import message_identity
-from ._response_utils import invocation_outcome, load_agent_response
+from ._response_utils import load_agent_response
 from ._retention import StateCapacityError
+from ._shared_state_validation import validate_identifier, validate_shared_data
 from ._workflows.naming import parse_workflow_message_id
 
 __all__ = ["migrate_legacy_state", "state_snapshot_digest"]
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _EVIDENCE_FIELDS = {"sourceDigest", "evidenceId", "complete", "messages"}
+_COMPLETION_EVIDENCE_FIELDS = {"sourceDigest", "evidenceId", "complete", "results"}
 _JOURNAL_REQUIRED = (
     "Legacy ingestedPositions require recorded delivery evidence: a complete authoritative accepted-message "
     "journal from the quiesced legacy deployment, including evicted messages. If that journal is unavailable, "
     "keep the old session on the old engine rather than guessing delivery receipts."
+)
+_COMPLETION_REQUIRED = (
+    "Legacy completion outcomes require authoritative completion evidence. Retained responses may be partial, "
+    "and an accepted-message delivery journal does not establish invocation outcomes or recover lost completions. "
+    "Supply a complete completion journal from the quiesced legacy deployment, including original results and "
+    "authoritative completion timestamps for pruned responses. Otherwise keep the session on the old engine or "
+    "explicitly start a new session generation. require_known_outcomes=False cannot waive the shared target contract."
 )
 
 
@@ -188,6 +195,103 @@ def _apply_journal(state: DurableAgentState, journal: dict[str, list[str]]) -> N
             existing.extend(fingerprint for fingerprint in recorded if fingerprint not in existing)
 
 
+def _response_evidence(response: dict[str, Any]) -> tuple[bool, bool]:
+    """Read failure and availability evidence from validated shared JSON without Core projection.
+
+    Only response extensionData and non-tool error contents have receipt meaning.
+    Unknown siblings, profiles and nested business values remain inert. Missing
+    failure evidence never establishes success in a possibly partial transcript.
+    """
+    status = response.get("extensionData", {}).get("durable_status")
+    failed = status == "error"
+    acknowledgement = status in ("accepted", "already_completed")
+    for message in response.get("messages", []):
+        if message["role"] == "tool":
+            continue
+        for content in message.get("contents", []):
+            if content["$type"] != "error":
+                continue
+            if content.get("errorCode") == "response_expired":
+                acknowledgement = True
+            else:
+                failed = True
+    return failed, acknowledgement
+
+
+def _completion_journal(
+    evidence: dict[str, Any], *, source_digest: str, expires_at: str
+) -> tuple[str, dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Detach original shared terminal results and build matching new-grace receipts.
+
+    Completeness and authoritative original completedAt are operator assertions,
+    not facts derivable from the retained transcript or the conversion clock.
+    """
+    if not isinstance(evidence, dict) or evidence.keys() != _COMPLETION_EVIDENCE_FIELDS:
+        raise ValueError("Completion evidence requires exactly sourceDigest, evidenceId, complete and results.")
+    journal: dict[str, Any] = json.loads(_canonical_json(evidence))
+    if journal["sourceDigest"] != source_digest:
+        raise ValueError("Completion evidence sourceDigest does not match the source snapshot.")
+    evidence_id = _nonblank(journal["evidenceId"], "Completion evidence evidenceId")
+    if journal["complete"] is not True:
+        raise ValueError("Completion evidence requires the explicit complete=True operator assertion.")
+    if not isinstance(journal["results"], list):
+        raise ValueError("Completion evidence results must be a list of original shared terminal results.")
+
+    results: dict[str, dict[str, Any]] = {}
+    receipts: dict[str, dict[str, Any]] = {}
+    for value in cast(list[Any], journal["results"]):
+        if not isinstance(value, dict):
+            raise ValueError("Completion evidence results must contain canonical shared terminal result objects.")
+        result = cast(dict[str, Any], value)
+        correlation_id = result.get("correlationId")
+        validate_identifier(correlation_id, "Completion evidence correlationId")
+        correlation_id = cast(str, correlation_id)
+        if correlation_id in results:
+            raise ValueError("Completion evidence contains a duplicate correlationId.")
+        if "resultExpiresAt" in result:
+            raise ValueError("Completion evidence must not contain resultExpiresAt, including null.")
+        # Do not call record_response: that API records a *new* completion at now.
+        # All original fields, including absent optionals and opaque siblings,
+        # survive at their exact locations. Only the new grace deadline is added.
+        results[correlation_id] = {**result, "resultExpiresAt": expires_at}
+        receipts[correlation_id] = {
+            "correlationId": correlation_id,
+            "outcome": result.get("outcome"),
+            "completedAt": result.get("completedAt"),
+            "resultExpiresAt": expires_at,
+            "resultState": "available",
+        }
+    validate_shared_data({
+        "conversationHistory": [],
+        "terminalResults": results,
+        "completionReceipts": receipts,
+    })
+    for result in results.values():
+        failed, acknowledgement = _response_evidence(result["response"])
+        if acknowledgement:
+            raise ValueError(
+                "Completion evidence requires original terminal results, not availability acknowledgements."
+            )
+        if failed and result["outcome"] != "failed":
+            raise ValueError("Completion evidence outcome conflicts with its response failure evidence.")
+    return evidence_id, results, receipts
+
+
+def _validate_retained_completions(history: list[Any], results: dict[str, dict[str, Any]]) -> None:
+    """Require journal coverage and check every retained response, including duplicates."""
+    for entry in history:
+        if entry["$type"] not in ("response", "errorResponse"):
+            continue
+        correlation_id = entry.get("correlationId")
+        validate_identifier(correlation_id, "Legacy response correlationId")
+        result = results.get(correlation_id)
+        if result is None:
+            raise ValueError("Completion evidence must include every retained response/errorResponse correlationId.")
+        failed, _ = _response_evidence(entry)
+        if (entry["$type"] == "errorResponse" or failed) and result["outcome"] != "failed":
+            raise ValueError("Completion evidence outcome conflicts with retained response failure evidence.")
+
+
 def _preserve_session(state: DurableAgentState, source_session_id: str) -> None:
     session = state.data.session
     if session is None:
@@ -214,6 +318,7 @@ def migrate_legacy_state(
     delivery_window_seconds: int,
     max_state_bytes: int | None = None,
     delivery_evidence: dict[str, Any] | None = None,
+    completion_evidence: dict[str, Any] | None = None,
     require_known_outcomes: bool = False,
     now: datetime | None = None,
 ) -> DurableAgentState:
@@ -234,30 +339,45 @@ def migrate_legacy_state(
     on the old engine rather than guessing. Equal maxima check consistency only;
     no contiguous positions or prefixes are required or inferred.
 
-    Only recorded responses receive completion/mailbox backfill. Surviving legacy
-    responses may be partial, not immutable originals. Existing delivery records
-    are never reopened. Without a mailbox, affirmative retained legacy failure
-    evidence may fill an unknown receipt outcome, preserving its timestamp and
-    other fields. It cannot override known outcomes or establish success from
-    absent errors. A fresh grace timestamp is captured once per call, not once per
-    migration ID: the parent owns retry idempotency and must not repeatedly migrate
-    the same source to refresh grace. Fixed now gives fixed backfill timestamps.
-    Existing state parsing owns legacy transcript conversion.
+    Any retained history, truncation, nonempty session or ingestedPositions, or
+    nonempty supplied accepted-message journal requires a
+    COMPLETE authoritative completion journal from the quiesced legacy deployment,
+    including original terminal results no longer in retained history. An empty
+    results list is an operator assertion of no completions, valid only without
+    retained responses. Only a fresh source without history, session, truncation or ingestion
+    can omit this journal. Authority and completeness cannot be proven here.
+    Every retained response must be covered, and affirmative failure evidence must
+    agree with its journal outcome. Partial non-error content never proves success.
+    Delivery evidence proves accepted inputs only, independently of this journal.
+    No private prototype completion maps or unversioned ingestedMessages are read.
+
+    Original journal completedAt strings are immutable. Neither transcript createdAt
+    nor the migration clock supplies a completion time. New matching result/receipt
+    grace deadlines use now + delivery_window_seconds and cannot precede completedAt.
+    Canonical result JSON is retained without conversion through Core responses.
+    The parent owns retry idempotency and must not refresh grace by re-migrating.
 
     Args:
-        source: Raw exported version-1 state. The caller's object remains untouched.
+        source: Raw exported shared 1.0.0, 1.1.0 or 1.2.0 state, without v2 maps.
+            The caller's object remains untouched. No version-2 source is migrated.
         source_digest: Lowercase SHA-256 returned by state_snapshot_digest(source).
         source_session_id: Original logical session identity, including its existing namespace.
         migration_id: Nonblank parent-managed idempotency identifier.
         ownership_transfer_id: Nonblank parent-authorized ownership transfer identifier.
-        delivery_window_seconds: Positive bounded grace period for legacy response backfill.
+        delivery_window_seconds: Positive bounded grace period for imported original results.
         max_state_bytes: Optional positive resolved budget, measured with default ASCII JSON.
             All migrated data and metadata are protected; oversize states fail without pruning.
         delivery_evidence: Exactly sourceDigest, nonblank evidenceId, complete=True and
             messages, a list of complete canonical Message.to_dict() inputs. Unsupported
             or lossy canonical inputs and duplicate ID/fingerprint pairs are rejected.
-        require_known_outcomes: Reject imports with unknown invocation outcomes instead
-            of using legacy-compatible receipts. Neither mode discards completion evidence.
+        completion_evidence: Exactly sourceDigest, nonblank evidenceId, complete=True and
+            results, a list of canonical shared terminalResult objects with correlationId,
+            known outcome, authoritative original completedAt, response.messages and error
+            for failures. resultExpiresAt is forbidden. Unknown JSON fields are preserved.
+            The digest binds the raw source before defaults. Acknowledgements, duplicate
+            correlations, malformed results and contradictory failure evidence are rejected.
+        require_known_outcomes: Deprecated compatibility argument that must be a boolean.
+            False cannot waive the shared target's requirement for known outcomes.
         now: Offset-aware timestamp for this staging call, defaulting to UTC now.
 
     Returns:
@@ -281,12 +401,19 @@ def migrate_legacy_state(
         raise ValueError("source_digest does not match the canonical source snapshot.")
     snapshot: dict[str, Any] = json.loads(_canonical_json(source))
     version = snapshot.get("schemaVersion")
-    if not isinstance(version, str) or re.fullmatch(r"1\.[0-9]+\.[0-9]+", version) is None:
-        raise ValueError("Explicit migration accepts only legacy version-1 state, never a v2 source.")
+    if not isinstance(version, str) or version not in ("1.0.0", "1.1.0", "1.2.0"):
+        raise ValueError("Explicit migration accepts only legacy shared 1.0.0, 1.1.0 or 1.2.0, never a v2 source.")
     raw_data = snapshot.get("data")
     if not isinstance(raw_data, dict):
         raise ValueError("Legacy state data must be an object.")
-    positions = _legacy_positions(cast(dict[str, Any], raw_data))
+    raw_data = cast(dict[str, Any], raw_data)
+    # History is optional in the legacy schema but required by the target. Add
+    # only an absent array on the detached snapshot, never replace a present value.
+    raw_data.setdefault("conversationHistory", [])
+    # The parent loader validates the published shared source before projection.
+    # Its raw shadows preserve unknown fields and optional-field representations.
+    state = DurableAgentState.from_dict(snapshot)
+    positions = _legacy_positions(raw_data)
     if positions and delivery_evidence is None:
         raise ValueError(_JOURNAL_REQUIRED)
     timestamp = now if now is not None else datetime.now(timezone.utc)
@@ -294,58 +421,48 @@ def migrate_legacy_state(
         raise ValueError("now must be an offset-aware datetime.")
     timestamp = timestamp.astimezone(timezone.utc)
     try:
-        _ = timestamp + timedelta(seconds=delivery_window_seconds)
+        expires_at = (timestamp + timedelta(seconds=delivery_window_seconds)).isoformat()
     except OverflowError as exc:
         raise ValueError("delivery_window_seconds exceeds the representable bounded grace period.") from exc
 
-    state = DurableAgentState.from_dict(snapshot)
     if "migration" in state.data.unknown_fields:
         raise ValueError("Legacy state already contains reserved migration metadata; refusing to overwrite it.")
+    if completion_evidence is None and (
+        raw_data["conversationHistory"] or "truncation" in raw_data or positions or raw_data.get("session")
+    ):
+        raise ValueError(_COMPLETION_REQUIRED)
+    completion_evidence_id: str | None = None
+    results: dict[str, dict[str, Any]] = {}
+    receipts: dict[str, dict[str, Any]] = {}
+    if completion_evidence is not None:
+        completion_evidence_id, results, receipts = _completion_journal(
+            completion_evidence, source_digest=source_digest, expires_at=expires_at
+        )
+    # Validate the target wire shape before reading response evidence. Legacy
+    # unknown/missing entry discriminators must not be disguised as writable v2.
+    validate_shared_data({
+        **raw_data,
+        "terminalResults": results,
+        "completionReceipts": receipts,
+    })
+    _validate_retained_completions(raw_data["conversationHistory"], results)
     _validate_receipts(state.data.ingested_messages)
     _preserve_session(state, source_session_id)
     evidence_id: str | None = None
     if delivery_evidence is not None:
         evidence_id, journal = _journal_receipts(delivery_evidence, source_digest=source_digest, positions=positions)
+        if journal and completion_evidence is None:
+            raise ValueError(_COMPLETION_REQUIRED)
         _apply_journal(state, journal)
     else:
         for identity in _retained_custom_request_ids(state):
             state.data.ingested_messages.setdefault(identity, None)
 
-    # A mailbox is itself a recorded response. Do not replace it from a transcript
-    # or refresh its expiry, even if its matching completion receipt was absent.
-    for correlation_id, mailbox in state.data.response_mailbox.items():
-        # An original mailbox establishes its completion time, unlike a legacy
-        # transcript's created_at. Backfill before marking new receipts as legacy.
-        state.data.completed_correlations.setdefault(
-            correlation_id, {DurableStateFields.COMPLETED_AT: mailbox[DurableStateFields.CREATED_AT]}
-        )
-    state._backfill_completion_outcomes(require_known=False)  # pyright: ignore[reportPrivateUsage]
-    for correlation_id in state.data.response_mailbox:
-        if correlation_id not in cast(dict[str, Any], raw_data).get(DurableStateFields.COMPLETED_CORRELATIONS, {}):
-            state.data.completed_correlations[correlation_id]["legacy"] = True
-    for entry in state.data.conversation_history:
-        if isinstance(entry, DurableAgentStateResponse) and entry.correlation_id is not None:
-            correlation_id = _nonblank(entry.correlation_id, "Legacy response correlation ID")
-            if correlation_id not in state.data.completed_correlations:
-                state.record_response(
-                    correlation_id,
-                    entry.to_run_response(entry),
-                    delivery_window_seconds=delivery_window_seconds,
-                    now=timestamp,
-                    legacy=True,
-                )
-            elif (
-                correlation_id not in state.data.response_mailbox
-                and DurableStateFields.OUTCOME not in state.data.completed_correlations[correlation_id]
-                and invocation_outcome(entry.to_run_response(entry), legacy=True) == "failed"
-            ):
-                # A partial legacy response can still prove failure, but cannot
-                # replace an immutable known outcome or independent mailbox evidence.
-                # Enrich only the receipt, never restore delivery or refresh its time.
-                state.data.completed_correlations[correlation_id][DurableStateFields.OUTCOME] = "failed"
-
-    state._backfill_completion_outcomes(require_known=require_known_outcomes)  # pyright: ignore[reportPrivateUsage]
+    # Switch the detached root before emitting or validating target maps. The
+    # data shadow must merge those new fields rather than revalidate as legacy.
     state.schema_version = DurableAgentState.SCHEMA_VERSION
+    state.data.response_mailbox = results
+    state.data.completed_correlations = receipts
     state.data.unknown_fields["migration"] = {
         "id": migration_id,
         "sourceDigest": source_digest,
@@ -353,6 +470,7 @@ def migrate_legacy_state(
         "ownershipTransferId": ownership_transfer_id,
         "createdAt": timestamp.isoformat(),
         **({"evidenceId": evidence_id} if evidence_id is not None else {}),
+        **({"completionEvidenceId": completion_evidence_id} if completion_evidence_id is not None else {}),
     }
     size = len(json.dumps(state.to_dict(), allow_nan=False))
     if max_state_bytes is not None and size > max_state_bytes:

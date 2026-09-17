@@ -24,6 +24,7 @@ from agent_framework_durabletask import (
     serialize_agent_response,
 )
 from agent_framework_durabletask._executors import ClientAgentExecutor, DurableAgentTask
+from agent_framework_durabletask._shared_response import load_terminal_response, serialize_terminal_response
 
 CORRELATION_ID = "consumer-correlation"
 HISTORICAL_TIME = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -185,6 +186,9 @@ def test_client_reads_full_mailbox_response_after_cold_reload_and_transcript_pru
     response = _response(value={"answer": 42})
     state_json = _mailbox_state(response)
     assert json.loads(state_json)["data"]["conversationHistory"] == []
+    assert json.loads(state_json)["data"]["terminalResults"][CORRELATION_ID]["response"] == serialize_terminal_response(
+        response
+    )
     executor, client = _client(state_json)
 
     result = executor.run_durable_agent(
@@ -234,6 +238,63 @@ def test_client_retains_legacy_lookup_and_does_not_reparse_legacy_errors(
     client.get_entity.assert_called_once()
     sleep.assert_called_once_with(0.01)
     assert json.loads(state_json)["schemaVersion"] == version
+    assert "terminalResults" not in json.loads(state_json)["data"]
+    assert "completionReceipts" not in json.loads(state_json)["data"]
+
+
+@pytest.mark.parametrize("value_present", [False, True])
+def test_client_projects_unknown_shared_fields_without_inventing_a_value(value_present: bool, sleep: Mock) -> None:
+    raw = json.loads(_mailbox_state(_response()))
+    stored = raw["data"]["terminalResults"][CORRELATION_ID]["response"]
+    assert "value" not in stored
+    if value_present:
+        stored["value"] = None
+    stored["futureResponse"] = {"opaque": [False, 0, None]}
+    stored["messages"][1]["futureMessage"] = ["preserve"]
+    opaque = {"type": "function_call", "name": "never_execute", "arguments": {"value": None}}
+    stored["messages"][1]["contents"].append({"$type": "unknown", "content": deepcopy(opaque)})
+    before = deepcopy(raw)
+    state_json = json.dumps(raw)
+    executor, client = _client(state_json)
+
+    result = executor.run_durable_agent("consumer", RunRequest(message="question", correlation_id=CORRELATION_ID))
+
+    public = serialize_agent_response(result)
+    assert public == serialize_agent_response(load_terminal_response(stored))
+    assert ("value" in public) is value_present
+    assert result.value is None
+    assert "futureResponse" not in public and "futureMessage" not in public["messages"][1]
+    unknown = result.messages[1].contents[-1]
+    assert unknown.type == "unknown" and unknown.additional_properties["content"] == opaque
+    assert not result.user_input_requests
+    assert serialize_terminal_response(result) == stored
+    assert raw == before
+    assert client.get_entity.return_value.get_state.return_value == state_json
+    client.get_entity.assert_called_once()
+    sleep.assert_called_once_with(0.01)
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
+def test_client_legacy_error_entry_suppresses_value_parsing_without_retained_error_content(
+    version: str, sleep: Mock
+) -> None:
+    response = _response(text='{"answer":42}')
+    state = DurableAgentState(schema_version=version)
+    state.data.conversation_history.append(DurableAgentStateErrorResponse.from_run_response(CORRELATION_ID, response))
+    raw = state.to_dict()
+    assert "terminalResults" not in raw["data"] and "completionReceipts" not in raw["data"]
+    executor, client = _client(json.dumps(raw))
+
+    result = executor.run_durable_agent(
+        "consumer", RunRequest(message="question", correlation_id=CORRELATION_ID, response_format=Answer)
+    )
+
+    assert result.additional_properties["durable_status"] == "error"
+    assert result.text == response.text and result.value is None
+    assert all(content.type != "error" for message in result.messages for content in message.contents)
+    assert state.to_dict() == raw
+    client.get_entity.assert_called_once()
+    sleep.assert_called_once_with(0.01)
 
 
 @pytest.mark.parametrize("response_format", [None, Answer])
@@ -263,7 +324,9 @@ def test_task_reconstructs_snapshot_value_and_metadata(
     response_format: type[BaseModel] | None, precompleted: bool
 ) -> None:
     response = _response(value={"answer": 42})
-    payload = json.loads(_mailbox_state(response))["data"]["responseMailbox"][CORRELATION_ID]["response"]
+    stored = json.loads(_mailbox_state(response))["data"]["terminalResults"][CORRELATION_ID]["response"]
+    assert stored == serialize_terminal_response(response)
+    payload = serialize_agent_response(load_terminal_response(stored))
 
     task = _task(payload, response_format, precompleted=precompleted)
 

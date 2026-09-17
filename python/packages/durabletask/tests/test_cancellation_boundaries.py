@@ -21,6 +21,7 @@ from agent_framework_durabletask import AgentEntity, DurableAgentState, DurableH
 from agent_framework_durabletask import _entities as entities
 from agent_framework_durabletask._executors import ClientAgentExecutor
 from agent_framework_durabletask._history_provider import current_durable_history_binding
+from agent_framework_durabletask._shared_response import serialize_terminal_response
 
 
 class SimulatedWorkerStop(BaseException):
@@ -121,7 +122,7 @@ def _initial_state() -> dict[str, Any]:
     session = AgentSession(session_id="revision-session", service_session_id="saved-service-id")
     session.state = {"foreign": {"pending_approval": {"id": "keep", "approved": False}}}
     state.data.session = session.to_dict()
-    state.data.ingested_messages = {"previous-input": ["previous-fingerprint"]}
+    state.data.ingested_messages = {"previous-input": ["a" * 64]}
     state.data.ingested_positions = {"source": 4}
     state.data.extension_data = {"control": {"keep": [1]}}
     state.record_response(
@@ -183,11 +184,14 @@ async def test_interruption_rolls_back_every_local_slice_and_retry_can_repeat_ex
         assert not task.done()
         assert provider.raw == before and provider.writes == 0
         staged = entity.state.to_dict()["data"]
-        assert "expired" not in staged["responseMailbox"], "TTL cleanup must actually have been staged"
-        assert "interrupted-input" in staged["ingestedMessages"]
+        assert "expired" not in staged["terminalResults"], "TTL cleanup must actually have been staged"
+        ingestion = staged["pythonIngestion"]
+        assert ingestion["profile"] == "agent-framework-python.ingestion"
+        assert type(ingestion["version"]) is int and ingestion["version"] == 1
+        assert "interrupted-input" in ingestion["messages"]
         if phase == "budget":
-            assert "interrupted" in staged["completedCorrelations"]
-            assert "interrupted" in staged["responseMailbox"]
+            assert "interrupted" in staged["completionReceipts"]
+            assert "interrupted" in staged["terminalResults"]
             assert staged["session"] != before["data"]["session"]
             assert barrier.observed_binding is None
         else:
@@ -219,8 +223,8 @@ async def test_interruption_rolls_back_every_local_slice_and_retry_can_repeat_ex
     assert entity.state is original_state and entity.state.to_dict() == before
     assert provider.raw == before and provider.writes == 0
     assert entity.state.try_get_agent_response("interrupted") is None
-    assert "interrupted" not in provider.raw["data"]["completedCorrelations"]
-    assert "expired" in provider.raw["data"]["responseMailbox"]
+    assert "interrupted" not in provider.raw["data"]["completionReceipts"]
+    assert "expired" in provider.raw["data"]["terminalResults"]
     assert history.effects.count("external-before-effect") == 1
     assert len(client.effects) == int(phase != "before_run")
 
@@ -231,11 +235,12 @@ async def test_interruption_rolls_back_every_local_slice_and_retry_can_repeat_ex
     assert history.effects.count("external-before-effect") == 2
     assert len(client.effects) == 1 + int(phase != "before_run")
     assert provider.writes == 1
-    assert "expired" not in provider.raw["data"]["responseMailbox"]
-    assert (
-        provider.raw["data"]["completedCorrelations"]["expired"] == before["data"]["completedCorrelations"]["expired"]
-    )
-    assert provider.raw["data"]["responseMailbox"]["previous"] == before["data"]["responseMailbox"]["previous"]
+    assert "expired" not in provider.raw["data"]["terminalResults"]
+    expired_receipt = deepcopy(provider.raw["data"]["completionReceipts"]["expired"])
+    unavailable_at = expired_receipt.pop("resultUnavailableAt")
+    assert datetime.fromisoformat(unavailable_at) >= datetime.fromisoformat(expired_receipt["resultExpiresAt"])
+    assert expired_receipt == {**before["data"]["completionReceipts"]["expired"], "resultState": "unavailable"}
+    assert provider.raw["data"]["terminalResults"]["previous"] == before["data"]["terminalResults"]["previous"]
     assert provider.raw["data"]["session"]["state"]["foreign"] == before["data"]["session"]["state"]["foreign"]
     attempts = (len(client.effects), len(history.effects))
     cold_provider = JsonStateProvider(provider.raw)
@@ -272,8 +277,8 @@ async def test_unknown_commit_requires_fresh_json_read_and_suppresses_duplicate_
     assert raw != before
     committed = DurableAgentState.from_json(json.dumps(raw)).try_get_agent_response("unknown-commit")
     assert committed is not None and committed.text == "boundary answer"
-    assert "unknown-commit" in raw["data"]["completedCorrelations"]
-    assert raw["data"]["responseMailbox"]["unknown-commit"]["response"] == committed.to_dict()
+    assert "unknown-commit" in raw["data"]["completionReceipts"]
+    assert raw["data"]["terminalResults"]["unknown-commit"]["response"] == serialize_terminal_response(committed)
     cold_provider = JsonStateProvider(raw)
     cold_agent: Any = _agent(client=client, name="unknown-commit")
     cold = AgentEntity(cold_agent, state_provider=cold_provider)

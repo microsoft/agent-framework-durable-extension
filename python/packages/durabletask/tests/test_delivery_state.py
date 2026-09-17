@@ -17,18 +17,22 @@ from agent_framework_durabletask._durable_agent_state import (
     DurableAgentStateEntryJsonType,
     DurableAgentStateResponse,
     DurableAgentStateTextContent,
-    DurableAgentStateUnknownEntry,
 )
 from agent_framework_durabletask._history_provider import replayable_entries
 from agent_framework_durabletask._message_identity import message_identity
+from agent_framework_durabletask._response_utils import invocation_outcome, serialize_agent_response
+from agent_framework_durabletask._shared_response import load_terminal_response, serialize_terminal_response
 
 DELIVERY_WINDOW_SECONDS = 60
 HISTORICAL_TIME = datetime(2024, 1, 1, tzinfo=timezone.utc)
+ORIGINAL_COMPLETED_AT = "2024-01-02T03:04:05.123456789Z"
 CORRELATION_ID = "correlation-1"
 SOURCE_SESSION_ID = "@dafx-delivery@legacy-source"
 
 
-def _migrate_legacy_payload(payload: dict[str, Any]) -> DurableAgentState:
+def _migrate_legacy_payload(
+    payload: dict[str, Any], *, completion_evidence: dict[str, Any] | None = None
+) -> DurableAgentState:
     return migrate_legacy_state(
         payload,
         source_digest=state_snapshot_digest(payload),
@@ -36,6 +40,7 @@ def _migrate_legacy_payload(payload: dict[str, Any]) -> DurableAgentState:
         migration_id="delivery-migration-1",
         ownership_transfer_id="delivery-transfer-1",
         delivery_window_seconds=DELIVERY_WINDOW_SECONDS,
+        completion_evidence=completion_evidence,
     )
 
 
@@ -162,7 +167,8 @@ def _assert_expired(response: AgentResponse[Any] | None) -> None:
 
 def test_record_response_snapshots_core_metadata_and_reloads_real_response() -> None:
     response = _response()
-    expected = json.loads(json.dumps(response.to_dict(), allow_nan=False))
+    expected = serialize_agent_response(response)
+    expected_wire = serialize_terminal_response(expected)
     now = datetime.now(timezone.utc)
     state = DurableAgentState()
 
@@ -171,15 +177,23 @@ def test_record_response_snapshots_core_metadata_and_reloads_real_response() -> 
     payload = json.loads(state.to_json())
     assert payload["schemaVersion"] == "2.0.0"
     assert payload["data"]["conversationHistory"] == []
-    assert payload["data"]["responseMailbox"][CORRELATION_ID] == {
-        "response": expected,
-        "createdAt": now.isoformat(),
-        "expiresAt": (now + timedelta(seconds=DELIVERY_WINDOW_SECONDS)).isoformat(),
+    assert payload["data"]["terminalResults"][CORRELATION_ID] == {
+        "correlationId": CORRELATION_ID,
+        "outcome": "succeeded",
+        "response": expected_wire,
+        "completedAt": now.isoformat(),
+        "resultExpiresAt": (now + timedelta(seconds=DELIVERY_WINDOW_SECONDS)).isoformat(),
     }
-    assert payload["data"]["completedCorrelations"][CORRELATION_ID] == {
+    assert payload["data"]["completionReceipts"][CORRELATION_ID] == {
+        "correlationId": CORRELATION_ID,
         "completedAt": now.isoformat(),
         "outcome": "succeeded",
+        "resultExpiresAt": (now + timedelta(seconds=DELIVERY_WINDOW_SECONDS)).isoformat(),
+        "resultState": "available",
     }
+    assert expected_wire["responseId"] == "response-1"
+    assert expected_wire["messages"][0]["contents"][0]["$type"] == "text"
+    assert "type" not in expected_wire and "response_id" not in expected_wire
     assert expected["type"] == "agent_response"
     assert expected["response_id"] == "response-1"
     assert expected["agent_id"] == "agent-1"
@@ -190,12 +204,12 @@ def test_record_response_snapshots_core_metadata_and_reloads_real_response() -> 
     assert expected["additional_properties"] == {"nested": {"labels": ["response"]}}
     assert "raw_representation" not in expected
 
-    # Exercise core's own reader as well as the durable state's reader.
-    direct = AgentResponse.from_dict(deepcopy(payload["data"]["responseMailbox"][CORRELATION_ID]["response"]))
+    # State uses shared wire JSON. Public response serialization remains Core JSON.
+    direct = load_terminal_response(deepcopy(payload["data"]["terminalResults"][CORRELATION_ID]["response"]))
     restored = DurableAgentState.from_json(json.dumps(payload))
     delivered = restored.try_get_agent_response(CORRELATION_ID)
     assert isinstance(delivered, AgentResponse)
-    assert direct.to_dict() == delivered.to_dict() == expected
+    assert serialize_agent_response(direct) == serialize_agent_response(delivered) == expected
     assert all(isinstance(message, Message) for message in delivered.messages)
     assert all(isinstance(content, Content) for message in delivered.messages for content in message.contents)
     assert delivered.messages[0].author_name == "planner"
@@ -209,23 +223,25 @@ def test_record_response_snapshots_core_metadata_and_reloads_real_response() -> 
     assert restored.try_get_agent_response("unknown-correlation") is None
 
 
-@pytest.mark.parametrize("value", [{"items": [{"answer": 42}]}, {}, [], 0, False, "structured result"])
+@pytest.mark.parametrize("value", [{"items": [{"answer": 42}]}, {}, [], 0, False, "", "structured result"])
 def test_record_response_preserves_structured_value_not_just_core_to_dict(value: Any) -> None:
     """Core 1.16 keeps value in private state, so to_dict equality alone cannot prove delivery fidelity."""
     response = _response(value=deepcopy(value))
     state = DurableAgentState()
     _record(state, response)
 
-    snapshot = json.loads(state.to_json())["data"]["responseMailbox"][CORRELATION_ID]["response"]
+    snapshot = json.loads(state.to_json())["data"]["terminalResults"][CORRELATION_ID]["response"]
     assert "value" in snapshot, "record_response lost the public structured result"
     assert snapshot["value"] == value
     assert type(snapshot["value"]) is type(value)
-    direct = AgentResponse.from_dict(snapshot)
+    direct = load_terminal_response(snapshot)
     assert direct.value == value
+    assert type(direct.value) is type(value)
     restored = DurableAgentState.from_json(state.to_json())
     delivered = restored.try_get_agent_response(CORRELATION_ID)
     assert isinstance(delivered, AgentResponse)
     assert delivered.value == value
+    assert type(delivered.value) is type(value)
 
 
 def test_structured_model_value_is_stored_as_inline_json() -> None:
@@ -239,12 +255,29 @@ def test_structured_model_value_is_stored_as_inline_json() -> None:
     _record(state, _response(value=value))
     value.citations.append("caller edit")
 
-    snapshot = json.loads(state.to_json())["data"]["responseMailbox"][CORRELATION_ID]["response"]
+    snapshot = json.loads(state.to_json())["data"]["terminalResults"][CORRELATION_ID]["response"]
     assert snapshot["value"] == expected
-    assert AgentResponse.from_dict(snapshot).value == expected
+    assert load_terminal_response(snapshot).value == expected
     delivered = DurableAgentState.from_json(state.to_json()).try_get_agent_response(CORRELATION_ID)
     assert isinstance(delivered, AgentResponse)
     assert delivered.value == expected
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_shared_structured_null_presence_survives_delivery_without_rewriting_wire(present: bool) -> None:
+    state = DurableAgentState()
+    _record(state, AgentResponse(messages=[]))
+    raw = state.to_dict()
+    wire: dict[str, Any] = {"messages": []}
+    if present:
+        wire["value"] = None
+    raw["data"]["terminalResults"][CORRELATION_ID]["response"] = wire
+    restored = DurableAgentState.from_json(json.dumps(raw))
+    delivered = restored.try_get_agent_response(CORRELATION_ID)
+    assert delivered is not None and delivered.value is None
+    assert serialize_terminal_response(delivered) == wire
+    assert restored.to_dict() == raw
+    assert ("value" in restored.data.response_mailbox[CORRELATION_ID]["response"]) is present
 
 
 def test_lazy_structured_value_is_captured_before_caller_text_changes() -> None:
@@ -257,9 +290,9 @@ def test_lazy_structured_value_is_captured_before_caller_text_changes() -> None:
     _record(state, response)
     response.messages[0].contents[0].text = '{"answer":0}'
 
-    snapshot = json.loads(state.to_json())["data"]["responseMailbox"][CORRELATION_ID]["response"]
+    snapshot = json.loads(state.to_json())["data"]["terminalResults"][CORRELATION_ID]["response"]
     assert snapshot["value"] == {"answer": 42}
-    assert AgentResponse.from_dict(snapshot).value == {"answer": 42}
+    assert load_terminal_response(snapshot).value == {"answer": 42}
     delivered = DurableAgentState.from_json(state.to_json()).try_get_agent_response(CORRELATION_ID)
     assert isinstance(delivered, AgentResponse)
     assert delivered.value == {"answer": 42}
@@ -267,7 +300,8 @@ def test_lazy_structured_value_is_captured_before_caller_text_changes() -> None:
 
 def test_mutating_caller_response_and_transcript_cannot_change_mailbox() -> None:
     response = _response()
-    expected = json.loads(json.dumps(response.to_dict(), allow_nan=False))
+    expected = serialize_agent_response(response)
+    expected_wire = serialize_terminal_response(expected)
     state = DurableAgentState()
     transcript = DurableAgentStateResponse.from_run_response(CORRELATION_ID, response)
     state.data.conversation_history.append(transcript)
@@ -301,10 +335,10 @@ def test_mutating_caller_response_and_transcript_cannot_change_mailbox() -> None
     state.data.conversation_history.clear()
 
     restored = DurableAgentState.from_json(state.to_json())
-    assert restored.data.response_mailbox[CORRELATION_ID]["response"] == expected
+    assert restored.data.response_mailbox[CORRELATION_ID]["response"] == expected_wire
     delivered = restored.try_get_agent_response(CORRELATION_ID)
     assert isinstance(delivered, AgentResponse)
-    assert delivered.to_dict() == expected
+    assert serialize_agent_response(delivered) == expected
 
 
 def test_structured_value_is_detached_from_the_caller() -> None:
@@ -336,14 +370,14 @@ def test_poll_results_and_serialized_delivery_records_are_detached() -> None:
     delivered.messages[0].contents[0].additional_properties["nested"]["labels"].append("caller edit")
     delivered.messages.clear()
     exported = state.to_dict()
-    exported["data"]["responseMailbox"][CORRELATION_ID]["response"]["messages"].clear()
-    exported["data"]["completedCorrelations"][CORRELATION_ID]["completedAt"] = "changed"
-    exported["data"]["ingestedMessages"]["message-1"].clear()
+    exported["data"]["terminalResults"][CORRELATION_ID]["response"]["messages"].clear()
+    exported["data"]["completionReceipts"][CORRELATION_ID]["completedAt"] = "changed"
+    exported["data"]["pythonIngestion"]["messages"]["message-1"].clear()
 
     assert state.to_dict() == expected
     second = state.try_get_agent_response(CORRELATION_ID)
     assert isinstance(second, AgentResponse)
-    assert second.to_dict() == expected["data"]["responseMailbox"][CORRELATION_ID]["response"]
+    assert serialize_terminal_response(second) == expected["data"]["terminalResults"][CORRELATION_ID]["response"]
 
 
 @pytest.mark.parametrize("cleanup", [False, True], ids=["before-cleanup", "after-cleanup"])
@@ -371,6 +405,7 @@ def test_expiry_returns_completed_status_never_the_surviving_transcript(cleanup:
     transcript = deepcopy(state.to_dict()["data"]["conversationHistory"])
     if cleanup:
         state.expire_responses(now=now)
+        receipt.update(resultState="unavailable", resultUnavailableAt=now.isoformat())
 
     restored = DurableAgentState.from_json(state.to_json())
     assert bool(restored.data.response_mailbox) is not cleanup
@@ -397,10 +432,16 @@ def test_expiry_boundary_removes_only_due_payloads_not_receipts() -> None:
     assert set(state.data.response_mailbox) == {CORRELATION_ID, "later"}
     state.expire_responses(now=boundary)
     assert set(state.data.response_mailbox) == {"later"}
+    receipts[CORRELATION_ID].update(resultState="unavailable", resultUnavailableAt=boundary.isoformat())
     assert state.data.completed_correlations == receipts
     state.expire_responses(now=boundary + timedelta(seconds=30))
+    receipts["later"].update(
+        resultState="unavailable", resultUnavailableAt=(boundary + timedelta(seconds=30)).isoformat()
+    )
     assert state.data.response_mailbox == {}
     assert DurableAgentState.from_json(state.to_json()).data.completed_correlations == receipts
+    state.expire_responses(now=boundary + timedelta(days=1))
+    assert state.data.completed_correlations == receipts
 
 
 @pytest.mark.parametrize("expired", [False, True])
@@ -420,11 +461,13 @@ def test_duplicate_record_does_not_replace_or_reopen_a_completed_response(expire
 
 
 def test_version_two_does_not_poll_transcript_without_delivery_evidence() -> None:
-    state = DurableAgentState.from_dict(_legacy_payload("2.0.0"))
+    payload = _legacy_payload("2.0.0")
+    payload["data"].update(terminalResults={}, completionReceipts={})
+    state = DurableAgentState.from_dict(payload)
     assert state.try_get_agent_response(CORRELATION_ID) is None
 
 
-@pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
 @pytest.mark.parametrize("kind", ["response", "errorResponse"])
 def test_legacy_reader_round_trip_and_polling_do_not_upgrade_state(version: str, kind: str) -> None:
     payload = _legacy_payload(version)
@@ -441,51 +484,101 @@ def test_legacy_reader_round_trip_and_polling_do_not_upgrade_state(version: str,
     assert restored.to_dict() == payload
 
 
-@pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
-def test_legacy_conversion_records_a_fresh_grace_window_not_a_historical_original(version: str) -> None:
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+def test_legacy_failure_conversion_preserves_original_completion_with_new_grace(version: str) -> None:
     payload = _legacy_payload(version)
+    payload["data"]["conversationHistory"][1]["$type"] = "errorResponse"
+    payload["futureRoot"] = {"keep": [False, None]}
+    payload["data"]["futureData"] = {"keep": [0]}
+    payload["data"]["conversationHistory"][1]["futureEntry"] = {"keep": ["original"]}
     original = deepcopy(payload)
     legacy_response = DurableAgentState.from_dict(payload).try_get_agent_response(CORRELATION_ID)
     assert isinstance(legacy_response, AgentResponse)
+    # This complete original is controlled fixture evidence, not the surviving transcript projection.
+    original_result = {
+        "correlationId": CORRELATION_ID,
+        "outcome": "failed",
+        "completedAt": ORIGINAL_COMPLETED_AT,
+        "response": {
+            "createdAt": HISTORICAL_TIME.isoformat(),
+            "messages": [
+                {
+                    "role": "assistant",
+                    "messageId": "original-response",
+                    "authorName": "legacy-agent",
+                    "contents": [{"$type": "text", "text": "complete original failure result"}],
+                }
+            ],
+            "usage": {"inputTokenCount": 3, "outputTokenCount": 2, "totalTokenCount": 5},
+        },
+        "error": {"code": "provider_error", "message": "Original invocation failed."},
+    }
+    evidence = {
+        "sourceDigest": state_snapshot_digest(payload),
+        "evidenceId": "delivery-completion-journal",
+        "complete": True,
+        "results": [deepcopy(original_result)],
+    }
+    before_evidence = deepcopy(evidence)
     before = datetime.now(timezone.utc)
-    state = _migrate_legacy_payload(payload)
+    state = _migrate_legacy_payload(payload, completion_evidence=evidence)
     after = datetime.now(timezone.utc)
 
     restored = DurableAgentState.from_json(state.to_json())
     assert restored.schema_version == "2.0.0"
     mailbox = restored.data.response_mailbox[CORRELATION_ID]
-    created_at = datetime.fromisoformat(mailbox["createdAt"])
-    assert before <= created_at <= after
-    assert created_at != HISTORICAL_TIME
-    assert datetime.fromisoformat(mailbox["expiresAt"]) - created_at == timedelta(seconds=DELIVERY_WINDOW_SECONDS)
-    assert restored.data.completed_correlations[CORRELATION_ID] == {"completedAt": mailbox["createdAt"], "legacy": True}
+    migration_time = datetime.fromisoformat(restored.data.unknown_fields["migration"]["createdAt"])
+    assert before <= migration_time <= after
+    assert mailbox == {**original_result, "resultExpiresAt": mailbox["resultExpiresAt"]}
+    assert mailbox["completedAt"] == ORIGINAL_COMPLETED_AT
+    assert datetime.fromisoformat(mailbox["resultExpiresAt"]) - migration_time == timedelta(
+        seconds=DELIVERY_WINDOW_SECONDS
+    )
+    assert restored.data.completed_correlations[CORRELATION_ID] == {
+        "correlationId": CORRELATION_ID,
+        "completedAt": ORIGINAL_COMPLETED_AT,
+        "outcome": "failed",
+        "resultExpiresAt": mailbox["resultExpiresAt"],
+        "resultState": "available",
+    }
     assert restored.data.ingested_messages == {"legacy-known-id": None}
     assert restored.data.unknown_fields["migration"] == {
         "id": "delivery-migration-1",
         "sourceDigest": state_snapshot_digest(original),
         "sourceSessionId": SOURCE_SESSION_ID,
         "ownershipTransferId": "delivery-transfer-1",
-        "createdAt": mailbox["createdAt"],
+        "createdAt": migration_time.isoformat(),
+        "completionEvidenceId": evidence["evidenceId"],
     }
     assert restored.data.session == {"session_id": SOURCE_SESSION_ID, "state": {}}
-    assert payload == original
+    assert restored.to_dict()["futureRoot"] == original["futureRoot"]
+    assert restored.data.unknown_fields["futureData"] == original["data"]["futureData"]
+    assert restored.to_dict()["data"]["conversationHistory"] == original["data"]["conversationHistory"]
+    assert payload == original and evidence == before_evidence
     delivered = restored.try_get_agent_response(CORRELATION_ID)
     assert isinstance(delivered, AgentResponse)
-    assert delivered.to_dict() == legacy_response.to_dict()
+    assert invocation_outcome(delivered) == "failed"
+    assert delivered.messages[0].text == "complete original failure result"
+    assert delivered.messages[0].text != legacy_response.messages[0].text
+    assert delivered.messages[0].message_id == "original-response"
+    assert delivered.messages[0].author_name == "legacy-agent"
+    assert delivered.usage_details == legacy_response.usage_details
     assert delivered.created_at == HISTORICAL_TIME.isoformat()
 
     first_conversion = restored.to_json()
     restored.prepare_for_write(delivery_window_seconds=DELIVERY_WINDOW_SECONDS * 2)
     assert restored.to_json() == first_conversion
-    restored.expire_responses(now=datetime.fromisoformat(mailbox["expiresAt"]))
+    restored.expire_responses(now=datetime.fromisoformat(mailbox["resultExpiresAt"]))
     expired = DurableAgentState.from_json(restored.to_json())
     after_expiry = expired.to_json()
     expired.prepare_for_write(delivery_window_seconds=DELIVERY_WINDOW_SECONDS * 2)
     assert expired.to_json() == after_expiry
+    assert expired.data.completed_correlations[CORRELATION_ID]["completedAt"] == ORIGINAL_COMPLETED_AT
     _assert_expired(expired.try_get_agent_response(CORRELATION_ID))
+    assert payload == original and evidence == before_evidence
 
 
-@pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
 @pytest.mark.parametrize("position", [0, 3])
 def test_scalar_legacy_ingestion_cannot_be_migrated_without_evidence(version: str, position: int) -> None:
     payload = _legacy_payload(version)
@@ -510,9 +603,11 @@ def test_scalar_legacy_ingestion_cannot_be_migrated_without_evidence(version: st
     assert delivered.text == "surviving legacy transcript"
 
 
-@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "2.0.0", "2.7.3"])
-def test_unknown_root_data_and_entry_properties_survive_reload_and_explicit_migration(version: str) -> None:
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0", "2.0.0"])
+def test_unknown_root_data_and_known_entry_siblings_survive_reload(version: str) -> None:
     payload = _legacy_payload(version)
+    if version == "2.0.0":
+        payload["data"].update(terminalResults={}, completionReceipts={})
     payload["futureRoot"] = {"nested": [1, {"keep": True}]}
     payload["data"]["futureData"] = {"nested": [2, {"keep": None}]}
     payload["data"]["session"] = {
@@ -534,52 +629,48 @@ def test_unknown_root_data_and_entry_properties_survive_reload_and_explicit_migr
         if kind == DurableAgentStateEntryJsonType.COMPACTION:
             entry.pop("correlationId")
         history.append(entry)
-    opaque = {
-        "$type": "future-owner-entry",
-        "correlationId": "opaque",
-        "messages": [{"role": "assistant", "contents": [{"$type": "text", "text": "do not replay"}]}],
-        "futureEntry": {"nested": [None, {"keep": "opaque"}]},
-    }
-    history.insert(1, opaque)
     payload["data"]["conversationHistory"] = history
     state = DurableAgentState.from_dict(deepcopy(payload))
     state = DurableAgentState.from_json(state.to_json())
     assert state.to_dict() == payload
-    assert isinstance(state.data.conversation_history[1], DurableAgentStateUnknownEntry)
     replayed = [entry.messages[index].text for entry, index in replayable_entries(state.data.conversation_history)]
     assert replayed == ["request", "response", "compaction"]
-    assert state.try_get_agent_response("opaque") is None
-
-    if version.startswith("1."):
-        state = _migrate_legacy_payload(payload)
-    elif version == "2.0.0":
+    assert state.try_get_agent_response("absent") is None
+    if version == "2.0.0":
         state.prepare_for_write(delivery_window_seconds=DELIVERY_WINDOW_SECONDS)
     else:
-        # Future revisions remain readable without permitting a write or downgrading the source.
-        with pytest.raises(ValueError, match="Only 2.0.0 is writable"):
+        with pytest.raises(ValueError, match="read-only"):
             state.prepare_for_write(delivery_window_seconds=DELIVERY_WINDOW_SECONDS)
-        assert state.to_dict() == payload
-    upgraded = DurableAgentState.from_json(state.to_json()).to_dict()
-    assert upgraded["schemaVersion"] == ("2.0.0" if version.startswith("1.") else version)
-    assert upgraded["futureRoot"] == payload["futureRoot"]
-    for key in ("futureData", "session", "conversationHistory"):
-        assert upgraded["data"][key] == payload["data"][key]
+    assert state.to_dict() == payload
 
 
-def test_ingestion_hash_lists_and_legacy_known_id_markers_survive_json_reload() -> None:
+def test_versioned_ingestion_fingerprints_and_identity_markers_survive_json_reload() -> None:
     first = Message("user", ["first"], message_id="same-id")
     changed = Message("user", ["changed"], message_id="same-id")
     hashes = [message_identity(first), message_identity(changed)]
     assert hashes[0] != hashes[1]
-    payload = {
+    payload: dict[str, Any] = {
         "schemaVersion": "2.0.0",
-        "data": {"conversationHistory": [], "ingestedMessages": {"same-id": hashes, "legacy-known-id": None}},
+        "data": {
+            "conversationHistory": [],
+            "terminalResults": {},
+            "completionReceipts": {},
+            "ingestedMessages": {"same-id": "opaque, not a fingerprint list"},
+            "pythonIngestion": {
+                "profile": "agent-framework-python.ingestion",
+                "version": 1,
+                "messages": {"same-id": hashes, "legacy-known-id": None},
+            },
+        },
     }
     state = DurableAgentState.from_dict(payload)
+    assert state.data.ingested_messages == {"same-id": hashes, "legacy-known-id": None}
     assert DurableAgentState.from_json(state.to_json()).to_dict() == payload
 
 
-@pytest.mark.parametrize("version", [None, False, 2, "", "0.1.0", "3.0.0", "2.0", "2.0.0-preview", "2.0.0\n"])
+@pytest.mark.parametrize(
+    "version", [None, False, 2, "", "0.1.0", "1.3.0", "2.7.3", "3.0.0", "2.0", "2.0.0-preview", "2.0.0\n"]
+)
 def test_unsupported_or_malformed_version_fails_without_resetting_input(version: Any) -> None:
     payload = _legacy_payload("1.1.0")
     payload["schemaVersion"] = version
@@ -609,21 +700,25 @@ def test_non_object_data_is_not_silently_reset(data: Any) -> None:
         DurableAgentState.from_dict(payload)
 
 
-@pytest.mark.parametrize("field", ["responseMailbox", "completedCorrelations", "ingestedMessages"])
+@pytest.mark.parametrize("field", ["terminalResults", "completionReceipts"])
 @pytest.mark.parametrize("value", [None, False, 0, "", [], "not-an-object", [1]])
 def test_malformed_delivery_containers_fail_on_initial_read_including_falsy_values(field: str, value: Any) -> None:
     """An explicitly malformed field must not be normalized to an empty receipt store."""
-    payload = {"schemaVersion": "2.0.0", "data": {"conversationHistory": [], field: value}}
+    payload = DurableAgentState().to_dict()
+    payload["data"][field] = value
     original = deepcopy(payload)
     with pytest.raises(ValueError):
         DurableAgentState.from_dict(payload)
     assert payload == original
 
 
-@pytest.mark.parametrize("field", ["responseMailbox", "completedCorrelations"])
+@pytest.mark.parametrize("field", ["terminalResults", "completionReceipts"])
 @pytest.mark.parametrize("value", [None, False, 0, "", [], "not-an-entry"])
 def test_delivery_record_must_be_an_object_at_initial_read(field: str, value: Any) -> None:
-    payload = {"schemaVersion": "2.0.0", "data": {field: {CORRELATION_ID: value}}}
+    state = DurableAgentState()
+    _record(state, _response())
+    payload = state.to_dict()
+    payload["data"][field][CORRELATION_ID] = value
     with pytest.raises(ValueError):
         DurableAgentState.from_dict(payload)
 
@@ -631,10 +726,14 @@ def test_delivery_record_must_be_an_object_at_initial_read(field: str, value: An
 @pytest.mark.parametrize(
     ("record_name", "required_field"),
     [
-        ("responseMailbox", "response"),
-        ("responseMailbox", "createdAt"),
-        ("responseMailbox", "expiresAt"),
-        ("completedCorrelations", "completedAt"),
+        ("terminalResults", "response"),
+        ("terminalResults", "correlationId"),
+        ("terminalResults", "outcome"),
+        ("terminalResults", "completedAt"),
+        ("completionReceipts", "correlationId"),
+        ("completionReceipts", "outcome"),
+        ("completionReceipts", "completedAt"),
+        ("completionReceipts", "resultState"),
     ],
 )
 def test_required_delivery_record_fields_are_checked_before_polling(record_name: str, required_field: str) -> None:
@@ -650,7 +749,12 @@ def test_required_delivery_record_fields_are_checked_before_polling(record_name:
 
 @pytest.mark.parametrize(
     ("record_name", "field"),
-    [("responseMailbox", "createdAt"), ("responseMailbox", "expiresAt"), ("completedCorrelations", "completedAt")],
+    [
+        ("terminalResults", "completedAt"),
+        ("terminalResults", "resultExpiresAt"),
+        ("completionReceipts", "completedAt"),
+        ("completionReceipts", "resultExpiresAt"),
+    ],
 )
 @pytest.mark.parametrize("value", [None, False, 0, [], "", "not-a-timestamp"])
 def test_invalid_delivery_timestamps_fail_at_initial_read(record_name: str, field: str, value: Any) -> None:
@@ -662,30 +766,33 @@ def test_invalid_delivery_timestamps_fail_at_initial_read(record_name: str, fiel
         DurableAgentState.from_dict(payload)
 
 
-@pytest.mark.parametrize("response", [None, [], "{}", {}, {"type": "other", "messages": []}])
+@pytest.mark.parametrize(
+    "response",
+    [None, [], "{}", {}, {"messages": [{"role": "assistant", "contents": [{"type": "text", "text": "Core"}]}]}],
+)
 def test_invalid_inline_response_fails_at_initial_read(response: Any) -> None:
     state = DurableAgentState()
     _record(state, _response())
     payload = json.loads(state.to_json())
-    payload["data"]["responseMailbox"][CORRELATION_ID]["response"] = response
+    payload["data"]["terminalResults"][CORRELATION_ID]["response"] = response
     with pytest.raises(ValueError):
         DurableAgentState.from_dict(payload)
 
 
-@pytest.mark.parametrize("legacy", [None, 0, 1, "true", [], {}])
-def test_legacy_receipt_marker_must_be_boolean_at_initial_read(legacy: Any) -> None:
-    payload = {
-        "schemaVersion": "2.0.0",
-        "data": {
-            "completedCorrelations": {CORRELATION_ID: {"completedAt": HISTORICAL_TIME.isoformat(), "legacy": legacy}}
-        },
-    }
-    with pytest.raises(ValueError):
+@pytest.mark.parametrize("outcome", [None, "unknown", "success", False, 0, [], {}])
+def test_receipt_requires_known_outcome_at_initial_read(outcome: Any) -> None:
+    state = DurableAgentState()
+    _record(state, _response())
+    payload = state.to_dict()
+    payload["data"]["completionReceipts"][CORRELATION_ID]["outcome"] = outcome
+    with pytest.raises(ValueError, match="outcome"):
         DurableAgentState.from_dict(payload)
 
 
-@pytest.mark.parametrize("fingerprints", [False, 0, "a" * 64, {}, [None], [1], ["a" * 64, False]])
-def test_ingestion_record_rejects_anything_but_hash_lists_or_legacy_null(fingerprints: Any) -> None:
-    payload = {"schemaVersion": "2.0.0", "data": {"ingestedMessages": {"message-id": fingerprints}}}
-    with pytest.raises(ValueError):
-        DurableAgentState.from_dict(payload)
+@pytest.mark.parametrize("opaque", [None, False, 0, "owner-value", [], {"message-id": "not-a-fingerprint-list"}])
+def test_unprofiled_ingestion_is_preserved_without_interpreting_receipts(opaque: Any) -> None:
+    payload = DurableAgentState().to_dict()
+    payload["data"]["ingestedMessages"] = opaque
+    state = DurableAgentState.from_dict(payload)
+    assert state.data.ingested_messages == {}
+    assert DurableAgentState.from_json(state.to_json()).to_dict() == payload

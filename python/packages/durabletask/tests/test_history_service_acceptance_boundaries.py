@@ -24,6 +24,7 @@ from agent_framework import (
     ResponseStream,
     SessionContext,
 )
+from test_durable_history_provider import _ingestion_messages
 from test_history_identity_acceptance import _assert_no_private_fields, _projection, _seed_history, _wire
 from test_history_pipeline_revision import NonStreamingAgent, ToolChatClient
 from test_revision_contract import JsonStateProvider
@@ -281,15 +282,15 @@ async def test_synthetic_service_response_does_not_accept_inputs_after_later_pro
     assert caller_middleware == ([ordinary, synthetic] if mode == "agent-synthetic-control" else [ordinary])
     assert provider.writes == 1
     assert provider.raw["data"]["conversationHistory"] == raw["data"]["conversationHistory"]
-    assert provider.raw["data"]["completedCorrelations"]["synthetic-failed"]["outcome"] == "failed"
+    assert provider.raw["data"]["completionReceipts"]["synthetic-failed"]["outcome"] == "failed"
     registration.assert_unchanged(entity)
     _assert_no_private_fields(provider.raw)
 
     # Assert actual cold delivery before the bookkeeping check, so the repro shows lost input.
     await _assert_cold_next_turn(provider.raw, request, accepted=real_leaf, stream=stream)
     receipts = {occurrence: [message_identity(message)] for occurrence in request["contextMessageIds"]}
-    assert provider.raw["data"]["ingestedMessages"] == {
-        **raw["data"]["ingestedMessages"],
+    assert _ingestion_messages(provider.raw) == {
+        **_ingestion_messages(raw),
         **(receipts if real_leaf else {}),
     }
     assert probe.accepted == [{(key, message_identity(message)) for key in receipts} if real_leaf else set()]
@@ -362,14 +363,14 @@ async def test_completed_service_call_acceptance_survives_real_per_call_history_
     assert provider.writes == 1 and request == before and caller_middleware == [ordinary]
     assert provider.raw["data"]["conversationHistory"] == raw["data"]["conversationHistory"]
     outcome = "failed" if fail_save else "succeeded"
-    assert provider.raw["data"]["completedCorrelations"]["per-call"]["outcome"] == outcome
+    assert provider.raw["data"]["completionReceipts"]["per-call"]["outcome"] == outcome
     registration.assert_unchanged(entity)
     _assert_no_private_fields(provider.raw)
 
     # The failed core hook may prevent continuation advancement. Acceptance must still survive.
     await _assert_cold_next_turn(provider.raw, request, accepted=True, stream=stream)
-    assert provider.raw["data"]["ingestedMessages"] == {
-        **raw["data"]["ingestedMessages"],
+    assert _ingestion_messages(provider.raw) == {
+        **_ingestion_messages(raw),
         **{occurrence: [message_identity(message)] for occurrence in request["contextMessageIds"]},
     }
 

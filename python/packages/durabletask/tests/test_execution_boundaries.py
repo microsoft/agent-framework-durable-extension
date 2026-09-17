@@ -32,9 +32,9 @@ from test_revision_contract import JsonStateProvider
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState, DurableHistoryProvider
 from agent_framework_durabletask._callbacks import AgentCallbackContext
-from agent_framework_durabletask._durable_agent_state import DurableAgentStateResponse
 from agent_framework_durabletask._history_provider import current_durable_history_binding
 from agent_framework_durabletask._message_identity import message_identity
+from agent_framework_durabletask._shared_response import serialize_terminal_response
 from agent_framework_durabletask._state_migration import migrate_legacy_state, state_snapshot_digest
 
 
@@ -208,6 +208,16 @@ def _committed(provider: JsonStateProvider) -> dict[str, Any]:
     return json.loads(json.dumps(provider.raw))
 
 
+def _ingested(data: dict[str, Any]) -> dict[str, Any]:
+    if "pythonIngestion" not in data:
+        return {}
+    profile = data["pythonIngestion"]
+    assert profile["profile"] == "agent-framework-python.ingestion"
+    assert type(profile["version"]) is int and profile["version"] == 1
+    assert isinstance(profile["messages"], dict)
+    return profile["messages"]
+
+
 def _request(correlation_id: str, message: Message) -> dict[str, Any]:
     return {
         "message": message.text,
@@ -227,10 +237,19 @@ def _assert_committed_error(
     raw = _committed(provider)
     assert raw["schemaVersion"] == "2.0.0"
     data = raw["data"]
-    mailbox = data["responseMailbox"][correlation_id]
-    assert mailbox["response"] == json.loads(json.dumps(response.to_dict()))
-    assert data["completedCorrelations"][correlation_id] == {"completedAt": mailbox["createdAt"], "outcome": "failed"}
-    assert datetime.fromisoformat(mailbox["expiresAt"]) > datetime.fromisoformat(mailbox["createdAt"])
+    mailbox = data["terminalResults"][correlation_id]
+    assert mailbox["response"] == json.loads(json.dumps(serialize_terminal_response(response)))
+    assert mailbox["correlationId"] == correlation_id and mailbox["outcome"] == "failed"
+    assert mailbox["error"]["code"] == error_code
+    assert detail in mailbox["error"]["message"]
+    assert data["completionReceipts"][correlation_id] == {
+        "correlationId": correlation_id,
+        "completedAt": mailbox["completedAt"],
+        "outcome": "failed",
+        "resultExpiresAt": mailbox["resultExpiresAt"],
+        "resultState": "available",
+    }
+    assert datetime.fromisoformat(mailbox["resultExpiresAt"]) > datetime.fromisoformat(mailbox["completedAt"])
     delivered = DurableAgentState.from_json(json.dumps(raw)).try_get_agent_response(correlation_id)
     assert isinstance(delivered, AgentResponse)
     errors = [content for message in delivered.messages for content in message.contents if content.type == "error"]
@@ -265,9 +284,9 @@ async def test_external_load_failure_commits_error_without_consuming_projected_i
     assert external.read_sessions and set(external.read_sessions) == {provider.core_session_id}
     assert external.saved == [] and client.received_messages == []
     assert data["conversationHistory"] == []
-    assert "upstream-0" not in data.get("ingestedMessages", {})
-    original_failure = deepcopy(data["responseMailbox"]["external-failed"])
-    original_receipt = deepcopy(data["completedCorrelations"]["external-failed"])
+    assert "upstream-0" not in _ingested(data)
+    original_failure = deepcopy(data["terminalResults"]["external-failed"])
+    original_receipt = deepcopy(data["completionReceipts"]["external-failed"])
 
     external.fail_reads = False
     cold_provider = JsonStateProvider(_committed(provider))
@@ -286,9 +305,9 @@ async def test_external_load_failure_commits_error_without_consuming_projected_i
     assert set(external.read_sessions) == {cold_provider.core_session_id}
     saved = _committed(cold_provider)["data"]
     assert saved["conversationHistory"] == []
-    assert saved["ingestedMessages"] == {"upstream-0": [message_identity(message)]}
-    assert saved["responseMailbox"]["external-failed"] == original_failure
-    assert saved["completedCorrelations"]["external-failed"] == original_receipt
+    assert _ingested(saved) == {"upstream-0": [message_identity(message)]}
+    assert saved["terminalResults"]["external-failed"] == original_failure
+    assert saved["completionReceipts"]["external-failed"] == original_receipt
     assert cold_provider.writes == 1
 
     before = _committed(cold_provider)
@@ -430,14 +449,14 @@ async def test_final_flush_failure_unbinds_restores_agent_and_rolls_back_all_loc
     assert entity.state is original_state and entity.state.to_dict() == before
     assert _committed(provider) == before and provider.writes == 1
     assert entity.state.try_get_agent_response("flush-failed") is None
-    assert "uncommitted-input" not in _committed(provider)["data"]["ingestedMessages"]
+    assert "uncommitted-input" not in _ingested(_committed(provider)["data"])
 
     history.fail_final_flush = False
     response = await entity.run(request)
     assert response.text == "answer-3"
     assert len(client.received_messages) == 3 and provider.writes == 2
     assert control.loaded[-1] == before["data"]["session"]["state"]["control"]
-    assert "flush-failed" in _committed(provider)["data"]["completedCorrelations"]
+    assert "flush-failed" in _committed(provider)["data"]["completionReceipts"]
     assert current_durable_history_binding() is None and entity.agent is original_agent
 
 
@@ -480,7 +499,7 @@ async def test_failed_model_turn_consumes_only_inputs_actually_saved_by_history(
     expected_receipts = {"prior-input": [message_identity(prior)]}
     if was_saved:
         expected_receipts["current-input"] = [message_identity(message)]
-    assert data["ingestedMessages"] == expected_receipts
+    assert _ingested(data) == expected_receipts
     stored_inputs = [
         item
         for entry in data["conversationHistory"]
@@ -556,7 +575,7 @@ async def test_completed_external_save_preserves_receipt_when_a_later_service_ca
     assert data["conversationHistory"] == []
     # The first per-call save returned before the later service call failed.
     # That affirms those inputs, not exactly-once external writes or whole-run success.
-    assert ("external-partial-input" in data.get("ingestedMessages", {})) is per_call
+    assert ("external-partial-input" in _ingested(data)) is per_call
     calls_before_duplicate = len(client.received_messages)
     saved_before_duplicate = deepcopy(external.saved)
     assert (await entity.run(request)).to_dict() == response.to_dict()
@@ -624,8 +643,8 @@ async def test_unsupported_stream_type_error_still_allows_one_non_streaming_invo
     assert callback.responses[0].to_dict() == response.to_dict()
     assert callback.responses[0].messages[0] is not response.messages[0]
     data = _committed(provider)["data"]
-    assert data["responseMailbox"]["unsupported-stream"]["response"] == response.to_dict()
-    assert "unsupported-stream" in data["completedCorrelations"] and provider.writes == 1
+    assert data["terminalResults"]["unsupported-stream"]["response"] == serialize_terminal_response(response)
+    assert "unsupported-stream" in data["completionReceipts"] and provider.writes == 1
     assert (await entity.run(request)).to_dict() == response.to_dict()
     assert agent.run_modes == [True, False] and provider.writes == 1
 
@@ -674,7 +693,9 @@ async def test_reset_clears_local_context_but_keeps_delivery_and_ingestion_recei
     initial = DurableAgentState().to_dict()
     initial["futureRoot"] = {"opaque": [1, 2]}
     initial["data"]["futureData"] = {"opaque": [3, 4]}
-    initial["data"]["conversationHistory"] = [{"$type": "future-kind", "opaque": ["old local history"]}]
+    initial["data"]["conversationHistory"] = [
+        {"$type": "request", "messages": [], "futureEntry": {"opaque": ["old local history"]}}
+    ]
     provider = JsonStateProvider(initial)
     control = _ControlProvider()
     initial_client: Any = RecordingChatClient()
@@ -694,7 +715,7 @@ async def test_reset_clears_local_context_but_keeps_delivery_and_ingestion_recei
     # Explicit reset may delete even opaque local history; unrelated data is not history.
     assert reset["futureRoot"] == before["futureRoot"]
     assert reset["data"]["futureData"] == before["data"]["futureData"]
-    for field in ("responseMailbox", "completedCorrelations", "ingestedMessages"):
+    for field in ("terminalResults", "completionReceipts", "pythonIngestion"):
         assert reset["data"][field] == before["data"][field]
     assert provider.writes == 2
 
@@ -709,23 +730,62 @@ async def test_reset_clears_local_context_but_keeps_delivery_and_ingestion_recei
     assert [[item.text for item in batch] for batch in client.received_messages] == [["after reset"]]
     saved = _committed(cold_provider)
     assert saved["data"]["session"]["state"]["control"] == {"before_runs": 1, "after_runs": 1}
-    assert saved["data"]["responseMailbox"]["before-reset"] == before["data"]["responseMailbox"]["before-reset"]
-    assert (
-        saved["data"]["completedCorrelations"]["before-reset"]
-        == before["data"]["completedCorrelations"]["before-reset"]
-    )
-    assert saved["data"]["ingestedMessages"]["before-reset-input"] == [message_identity(message)]
+    assert saved["data"]["terminalResults"]["before-reset"] == before["data"]["terminalResults"]["before-reset"]
+    assert saved["data"]["completionReceipts"]["before-reset"] == before["data"]["completionReceipts"]["before-reset"]
+    assert _ingested(saved["data"])["before-reset-input"] == [message_identity(message)]
     assert (await cold.run(request)).to_dict() == original_response.to_dict()
     assert len(client.received_messages) == 1 and cold_provider.writes == 1
 
 
 @pytest.mark.parametrize("legacy", [False, True], ids=["writer", "legacy-migration"])
-def test_response_writer_and_migration_keep_completion_evidence_after_payload_expiry(legacy: bool) -> None:
-    response = AgentResponse(messages=[Message("assistant", ["original result"])])
-    state = DurableAgentState("1.1.0" if legacy else "2.0.0")
+@pytest.mark.parametrize("outcome", ["succeeded", "failed"])
+def test_response_writer_and_migration_keep_completion_evidence_after_payload_expiry(
+    legacy: bool, outcome: str
+) -> None:
+    response = AgentResponse(
+        messages=[
+            Message(
+                "assistant",
+                [
+                    Content.from_error(message="original failure")
+                    if outcome == "failed"
+                    else Content.from_text("original result"),
+                ],
+            )
+        ]
+    )
+    state = DurableAgentState()
     if legacy:
-        state.data.conversation_history.append(DurableAgentStateResponse.from_run_response("completed", response))
-        source = state.to_dict()
+        source: dict[str, Any] = {
+            "schemaVersion": "1.1.0",
+            "data": {
+                "conversationHistory": [
+                    {
+                        "$type": "errorResponse" if outcome == "failed" else "response",
+                        "correlationId": "completed",
+                        "createdAt": "2024-01-01T00:00:00+00:00",
+                        "messages": [
+                            {"role": "assistant", "contents": [{"$type": "text", "text": "retained portion"}]}
+                        ],
+                    }
+                ]
+            },
+        }
+        # Record the controlled original response, not a projection of retained history.
+        original_result = {
+            "correlationId": "completed",
+            "outcome": outcome,
+            "completedAt": "2024-01-02T03:04:05.123456789Z",
+            "response": serialize_terminal_response(response),
+            **({"error": {"code": "provider_error", "message": "original failure"}} if outcome == "failed" else {}),
+        }
+        evidence = {
+            "sourceDigest": state_snapshot_digest(source),
+            "evidenceId": "expiry-completion-journal",
+            "complete": True,
+            "results": [deepcopy(original_result)],
+        }
+        before_source, before_evidence = deepcopy(source), deepcopy(evidence)
         state = migrate_legacy_state(
             source,
             source_digest=state_snapshot_digest(source),
@@ -733,24 +793,41 @@ def test_response_writer_and_migration_keep_completion_evidence_after_payload_ex
             migration_id="expiry-migration",
             ownership_transfer_id="quiesced-owner",
             delivery_window_seconds=3600,
+            completion_evidence=evidence,
         )
+        result = state.data.response_mailbox["completed"]
+        assert result == {**original_result, "resultExpiresAt": result["resultExpiresAt"]}
+        assert state.to_dict()["data"]["conversationHistory"] == source["data"]["conversationHistory"]
+        assert source == before_source and evidence == before_evidence
     else:
         state.record_response("completed", response, delivery_window_seconds=3600)
     raw = json.loads(state.to_json())
     assert raw["schemaVersion"] == "2.0.0"
-    mailbox = raw["data"]["responseMailbox"]["completed"]
-    receipt = raw["data"]["completedCorrelations"]["completed"]
-    assert receipt["completedAt"] == mailbox["createdAt"]
-    assert receipt.get("legacy", False) is legacy
+    mailbox = raw["data"]["terminalResults"]["completed"]
+    receipt = raw["data"]["completionReceipts"]["completed"]
+    assert mailbox["correlationId"] == "completed" and mailbox["outcome"] == outcome
+    assert receipt == {
+        "correlationId": "completed",
+        "outcome": outcome,
+        "completedAt": mailbox["completedAt"],
+        "resultExpiresAt": mailbox["resultExpiresAt"],
+        "resultState": "available",
+    }
 
     restored = DurableAgentState.from_json(json.dumps(raw))
-    restored.expire_responses(now=datetime.fromisoformat(mailbox["expiresAt"]))
+    expiry = datetime.fromisoformat(mailbox["resultExpiresAt"])
+    restored.expire_responses(now=expiry)
     expired = DurableAgentState.from_json(restored.to_json())
     assert expired.data.response_mailbox == {}
-    assert expired.data.completed_correlations["completed"] == receipt
+    assert expired.data.completed_correlations["completed"] == {
+        **receipt,
+        "resultState": "unavailable",
+        "resultUnavailableAt": expiry.isoformat(),
+    }
     delivered = expired.try_get_agent_response("completed")
     assert isinstance(delivered, AgentResponse)
     assert delivered.additional_properties["durable_status"] == "already_completed"
+    assert delivered.additional_properties["durable_outcome"] == outcome
     assert delivered.messages[0].contents[0].error_code == "response_expired"
     before = expired.to_json()
     expired.record_response(
@@ -775,11 +852,16 @@ def test_version_two_mailbox_without_matching_receipt_is_rejected_on_initial_rea
     raw = json.loads(state.to_json())
     # Positive control: this is an otherwise valid writer-produced mailbox and receipt.
     assert DurableAgentState.from_json(json.dumps(raw)).to_dict() == raw
-    receipt = raw["data"]["completedCorrelations"].pop("completed")
+    receipt = raw["data"]["completionReceipts"].pop("completed")
     if receipt_shape == "missing-container":
-        del raw["data"]["completedCorrelations"]
+        del raw["data"]["completionReceipts"]
     elif receipt_shape == "unrelated-receipt":
-        raw["data"]["completedCorrelations"]["different-correlation"] = receipt
+        raw["data"]["completionReceipts"]["different-correlation"] = {
+            **receipt,
+            "correlationId": "different-correlation",
+            "resultState": "unavailable",
+            "resultUnavailableAt": receipt["resultExpiresAt"],
+        }
     original = deepcopy(raw)
 
     # An orphan mailbox must not be the last completion evidence: expiry could delete

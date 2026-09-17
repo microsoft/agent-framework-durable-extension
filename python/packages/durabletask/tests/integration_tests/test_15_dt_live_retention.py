@@ -38,6 +38,7 @@ from live_retention_worker import AGENT_NAME, DELIVERY_WINDOW_SECONDS, MAX_STATE
 
 import agent_framework_durabletask
 from agent_framework_durabletask import DurableAgentState, DurableHistoryProvider
+from agent_framework_durabletask._shared_response import load_terminal_response
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_dts, pytest.mark.timeout(150)]
 WAIT_SECONDS = 30
@@ -269,13 +270,13 @@ def _committed(
             return None
         raw = metadata.get_state()
         state = json.loads(raw) if isinstance(raw, str) else raw
-        if correlation not in state.get("data", {}).get("completedCorrelations", {}):
+        if correlation not in state.get("data", {}).get("completionReceipts", {}):
             return None
         return _snapshot(client, entity)
 
     snapshot = _poll(worker, probe, f"completion receipt for {correlation}")
     (worker.artifacts / f"committed-{correlation}.json").write_text(json.dumps(snapshot), encoding="utf-8")
-    receipt = snapshot["state"]["data"]["completedCorrelations"][correlation]
+    receipt = snapshot["state"]["data"]["completionReceipts"][correlation]
     assert receipt["outcome"] == "succeeded", f"The real Agent failed for {correlation}"
     return snapshot["state"]
 
@@ -295,6 +296,14 @@ def _stored(raw: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         message.to_chat_message().to_dict() for entry in state.data.conversation_history for message in entry.messages
     ]
+
+
+def _ingested(raw: dict[str, Any]) -> dict[str, Any]:
+    profile = raw["data"]["pythonIngestion"]
+    assert profile["profile"] == "agent-framework-python.ingestion"
+    assert type(profile["version"]) is int and profile["version"] == 1
+    assert isinstance(profile["messages"], dict)
+    return profile["messages"]
 
 
 def _model_history(stored: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -404,7 +413,7 @@ def test_live_media_pressure_cold_read_and_exact_model_input(
             previous, previous_removed, previous_measured = retained, removed, measured
         assert previous_removed >= 4, "This must exercise real pressure eviction, not merely media serialization"
         assert sum(message["role"] == "user" for message in previous) >= 2, "Retain older media for cold model replay"
-        assert len(raw["data"]["completedCorrelations"]) == len(raw["data"]["responseMailbox"]) == 8
+        assert len(raw["data"]["completionReceipts"]) == len(raw["data"]["terminalResults"]) == 8
 
     with _worker(dts_endpoint, live_taskhub, tmp_path / "cold") as cold:
         snapshot = _snapshot(live_client, entity)
@@ -429,26 +438,26 @@ def test_live_media_pressure_cold_read_and_exact_model_input(
             pair = {f"turn-{turn}-call-message", f"turn-{turn}-result-message"}
             assert pair <= final_ids or pair.isdisjoint(final_ids), "Cold pressure split an atomic tool pair"
         _equal(
-            {key: final["data"]["ingestedMessages"][key] for key in raw["data"]["ingestedMessages"]},
-            raw["data"]["ingestedMessages"],
+            {key: _ingested(final)[key] for key in _ingested(raw)},
+            _ingested(raw),
             "cold replay preserves ingestion receipts",
         )
-        assert set(final["data"]["ingestedMessages"]) == {*raw["data"]["ingestedMessages"], "cold-input"}
+        assert set(_ingested(final)) == {*_ingested(raw), "cold-input"}
         total_removed = len(originals) - len(final_messages)
         assert final["data"]["truncation"]["evictedMessageCount"] == total_removed
         assert cold.removed_measurement() == total_removed - previous_removed
         assert len(json.dumps(final)) < int(MAX_STATE_BYTES * 0.85)
         _equal(
-            final["data"]["completedCorrelations"]["turn-0"],
-            raw["data"]["completedCorrelations"]["turn-0"],
+            final["data"]["completionReceipts"]["turn-0"],
+            raw["data"]["completionReceipts"]["turn-0"],
             "evicted turn completion receipt",
         )
-        for correlation, mailbox in raw["data"]["responseMailbox"].items():
-            _equal(final["data"]["responseMailbox"][correlation], mailbox, "retained mailbox through pressure")
+        for correlation, mailbox in raw["data"]["terminalResults"].items():
+            _equal(final["data"]["terminalResults"][correlation], mailbox, "retained mailbox through pressure")
             assert (
-                datetime.fromisoformat(mailbox["expiresAt"]) - datetime.fromisoformat(mailbox["createdAt"])
+                datetime.fromisoformat(mailbox["resultExpiresAt"]) - datetime.fromisoformat(mailbox["completedAt"])
             ).total_seconds() == DELIVERY_WINDOW_SECONDS
-        assert set(final["data"]["responseMailbox"]) == {*raw["data"]["responseMailbox"], "cold"}
+        assert set(final["data"]["terminalResults"]) == {*raw["data"]["terminalResults"], "cold"}
 
 
 def test_live_hard_stop_before_commit_repeats_effect_but_committed_duplicate_does_not(
@@ -469,8 +478,8 @@ def test_live_hard_stop_before_commit_repeats_effect_but_committed_duplicate_doe
         snapshot = _snapshot(live_client, entity)
         (tmp_path / "after-hard-stop.json").write_text(json.dumps(snapshot), encoding="utf-8")
         _equal(snapshot["state"], baseline, "backend state after hard stop")
-        assert "target" not in snapshot["state"]["data"]["completedCorrelations"]
-        assert "target" not in snapshot["state"]["data"]["responseMailbox"]
+        assert "target" not in snapshot["state"]["data"]["completionReceipts"]
+        assert "target" not in snapshot["state"]["data"]["terminalResults"]
 
     with _worker(dts_endpoint, live_taskhub, tmp_path / "retry", "target-input") as retry:
         # The killed work item may redeliver before this explicit retry. Either must use
@@ -480,7 +489,7 @@ def test_live_hard_stop_before_commit_repeats_effect_but_committed_duplicate_doe
         _equal(_snapshot(live_client, entity)["state"], baseline, "blocked retry is still uncommitted")
         retry.command("release")
         committed = _committed(live_client, entity, "target", retry)
-        assert committed["data"]["completedCorrelations"]["target"]["outcome"] == "succeeded"
+        assert committed["data"]["completionReceipts"]["target"]["outcome"] == "succeeded"
         _equal(_stored(committed), [*_stored(baseline), target.to_dict(), _answer("target-input")], "committed retry")
         retry.hard_stop()  # Only after authoritative scheduler readback, never a warm-cache acknowledgement.
 
@@ -504,7 +513,7 @@ def test_live_hard_stop_before_commit_repeats_effect_but_committed_duplicate_doe
             barrier_completed = True
             _equal(
                 json.loads(barrier.serialized_output),
-                committed["data"]["responseMailbox"]["target"]["response"],
+                load_terminal_response(committed["data"]["terminalResults"]["target"]["response"]).to_dict(),
                 "duplicate response",
             )
             snapshot = _snapshot(live_client, entity)
@@ -520,6 +529,6 @@ def test_live_hard_stop_before_commit_repeats_effect_but_committed_duplicate_doe
     effects = [json.loads(path.read_text(encoding="utf-8")) for path in tmp_path.glob("*/effect-*.json")]
     assert sum(effect["message_id"] == "target-input" for effect in effects) == 2
     # The delivery window is not shortened to make duplicate suppression or pressure fit.
-    mailbox = committed["data"]["responseMailbox"]["target"]
-    window = datetime.fromisoformat(mailbox["expiresAt"]) - datetime.fromisoformat(mailbox["createdAt"])
+    mailbox = committed["data"]["terminalResults"]["target"]
+    window = datetime.fromisoformat(mailbox["resultExpiresAt"]) - datetime.fromisoformat(mailbox["completedAt"])
     assert window.total_seconds() == DELIVERY_WINDOW_SECONDS

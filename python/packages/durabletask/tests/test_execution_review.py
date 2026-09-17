@@ -43,6 +43,16 @@ def _committed(provider: JsonStateProvider) -> dict[str, Any]:
     return _wire(provider.raw)
 
 
+def _ingested(data: dict[str, Any]) -> dict[str, Any]:
+    if "pythonIngestion" not in data:
+        return {}
+    profile = data["pythonIngestion"]
+    assert profile["profile"] == "agent-framework-python.ingestion"
+    assert type(profile["version"]) is int and profile["version"] == 1
+    assert isinstance(profile["messages"], dict)
+    return profile["messages"]
+
+
 def _make_agent(client: Any, **kwargs: Any) -> Agent:
     return Agent(client=client, **kwargs)
 
@@ -545,16 +555,20 @@ async def test_string_numeric_correlation_survives_cold_reload_without_reexecuti
     cold_provider = JsonStateProvider(_committed(provider))
     duplicate = await AgentEntity(agent, state_provider=cold_provider).run(request.to_dict())
     assert duplicate.to_dict() == response.to_dict()
-    assert set(provider.raw["data"]["completedCorrelations"]) == {"17"}
+    assert set(provider.raw["data"]["completionReceipts"]) == {"17"}
     assert len(client.received_messages) == 1 and cold_provider.writes == 0
 
 
-@pytest.mark.parametrize("anonymous", [False, True], ids=["application-id", "anonymous"])
-async def test_paired_occurrences_preserve_exact_raw_messages_and_canonical_content_metadata(anonymous: bool) -> None:
+@pytest.mark.parametrize(
+    "public_id", ["same-application-id", "", None], ids=["application-id", "empty-id", "anonymous"]
+)
+async def test_paired_occurrences_preserve_exact_raw_messages_and_canonical_content_metadata(
+    public_id: str | None,
+) -> None:
     message = Message(
         "user",
         [Content.from_text("identical payload", additional_properties={"source": {"tags": ["keep"]}})],
-        message_id=None if anonymous else "same-application-id",
+        message_id=public_id,
         additional_properties={"application": {"labels": [1, 2]}},
     )
     request = _projection("paired", [message, deepcopy(message)], ["o1", "o2"])
@@ -569,7 +583,30 @@ async def test_paired_occurrences_preserve_exact_raw_messages_and_canonical_cont
     assert [item.to_dict() for item in client.received_messages[0]] == original["contextMessages"]
     assert [item.message_id for item in client.received_messages[0]] == [message.message_id] * 2
     assert request == original and message.to_dict() == original["contextMessages"][0]
-    assert provider.raw["data"]["ingestedMessages"] == {key: [message_identity(message)] for key in ("o1", "o2")}
+    assert _ingested(provider.raw["data"]) == {key: [message_identity(message)] for key in ("o1", "o2")}
+    raw_inputs = [
+        stored
+        for entry in provider.raw["data"]["conversationHistory"]
+        if entry["$type"] == "request"
+        for stored in entry["messages"]
+    ]
+    assert len(raw_inputs) == 2
+    history_ids = []
+    for stored in raw_inputs:
+        if public_id is None:
+            assert "messageId" not in stored
+        else:
+            assert stored["messageId"] == public_id
+        history_id = stored.get("pythonHistoryId", stored.get("messageId"))
+        assert isinstance(history_id, str) and history_id
+        history_ids.append(history_id)
+        if history_id != public_id:
+            assert stored["pythonHistoryIdentity"] == {
+                "profile": "agent-framework-python.history-identity",
+                "version": 1,
+            }
+            assert stored["pythonHistoryId"] == history_id
+    assert history_ids[0] != history_ids[1]
     restored = DurableAgentState.from_json(json.dumps(_committed(provider)))
     inputs = [
         stored.to_chat_message()
@@ -578,6 +615,7 @@ async def test_paired_occurrences_preserve_exact_raw_messages_and_canonical_cont
         for stored in entry.messages
     ]
     assert len(inputs) == 2
+    assert [item.message_id for item in inputs] == [public_id] * 2
     assert [item.contents[0].to_dict() for item in inputs] == [message.contents[0].to_dict()] * 2
 
 
@@ -599,7 +637,7 @@ async def test_occurrence_receipts_survive_cold_reload_and_eviction_without_bloc
         assert not any(
             stored.text == message.text for entry in entity.state.data.conversation_history for stored in entry.messages
         )
-    assert provider.raw["data"]["ingestedMessages"] == {"o1": [message_identity(message)]}
+    assert _ingested(provider.raw["data"]) == {"o1": [message_identity(message)]}
     cold_provider = JsonStateProvider(_committed(provider))
     cold = AgentEntity(agent, state_provider=cold_provider)
     calls_before = len(client.received_messages)
@@ -611,14 +649,14 @@ async def test_occurrence_receipts_survive_cold_reload_and_eviction_without_bloc
     repeated = await cold.run(_projection("new-correlation-same-occurrence", [message], ["o1"]))
     assert repeated.text == "reply-3" and probe.inputs[-1] == []
     assert len(client.received_messages) == calls_before + 1 and cold_provider.writes == 1
-    assert "new-correlation-same-occurrence" in cold_provider.raw["data"]["completedCorrelations"]
+    assert "new-correlation-same-occurrence" in cold_provider.raw["data"]["completionReceipts"]
     await cold.run(_projection("new-occurrence", [message], ["o2"]))
     assert [item.to_dict() for item in probe.inputs[-1]] == [message.to_dict()]
     revised = deepcopy(message)
     revised.contents[0].text = "revised payload"
     await cold.run(_projection("revised-occurrence", [revised], ["o1"]))
     assert [item.to_dict() for item in probe.inputs[-1]] == [revised.to_dict()]
-    assert cold_provider.raw["data"]["ingestedMessages"] == {
+    assert _ingested(cold_provider.raw["data"]) == {
         "o1": [message_identity(message), message_identity(revised)],
         "o2": [message_identity(message)],
     }
@@ -635,7 +673,7 @@ async def test_paired_empty_projection_roundtrips_and_never_falls_back_to_loggin
     provider = JsonStateProvider()
     response = await AgentEntity(_make_agent(client), state_provider=provider).run(request)
     assert response.text == "reply-1" and client.received_messages == [[]]
-    assert provider.raw["data"].get("ingestedMessages", {}) == {}
+    assert _ingested(provider.raw["data"]) == {}
 
 
 @pytest.mark.parametrize("occurrences", [[], ["o1", "o2"], "o1", [None], [17], [""]])
@@ -691,7 +729,7 @@ async def test_failed_tool_followup_retains_receipts_by_occurrence_not_applicati
     assert history.after_calls == int(per_call)
     raw = _committed(provider)
     expected = {identity: [message_identity(message)] for identity in ("o1", "o2")} if per_call else {}
-    assert raw["data"].get("ingestedMessages", {}) == expected
+    assert _ingested(raw["data"]) == expected
     saved_inputs = [
         stored
         for entry in raw["data"]["conversationHistory"]
@@ -709,7 +747,7 @@ async def test_failed_tool_followup_retains_receipts_by_occurrence_not_applicati
     await cold.run(_projection("after-partial", [message, deepcopy(message)], ["o1", "o3"]))
     assert [item.to_dict() for item in probe.inputs[-1]] == [message.to_dict()] * (1 if per_call else 2)
     expected.update({identity: [message_identity(message)] for identity in ("o1", "o3")})
-    assert cold_provider.raw["data"]["ingestedMessages"] == expected
+    assert _ingested(cold_provider.raw["data"]) == expected
 
 
 @pytest.mark.parametrize("saved_count", [0, 1, 2], ids=["no-append", "partial-append", "full-append"])
@@ -742,7 +780,7 @@ async def test_partial_append_does_not_consume_an_unsaved_equal_occurrence(saved
     raw = _committed(provider)
     saved = [item for entry in raw["data"]["conversationHistory"] for item in entry["messages"]]
     assert len(saved) == saved_count, "the failure must occur after the selected real durable appends"
-    assert raw["data"].get("ingestedMessages", {}) == {
+    assert _ingested(raw["data"]) == {
         occurrence: [message_identity(message)] for occurrence in ["o1", "o2"][:saved_count]
     }
     assert provider.writes == 1
@@ -754,7 +792,7 @@ async def test_partial_append_does_not_consume_an_unsaved_equal_occurrence(saved
     assert cold_client.received_messages == [] and cold_provider.writes == 0
     await cold.run(_projection("append-recovered", [message, deepcopy(message)], ["o1", "o2"]))
     assert [item.to_dict() for item in probe.inputs[-1]] == [message.to_dict()] * (2 - saved_count)
-    assert cold_provider.raw["data"]["ingestedMessages"] == {
+    assert _ingested(cold_provider.raw["data"]) == {
         occurrence: [message_identity(message)] for occurrence in ("o1", "o2")
     }
 

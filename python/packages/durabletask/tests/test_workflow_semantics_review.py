@@ -28,6 +28,7 @@ from agent_framework import (
 )
 from agent_framework._workflows._edge import EdgeGroup, FanInEdgeGroup, FanOutEdgeGroup, SingleEdgeGroup
 from durabletask.task import CompletableTask, OrchestrationContext
+from test_durable_history_provider import _ingestion_messages
 
 from agent_framework_durabletask import AgentEntity, AgentEntityStateProviderMixin, RunRequest, serialize_agent_response
 from agent_framework_durabletask._message_identity import message_identity
@@ -844,7 +845,7 @@ async def test_real_adapter_three_hops_preserve_selected_context_through_receive
         assert len(wire["contextMessageIds"]) == len(expected)
         assert RunRequest.from_dict(wire).context_message_ids == wire["contextMessageIds"]
         assert agents[name].inputs == [expected]
-        receipts = providers[name].raw["data"]["ingestedMessages"]
+        receipts = _ingestion_messages(providers[name].raw)
         assert receipts == {
             identity: [message_identity(Message.from_dict(message))]
             for identity, message in zip(wire["contextMessageIds"], expected, strict=True)

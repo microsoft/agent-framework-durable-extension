@@ -468,7 +468,13 @@ def route_message_through_edge_groups(
 
         if isinstance(group, (SwitchCaseEdgeGroup, FanOutEdgeGroup)):
             if group.selection_func is not None:
-                selected = group.selection_func(message, group.target_executor_ids)
+                target_ids = group.target_executor_ids
+                selected = list(group.selection_func(message, list(target_ids)))
+                if not all(target_id in target_ids for target_id in selected):
+                    raise RuntimeError(
+                        f"Invalid selection result: {selected}. "
+                        f"Expected selections to be a subset of valid target executor IDs: {target_ids}."
+                    )
                 targets.extend(selected)
             else:
                 targets.extend(group.target_executor_ids)
