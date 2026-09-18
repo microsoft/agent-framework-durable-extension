@@ -612,14 +612,14 @@ public sealed class AgentEntityExpiryChainTests
     private static DurableAgentState WithScheduleMetadata(
         DurableAgentState state,
         JsonElement scheduleMetadata) => new()
-    {
-        SchemaVersion = state.SchemaVersion,
-        PersistentRequestOutcomesAuthorized = true,
-        Data = state.Data,
-        ExtensionData =
+        {
+            SchemaVersion = state.SchemaVersion,
+            PersistentRequestOutcomesAuthorized = true,
+            Data = state.Data,
+            ExtensionData =
             new Dictionary<string, JsonElement> { [AgentEntityResultExpirySchedule.ExtensionKey] = scheduleMetadata },
-        UnknownProperties = state.UnknownProperties,
-    };
+            UnknownProperties = state.UnknownProperties,
+        };
 
     private static string Serialize(DurableAgentState state) =>
         JsonSerializer.Serialize(state, DurableAgentStateJsonContext.Default.DurableAgentState);
