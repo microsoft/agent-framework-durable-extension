@@ -76,6 +76,10 @@ the host registration APIs.
 The Core requirement remains `agent-framework-core>=1.13.0,<2`. This package directly requires
 `pydantic>=2.11,<3` for structured response handling.
 
+Canonical media keeps its declared content kind rather than inferring it from the URI scheme.
+New response timestamps without an offset are interpreted as UTC. Valid stored timestamps retain
+their original offset and fractional precision.
+
 ### Basic Usage Example
 
 ```python
