@@ -400,7 +400,7 @@ public sealed class AgentEntityExpiryChainTests
     public async Task PublicRetentionSettingCannotEnableProductionMailboxWritesAsync()
     {
         int signals = 0;
-        EntityHarness production = CreateHarness(new RecordingAgent("agent"), state: null, enableMailboxWrites: false,
+        EntityHarness production = CreateHarness(new RecordingAgent("agent"), state: null, enablePersistentRequestOutcomes: false,
             authorizeLegacyMigration: false, resultRetentionPeriod: TimeSpan.FromMinutes(2), timeProvider: new Clock(s_now),
             onSignal: (_, _) => signals++);
         await production.RunAsync(new RunRequest("request") { CorrelationId = "request" });
@@ -410,7 +410,7 @@ public sealed class AgentEntityExpiryChainTests
         Assert.Null(state.Data.CompletionReceipts);
         Assert.Null(state.ExtensionData);
         Assert.Equal(0, signals);
-        Assert.Null(typeof(DurableAgentsOptions).GetProperty("EnableMailboxWrites"));
+        Assert.Null(typeof(DurableAgentsOptions).GetProperty("EnablePersistentRequestOutcomes"));
         Assert.Null(typeof(DurableAgentsOptions).GetProperty("EnableMailboxEntityDeletion"));
     }
 
@@ -429,7 +429,7 @@ public sealed class AgentEntityExpiryChainTests
             },
         };
         int signals = 0;
-        EntityHarness production = CreateHarness(new RecordingAgent("agent"), state, enableMailboxWrites: false,
+        EntityHarness production = CreateHarness(new RecordingAgent("agent"), state, enablePersistentRequestOutcomes: false,
             authorizeLegacyMigration: false, resultRetentionPeriod: TimeSpan.FromMinutes(2), timeProvider: new Clock(s_now),
             onSignal: (_, _) => signals++);
         await production.RunAsync(new RunRequest("request") { CorrelationId = "request" });
@@ -480,7 +480,7 @@ public sealed class AgentEntityExpiryChainTests
 
         // Recreate the same entity identity from deleted state using production's default-off gates.
         EntityHarness recreated = CreateHarness(new RecordingAgent("agent"), state: null,
-            enableMailboxWrites: false, authorizeLegacyMigration: false);
+            enablePersistentRequestOutcomes: false, authorizeLegacyMigration: false);
         await recreated.RunAsync(new RunRequest("new") { CorrelationId = "new-generation" });
         DurableAgentState state = Reload(Assert.IsType<DurableAgentState>(recreated.PersistedState));
         Assert.Equal(DurableAgentState.CurrentSchemaVersion, state.SchemaVersion);
@@ -527,7 +527,7 @@ public sealed class AgentEntityExpiryChainTests
         int writes = 0;
         int signals = 0;
         EntityHarness harness = CreateHarness(new RecordingAgent("agent"), state,
-            enableMailboxWrites: false, authorizeLegacyMigration: false,
+            enablePersistentRequestOutcomes: false, authorizeLegacyMigration: false,
             onCommit: _ => writes++, onSignal: (_, _) => signals++);
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => harness.CheckResultsExpirationAsync(new AgentEntityResultExpirationCheck(s_now)));
@@ -543,7 +543,7 @@ public sealed class AgentEntityExpiryChainTests
         int signals = 0;
         RecordingAgent agent = new("agent");
         EntityHarness harness = CreateHarness(agent, state,
-            enableMailboxWrites: false, authorizeLegacyMigration: false, timeProvider: new Clock(s_now.AddHours(1)),
+            enablePersistentRequestOutcomes: false, authorizeLegacyMigration: false, timeProvider: new Clock(s_now.AddHours(1)),
             registerWithFactory: true, onFactoryInvoked: () => Assert.Fail("stale check invoked factory"),
             onCommit: _ => writes++, onSignal: (_, _) => signals++);
         await harness.CheckResultsExpirationAsync(check, hasInput: true);
@@ -608,7 +608,7 @@ public sealed class AgentEntityExpiryChainTests
     private static DurableAgentState WithProfile(DurableAgentState state, JsonElement profile) => new()
     {
         SchemaVersion = state.SchemaVersion,
-        MailboxWritesAuthorized = true,
+        PersistentRequestOutcomesAuthorized = true,
         Data = state.Data,
         ExtensionData = new Dictionary<string, JsonElement> { [AgentEntityResultExpirySchedule.ExtensionName] = profile },
         UnknownProperties = state.UnknownProperties,

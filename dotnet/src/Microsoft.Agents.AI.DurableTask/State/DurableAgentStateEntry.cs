@@ -72,8 +72,8 @@ internal abstract class DurableAgentStateEntry
             else if (this.CorrelationId is not null)
             {
                 DurableAgentStateContract.ValidateIdentifier(
-                    this.CorrelationId,
-                    "conversationHistory.correlationId");
+                    value: this.CorrelationId,
+                    propertyPath: $"{nameof(DurableAgentStateData.ConversationHistory)}.{nameof(CorrelationId)}");
             }
         }
 

@@ -41,7 +41,7 @@ public sealed class DurableAgentsOptions
     } = TimeSpan.FromDays(14);
 
     /// <summary>
-    /// Gets or sets whether successful entity operations may publish schema 2.0 mailbox state.
+    /// Gets or sets whether successful entity operations may persist schema 2.0 request outcomes.
     /// Defaults to <see langword="false"/>.
     /// </summary>
     /// <remarks>
@@ -49,7 +49,7 @@ public sealed class DurableAgentsOptions
     /// Public activation awaits shared contract, consumer/rollback, and late-duplicate policy agreement.
     /// Readers support both layouts regardless of this setting.
     /// </remarks>
-    internal bool EnableMailboxWrites { get; set; }
+    internal bool EnablePersistentRequestOutcomes { get; set; }
 
     /// <summary>
     /// Gets or sets the test-only agreement to delete receipt-bearing entities after an explicit TTL.
@@ -68,11 +68,11 @@ public sealed class DurableAgentsOptions
     internal Func<DurableAgentState, bool>? AuthorizeLegacyMigration { get; set; }
 
     /// <summary>
-    /// Gets or sets optional retention for new mailbox result payloads. Defaults to no expiry.
+    /// Gets or sets optional retention for persisted request outcome payloads. Defaults to no expiry.
     /// Completion receipts remain until the whole entity is deleted.
     /// </summary>
     /// <remarks>
-    /// Under the internal mailbox-writer gate, committed runs schedule entity-local payload cleanup.
+    /// When persistent request outcomes are enabled, committed runs schedule entity-local payload cleanup.
     /// Physical removal may lag expiry; polling reports unavailable without modifying state.
     /// Imported states without a scheduled check need an explicit cleanup operation or a successful new run.
     /// </remarks>

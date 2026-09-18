@@ -196,7 +196,7 @@ public sealed class AgentEntityTimeToLiveTests
         {
             DefaultTimeToLive = timeToLive,
             MinimumTimeToLiveSignalDelay = TimeSpan.Zero,
-            EnableMailboxWrites = true,
+            EnablePersistentRequestOutcomes = true,
             EnableMailboxEntityDeletion = true,
             AuthorizeLegacyMigration = _ => true,
         };
