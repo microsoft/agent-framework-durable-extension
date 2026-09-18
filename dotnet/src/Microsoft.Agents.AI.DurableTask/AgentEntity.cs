@@ -11,9 +11,8 @@ using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Agents.AI.DurableTask;
 
-internal class AgentEntity(IServiceProvider services, CancellationToken cancellationToken = default) : TaskEntity<DurableAgentState>, ITaskEntity
+internal partial class AgentEntity(IServiceProvider services, CancellationToken cancellationToken = default) : TaskEntity<DurableAgentState>, ITaskEntity
 {
-    private static readonly TimeSpan s_minimumResultExpirationSignalDelay = TimeSpan.FromMinutes(1);
     private readonly IServiceProvider _services = services;
     private readonly DurableTaskClient _client = services.GetRequiredService<DurableTaskClient>();
     private readonly ILoggerFactory _loggerFactory = services.GetRequiredService<ILoggerFactory>();
@@ -61,55 +60,6 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
     }
 
     /// <summary>
-    /// Determines whether a scheduled result-expiration signal still owns the current persisted schedule generation.
-    /// </summary>
-    /// <remarks>
-    /// Returning <see langword="false"/> tells the explicit interface dispatcher to bypass normal dispatch entirely,
-    /// avoiding initialization or state write-back for missing, legacy, duplicate, or superseded signals.
-    /// </remarks>
-    private bool ShouldDispatchScheduledResultExpiration(TaskEntityOperation operation)
-    {
-        this._cancellationToken.ThrowIfCancellationRequested();
-        AgentEntityResultExpirationCheck? scheduledCheck =
-            (AgentEntityResultExpirationCheck?)operation.GetInput(typeof(AgentEntityResultExpirationCheck));
-
-        // Read persisted state directly from the operation. Entering the base dispatcher first would initialize a
-        // missing entity and write that placeholder back after the successful void operation.
-        DurableAgentState? persistedState =
-            (DurableAgentState?)operation.State.GetState(typeof(DurableAgentState));
-        if (persistedState is null)
-        {
-            return false;
-        }
-
-        _ = DurableAgentStateSchemaVersion.ParseSupported(persistedState.SchemaVersion);
-        if (persistedState.SchemaVersion != DurableAgentState.RevisedSchemaVersion)
-        {
-            // Result expiration applies only to the revised mailbox. Validate legacy state, but do not dispatch a
-            // successful no-op because the base dispatcher would still rewrite it.
-            ValidateForCommit(persistedState);
-            return false;
-        }
-
-        AgentEntityResultExpirySchedule? schedule =
-            AgentEntityResultExpirySchedule.Read(persistedState, operation.Context.Id.ToString());
-        return IsCurrentScheduledResultExpiration(schedule, scheduledCheck);
-    }
-
-    /// <summary>
-    /// Identifies delayed result-expiration self-signals without matching explicit no-input recovery requests.
-    /// </summary>
-    /// <remarks>
-    /// Scheduled signals carry an <see cref="AgentEntityResultExpirationCheck"/> input. A no-input invocation asks the
-    /// entity to inspect or repair its current schedule and must continue through normal dispatch.
-    /// </remarks>
-    private static bool IsScheduledResultExpirationOperation(TaskEntityOperation operation)
-    {
-        return operation.HasInput &&
-            string.Equals(operation.Name, nameof(CheckAndExpireResults), StringComparison.OrdinalIgnoreCase);
-    }
-
-    /// <summary>
     /// Identifies operations that are allowed to create a new agent mailbox generation.
     /// </summary>
     /// <remarks>
@@ -120,20 +70,6 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
     {
         return string.Equals(operation.Name, nameof(Run), StringComparison.OrdinalIgnoreCase) ||
             string.Equals(operation.Name, nameof(RunAgentAsync), StringComparison.OrdinalIgnoreCase);
-    }
-
-    /// <summary>
-    /// Checks whether a delivered expiration signal exactly matches the generation persisted in entity state.
-    /// </summary>
-    /// <remarks>
-    /// Record equality covers the scheduled time, random token, and entity identity. The persisted generation is the
-    /// authority, so timestamp-only, duplicated, superseded, and foreign-entity signals fail closed.
-    /// </remarks>
-    private static bool IsCurrentScheduledResultExpiration(
-        AgentEntityResultExpirySchedule? schedule,
-        AgentEntityResultExpirationCheck? scheduledCheck)
-    {
-        return schedule?.Pending == scheduledCheck;
     }
 
     /// <summary>
@@ -365,7 +301,7 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
                     correlationId,
                     response,
                     completedAt,
-                    GetResultExpiration(completedAt, this._options.ResultRetentionPeriod),
+                    CalculateResultExpiration(completedAt, this._options.ResultRetentionPeriod),
                     logger: logger);
                 DurableAgentJsonUtilities.CaptureRetainedResult(
                     response, workingState.Data.TerminalResults![correlationId].Response!);
@@ -388,9 +324,10 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
                     response.Usage?.TotalTokenCount);
             }
 
-            DateTime? deletionCheckExpiration = this.UpdateExpiration(workingState, sessionId, logger);
+            DateTime? entityDeletionCheckExpiration =
+                this.UpdateEntityExpiration(workingState, sessionId, logger);
             this._cancellationToken.ThrowIfCancellationRequested();
-            this.CommitWorkingState(workingState, sessionId, logger, deletionCheckExpiration);
+            this.CommitWorkingState(workingState, sessionId, logger, entityDeletionCheckExpiration);
 
             return response;
         }
@@ -406,288 +343,35 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
         }
     }
 
-    private static DateTimeOffset? GetResultExpiration(
-        DateTimeOffset completedAt,
-        TimeSpan? retention)
-    {
-        if (retention is null)
-        {
-            return null;
-        }
-
-        return retention > DateTimeOffset.MaxValue - completedAt
-            ? DateTimeOffset.MaxValue
-            : completedAt.Add(retention.Value);
-    }
-
-    /// <summary>
-    /// Removes due result payloads while retaining completion receipts, then schedules the next check.
-    /// </summary>
-    /// <remarks>
-    /// Also callable as an explicit entity operation to recover imported states with no scheduled signal.
-    /// Signals carry no deletion authority: every turn rechecks the current generation and clock.
-    /// </remarks>
-    public void CheckAndExpireResults(AgentEntityResultExpirationCheck? scheduledCheck = null)
-    {
-        AgentSessionId sessionId = this.Context.Id;
-        ILogger logger = this.GetLogger(sessionId.Name, sessionId.Key);
-        try
-        {
-            this._cancellationToken.ThrowIfCancellationRequested();
-            _ = DurableAgentStateSchemaVersion.ParseSupported(this.State.SchemaVersion);
-            if (IsEmptyInitializedState(this.State))
-            {
-                // A late signal must not resurrect an entity deleted in the meantime.
-                this.State = null!;
-                return;
-            }
-
-            if (this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion)
-            {
-                ValidateForCommit(this.State);
-                return;
-            }
-
-            AgentEntityResultExpirySchedule? schedule =
-                AgentEntityResultExpirySchedule.Read(this.State, this.Context.Id.ToString());
-            if (scheduledCheck is not null && (schedule?.Pending is null || schedule.Pending != scheduledCheck))
-            {
-                // Includes old timestamp-only signals, duplicate deliveries and deleted generations.
-                return;
-            }
-
-            if (!this._options.EnablePersistentRequestOutcomes)
-            {
-                throw new InvalidOperationException(
-                    $"Result expiration requires {nameof(DurableAgentsOptions.EnablePersistentRequestOutcomes)} to be enabled.");
-            }
-
-            // Unlike a new run, cleanup must not assign history identities or promote legacy state.
-            DurableAgentState workingState = DurableAgentStateJsonConverter.DeserializeRevisedContract(
-                DurableAgentStateJsonConverter.SerializeRevisedContract(this.State));
-            workingState.PersistentRequestOutcomesAuthorized = true;
-            this.CommitWorkingState(workingState, sessionId, logger, deletionCheckExpiration: null,
-                previousResultCheckTime: scheduledCheck?.ScheduledTime);
-        }
-        catch (Exception exception)
-        {
-            logger.LogDurableAgentExecutionFailed(exception, sessionId);
-            throw;
-        }
-    }
-
-    /// <summary>
-    /// Checks if the entity has expired and deletes it if so, otherwise reschedules the deletion check.
-    /// </summary>
-    /// <remarks>
-    /// This method is called by the durable task runtime when a <c>CheckAndDeleteIfExpired</c> signal is received.
-    /// </remarks>
-    public void CheckAndDeleteIfExpired(AgentEntityDeletionCheck? scheduledCheck = null)
-    {
-        AgentSessionId sessionId = this.Context.Id;
-        ILogger logger = this.GetLogger(sessionId.Name, sessionId.Key);
-
-        DateTime currentTime = this._timeProvider.GetUtcNow().UtcDateTime;
-        DateTime? expirationTime = this.State.Data.ExpirationTimeUtc;
-
-        logger.LogTTLDeletionCheck(sessionId, expirationTime, currentTime);
-
-        // A delayed signal can outlive a deleted entity. TaskEntity initializes missing state
-        // before dispatch, so remove that otherwise-empty placeholder instead of recreating it.
-        if (!expirationTime.HasValue && IsEmptyInitializedState(this.State))
-        {
-            this.State = null!;
-            return;
-        }
-
-        if (this.State.SchemaVersion == DurableAgentState.RevisedSchemaVersion &&
-            !this._options.EnableMailboxEntityDeletion)
-        {
-            // A legacy deadline is not authorization to erase completion evidence.
-            return;
-        }
-
-        if (!this._options.ContainsAgent(sessionId.Name) ||
-            !this._options.GetTimeToLive(
-                sessionId.Name, this.State.SchemaVersion == DurableAgentState.RevisedSchemaVersion).HasValue)
-        {
-            if (expirationTime.HasValue)
-            {
-                logger.LogTTLExpirationTimeCleared(sessionId);
-                DurableAgentState workingState = this.State.Clone();
-                workingState.Data.ExpirationTimeUtc = null;
-                ValidateForCommit(workingState);
-                this.State = workingState;
-            }
-
-            return;
-        }
-
-        if (!expirationTime.HasValue)
-        {
-            return;
-        }
-
-        if (currentTime >= expirationTime.Value)
-        {
-            logger.LogTTLEntityExpired(sessionId, expirationTime.Value);
-            this.State = null!;
-            return;
-        }
-
-        // A shorter TTL creates an earlier signal. Its older, later counterpart is stale.
-        if (scheduledCheck is null ||
-            scheduledCheck.ExpectedExpirationTimeUtc <= expirationTime.Value)
-        {
-            this.ScheduleDeletionCheck(sessionId, logger, expirationTime.Value);
-        }
-    }
-
-    private static bool IsEmptyInitializedState(DurableAgentState state)
-    {
-        return state.Data.ConversationHistory.Count == 0 &&
-            state.Data.TerminalResults is null &&
-            state.Data.CompletionReceipts is null &&
-            state.Data.HistoryBinding.ValueKind == JsonValueKind.Undefined &&
-            state.Data.Session is null &&
-            state.Data.IngestedPositions is null &&
-            state.Data.Truncation is null &&
-            state.Data.ExpirationTimeUtc is null &&
-            state.Data.ExtensionData is null &&
-            state.Data.UnknownProperties is null &&
-            state.ExtensionData is null &&
-            state.UnknownProperties is null;
-    }
-
-    private void ScheduleDeletionCheck(
-        AgentSessionId sessionId,
-        ILogger logger,
-        DateTime expirationTime)
-    {
-        DateTime currentTime = this._timeProvider.GetUtcNow().UtcDateTime;
-        TimeSpan minimumDelay = this._options.MinimumTimeToLiveSignalDelay;
-
-        // To avoid excessive scheduling, we schedule the deletion check for no less than the minimum delay.
-        DateTime scheduledTime = expirationTime > currentTime.Add(minimumDelay)
-            ? expirationTime
-            : currentTime.Add(minimumDelay);
-
-        logger.LogTTLDeletionScheduled(sessionId, scheduledTime);
-
-        // Schedule a signal to self to check for expiration
-        this.Context.SignalEntity(
-            this.Context.Id,
-            nameof(CheckAndDeleteIfExpired), // self-signal
-            new AgentEntityDeletionCheck(expirationTime),
-            options: new SignalEntityOptions { SignalTime = scheduledTime });
-    }
-
-    private DateTime? UpdateExpiration(
-        DurableAgentState workingState,
-        AgentSessionId sessionId,
-        ILogger logger)
-    {
-        TimeSpan? timeToLive = this._options.GetTimeToLive(
-            sessionId.Name, workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion);
-        DateTime? previousExpirationTime = workingState.Data.ExpirationTimeUtc;
-        if (!timeToLive.HasValue)
-        {
-            if (previousExpirationTime.HasValue)
-            {
-                logger.LogTTLExpirationTimeCleared(sessionId);
-                workingState.Data.ExpirationTimeUtc = null;
-            }
-
-            return null;
-        }
-
-        DateTime newExpirationTime =
-            this._timeProvider.GetUtcNow().UtcDateTime.Add(timeToLive.Value);
-        workingState.Data.ExpirationTimeUtc = newExpirationTime;
-        logger.LogTTLExpirationTimeUpdated(sessionId, newExpirationTime);
-
-        // The first turn starts one delayed-check chain. An extension is picked up by the
-        // existing signal; only a shortened expiration needs a new earlier signal.
-        return !previousExpirationTime.HasValue ||
-            newExpirationTime < previousExpirationTime.Value
-                ? newExpirationTime
-                : null;
-    }
-
     private void CommitWorkingState(
         DurableAgentState workingState,
         AgentSessionId sessionId,
         ILogger logger,
-        DateTime? deletionCheckExpiration,
+        DateTime? entityDeletionCheckExpiration,
         DateTimeOffset? previousResultCheckTime = null)
     {
         DateTimeOffset currentTime = this._timeProvider.GetUtcNow();
-        DateTimeOffset? nextResultExpiration = null;
-        AgentEntityResultExpirationCheck? nextSignal = null;
-        if (workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
-        {
-            string entityId = this.Context.Id.ToString();
-            AgentEntityResultExpirySchedule? schedule = AgentEntityResultExpirySchedule.Read(workingState, entityId);
-            foreach (DurableAgentStateTerminalResult result in workingState.Data.TerminalResults!.Values.ToArray())
-            {
-                if (result.ResultExpiresAt is DateTimeOffset expiresAt)
-                {
-                    if (expiresAt <= currentTime)
-                    {
-                        DurableAgentStateOutcomeResolver.MarkExpiredResultUnavailable(
-                            workingState, result.CorrelationId, currentTime);
-                    }
-                    else if (nextResultExpiration is null || expiresAt < nextResultExpiration)
-                    {
-                        nextResultExpiration = expiresAt;
-                    }
-                }
-            }
-
-            AgentEntityResultExpirationCheck? pending = schedule?.Pending;
-            // Consuming a matching signal rotates its token even if the clock has moved backwards.
-            // An explicit recovery or successful new run also replaces an overdue/stuck schedule.
-            if (previousResultCheckTime.HasValue || pending?.ScheduledTime <= currentTime)
-            {
-                pending = null;
-            }
-
-            if (nextResultExpiration is DateTimeOffset resultExpiration)
-            {
-                DateTimeOffset schedulingBase = previousResultCheckTime > currentTime
-                    ? previousResultCheckTime.Value
-                    : currentTime;
-                DateTimeOffset minimumScheduledTime = schedulingBase.Add(s_minimumResultExpirationSignalDelay);
-                DateTimeOffset scheduledTime = resultExpiration > minimumScheduledTime ? resultExpiration : minimumScheduledTime;
-                if (pending is null || pending.ScheduledTime > scheduledTime)
-                {
-                    pending = nextSignal = new AgentEntityResultExpirationCheck(
-                        scheduledTime.ToUniversalTime(), Guid.NewGuid().ToString("N"), entityId);
-                }
-            }
-            else
-            {
-                pending = null;
-            }
-
-            workingState = AgentEntityResultExpirySchedule.Write(workingState, entityId, schedule, pending);
-        }
+        workingState = this.UpdateResultExpirationSchedule(
+            workingState,
+            currentTime,
+            previousResultCheckTime,
+            out AgentEntityResultExpirationCheck? nextResultExpirationSignal);
 
         this._cancellationToken.ThrowIfCancellationRequested();
         ValidateForCommit(workingState);
-        if (deletionCheckExpiration.HasValue)
+        if (entityDeletionCheckExpiration.HasValue)
         {
             // this.State still points at the hydrated state until the final assignment.
-            this.ScheduleDeletionCheck(sessionId, logger, deletionCheckExpiration.Value);
+            this.ScheduleEntityDeletionCheck(sessionId, logger, entityDeletionCheckExpiration.Value);
         }
 
-        if (nextSignal is not null)
+        if (nextResultExpirationSignal is not null)
         {
             this.Context.SignalEntity(
                 this.Context.Id,
                 nameof(CheckAndExpireResults),
-                nextSignal,
-                options: new SignalEntityOptions { SignalTime = nextSignal.ScheduledTime });
+                nextResultExpirationSignal,
+                options: new SignalEntityOptions { SignalTime = nextResultExpirationSignal.ScheduledTime });
         }
 
         this._cancellationToken.ThrowIfCancellationRequested();
@@ -720,7 +404,3 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
         return this._loggerFactory.CreateLogger($"Microsoft.DurableTask.Agents.{agentName}.{sessionKey}");
     }
 }
-
-internal sealed record AgentEntityDeletionCheck(DateTime ExpectedExpirationTimeUtc);
-
-internal sealed record AgentEntityResultExpirationCheck(DateTimeOffset ScheduledTime, string? Token = null, string? EntityId = null);
