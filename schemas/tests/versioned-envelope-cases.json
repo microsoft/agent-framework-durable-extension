@@ -1,0 +1,252 @@
+[
+  {
+    "description": "Historical 1.0.0 full-envelope message boundary",
+    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json" },
+    "tests": [
+      {
+        "description": "Original roles, object arguments and URI with media type remain valid",
+        "data": { "schemaVersion": "1.0.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": {} }, { "$type": "uri", "uri": "https://example.test/media", "mediaType": "image/png" }] }] }] } },
+        "valid": true
+      },
+      {
+        "description": "Developer role is not a historical correction",
+        "data": { "schemaVersion": "1.0.0", "data": { "conversationHistory": [{ "$type": "request", "messages": [{ "role": "developer" }] }] } },
+        "valid": false
+      },
+      {
+        "description": "String arguments are v2-only",
+        "data": { "schemaVersion": "1.0.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": " { \"partial\": " }] }] }] } },
+        "valid": false
+      },
+      {
+        "description": "Empty string arguments are also v2-only",
+        "data": { "schemaVersion": "1.0.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": "" }] }] }] } },
+        "valid": false
+      },
+      {
+        "description": "Omitted URI media type is v2-only even on a legacy error entry",
+        "data": { "schemaVersion": "1.0.0", "data": { "conversationHistory": [{ "$type": "errorResponse", "messages": [{ "role": "assistant", "contents": [{ "$type": "uri", "uri": "https://example.test/media" }] }] }] } },
+        "valid": false
+      },
+      {
+        "description": "Historical explicit opaque object, scalar and null remain valid",
+        "data": { "schemaVersion": "1.0.0", "data": { "conversationHistory": [{ "messages": [{ "role": "assistant", "contents": [{ "$type": "unknown", "content": { "$type": "future", "$runtimeType": "inert", "metadata": [null, false, 0] } }, { "$type": "unknown", "content": "original" }, { "$type": "unknown", "content": null }] }] }] } },
+        "valid": true
+      },
+      {
+        "description": "Unwrapped unknown content discriminator remains invalid",
+        "data": { "schemaVersion": "1.0.0", "data": { "conversationHistory": [{ "messages": [{ "role": "assistant", "contents": [{ "$type": "future", "content": {} }] }] }] } },
+        "valid": false
+      },
+      {
+        "description": "Malformed known fields remain invalid",
+        "data": { "schemaVersion": "1.0.0", "data": { "conversationHistory": [{ "messages": [{ "role": "assistant", "contents": [{ "$type": "text", "text": false }] }] }] } },
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "Historical 1.1.0 full-envelope message boundary",
+    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json" },
+    "tests": [
+      {
+        "description": "Original roles, object arguments and URI with media type remain valid",
+        "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": {} }, { "$type": "uri", "uri": "https://example.test/media", "mediaType": "image/png" }] }] }] } },
+        "valid": true
+      },
+      {
+        "description": "Developer role is not a historical correction",
+        "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "$type": "request", "messages": [{ "role": "developer" }] }] } },
+        "valid": false
+      },
+      {
+        "description": "String arguments are v2-only",
+        "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": " { \"partial\": " }] }] }] } },
+        "valid": false
+      },
+      {
+        "description": "Empty string arguments are also v2-only",
+        "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": "" }] }] }] } },
+        "valid": false
+      },
+      {
+        "description": "Omitted URI media type is v2-only even on a legacy error entry",
+        "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "$type": "errorResponse", "messages": [{ "role": "assistant", "contents": [{ "$type": "uri", "uri": "https://example.test/media" }] }] }] } },
+        "valid": false
+      },
+      {
+        "description": "Historical explicit opaque object, scalar and null remain valid",
+        "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "messages": [{ "role": "assistant", "contents": [{ "$type": "unknown", "content": { "$type": "future", "$runtimeType": "inert", "metadata": [null, false, 0] } }, { "$type": "unknown", "content": "original" }, { "$type": "unknown", "content": null }] }] }] } },
+        "valid": true
+      },
+      {
+        "description": "Unwrapped unknown content discriminator remains invalid",
+        "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "messages": [{ "role": "assistant", "contents": [{ "$type": "future", "content": {} }] }] }] } },
+        "valid": false
+      },
+      {
+        "description": "Malformed known fields remain invalid",
+        "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "messages": [{ "role": "assistant", "contents": [{ "$type": "text", "text": false }] }] }] } },
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "Historical 1.2.0 full-envelope message boundary",
+    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json" },
+    "tests": [
+      {
+        "description": "Original roles, object arguments and URI with media type remain valid",
+        "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": {} }, { "$type": "uri", "uri": "https://example.test/media", "mediaType": "image/png" }] }] }] } },
+        "valid": true
+      },
+      {
+        "description": "Developer role is not a historical correction",
+        "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "$type": "request", "messages": [{ "role": "developer" }] }] } },
+        "valid": false
+      },
+      {
+        "description": "String arguments are v2-only",
+        "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": " { \"partial\": " }] }] }] } },
+        "valid": false
+      },
+      {
+        "description": "Empty string arguments are also v2-only",
+        "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": "" }] }] }] } },
+        "valid": false
+      },
+      {
+        "description": "Omitted URI media type is v2-only even on a legacy error entry",
+        "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "$type": "errorResponse", "messages": [{ "role": "assistant", "contents": [{ "$type": "uri", "uri": "https://example.test/media" }] }] }] } },
+        "valid": false
+      },
+      {
+        "description": "Historical explicit opaque object, scalar and null remain valid",
+        "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "messages": [{ "role": "assistant", "contents": [{ "$type": "unknown", "content": { "$type": "future", "$runtimeType": "inert", "metadata": [null, false, 0] } }, { "$type": "unknown", "content": "original" }, { "$type": "unknown", "content": null }] }] }] } },
+        "valid": true
+      },
+      {
+        "description": "Unwrapped unknown content discriminator remains invalid",
+        "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "messages": [{ "role": "assistant", "contents": [{ "$type": "future", "content": {} }] }] }] } },
+        "valid": false
+      },
+      {
+        "description": "Malformed known fields remain invalid",
+        "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "messages": [{ "role": "assistant", "contents": [{ "$type": "text", "text": false }] }] }] } },
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "Schema 2.0 full-envelope lossless message boundary",
+    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json" },
+    "tests": [
+      {
+        "description": "Original object arguments and URI media type remain valid",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": {} }, { "$type": "uri", "uri": "https://example.test/media", "mediaType": "image/png" }] }] }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "Developer role in a v2 request",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "request", "messages": [{ "role": "developer" }] }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "String arguments in a v2 response",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": " { \"partial\": " }] }] }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "Empty string arguments in a v2 response",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": "" }] }] }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "Omitted URI media type in a v2 error entry",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "errorResponse", "messages": [{ "role": "assistant", "contents": [{ "$type": "uri", "uri": "https://example.test/media" }] }] }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "V2 compaction uses v2 messages without a correlation",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "compaction", "messages": [{ "role": "developer", "contents": [{ "$type": "uri", "uri": "https://example.test/media" }] }] }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "V2 opaque mapping preserves the original JSON",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "unknown", "content": { "$type": "future", "$runtimeType": "inert", "metadata": [null, false, 0] } }, { "$type": "unknown", "content": "original" }, { "$type": "unknown", "content": null }] }] }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": true
+      },
+      {
+        "description": "Unwrapped unknown content discriminator remains invalid in v2",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "future", "content": {} }] }] }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": false
+      },
+      {
+        "description": "Malformed known fields remain invalid in v2",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "text", "text": false }] }] }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": false
+      },
+      {
+        "description": "Unknown role remains invalid in v2",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [{ "$type": "request", "messages": [{ "role": "future" }] }], "terminalResults": {}, "completionReceipts": {} } },
+        "valid": false
+      },
+      {
+        "description": "V2 success payload independently uses expanded messages and structured value",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": { "c": { "correlationId": "c", "outcome": "succeeded", "completedAt": "2026-09-11T00:00:00Z", "response": { "messages": [{ "role": "developer", "contents": [{ "$type": "functionCall", "callId": "t", "name": "f", "arguments": " { \"partial\": " }, { "$type": "uri", "uri": "https://example.test/media" }, { "$type": "unknown", "content": { "$runtimeType": "inert", "metadata": null } }] }], "value": false } } }, "completionReceipts": { "c": { "correlationId": "c", "outcome": "succeeded", "completedAt": "2026-09-11T00:00:00Z", "resultState": "available" } } } },
+        "valid": true
+      },
+      {
+        "description": "V2 failure payload independently uses expanded messages",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": { "c": { "correlationId": "c", "outcome": "failed", "completedAt": "2026-09-11T00:00:00Z", "response": { "messages": [{ "role": "developer", "contents": [{ "$type": "uri", "uri": "https://example.test/media" }] }] }, "error": { "code": "example", "message": "Synthetic failure" } } }, "completionReceipts": { "c": { "correlationId": "c", "outcome": "failed", "completedAt": "2026-09-11T00:00:00Z", "resultState": "available" } } } },
+        "valid": true
+      },
+      {
+        "description": "V2 terminal messages still reject malformed known fields",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": { "c": { "correlationId": "c", "outcome": "succeeded", "completedAt": "2026-09-11T00:00:00Z", "response": { "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "t", "name": "f", "arguments": false }] }] } } }, "completionReceipts": { "c": { "correlationId": "c", "outcome": "succeeded", "completedAt": "2026-09-11T00:00:00Z", "resultState": "available" } } } },
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "Opaque runtime profiles and authoritative receipt outcomes",
+    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json" },
+    "tests": [
+      {
+        "description": "Nonconsumers preserve a separately versioned profile without interpreting owner fields",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": {}, "completionReceipts": {}, "historyBinding": { "version": 99, "ownerKind": "runtime-specific", "future": [null, false, {}] } } },
+        "valid": true
+      },
+      {
+        "description": "Even malformed profile data passes shared shape validation, not relying-runtime validation",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": {}, "completionReceipts": {}, "historyBinding": "opaque-unusable-profile" } },
+        "valid": true
+      },
+      {
+        "description": "Retained successful outcome survives payload expiry",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": {}, "completionReceipts": { "c": { "correlationId": "c", "outcome": "succeeded", "completedAt": "2026-09-10T00:00:00Z", "resultState": "unavailable", "resultUnavailableAt": "2026-09-11T00:00:00Z" } } } },
+        "valid": true
+      },
+      {
+        "description": "Retained failed outcome survives payload expiry",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": {}, "completionReceipts": { "c": { "correlationId": "c", "outcome": "failed", "completedAt": "2026-09-10T00:00:00Z", "resultState": "unavailable", "resultUnavailableAt": "2026-09-11T00:00:00Z" } } } },
+        "valid": true
+      },
+      {
+        "description": "Legacy receipt without outcome cannot be silently promoted to v2",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": {}, "completionReceipts": { "c": { "correlationId": "c", "completedAt": "2026-09-10T00:00:00Z", "resultState": "unavailable", "resultUnavailableAt": "2026-09-11T00:00:00Z" } } } },
+        "valid": false
+      },
+      {
+        "description": "Null outcome is not authoritative success or failure",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": {}, "completionReceipts": { "c": { "correlationId": "c", "outcome": null, "completedAt": "2026-09-10T00:00:00Z", "resultState": "unavailable", "resultUnavailableAt": "2026-09-11T00:00:00Z" } } } },
+        "valid": false
+      },
+      {
+        "description": "No synthetic unknown outcome is introduced into the v2 enum",
+        "data": { "schemaVersion": "2.0.0", "data": { "conversationHistory": [], "terminalResults": {}, "completionReceipts": { "c": { "correlationId": "c", "outcome": "unknown", "completedAt": "2026-09-10T00:00:00Z", "resultState": "unavailable", "resultUnavailableAt": "2026-09-11T00:00:00Z" } } } },
+        "valid": false
+      }
+    ]
+  }
+]
