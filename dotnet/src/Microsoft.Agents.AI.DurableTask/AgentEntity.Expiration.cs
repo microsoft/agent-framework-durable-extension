@@ -2,7 +2,6 @@
 
 using System.Text.Json;
 using Microsoft.Agents.AI.DurableTask.State;
-using Microsoft.DurableTask.Client;
 using Microsoft.DurableTask.Entities;
 using Microsoft.Extensions.Logging;
 
