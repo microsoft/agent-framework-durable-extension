@@ -135,7 +135,7 @@ class TestAddAgentMethod:
         with pytest.raises(ValueError, match="different registrations must not share a durable identity"):
             app.add_agent(agent2)
 
-    def test_add_agent_with_case_insensitive_duplicate_name_skips(self) -> None:
+    def test_add_agent_with_case_insensitive_duplicate_name_rejects(self) -> None:
         """Case-only name collisions are rejected for different agent objects."""
         agent1 = Mock()
         agent1.name = "MyAgent"

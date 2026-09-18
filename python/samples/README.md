@@ -174,6 +174,10 @@ Set these variables in **both the worker and client terminals**, using the same 
 name and endpoint. For combined samples, set them in the terminal running the sample.
 The endpoint below is for the local emulator.
 
+Standalone workers and clients reject a missing, blank, or case-insensitive `default`
+`TASKHUB` value before they construct a scheduler connection. This keeps a sample from
+silently attaching to a shared live hub when the environment is incomplete.
+
 POSIX shell (Linux/macOS/WSL):
 
 ```bash

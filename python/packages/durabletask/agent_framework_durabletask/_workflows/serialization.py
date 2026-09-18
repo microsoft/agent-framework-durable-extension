@@ -240,7 +240,10 @@ def serialize_value(value: Any) -> Any:
         data = cast(dict[Any, Any], value)
         if any(str(key) in _RESERVED_VALUE_DICT_KEYS for key in data):
             return _encode_pickle(value)
-        return {str(key): serialize_value(item) for key, item in data.items()}
+        invalid_keys = [key for key in data if not isinstance(key, str)]
+        if invalid_keys:
+            raise ValueError("Workflow transport dictionaries must use string keys.")
+        return {key: serialize_value(item) for key, item in cast("dict[str, Any]", data).items()}
     if isinstance(value, list):
         return [serialize_value(item) for item in cast(list[Any], value)]
     return encode_checkpoint_value(value)

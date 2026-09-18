@@ -149,6 +149,11 @@ delivery windows are configurable through the host registration APIs.
 The Core requirement remains `agent-framework-core>=1.13.0,<2`. This package directly requires
 `pydantic>=2.11,<3` for structured response handling.
 
+Explicit durable and external primary providers retain the user's hook order, so place history
+before a matching before-compaction provider when that strategy must see loaded history.
+Provider namespaces must be unique, including store-only sinks, and conflicts with an injected
+history source raise an error rather than automatically reassigning a namespace.
+
 Canonical media keeps its declared content kind rather than inferring it from the URI scheme.
 New response timestamps without an offset are interpreted as UTC. Valid stored timestamps retain
 their original offset and fractional precision.
