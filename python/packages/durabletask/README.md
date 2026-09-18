@@ -48,6 +48,19 @@ changes. V2 readers do not resume provider sessions or workflow history.
 The Core requirement remains `agent-framework-core>=1.13.0,<2`. This package directly requires
 `pydantic>=2.11,<3` for structured response handling.
 
+### Private delivery staging
+
+The next stack layer adds private delivery operations over complete canonical v2 JSON snapshots.
+Recording stages an original result with its matching receipt. Expiry stages removal only when
+the stored deadline is due and retains the original completion outcome and timestamps. Duplicate
+correlations do not replace results or refresh their delivery window. Failed staging leaves the
+input snapshot unchanged, including unknown JSON.
+
+These functions do not persist state or activate a v2 entity writer. The mutable writer still
+uses legacy `1.1.0`, and v2 execution and mutation remain rejected. A later runtime layer must
+validate its complete candidate against an independent committed baseline before storage.
+Read-only consumers reuse the same lookup rules, without transcript fallback or cleanup writes.
+
 ### Basic Usage Example
 
 ```python
