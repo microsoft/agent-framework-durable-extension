@@ -12,6 +12,7 @@ import pytest
 from agent_framework import (
     Agent,
     BaseChatClient,
+    ChatMiddleware,
     ChatMiddlewareLayer,
     ChatResponse,
     ChatResponseUpdate,
@@ -226,3 +227,61 @@ async def test_service_acceptance_retains_completed_leaf_before_later_service_fa
         ).get_final_response()
 
     assert accepted == [["question"]]
+
+
+async def test_service_acceptance_captures_detached_inputs_before_postawait_mutation() -> None:
+    accepted: list[list[dict[str, Any]]] = []
+    observed_after_await: list[list[dict[str, Any]]] = []
+
+    inner = ToolChatClient()
+    client = DurableServiceClient(
+        inner,
+        lambda messages: accepted.append([message.to_dict() for message in messages]),
+    )
+
+    class MutatingProvider(ContextProvider):
+        async def before_run(self, *, context: SessionContext, **kwargs: Any) -> None:
+            context.extend_messages(
+                self,
+                [
+                    Message(
+                        "user",
+                        [Content.from_text("context")],
+                        additional_properties={"nested": {"items": [{"kind": "original"}]}, "raw": {"x": 1}},
+                    )
+                ],
+            )
+
+    class PostAwaitMutator(ChatMiddleware):
+        async def process(
+            self,
+            context: Any,
+            call_next: Callable[[], Awaitable[None]],
+        ) -> None:
+            await call_next()
+            observed_after_await.append([message.to_dict() for message in context.messages])
+            context.messages[0].contents[0].text = "context-mutated"
+            context.messages[0].additional_properties["nested"]["items"][0]["kind"] = "mutated"
+            context.messages[1].contents[0].text = "question-mutated"
+            context.messages[1].additional_properties["native"] = {"changed": True}
+
+    agent = _ObservedAgent(
+        client=client,
+        streaming=False,
+        context_providers=[MutatingProvider("mutating-provider")],
+        middleware=[PostAwaitMutator()],
+    )
+
+    response = await agent.run("question", session=agent.create_session(session_id="accept-detached"))
+
+    assert response.messages[0].contents[0].type == "function_call"
+    assert len(accepted) == len(inner.received_messages) == 1
+    assert len(observed_after_await) == 1
+    assert [message["contents"][0]["text"] for message in observed_after_await[0]] == ["context", "question"]
+    assert [message["contents"][0]["text"] for message in accepted[0]] == ["context", "question"]
+    assert accepted[0][1]["additional_properties"] == {}
+    assert accepted[0][0]["additional_properties"] == {
+        "nested": {"items": [{"kind": "original"}]},
+        "raw": {"x": 1},
+        "_attribution": {"source_id": "mutating-provider", "source_type": "MutatingProvider"},
+    }

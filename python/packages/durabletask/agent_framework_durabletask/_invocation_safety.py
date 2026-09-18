@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -54,7 +55,7 @@ class DurableServiceAcceptance(ChatMiddleware):
         self._accept = accept
 
     async def process(self, context: ChatContext, call_next: Callable[[], Awaitable[None]]) -> None:
-        inputs = list(context.messages)
+        inputs = deepcopy(list(context.messages))
         await call_next()
 
         def completed(response: ChatResponse) -> ChatResponse:
