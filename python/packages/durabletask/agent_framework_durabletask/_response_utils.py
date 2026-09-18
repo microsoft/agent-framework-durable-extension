@@ -2,13 +2,240 @@
 
 """Shared utilities for handling AgentResponse parsing and validation."""
 
+import json
 import logging
-from typing import Any
+from collections.abc import Mapping, Sequence
+from copy import copy, deepcopy
+from functools import lru_cache
+from inspect import Parameter, signature
+from typing import Any, cast
 
-from agent_framework import AgentResponse
-from pydantic import BaseModel
+from agent_framework import AgentResponse, Content, Message
+from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger("agent_framework.durabletask")
+
+# Optional reader marker; the serializer does not add it to response payloads.
+_DELIVERY_VERSION_KEY = "_durable_response_version"
+_DELIVERY_VERSION = 1
+_VALUE_BY_NAME_KEY = "_durable_value_by_name"
+_VALUE_POLICY_KEY = "_durable_value_policy"
+_VALUE_POLICY = {"profile": "agent-framework-python.shared-value", "version": 1}
+
+
+def _shared_value_snapshot(response: AgentResponse[Any]) -> dict[str, Any] | None:
+    """Find shared value presence without treating a transport marker as state authority."""
+    original = getattr(response, "_original_shared_response", None)
+    if isinstance(original, dict):
+        return cast(dict[str, Any], original)
+    snapshot = getattr(response, "_durable_shared_value_snapshot", None)
+    return cast(dict[str, Any], snapshot) if isinstance(snapshot, dict) else None
+
+
+@lru_cache(maxsize=3)
+def _constructor_fields(cls: type[AgentResponse[Any]] | type[Message] | type[Content]) -> tuple[str, ...]:
+    """Cache explicit public parameters, never names supplied by a stored type."""
+    return tuple(
+        name
+        for name, parameter in signature(cls).parameters.items()
+        if not name.startswith("_") and parameter.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+    )
+
+
+def _constructor_kwargs(
+    data: Mapping[str, Any], cls: type[AgentResponse[Any]] | type[Message] | type[Content]
+) -> dict[str, Any]:
+    return {name: data[name] for name in _constructor_fields(cls) if name in data}
+
+
+def _load_content(data: Any) -> Any:
+    """Decode only Content envelope edges, not arbitrary dictionaries with a type key."""
+    if not isinstance(data, Mapping):
+        return data
+    data = cast(Mapping[str, Any], data)
+    fields = _constructor_kwargs(data, Content)
+    if not isinstance(fields.get("type"), str) or not fields["type"]:
+        raise ValueError("Content mapping requires 'type' to be a non-empty string")
+    # Retain Core's legacy inline-data input form without polymorphic deserialization.
+    if fields["type"] == "data" and "data" in data and "media_type" in data:
+        return Content.from_data(data["data"], data["media_type"])
+    if isinstance(fields.get("function_call"), Mapping):
+        fields["function_call"] = _load_content(fields["function_call"])
+    for name in ("items", "inputs"):
+        if isinstance(fields.get(name), list):
+            fields[name] = [_load_content(item) for item in fields[name]]
+    # Unlike code/shell outputs, image-generation outputs are arbitrary application data.
+    if fields["type"] in ("code_interpreter_tool_result", "shell_tool_result") and isinstance(
+        fields.get("outputs"), list
+    ):
+        fields["outputs"] = [_load_content(item) for item in fields["outputs"]]
+    # arguments, result, output, annotations and additional_properties stay opaque.
+    return Content(**fields)
+
+
+def _load_message(data: Any) -> Message:
+    if isinstance(data, Message):
+        return data
+    if not isinstance(data, Mapping):
+        raise TypeError("Agent response messages must be Message instances or mappings")
+    fields = _constructor_kwargs(cast(Mapping[str, Any], data), Message)
+    if fields.get("contents") is not None:
+        fields["contents"] = [_load_content(content) for content in fields["contents"]]
+    return Message(**fields)
+
+
+def preserve_input_envelope(message: Message, raw: dict[str, Any]) -> None:
+    """Attach inert input extras to their original objects, not their list positions."""
+    message._durable_original_core_message = deepcopy(raw)  # type: ignore[attr-defined]
+
+    def attach(content: Content, payload: dict[str, Any]) -> None:
+        content._durable_original_core_content = deepcopy(payload)  # type: ignore[attr-defined]
+        if isinstance(content.function_call, Content) and isinstance(payload.get("function_call"), dict):
+            attach(content.function_call, payload["function_call"])
+        names = ["items", "inputs"]
+        if content.type in ("code_interpreter_tool_result", "shell_tool_result"):
+            names.append("outputs")
+        for name in names:
+            values = getattr(content, name, None)
+            originals = payload.get(name)
+            if isinstance(values, list) and isinstance(originals, list):
+                for value, original in zip(cast("list[Any]", values), cast("list[Any]", originals)):
+                    if isinstance(value, Content) and isinstance(original, dict):
+                        attach(value, cast("dict[str, Any]", original))
+
+    for content, payload in zip(message.contents, raw.get("contents", [])):
+        if isinstance(payload, dict):
+            attach(content, cast("dict[str, Any]", payload))
+
+
+def serialize_input_content(content: Content) -> dict[str, Any]:
+    """Restore inert extras from the same content occurrence, retaining current fields."""
+    current = deepcopy(content.to_dict())
+    raw_value = getattr(content, "_durable_original_core_content", None)
+    raw = cast("dict[str, Any]", raw_value) if isinstance(raw_value, dict) else {}
+    if raw.get("type") == content.type:
+        fields = set(_constructor_fields(Content))
+        defaults = {
+            key: deepcopy(value)
+            for key, value in raw.items()
+            if key not in fields or (key != "raw_representation" and getattr(content, key, object()) == value)
+        }
+        current = {**defaults, **current}
+    if isinstance(content.function_call, Content):
+        current["function_call"] = serialize_input_content(content.function_call)
+    names = ["items", "inputs"]
+    if content.type in ("code_interpreter_tool_result", "shell_tool_result"):
+        names.append("outputs")
+    for name in names:
+        values = getattr(content, name, None)
+        if isinstance(values, list):
+            current[name] = [
+                serialize_input_content(value) if isinstance(value, Content) else deepcopy(value)
+                for value in cast("list[Any]", values)
+            ]
+    return current
+
+
+def _serialize_model_value(value: BaseModel) -> tuple[Any, bool]:
+    """Prefer alias JSON; use field-name JSON when serialization aliases are not inputs."""
+    payload = value.model_dump(mode="json", by_alias=True, round_trip=True)
+    field_payload = value.model_dump(mode="json", by_alias=False, round_trip=True)
+    try:
+        restored = type(value).model_validate_json(json.dumps(payload))
+    except ValidationError:
+        pass
+    else:
+        if restored.model_dump(mode="json", by_alias=False, round_trip=True) == field_payload:
+            return payload, False
+    # A serialization alias may be ignored in favor of a default without raising an error.
+    # Record the input mode, not a Python model name, for the caller's declared format.
+    restored = type(value).model_validate_json(json.dumps(field_payload), by_alias=False, by_name=True)
+    if restored.model_dump(mode="json", by_alias=False, round_trip=True) != field_payload:
+        raise ValueError("Structured response value cannot round-trip through its declared model")
+    return field_payload, True
+
+
+def is_terminal_agent_response(response: AgentResponse[Any]) -> bool:
+    """Identify durable failures/completions, retaining the legacy non-tool error fallback.
+
+    Args:
+        response: Agent response whose durable status and non-tool error contents to inspect.
+
+    Returns:
+        Whether the response reports a durable failure, completion, or non-tool error.
+    """
+    return response.additional_properties.get("durable_status") in ("error", "already_completed") or any(
+        content.type == "error"
+        for message in response.messages
+        if message.role != "tool"
+        for content in message.contents
+    )
+
+
+def serialize_agent_response(response: AgentResponse[Any]) -> dict[str, Any]:
+    """Snapshot a response as inline base-response JSON for durable delivery.
+
+    Public base fields are authoritative even for subclasses. Serializable extra
+    fields may remain in the raw snapshot, but are not constructor arguments when
+    delivering it. No response-format class or provider raw representation is stored.
+    The containing entity schema versions delivery; a response version is not added.
+    Shared-origin values carry a versioned value-policy marker across Core JSON
+    delivery. It preserves presence and lossless typed handling, not completion
+    authority, a runtime type, or a duplicate of the original shared response.
+
+    Args:
+        response: Agent response whose public fields and structured value to snapshot.
+
+    Returns:
+        Detached response payload with canonical base-response fields.
+    """
+    base = AgentResponse(**{
+        name: getattr(response, name)
+        for name in _constructor_fields(AgentResponse)
+        if name not in ("value", "response_format", "raw_representation") and hasattr(response, name)
+    })
+    # Use the base serializer, not an override that may omit or replace public response fields.
+    payload = AgentResponse.to_dict(response)
+    payload.update(base.to_dict())
+    payload.pop("response_format", None)
+    payload.pop("raw_representation", None)
+    payload.pop("value", None)
+    payload.pop(_VALUE_BY_NAME_KEY, None)
+    payload.pop(_VALUE_POLICY_KEY, None)
+    payload["type"] = "agent_response"
+
+    # Core's lazy value getter changes its cache. Parse a copy so recording is observational.
+    source = copy(response)
+    shared = _shared_value_snapshot(source)
+    value = source._value  # pyright: ignore[reportPrivateUsage]
+    if (
+        shared is None
+        and not is_terminal_agent_response(source)
+        and not source.user_input_requests
+        and source.additional_properties.get("durable_status") != "accepted"
+    ):
+        value = source.value
+    if value is not None or source._value_parsed:  # pyright: ignore[reportPrivateUsage]
+        by_name = getattr(source, _VALUE_BY_NAME_KEY, False)
+        if isinstance(value, BaseModel):
+            if shared is not None:
+                # Preserve the established shared field encoding rather than
+                # choosing aliases again for a different caller's model type.
+                value = value.model_dump(mode="json", by_alias=not by_name, round_trip=True)
+            else:
+                value, by_name = _serialize_model_value(value)
+        payload["value"] = value
+        if by_name:
+            payload[_VALUE_BY_NAME_KEY] = True
+    if shared is not None:
+        if ("value" in shared) != ("value" in payload) or (
+            "value" in shared
+            and json.dumps(shared["value"], sort_keys=True, allow_nan=False)
+            != json.dumps(payload["value"], sort_keys=True, allow_nan=False)
+        ):
+            raise ValueError("The serialized response cannot preserve the shared structured value.")
+        payload[_VALUE_POLICY_KEY] = dict(_VALUE_POLICY)
+    return deepcopy(payload)
 
 
 def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -> AgentResponse:
@@ -21,8 +248,9 @@ def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -
         AgentResponse: The converted response object
 
     Raises:
-        ValueError: If agent_response is None
-        TypeError: If agent_response is an unsupported type
+        ValueError: If agent_response is None, its optional delivery version is unsupported,
+            or a content envelope is malformed.
+        TypeError: If the input type or required constructor fields are invalid.
     """
     if agent_response is None:
         raise ValueError("agent_response cannot be None")
@@ -32,8 +260,52 @@ def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -
     if isinstance(agent_response, AgentResponse):
         return agent_response
     if isinstance(agent_response, dict):
-        logger.debug("[load_agent_response] Converting dict payload using AgentResponse.from_dict")
-        return AgentResponse.from_dict(agent_response)
+        logger.debug("[load_agent_response] Constructing a base response from delivery fields")
+        if _VALUE_POLICY_KEY in agent_response:
+            policy = agent_response[_VALUE_POLICY_KEY]
+            if not isinstance(policy, dict):
+                raise ValueError("Unsupported durable structured-value policy.")
+            policy = cast(dict[str, Any], policy)
+            if policy != _VALUE_POLICY or type(policy.get("version")) is not int:
+                raise ValueError("Unsupported durable structured-value policy.")
+        if _DELIVERY_VERSION_KEY in agent_response:
+            version = agent_response[_DELIVERY_VERSION_KEY]
+            if type(version) is not int or version != _DELIVERY_VERSION:
+                raise ValueError("Unsupported durable response version")
+        response_type = agent_response.get("type")
+        if "type" in agent_response and (not isinstance(response_type, str) or response_type != "agent_response"):
+            raise ValueError("Response type does not match agent_response.")
+        if (
+            agent_response
+            and "type" not in agent_response
+            and not any(field in agent_response for field in _constructor_fields(AgentResponse))
+        ):
+            raise TypeError("The mapping does not contain any AgentResponse fields.")
+        # Core permits empty, value-only, and metadata-only responses without a type.
+        # Preserve that constructor contract instead of requiring a new envelope marker.
+        # Filtering is consumer-only. Neither construction nor subsequent consumer mutations
+        # may remove or change unknown fields in the raw mailbox payload.
+        data = deepcopy(agent_response)
+        fields = _constructor_kwargs(data, AgentResponse)
+        # A caller-supplied format remains a constructor value, never a stored type
+        # to import. Shared profiles reject this field before reaching this loader.
+        messages = fields.get("messages")
+        if messages is not None and not isinstance(messages, Message):
+            if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes, bytearray)):
+                raise TypeError("Agent response messages must be a sequence of messages")
+            fields["messages"] = [_load_message(message) for message in cast("Sequence[Any]", messages)]
+        response = AgentResponse(**fields)
+        if "value" in data:
+            # Core sets this to False for None, losing the distinction between absent and null.
+            response._value_parsed = True  # pyright: ignore[reportPrivateUsage]
+            if data.get(_VALUE_BY_NAME_KEY) is True:
+                setattr(response, _VALUE_BY_NAME_KEY, True)
+        if _VALUE_POLICY_KEY in data:
+            # The canonical Core value itself carries presence. Retain a detached
+            # local comparison snapshot, not a second value in the transport.
+            snapshot = {"value": deepcopy(data["value"])} if "value" in data else {}
+            response._durable_shared_value_snapshot = snapshot  # type: ignore[attr-defined]
+        return response
 
     raise TypeError(f"Unsupported type for agent_response: {type(agent_response)}")
 
@@ -41,12 +313,16 @@ def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -
 def ensure_response_format(
     response_format: type[BaseModel] | None,
     correlation_id: str,
-    response: AgentResponse,
+    response: AgentResponse[Any],
 ) -> None:
     """Ensure the AgentResponse value is parsed into the expected response_format.
 
     This function modifies the response in-place by parsing its value attribute
-    into the specified Pydantic model format.
+    into the specified Pydantic model format. Terminal responses and accepted
+    acknowledgements are left unchanged. A retained value, including null,
+    takes precedence over parsing message text again. Shared response projections
+    require an original value and a JSON-preserving typed round trip. Only legacy
+    responses may obtain an absent structured value from message text.
 
     Args:
         response_format: Optional Pydantic model class to parse the response value into
@@ -57,9 +333,39 @@ def ensure_response_format(
         ValueError: If response_format is specified but response.value cannot be parsed
     """
     if response_format is not None:
+        shared = _shared_value_snapshot(response)
+        if response.additional_properties.get("durable_status") in ("error", "already_completed", "accepted") or (
+            getattr(response, "_original_shared_response", None) is not None and response.user_input_requests
+        ):
+            return
+
+        if shared is not None and "value" not in shared:
+            raise ValueError("The shared response has no structured value for the requested response format.")
+        # Only reuse a retained value; an unparsed response must use the requested format.
+        value = response._value  # pyright: ignore[reportPrivateUsage]
+        value_present = value is not None or response._value_parsed  # pyright: ignore[reportPrivateUsage]
         # Set the response format on the response so .value knows how to parse
         response._response_format = response_format  # pyright: ignore[reportPrivateUsage]
-        response._value_parsed = False  # pyright: ignore[reportPrivateUsage]  # Reset to allow re-parsing with new format
+        if value_present:
+            by_name = getattr(response, _VALUE_BY_NAME_KEY, False)
+            if not isinstance(value, response_format):
+                # Retained values crossed a JSON boundary, just like structured message text.
+                if isinstance(value, BaseModel):
+                    value, by_name = _serialize_model_value(value)
+                if by_name:
+                    value = response_format.model_validate_json(json.dumps(value), by_alias=False, by_name=True)
+                else:
+                    value = response_format.model_validate_json(json.dumps(value))
+            if shared is not None:
+                projected = value.model_dump(mode="json", by_alias=not by_name, round_trip=True)
+                if json.dumps(projected, sort_keys=True, allow_nan=False) != json.dumps(
+                    shared["value"], sort_keys=True, allow_nan=False
+                ):
+                    raise ValueError("The requested response format cannot preserve the shared structured value.")
+            response._value = value  # pyright: ignore[reportPrivateUsage]
+            response._value_parsed = True  # pyright: ignore[reportPrivateUsage]
+        else:
+            response._value_parsed = False  # pyright: ignore[reportPrivateUsage]
 
         # Access response.value to trigger parsing (may raise ValidationError)
         # Validate that parsing succeeded

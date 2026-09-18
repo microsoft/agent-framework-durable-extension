@@ -50,6 +50,28 @@ from ._models import RunRequest, serialize_response_format
 logger = logging.getLogger("agent_framework.durabletask")
 
 
+def _validate_legacy_state_layout(state: dict[str, Any]) -> None:
+    """Reject layouts the legacy mutable model cannot safely preserve.
+
+    Shared v2 snapshots belong to the separate read-only reader until a v2 writer
+    is implemented. An empty object is the existing fresh-entity sentinel.
+    """
+    if not isinstance(state, dict):
+        raise ValueError("Durable entity state must be a JSON object.")
+    if not state:
+        return
+    version = state.get("schemaVersion")
+    if version == "2.0.0":
+        raise ValueError("Shared schema 2.0.0 state is read-only in this version; v2 entity writes are not supported.")
+    if not isinstance(version, str) or version not in ("1.0.0", "1.1.0", "1.2.0"):
+        raise ValueError("Durable entity state schemaVersion is missing or unsupported.")
+    data = state.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("Durable entity state data must be a JSON object.")
+    if any(name in data for name in ("terminalResults", "completionReceipts", "historyBinding")):
+        raise ValueError("Legacy mutable state cannot contain shared v2 delivery or binding fields.")
+
+
 class DurableAgentStateEntryJsonType(str, Enum):
     """Enum for conversation history entry types.
 
@@ -403,11 +425,12 @@ class DurableAgentState:
         Args:
             schema_version: Schema version to use (defaults to SCHEMA_VERSION)
         """
+        _validate_legacy_state_layout({"schemaVersion": schema_version, "data": {}})
         self.data = DurableAgentStateData()
         self.schema_version = schema_version
 
     def to_dict(self) -> dict[str, Any]:
-
+        _validate_legacy_state_layout({"schemaVersion": self.schema_version, "data": {}})
         return {
             DurableStateFields.SCHEMA_VERSION: self.schema_version,
             DurableStateFields.DATA: self.data.to_dict(),
@@ -423,9 +446,8 @@ class DurableAgentState:
         Args:
             state: Dictionary containing schemaVersion and data (full state structure)
         """
-        schema_version = state.get(DurableStateFields.SCHEMA_VERSION)
-        if schema_version is None:
-            logger.warning("Resetting state as it is incompatible with the current schema, all history will be lost")
+        _validate_legacy_state_layout(state)
+        if not state:
             return cls()
 
         instance = cls(schema_version=state.get(DurableStateFields.SCHEMA_VERSION, DurableAgentState.SCHEMA_VERSION))

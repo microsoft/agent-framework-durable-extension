@@ -52,8 +52,9 @@ from ._entities import AgentEntity, AgentEntityStateProviderMixin
 from ._executors import DurableAgentExecutor
 from ._models import AgentSessionId, DurableAgentSession, RunRequest
 from ._orchestration_context import DurableAIAgentOrchestrationContext
-from ._response_utils import ensure_response_format, load_agent_response
+from ._response_utils import ensure_response_format, load_agent_response, serialize_agent_response
 from ._shim import DurableAIAgent
+from ._state_reader import SharedAgentStateReader, read_agent_state
 from ._worker import DurableAIAgentWorker
 from ._workflows.activity import execute_workflow_activity
 from ._workflows.client import DurableWorkflowClient
@@ -163,6 +164,7 @@ __all__ = [
     "DurableTaskWorkflowContext",
     "DurableWorkflowClient",
     "RunRequest",
+    "SharedAgentStateReader",
     "WorkflowOrchestrationContext",
     "WorkflowRegistrationPlan",
     "__version__",
@@ -173,8 +175,10 @@ __all__ = [
     "is_auto_generated_workflow_name",
     "load_agent_response",
     "plan_workflow_registration",
+    "read_agent_state",
     "run_agent_coroutine",
     "run_workflow_orchestrator",
+    "serialize_agent_response",
     "validate_executor_id",
     "validate_workflow_name",
     "workflow_name_from_orchestrator",

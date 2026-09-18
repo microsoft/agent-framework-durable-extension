@@ -24,9 +24,9 @@ from durabletask.task import CompletableTask, CompositeTask, OrchestrationContex
 from pydantic import BaseModel
 
 from ._constants import DEFAULT_MAX_POLL_RETRIES, DEFAULT_POLL_INTERVAL_SECONDS
-from ._durable_agent_state import DurableAgentState
 from ._models import AgentSessionId, DurableAgentSession, RunRequest
 from ._response_utils import ensure_response_format, load_agent_response
+from ._state_reader import read_agent_state
 
 logger = logging.getLogger("agent_framework.durabletask")
 
@@ -425,7 +425,7 @@ class ClientAgentExecutor(DurableAgentExecutor[AgentResponse]):
             if not state_json:
                 return None
 
-            state = DurableAgentState.from_json(state_json)
+            state = read_agent_state(state_json)
 
             # Use the helper method to get response by correlation ID
             return state.try_get_agent_response(correlation_id)

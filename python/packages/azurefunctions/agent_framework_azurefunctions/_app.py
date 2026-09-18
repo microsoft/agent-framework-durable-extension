@@ -41,9 +41,12 @@ from agent_framework_durabletask import (
     DurableAgentState,
     DurableAIAgent,
     RunRequest,
+    SharedAgentStateReader,
     deserialize_workflow_output,
     execute_workflow_activity,
     plan_workflow_registration,
+    read_agent_state,
+    serialize_agent_response,
 )
 from agent_framework_durabletask._workflows.naming import (
     SUBWORKFLOW_REQUEST_SEPARATOR,
@@ -1051,7 +1054,7 @@ class AgentFunctionApp(DFAppBase):
                     logger.debug(f"[HTTP Trigger] Result status: {result.get('status', 'unknown')}")
                     return self._create_http_response(
                         payload=result,
-                        status_code=200 if result.get("status") == "success" else 500,
+                        status_code={"success": 200, "completed_unavailable": 410}.get(result.get("status", ""), 500),
                         request_response_format=request_response_format,
                         session_id=session_id,
                     )
@@ -1285,6 +1288,8 @@ class AgentFunctionApp(DFAppBase):
                 response_text = str(result.get("response", "No response"))
                 logger.info("[MCP Tool] Agent '%s' responded successfully", agent_name)
                 return response_text
+            if result.get("status") == "completed_unavailable":
+                raise RuntimeError(f"Agent response unavailable (outcome: {result['outcome']}): {result['error']}")
             error_msg = result.get("error", "Unknown error")
             logger.error("[MCP Tool] Agent '%s' execution failed: %s", agent_name, error_msg)
             raise RuntimeError(f"Agent execution failed: {error_msg}")
@@ -1337,18 +1342,19 @@ class AgentFunctionApp(DFAppBase):
         self,
         client: df.DurableOrchestrationClient,
         entity_instance_id: df.EntityId,
-    ) -> DurableAgentState | None:
-        state_response = await client.read_entity_state(entity_instance_id)
+    ) -> SharedAgentStateReader | DurableAgentState | None:
+        try:
+            state_response = await client.read_entity_state(entity_instance_id)
+        except Exception:
+            # Preserve bounded retry for transient storage/transport failures.
+            # Decoding below remains outside this catch, so malformed stored
+            # state is reported immediately rather than treated as not ready.
+            logger.warning("[HTTP Trigger] Entity state transport read failed", exc_info=True)
+            return None
         if not state_response or not state_response.entity_exists:
             return None
 
-        state_payload = state_response.entity_state
-        if not isinstance(state_payload, dict):
-            return None
-
-        typed_state_payload = cast(dict[str, Any], state_payload)
-
-        return DurableAgentState.from_dict(typed_state_payload)
+        return read_agent_state(state_response.entity_state)
 
     async def _get_response_from_entity(
         self,
@@ -1407,6 +1413,49 @@ class AgentFunctionApp(DFAppBase):
                 return None
 
             agent_response = state.try_get_agent_response(correlation_id)
+            if isinstance(state, SharedAgentStateReader):
+                if agent_response is None:
+                    return None
+                # Shared lookup resolves authoritative receipts and availability.
+                # Do not infer delivery status from provider error-code hints here.
+                durable_status = agent_response.additional_properties.get("durable_status")
+                extra_fields: dict[str, Any] = {
+                    ApiResponseFields.MESSAGE_COUNT: state.message_count,
+                    "agent_response": serialize_agent_response(agent_response),
+                }
+                status = "success"
+                response_message: str | None = agent_response.text
+                if durable_status in ("error", "already_completed"):
+                    error = next(
+                        (
+                            content
+                            for response_message_item in agent_response.messages
+                            if response_message_item.role != "tool"
+                            for content in response_message_item.contents
+                            if content.type == "error"
+                        ),
+                        None,
+                    )
+                    status = "completed_unavailable" if durable_status == "already_completed" else "error"
+                    response_message = None
+                    extra_fields.update(
+                        error=(error.message if error is not None else None)
+                        or agent_response.text
+                        or "Agent execution failed.",
+                        error_code=error.error_code if error is not None else None,
+                    )
+                    if status == "completed_unavailable":
+                        extra_fields["outcome"] = agent_response.additional_properties["durable_outcome"]
+                return self._build_response_payload(
+                    response=response_message,
+                    message=message,
+                    session_id=session_id,
+                    status=status,
+                    correlation_id=correlation_id,
+                    extra_fields=extra_fields,
+                )
+
+            # Keep the legacy transcript result and builder unchanged.
             if agent_response:
                 result = self._build_success_result(
                     response_message=agent_response.text,
@@ -1419,6 +1468,14 @@ class AgentFunctionApp(DFAppBase):
 
         except Exception as exc:
             logger.warning(f"[HTTP Trigger] Error reading entity state: {exc}")
+            return self._build_response_payload(
+                response=None,
+                message=message,
+                session_id=session_id,
+                status="error",
+                correlation_id=correlation_id,
+                extra_fields={"error": str(exc), "error_code": "state_read_error"},
+            )
 
         return result
 
@@ -1573,7 +1630,9 @@ class AgentFunctionApp(DFAppBase):
     ) -> func.HttpResponse:
         """Return a plain-text response with optional session identifier header."""
         body_text = payload if isinstance(payload, str) else self._convert_payload_to_text(payload)
-        headers = {SESSION_ID_HEADER: session_id} if session_id is not None else None
+        headers = {SESSION_ID_HEADER: session_id} if session_id is not None else {}
+        if isinstance(payload, dict) and payload.get("status") == "completed_unavailable":
+            headers["x-ms-durable-outcome"] = payload["outcome"]
         return func.HttpResponse(body_text, status_code=status_code, mimetype=MIMETYPE_TEXT_PLAIN, headers=headers)
 
     def _build_json_response(self, payload: dict[str, Any] | str, status_code: int) -> func.HttpResponse:
@@ -1592,6 +1651,9 @@ class AgentFunctionApp(DFAppBase):
 
     def _convert_payload_to_text(self, payload: dict[str, Any]) -> str:
         """Convert a structured payload into a human-readable text response."""
+        response = payload.get("response")
+        if payload.get("status") == "success" and isinstance(response, str):
+            return response
         for key in ("response", "error", "message"):
             value = payload.get(key)
             if isinstance(value, str) and value:
