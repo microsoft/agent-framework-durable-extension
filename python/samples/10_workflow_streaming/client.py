@@ -59,7 +59,7 @@ def get_client(taskhub: str | None = None, endpoint: str | None = None) -> Durab
 
 async def main() -> None:
     """Start a workflow and stream its typed progress events to the console."""
-    client = DurableWorkflowClient(get_client())
+    client = DurableWorkflowClient(get_client(), workflow_name="content_pipeline")
 
     # Start without waiting so we can stream progress as it happens.
     instance_id = await client.run_workflow(input="Write a short note about durable workflows.", wait=False)
@@ -73,7 +73,7 @@ async def main() -> None:
             logger.info("  [%s] %s", event.type, event.executor_id)
 
     # The stream ends when the workflow reaches a terminal state; read the result.
-    output = await client.await_workflow_output(instance_id)
+    output = await asyncio.to_thread(client.await_workflow_output, instance_id)
     logger.info("Final output: %s", output)
 
 

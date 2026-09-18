@@ -242,8 +242,11 @@ class AgentEntityStateProviderMixin:
             self._state_cache = candidate
             self.persist_state()
         except BaseException:
-            self._state_cache = prior_cache
-            self._persisted_state_snapshot = prior_snapshot
+            if value is prior_cache:
+                self._restore_persisted_cache(prior_snapshot)
+            else:
+                self._state_cache = prior_cache
+                self._persisted_state_snapshot = prior_snapshot
             raise
 
     def persist_state(self) -> None:

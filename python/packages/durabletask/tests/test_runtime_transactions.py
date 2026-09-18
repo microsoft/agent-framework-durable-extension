@@ -8,6 +8,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Mapping, Sequence
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -301,6 +302,7 @@ async def test_committed_completion_is_immutable_against_response_mutation_and_c
 
 def test_nan_session_property_setter_rolls_back_raw_and_cache() -> None:
     provider = JsonStateProvider()
+    original_cache = provider.state
     candidate = DurableAgentState()
     candidate.data.session = {"nan": float("nan")}
 
@@ -308,6 +310,7 @@ def test_nan_session_property_setter_rolls_back_raw_and_cache() -> None:
         provider.state = candidate
 
     assert provider.raw == {}
+    assert provider.state is original_cache
     assert provider.state.data.session is None
     assert provider.attempted_writes == 0
     assert provider.successful_writes == 0
@@ -581,3 +584,58 @@ async def test_non_streaming_fallback_commits_once_without_replaying_the_model()
     assert provider.successful_writes == 1
     committed = _committed(provider)["data"]["terminalResults"]["fallback"]["response"]
     assert committed == serialize_terminal_response(response)
+
+
+@pytest.mark.parametrize("same_cached_object", [True, False], ids=["cached-alias", "distinct-replacement"])
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    [
+        pytest.param("invalid-json", "strict JSON|finite numbers", id="prepare-failure"),
+        pytest.param("terminal-result", "A committed terminal result is immutable", id="immutable-result"),
+    ],
+)
+async def test_rejected_state_setter_restores_committed_cache(
+    same_cached_object: bool, mutation: str, error: str
+) -> None:
+    provider = JsonStateProvider()
+    client = RecordingChatClient(response_message_id="setter-answer")
+    entity = AgentEntity(
+        Agent(client=client, name="setter-alias"),
+        state_provider=provider,
+        response_delivery_window_seconds=3600,
+    )
+    correlation_id = "setter-alias"
+    response = await entity.run(_request(correlation_id, "original"))
+    assert response.text == "reply-1"
+    original_response = response.to_dict()
+    committed = _committed(provider)
+    result = committed["data"]["terminalResults"][correlation_id]
+    now = datetime.now(timezone.utc)
+    assert datetime.fromisoformat(result["completedAt"]) <= now < datetime.fromisoformat(result["resultExpiresAt"])
+    writes_before = (provider.attempted_writes, provider.successful_writes)
+    assert writes_before == (1, 1)
+
+    original_cache = provider.state
+    candidate = original_cache if same_cached_object else deepcopy(original_cache)
+    if mutation == "invalid-json":
+        candidate.data.unknown_fields["setter_alias_invalid_json"] = float("nan")
+    else:
+        candidate.data.response_mailbox[correlation_id]["response"]["messages"][0]["contents"][0]["text"] = "tampered"
+    assert (candidate is provider.state) is same_cached_object
+
+    with pytest.raises(ValueError, match=error):
+        provider.state = candidate
+
+    assert provider.raw == committed
+    assert (provider.attempted_writes, provider.successful_writes) == writes_before
+    if not same_cached_object:
+        assert provider.state is original_cache
+    assert "setter_alias_invalid_json" not in provider.state.data.unknown_fields
+    assert provider.state.to_dict() == committed
+    retained = provider.state.try_get_agent_response(correlation_id)
+    assert retained is not None
+    assert retained.text == "reply-1"
+    assert retained.to_dict() == original_response
+    assert provider.raw == committed
+    assert (provider.attempted_writes, provider.successful_writes) == writes_before
+    assert len(client.received_messages) == 1
