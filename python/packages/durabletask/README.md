@@ -61,6 +61,25 @@ uses legacy `1.1.0`, and v2 execution and mutation remain rejected. A later runt
 validate its complete candidate against an independent committed baseline before storage.
 Read-only consumers reuse the same lookup rules, without transcript fallback or cleanup writes.
 
+### Private canonical history bridge
+
+The next private layer adds a typed canonical transcript and a Core history-provider bridge.
+It preserves unknown JSON, session state and original public message IDs separately from
+internal reconciliation identities. Delivery methods reuse the private staging operations
+without replacing typed history objects. History hooks stage appends and compaction annotations
+in memory. Excluded messages can be omitted from model input but are not physically deleted.
+External primary providers, service-owned history and store-only audit sinks keep separate roles.
+On a service-owned turn, the inactive external primary's custom hooks are also suppressed because
+they may load or persist history directly. Ownership-independent work belongs in a separate context
+provider or store-only sink. Client-owned turns retain the original primary's hooks and resources.
+
+These modules are not exported or connected to either host. Public `DurableAgentState` remains
+the legacy writer, and the existing v2 mutation guards remain active. There is no new supported
+deployment mode, migration operation, retention policy or workflow engine in this layer.
+Host activation, transactional session capture and the versioned workflow start boundary must
+land together in the later runtime layer. The private model alone does not enforce a committed
+storage baseline or make provider side effects transactional.
+
 ### Basic Usage Example
 
 ```python
