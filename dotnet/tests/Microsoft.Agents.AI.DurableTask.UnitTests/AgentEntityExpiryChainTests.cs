@@ -204,19 +204,20 @@ public sealed class AgentEntityExpiryChainTests
     [InlineData("""{"version":1,"entityId":"@dafx-agent@session","scheduledResultExpiryUtc":0,"token":null}""")]
     [InlineData("""{"version":1,"entityId":"@dafx-agent@session","scheduledResultExpiryUtc":null}""")]
     [InlineData("""{"version":1,"entityId":"@dafx-agent@session","scheduledResultExpiryUtc":"2026-09-12T02:00:00+02:00","token":"5b9ddf23b2d94e42b1dd4d946134f043"}""")]
-    public async Task InvalidFutureProfileBlocksWritersBeforeModelButRemainsOpaqueForDeliveryAsync(string profile)
+    public async Task InvalidFutureScheduleMetadataBlocksWritersBeforeModelButRemainsOpaqueForDeliveryAsync(
+        string scheduleMetadata)
     {
         List<AgentEntityResultExpirationCheck> signals = [];
         DurableAgentState original = await RunAsync(null, "first", 20, signals);
-        using JsonDocument document = JsonDocument.Parse(profile);
-        DurableAgentState state = WithProfile(original, document.RootElement.Clone());
+        using JsonDocument document = JsonDocument.Parse(scheduleMetadata);
+        DurableAgentState state = WithScheduleMetadata(original, document.RootElement.Clone());
         string before = Serialize(state);
         RecordingAgent agent = new("agent");
         EntityHarness writer = CreateHarness(agent, state, timeProvider: new Clock(s_now),
             onSignalInput: input => signals.Add(Assert.IsType<AgentEntityResultExpirationCheck>(input)));
         InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
             () => writer.RunAsync(new RunRequest("new") { CorrelationId = "new" }));
-        Assert.Contains(AgentEntityResultExpirySchedule.ExtensionName, error.Message);
+        Assert.Contains(AgentEntityResultExpirySchedule.ExtensionKey, error.Message);
         Assert.Equal(0, agent.InvocationCount);
         Assert.False(writer.StateWasPersisted);
         await Assert.ThrowsAsync<InvalidOperationException>(() => writer.CheckResultsExpirationAsync());
@@ -233,14 +234,15 @@ public sealed class AgentEntityExpiryChainTests
     }
 
     [Fact]
-    public async Task ProfileUnknownFieldsAndOtherExtensionsSurviveRotationAndClearAsync()
+    public async Task ScheduleMetadataUnknownFieldsAndOtherExtensionsSurviveRotationAndClearAsync()
     {
         List<AgentEntityResultExpirationCheck> signals = [];
         DurableAgentState state = await RunAsync(null, "first", 20, signals);
-        Dictionary<string, JsonElement> profile = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
-            state.ExtensionData![AgentEntityResultExpirySchedule.ExtensionName])!;
-        profile["future"] = JsonSerializer.SerializeToElement(new { flag = false, data = (string?)null });
-        state = WithProfile(state, JsonSerializer.SerializeToElement(profile));
+        Dictionary<string, JsonElement> scheduleMetadata =
+            JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+            state.ExtensionData![AgentEntityResultExpirySchedule.ExtensionKey])!;
+        scheduleMetadata["future"] = JsonSerializer.SerializeToElement(new { flag = false, data = (string?)null });
+        state = WithScheduleMetadata(state, JsonSerializer.SerializeToElement(scheduleMetadata));
         state.ExtensionData!["application"] = JsonSerializer.SerializeToElement(new List<int> { 0, 1 });
         state.UnknownProperties = new Dictionary<string, JsonElement> { ["rootFuture"] = JsonSerializer.SerializeToElement(false) };
         string before = Serialize(state);
@@ -256,7 +258,9 @@ public sealed class AgentEntityExpiryChainTests
 
         void AssertPreserved(DurableAgentState value)
         {
-            Assert.True(JsonElement.DeepEquals(profile["future"], value.ExtensionData![AgentEntityResultExpirySchedule.ExtensionName].GetProperty("future")));
+            Assert.True(JsonElement.DeepEquals(
+                scheduleMetadata["future"],
+                value.ExtensionData![AgentEntityResultExpirySchedule.ExtensionKey].GetProperty("future")));
             Assert.True(JsonElement.DeepEquals(state.ExtensionData!["application"], value.ExtensionData["application"]));
             Assert.False(value.UnknownProperties!["rootFuture"].GetBoolean());
         }
@@ -418,14 +422,14 @@ public sealed class AgentEntityExpiryChainTests
     [InlineData("1.0.0")]
     [InlineData("1.1.0")]
     [InlineData("1.2.0")]
-    public async Task LegacyWriterDoesNotInterpretOrCreateRuntimeProfileAsync(string version)
+    public async Task LegacyWriterDoesNotInterpretOrCreateResultExpiryScheduleMetadataAsync(string version)
     {
         DurableAgentState state = new()
         {
             SchemaVersion = version,
             ExtensionData = new Dictionary<string, JsonElement>
             {
-                [AgentEntityResultExpirySchedule.ExtensionName] = JsonSerializer.SerializeToElement(false),
+                [AgentEntityResultExpirySchedule.ExtensionKey] = JsonSerializer.SerializeToElement(false),
             },
         };
         int signals = 0;
@@ -435,7 +439,7 @@ public sealed class AgentEntityExpiryChainTests
         await production.RunAsync(new RunRequest("request") { CorrelationId = "request" });
         DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(production.PersistedState));
         Assert.Equal(DurableAgentState.CurrentSchemaVersion, committed.SchemaVersion);
-        Assert.False(committed.ExtensionData![AgentEntityResultExpirySchedule.ExtensionName].GetBoolean());
+        Assert.False(committed.ExtensionData![AgentEntityResultExpirySchedule.ExtensionKey].GetBoolean());
         Assert.Null(committed.Data.TerminalResults);
         Assert.Equal(0, signals);
         Assert.Equal(version, state.SchemaVersion);
@@ -459,8 +463,8 @@ public sealed class AgentEntityExpiryChainTests
             SchemaVersion = version,
             ExtensionData = new Dictionary<string, JsonElement>
             {
-                // Legacy state must preserve, but never interpret, even an unknown profile shape.
-                [AgentEntityResultExpirySchedule.ExtensionName] = JsonSerializer.SerializeToElement(false),
+                // Legacy state must preserve, but never interpret, even an unknown schedule metadata shape.
+                [AgentEntityResultExpirySchedule.ExtensionKey] = JsonSerializer.SerializeToElement(false),
             },
         };
         await AssertInputBearingCheckIsInertAsync(state, check);
@@ -605,12 +609,15 @@ public sealed class AgentEntityExpiryChainTests
     private static AgentEntityResultExpirationCheck? Pending(DurableAgentState state) =>
         AgentEntityResultExpirySchedule.Read(state, new AgentSessionId("agent", "session").ToString())?.Pending;
 
-    private static DurableAgentState WithProfile(DurableAgentState state, JsonElement profile) => new()
+    private static DurableAgentState WithScheduleMetadata(
+        DurableAgentState state,
+        JsonElement scheduleMetadata) => new()
     {
         SchemaVersion = state.SchemaVersion,
         PersistentRequestOutcomesAuthorized = true,
         Data = state.Data,
-        ExtensionData = new Dictionary<string, JsonElement> { [AgentEntityResultExpirySchedule.ExtensionName] = profile },
+        ExtensionData =
+            new Dictionary<string, JsonElement> { [AgentEntityResultExpirySchedule.ExtensionKey] = scheduleMetadata },
         UnknownProperties = state.UnknownProperties,
     };
 
