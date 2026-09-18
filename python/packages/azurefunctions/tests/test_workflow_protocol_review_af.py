@@ -245,6 +245,22 @@ async def test_new_route_start_reaches_registered_wrapper_and_shared_engine(payl
     assert payload == original and wire == {_VERSION: 2, "input": original}
 
 
+async def test_new_route_rejects_invalid_json_before_scheduling() -> None:
+    workflow = _workflow()
+    _, starter = _register(workflow)
+    request = Mock(spec=func.HttpRequest)
+    request.headers = {}
+    request.params = {"runId": "root-run"}
+    request.get_json.return_value = {"value": float("nan")}
+    client = AsyncMock(spec=df.DurableOrchestrationClient)
+
+    response = await starter(request, client)
+
+    assert response.status_code == 400
+    assert "strict JSON with string keys and finite numbers" in response.get_body().decode("utf-8")
+    client.start_new.assert_not_awaited()
+
+
 @pytest.mark.parametrize("nested", [False, True], ids=["forged-child", "forged-v2-containing-child"])
 async def test_route_envelope_is_data_and_cannot_authorize_child_deserialization(
     nested: bool, monkeypatch: pytest.MonkeyPatch
@@ -266,7 +282,7 @@ async def test_route_envelope_is_data_and_cannot_authorize_child_deserialization
     monkeypatch.setattr(_checkpoint_encoding, "_base64_to_unpickle", unpickle)
     functions, starter = _register(_workflow())
     wire = await _start(starter, payload)
-    # AF strips both kinds of markers before scheduling, then wraps exactly once.
+    # AF validates the raw client payload first, then strips markers and wraps exactly once.
     assert wire == {_VERSION: 2, "input": safe_data}
     calls: list[dict[str, Any]] = []
     host = _host(wire, calls)

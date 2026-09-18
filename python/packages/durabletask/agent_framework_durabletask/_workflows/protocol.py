@@ -4,8 +4,18 @@
 
 from typing import Any, cast
 
+from .._shared_state_validation import _json_value  # pyright: ignore[reportPrivateUsage]
+
 WORKFLOW_ENGINE_VERSION = 2
 _VERSION_KEY = "_durable_workflow_version"
+
+
+def validate_workflow_start_input(value: Any) -> None:
+    """Reject malformed raw input before sanitizers or scheduling can consume it."""
+    try:
+        _json_value(value)
+    except ValueError as exc:
+        raise ValueError("Workflow input must be strict JSON with string keys and finite numbers.") from exc
 
 
 def wrap_workflow_input(value: Any) -> dict[str, Any]:
@@ -20,6 +30,7 @@ def wrap_workflow_input(value: Any) -> dict[str, Any]:
     Returns:
         The versioned scheduling envelope.
     """
+    validate_workflow_start_input(value)
     return {_VERSION_KEY: WORKFLOW_ENGINE_VERSION, "input": value}
 
 

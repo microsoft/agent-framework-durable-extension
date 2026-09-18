@@ -24,7 +24,7 @@ from .naming import (
     split_subworkflow_request_id,
     workflow_orchestrator_name,
 )
-from .protocol import wrap_workflow_input
+from .protocol import validate_workflow_start_input, wrap_workflow_input
 from .serialization import (
     deserialize_workflow_event,
     deserialize_workflow_output,
@@ -120,6 +120,7 @@ class DurableWorkflowClient:
             The orchestration instance ID, for use with ``await_workflow_output``.
         """
         orchestration_name = workflow_orchestrator_name(self._resolve_workflow_name(workflow_name))
+        validate_workflow_start_input(input)
         new_instance_id = self._client.schedule_new_orchestration(
             orchestration_name,
             # Neutralize a forged sub-workflow envelope before scheduling: only an

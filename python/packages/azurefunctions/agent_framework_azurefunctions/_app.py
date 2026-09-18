@@ -54,6 +54,7 @@ from agent_framework_durabletask import (
     validate_agent_configuration,
     validate_response_delivery_window,
     validate_runtime_deployment,
+    validate_workflow_start_input,
     wrap_workflow_input,
 )
 from agent_framework_durabletask._workflows.naming import (
@@ -684,17 +685,22 @@ class AgentFunctionApp(DFAppBase):
                     return self._build_error_response("Request body is required")
                 client_input = raw_body.decode("utf-8")
 
-            # Neutralize a forged sub-workflow envelope before scheduling: only an
-            # internal child dispatch (post trust boundary) may carry those reserved
-            # keys, so stripping them here keeps untrusted input off the orchestrator's
-            # trusted-deserialization path (see strip_subworkflow_markers).
-            client_input = strip_subworkflow_markers(client_input)
-            client_input = strip_pickle_markers(client_input)
+            try:
+                validate_workflow_start_input(client_input)
+                # Neutralize a forged sub-workflow envelope before scheduling: only an
+                # internal child dispatch (post trust boundary) may carry those reserved
+                # keys, so stripping them here keeps untrusted input off the orchestrator's
+                # trusted-deserialization path (see strip_subworkflow_markers).
+                client_input = strip_subworkflow_markers(client_input)
+                client_input = strip_pickle_markers(client_input)
+                workflow_input = wrap_workflow_input(client_input)
+            except ValueError as exc:
+                return self._build_error_response(str(exc), status_code=400)
 
             instance_id = await client.start_new(
                 orchestrator_name,
                 instance_id=requested_instance_id,
-                client_input=wrap_workflow_input(client_input),
+                client_input=workflow_input,
             )
 
             if wait_for_response:
