@@ -118,6 +118,9 @@ def create_agent_entity(
             elif operation == "expire_responses":
                 context.set_result({"expired": entity.expire_responses()})
 
+            elif operation == "migrate":
+                context.set_result(entity.migrate(context.get_input()))
+
             else:
                 logger.error("[entity_function] Unknown operation: %s", operation)
                 context.set_result({"error": f"Unknown operation: {operation}"})

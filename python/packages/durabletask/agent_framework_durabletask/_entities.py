@@ -54,6 +54,7 @@ from ._shared_agent_state import (
     DurableAgentStateUnknownEntry,
 )
 from ._shared_state_validation import validate_completion_transition, validate_identifier
+from ._state_migration import migrate_legacy_state, state_snapshot_digest
 
 logger = logging.getLogger("agent_framework.durabletask")
 
@@ -380,6 +381,75 @@ class AgentEntity:
         except BaseException:
             self._state_provider.replace_cached_state(original)
             raise
+
+    def migrate(self, request: dict[str, Any]) -> dict[str, str]:
+        """Import an authorized quiesced legacy export into a separate empty entity.
+
+        This backend-only operation cannot authorize the operator or fence the old
+        deployment. HTTP and MCP routes do not expose it. Identical retries return
+        the recorded migration without rewriting results or refreshing their grace.
+
+        Args:
+            request: Source, sourceDigest, sourceSessionId, destinationSessionId,
+                migrationId, ownershipTransferId, and optional deliveryEvidence,
+                completionEvidence and requireKnownOutcomes.
+
+        Returns:
+            The committed migration identity and destination session identity.
+        """
+        self._state_provider.ensure_v2_writable()
+        required = {
+            "source",
+            "sourceDigest",
+            "sourceSessionId",
+            "destinationSessionId",
+            "migrationId",
+            "ownershipTransferId",
+        }
+        if (
+            not isinstance(request, dict)
+            or not required <= request.keys()
+            or request.keys() - required - {"deliveryEvidence", "completionEvidence", "requireKnownOutcomes"}
+        ):
+            raise ValueError("Migration requires a complete explicit source and destination request.")
+        for name in required - {"source"}:
+            if not isinstance(request[name], str) or not request[name].strip():
+                raise ValueError(f"Migration {name} must be a nonblank string.")
+        destination = self._state_provider.core_session_id
+        if request["destinationSessionId"] != destination:
+            raise ValueError("Migration destinationSessionId does not match this entity.")
+        if request["sourceSessionId"] == destination:
+            raise ValueError("Migration requires a separately addressed destination, never an in-place rewrite.")
+        if not isinstance(request["source"], dict):
+            raise ValueError("Migration source must be an exported state object.")
+        digest = state_snapshot_digest(request)
+        original = self.state
+        existing = original.data.unknown_fields.get("migration")
+        if isinstance(existing, dict) and cast("dict[str, Any]", existing).get("requestDigest") == digest:
+            return {"status": "migrated", "migrationId": request["migrationId"], "sessionId": destination}
+        if original.to_dict() != DurableAgentState().to_dict():
+            raise ValueError(
+                "Migration destination must be empty; an existing or different migration cannot be replaced."
+            )
+        staged = migrate_legacy_state(
+            cast("dict[str, Any]", request["source"]),
+            source_digest=request["sourceDigest"],
+            source_session_id=request["sourceSessionId"],
+            migration_id=request["migrationId"],
+            ownership_transfer_id=request["ownershipTransferId"],
+            delivery_window_seconds=self._response_delivery_window_seconds,
+            delivery_evidence=request.get("deliveryEvidence"),
+            completion_evidence=request.get("completionEvidence"),
+            require_known_outcomes=request.get("requireKnownOutcomes", False),
+        )
+        staged.data.unknown_fields["migration"].update({"requestDigest": digest, "destinationSessionId": destination})
+        self._state_provider.replace_cached_state(staged)
+        try:
+            self.persist_state()
+        except BaseException:
+            self._state_provider.replace_cached_state(original)
+            raise
+        return {"status": "migrated", "migrationId": request["migrationId"], "sessionId": destination}
 
     def _is_error_response(self, entry: DurableAgentStateEntry) -> bool:
         """Check if a conversation history entry records a failed turn."""
@@ -916,7 +986,22 @@ class AgentEntity:
             raise TypeError(
                 f"Agent {type(self.agent).__name__} exposes context providers but does not support create_session()."
             )
-        session: Any = create_session(session_id=self._state_provider.core_session_id)
+        session_id = self._state_provider.core_session_id
+        migration = self.state.data.unknown_fields.get("migration")
+        if isinstance(migration, dict):
+            migration = cast("dict[str, Any]", migration)
+            if "requestDigest" in migration:
+                source_session_id = migration.get("sourceSessionId")
+                if (
+                    migration.get("destinationSessionId") != session_id
+                    or not isinstance(source_session_id, str)
+                    or not source_session_id.strip()
+                ):
+                    raise ValueError("Committed migration session binding does not match this destination entity.")
+                # The authorized migration transfers the provider's existing identity.
+                # Ordinary non-migrated entities remain qualified by destination name/key.
+                session_id = source_session_id
+        session: Any = create_session(session_id=session_id)
         self._restore_session(session)
         return session
 

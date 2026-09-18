@@ -517,6 +517,10 @@ class DurableAIAgentWorker:
                 """Remove expired payloads when signaled by application-owned maintenance."""
                 return self._agent_entity.expire_responses()
 
+            def migrate(self, request: dict[str, Any]) -> dict[str, str]:
+                """Import an authorized legacy export into a separate empty destination."""
+                return self._agent_entity.migrate(request)
+
         # Set the entity name to match the prefixed agent name
         # This is used by durabletask to register the entity
         ConfiguredAgentEntity.__name__ = entity_name
