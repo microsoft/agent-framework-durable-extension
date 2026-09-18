@@ -52,6 +52,14 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _resolve_taskhub(taskhub: str | None) -> str:
+    taskhub_name = taskhub if taskhub is not None else os.getenv("TASKHUB")
+    if not taskhub_name or taskhub_name != taskhub_name.strip() or taskhub_name.strip().casefold() == "default":
+        raise ValueError("Set TASKHUB to a non-default, non-blank hub name before starting this sample.")
+    return taskhub_name
+
+
 SPAM_AGENT_NAME = "SpamDetectionAgent"
 EMAIL_AGENT_NAME = "EmailAssistantAgent"
 WORKFLOW_NAME = "email_triage"
@@ -166,7 +174,7 @@ def get_worker(
     taskhub: str | None = None, endpoint: str | None = None, log_handler: logging.Handler | None = None
 ) -> DurableTaskSchedulerWorker:
     """Create a configured DurableTaskSchedulerWorker."""
-    taskhub_name = taskhub or os.getenv("TASKHUB", "default")
+    taskhub_name = _resolve_taskhub(taskhub)
     endpoint_url = endpoint or os.getenv("ENDPOINT", "http://localhost:8080")
 
     credential = None if endpoint_url == "http://localhost:8080" else AzureCliCredential()
