@@ -170,7 +170,9 @@ class DurableHistoryProvider(HistoryProvider):
     def _to_message(stored: DurableAgentStateMessage) -> Message | None:
         """Convert a persisted message into one that is safe to replay to a chat client."""
         chat_message: Message = copy.deepcopy(stored).to_chat_message()
-        replayable = [content for content in chat_message.contents if content.type != "reasoning"]
+        replayable = [
+            content for content in chat_message.contents if content.type not in ("reasoning", "text_reasoning")
+        ]
         if not replayable:
             return None
         message = Message(
@@ -295,6 +297,9 @@ class DurableHistoryProvider(HistoryProvider):
                 created_at,
                 stored_messages,
                 usage=copy.deepcopy(DurableAgentStateUsage.from_usage(response.usage_details)),
+                extension_data=copy.deepcopy(response.additional_properties)
+                if response.additional_properties
+                else None,
             )
         binding.state_provider.state.data.conversation_history.append(entry)
         if state is not None:
@@ -861,8 +866,10 @@ def _copy_with_history_providers(agent: SupportsAgentRun, providers: list[Any]) 
 def ensure_durable_history(agent: SupportsAgentRun) -> SupportsAgentRun:
     """Back an agent's conversation history with canonical durable state.
 
-    With no load-enabled primary, append a :class:`DurableHistoryProvider` after existing
-    providers using core's default history source. Only exact built-in
+    With no load-enabled primary, inject a :class:`DurableHistoryProvider` using core's
+    default history source. Place it before a matching before-compaction provider so
+    Core's forward hooks can load prior context first. Otherwise append it, retaining
+    the existing reverse after-hook cadence. Only exact built-in
     :class:`InMemoryHistoryProvider` instances are replaced. Other primaries, including
     in-memory subclasses, keep their original hooks and state without an additional durable
     provider. Service ownership is resolved per run.
@@ -879,10 +886,18 @@ def ensure_durable_history(agent: SupportsAgentRun) -> SupportsAgentRun:
     )
 
     if existing is None:
-        updated = [
-            *provider_list,
-            DurableHistoryProvider(source_id=InMemoryHistoryProvider.DEFAULT_SOURCE_ID),
-        ]
+        insertion = next(
+            (
+                index
+                for index, provider in enumerate(provider_list)
+                if isinstance(provider, CompactionProvider)
+                and provider.history_source_id == InMemoryHistoryProvider.DEFAULT_SOURCE_ID
+                and provider.before_strategy is not None
+            ),
+            len(provider_list),
+        )
+        updated = list(provider_list)
+        updated.insert(insertion, DurableHistoryProvider(source_id=InMemoryHistoryProvider.DEFAULT_SOURCE_ID))
     elif isinstance(existing, DurableHistoryProvider):
         return agent
     elif type(existing) is InMemoryHistoryProvider:

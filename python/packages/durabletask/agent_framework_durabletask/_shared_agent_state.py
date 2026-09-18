@@ -33,6 +33,7 @@ from ._response_utils import (
 from ._shared_state_validation import (
     validate_shared_data,
     validate_shared_state,
+    validate_timestamp,
 )
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -384,7 +385,10 @@ class DurableAgentStateContent:
     def to_core_content(self) -> Content:
         profile = (self.unknown_fields or {}).get("pythonCoreFields")
         if not _has_python_profile(profile, _CORE_FIELDS_PROFILE):
-            return self.to_ai_content()
+            content = self.to_ai_content()
+            if isinstance(self.extensionData, dict):
+                content.additional_properties = deepcopy(self.extensionData)
+            return content
         profile = cast(dict[str, Any], profile)
         extra = profile.get("fields")
         if not isinstance(extra, dict):
@@ -392,6 +396,8 @@ class DurableAgentStateContent:
         if extra.keys() & (self.core_projection().keys() | {"raw_representation", "response_format"}):
             raise ValueError("Python core-fields metadata cannot replace known content fields.")
         payload = {**deepcopy(cast(dict[str, Any], extra)), **self.core_projection()}
+        if "additional_properties" not in extra and isinstance(self.extensionData, dict):
+            payload["additional_properties"] = deepcopy(self.extensionData)
         return load_agent_response({"messages": [{"role": "assistant", "contents": [payload]}]}).messages[0].contents[0]
 
     def to_dict(self) -> dict[str, Any]:
@@ -927,12 +933,23 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
 
     @classmethod
     def from_run_response(cls, correlation_id: str, response: AgentResponse) -> DurableAgentStateResponse:
-        return cls(
+        entry = cls(
             correlation_id=correlation_id,
             created_at=_parse_created_at(response.created_at),
             messages=[DurableAgentStateMessage.from_chat_message(m) for m in response.messages],
             usage=DurableAgentStateUsage.from_usage(response.usage_details),
+            extension_data=deepcopy(response.additional_properties) if response.additional_properties else None,
         )
+        if isinstance(response.created_at, str):
+            try:
+                validate_timestamp(response.created_at)
+            except ValueError:
+                pass  # Keep the existing typed/default timestamp policy for invalid input.
+            else:
+                raw = entry._to_dict()
+                raw[DurableStateFields.CREATED_AT] = response.created_at
+                entry._capture_raw(raw)
+        return entry
 
     @staticmethod
     def to_run_response(response_entry: DurableAgentStateResponse) -> AgentResponse:
@@ -942,9 +959,10 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
             created_at=response_entry.to_dict().get(DurableStateFields.CREATED_AT),
             messages=messages,
             usage_details=usage_details,
-            additional_properties=(
-                {"durable_status": "error"} if isinstance(response_entry, DurableAgentStateErrorResponse) else None
-            ),
+            additional_properties=({
+                **deepcopy(response_entry.extension_data or {}),
+                **({"durable_status": "error"} if isinstance(response_entry, DurableAgentStateErrorResponse) else {}),
+            }),
         )
 
 
