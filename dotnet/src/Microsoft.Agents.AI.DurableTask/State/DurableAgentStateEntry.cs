@@ -73,7 +73,7 @@ internal abstract class DurableAgentStateEntry
             {
                 DurableAgentStateContract.ValidateIdentifier(
                     value: this.CorrelationId,
-                    propertyPath: $"{nameof(DurableAgentStateData.ConversationHistory)}.{nameof(CorrelationId)}");
+                    diagnosticPath: $"{nameof(DurableAgentStateData.ConversationHistory)}.{nameof(CorrelationId)}");
             }
         }
 

@@ -50,7 +50,7 @@ internal sealed class DurableAgentStateTerminalResult
     {
         DurableAgentStateContract.ValidateIdentifier(
             value: correlationId,
-            propertyPath: $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(CorrelationId)}");
+            diagnosticPath: $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(CorrelationId)}");
         return new()
         {
             CorrelationId = correlationId,
@@ -70,10 +70,10 @@ internal sealed class DurableAgentStateTerminalResult
     {
         DurableAgentStateContract.ValidateIdentifier(
             value: dictionaryKey,
-            propertyPath: $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(dictionaryKey)}");
+            diagnosticPath: $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(dictionaryKey)}");
         DurableAgentStateContract.ValidateIdentifier(
             value: this.CorrelationId,
-            propertyPath: $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(CorrelationId)}");
+            diagnosticPath: $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(CorrelationId)}");
         if (!string.Equals(dictionaryKey, this.CorrelationId, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(

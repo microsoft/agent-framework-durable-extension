@@ -31,7 +31,7 @@ internal sealed class DurableAgentStateTerminalError
     {
         DurableAgentStateContract.ValidateIdentifier(
             value: this.Code,
-            propertyPath:
+            diagnosticPath:
                 $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(DurableAgentStateTerminalResult.Error)}.{nameof(Code)}");
         if (string.IsNullOrWhiteSpace(this.Message) ||
             this.Message.EnumerateRunes()
