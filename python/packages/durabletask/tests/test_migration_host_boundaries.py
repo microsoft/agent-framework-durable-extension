@@ -394,8 +394,99 @@ async def test_invalid_committed_migration_binding_blocks_provider_access(field:
         Agent(client=client, name="migration-agent", context_providers=[external]),
         state_provider=JsonStateProvider(raw, session_id="dest-session", entity_name=ENTITY_NAME),
     )
-    result = await restored.run({"message": "question", "correlationId": "invalid-binding"})
-    assert result.additional_properties["durable_status"] == "error"
-    assert "migration session binding" in result.text
+    with pytest.raises(ValueError, match="migration session binding"):
+        await restored.run({"message": "question", "correlationId": "invalid-binding"})
     assert external.calls == []
+    assert client.received_messages == []
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "id",
+        "sourceDigest",
+        "sourceSessionId",
+        "ownershipTransferId",
+        "createdAt",
+        "requestDigest",
+        "destinationSessionId",
+    ],
+)
+@pytest.mark.parametrize("replacement", [None, "", " "])
+async def test_malformed_migration_binding_rejects_before_any_turn_write(field: str, replacement: Any) -> None:
+    entity, provider, _ = _json_provider_entity()
+    entity.migrate(_migration_request(_legacy_source(), provider.core_session_id))
+    raw = deepcopy(provider.raw)
+    raw["data"]["migration"][field] = replacement
+    restored, backing, client = _json_provider_entity(raw)
+    with pytest.raises(ValueError, match="migration session binding"):
+        await restored.run({"message": "question", "correlationId": "bad-binding"})
+    assert client.received_messages == []
+    assert backing.attempted_writes == 0
+    assert backing.raw == raw
+
+
+@pytest.mark.parametrize("metadata", [None, [], "not-an-object", {}, {"sourceSessionId": SOURCE_SESSION_ID}])
+async def test_partial_or_non_object_migration_metadata_fails_closed(metadata: Any) -> None:
+    raw = DurableAgentState().to_dict()
+    raw["data"]["migration"] = metadata
+    restored, backing, client = _json_provider_entity(raw)
+    with pytest.raises(ValueError, match="migration session binding"):
+        await restored.run({"message": "question", "correlationId": "bad-binding"})
+    assert client.received_messages == []
+    assert backing.attempted_writes == 0
+    assert backing.raw == raw
+
+
+@pytest.mark.parametrize("digest", ["A" * 64, "g" * 64, "a" * 63, "a" * 65, 7, True])
+async def test_request_digest_must_be_lowercase_sha256(digest: Any) -> None:
+    entity, provider, _ = _json_provider_entity()
+    entity.migrate(_migration_request(_legacy_source(), provider.core_session_id))
+    raw = deepcopy(provider.raw)
+    raw["data"]["migration"]["requestDigest"] = digest
+    restored, backing, client = _json_provider_entity(raw)
+    with pytest.raises(ValueError, match="migration session binding"):
+        await restored.run({"message": "question", "correlationId": "bad-binding"})
+    assert client.received_messages == []
+    assert backing.attempted_writes == 0
+
+
+@pytest.mark.parametrize("operation", ["reset", "expire_responses", "migrate"])
+def test_malformed_binding_blocks_control_operations(operation: str) -> None:
+    raw = DurableAgentState().to_dict()
+    raw["data"]["migration"] = {"sourceSessionId": SOURCE_SESSION_ID}
+    restored, backing, client = _json_provider_entity(raw)
+    request = _migration_request(_legacy_source(), backing.core_session_id)
+    with pytest.raises(ValueError, match="migration session binding"):
+        if operation == "migrate":
+            restored.migrate(request)
+        else:
+            getattr(restored, operation)()
+    assert backing.raw == raw
+    assert backing.attempted_writes == 0
+    assert client.received_messages == []
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "id",
+        "sourceDigest",
+        "sourceSessionId",
+        "ownershipTransferId",
+        "createdAt",
+        "requestDigest",
+        "destinationSessionId",
+    ],
+)
+async def test_missing_committed_binding_field_blocks_run(field: str) -> None:
+    entity, provider, _ = _json_provider_entity()
+    entity.migrate(_migration_request(_legacy_source(), provider.core_session_id))
+    raw = deepcopy(provider.raw)
+    del raw["data"]["migration"][field]
+    restored, backing, client = _json_provider_entity(raw)
+    with pytest.raises(ValueError, match="migration session binding"):
+        await restored.run({"message": "question", "correlationId": "bad-binding"})
+    assert backing.raw == raw
+    assert backing.attempted_writes == 0
     assert client.received_messages == []

@@ -17,7 +17,7 @@ class StateCapacityError(ValueError):
         self.floor_bytes = floor_bytes
         self.target_bytes = target_bytes
         super().__init__(
-            f"Durable state capacity cannot meet the {target_bytes}-byte retention target: "
+            f"Durable state capacity cannot meet the {target_bytes}-byte capacity target: "
             f"serialized size is {size_bytes} bytes, budget is {max_state_bytes} bytes, "
             f"and the protected floor is {floor_bytes} bytes. No transcript changes were applied."
         )

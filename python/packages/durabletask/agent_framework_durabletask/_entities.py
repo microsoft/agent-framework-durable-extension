@@ -8,6 +8,7 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 import warnings
 from collections.abc import Mapping, Sequence
 from copy import copy, deepcopy
@@ -53,7 +54,7 @@ from ._shared_agent_state import (
     DurableAgentStateResponse,
     DurableAgentStateUnknownEntry,
 )
-from ._shared_state_validation import validate_completion_transition, validate_identifier
+from ._shared_state_validation import validate_completion_transition, validate_identifier, validate_timestamp
 from ._state_migration import migrate_legacy_state, state_snapshot_digest
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -343,6 +344,7 @@ class AgentEntity:
     def expire_responses(self) -> int:
         """Remove expired delivery payloads without model execution or deleting receipts."""
         self._state_provider.ensure_v2_writable()
+        self._migration_session_id()
         original = self.state
         staged = deepcopy(original)
         staged.prepare_for_write(delivery_window_seconds=self._response_delivery_window_seconds)
@@ -361,6 +363,7 @@ class AgentEntity:
 
     def reset(self) -> None:
         self._state_provider.ensure_v2_writable()
+        self._migration_session_id()
         if self._has_context_pipeline():
             providers = cast("Sequence[Any]", self.agent.context_providers)  # type: ignore[attr-defined]
             if any(
@@ -398,6 +401,7 @@ class AgentEntity:
             The committed migration identity and destination session identity.
         """
         self._state_provider.ensure_v2_writable()
+        self._migration_session_id()
         required = {
             "source",
             "sourceDigest",
@@ -461,6 +465,7 @@ class AgentEntity:
     ) -> AgentResponse:
         """Execute the agent with a message."""
         self._state_provider.ensure_v2_writable()
+        self._migration_session_id()
         if isinstance(request, str):
             run_request = RunRequest.from_json(request)
         elif isinstance(request, dict):
@@ -980,28 +985,44 @@ class AgentEntity:
                 return provider
         return None
 
+    def _migration_session_id(self) -> str:
+        """Validate reserved committed binding metadata before any operation can use it."""
+        session_id = self._state_provider.core_session_id
+        metadata = self.state.data.unknown_fields
+        if "migration" not in metadata:
+            return session_id
+        message = "Committed migration session binding is invalid or does not match this destination entity."
+        migration = metadata["migration"]
+        if not isinstance(migration, dict):
+            raise ValueError(message)
+        migration = cast("dict[str, Any]", migration)
+        for field in ("id", "sourceSessionId", "ownershipTransferId", "destinationSessionId"):
+            value = migration.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(message)
+        for field in ("sourceDigest", "requestDigest"):
+            value = migration.get(field)
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError(message)
+        try:
+            validate_timestamp(migration.get("createdAt"))
+        except ValueError as exc:
+            raise ValueError(message) from exc
+        for field in ("evidenceId", "completionEvidenceId"):
+            if field in migration and (not isinstance(migration[field], str) or not migration[field].strip()):
+                raise ValueError(message)
+        source_session_id = cast(str, migration["sourceSessionId"])
+        if migration["destinationSessionId"] != session_id or source_session_id == session_id:
+            raise ValueError(message)
+        return source_session_id
+
     def _create_session(self) -> Any:
         create_session = getattr(self.agent, "create_session", None)
         if not callable(create_session):
             raise TypeError(
                 f"Agent {type(self.agent).__name__} exposes context providers but does not support create_session()."
             )
-        session_id = self._state_provider.core_session_id
-        migration = self.state.data.unknown_fields.get("migration")
-        if isinstance(migration, dict):
-            migration = cast("dict[str, Any]", migration)
-            if "requestDigest" in migration:
-                source_session_id = migration.get("sourceSessionId")
-                if (
-                    migration.get("destinationSessionId") != session_id
-                    or not isinstance(source_session_id, str)
-                    or not source_session_id.strip()
-                ):
-                    raise ValueError("Committed migration session binding does not match this destination entity.")
-                # The authorized migration transfers the provider's existing identity.
-                # Ordinary non-migrated entities remain qualified by destination name/key.
-                session_id = source_session_id
-        session: Any = create_session(session_id=session_id)
+        session: Any = create_session(session_id=self._migration_session_id())
         self._restore_session(session)
         return session
 
