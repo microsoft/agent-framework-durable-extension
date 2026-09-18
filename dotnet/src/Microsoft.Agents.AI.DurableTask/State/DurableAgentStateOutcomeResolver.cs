@@ -91,7 +91,7 @@ internal static class DurableAgentStateOutcomeResolver
             {
                 DurableAgentStateContract.ValidateIdentifier(
                     value: response.CorrelationId,
-                    propertyPath:
+                    diagnosticPath:
                         $"{nameof(DurableAgentStateData.ConversationHistory)}.{nameof(DurableAgentStateEntry.CorrelationId)}");
             }
             catch (InvalidOperationException exception)

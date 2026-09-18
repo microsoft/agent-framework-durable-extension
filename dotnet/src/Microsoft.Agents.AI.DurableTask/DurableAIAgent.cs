@@ -296,6 +296,9 @@ public sealed class DurableAIAgent : AIAgent
         AgentResponse response = await this.RunAsync(messages, session, options, cancellationToken);
 
         AgentResponse<T> typedResponse = new(response, serializerOptions) { IsWrappedInObject = isWrappedInObject };
+        // Constructing AgentResponse<T> creates a new object. The canonical durable result is kept in an identity-based
+        // sidecar rather than in AgentResponse itself, so it would not follow this conversion automatically. Copy it to
+        // keep GetDurableResult() lossless and consistent between the typed and untyped APIs.
         DurableAgentJsonUtilities.CopyRetainedResult(response, typedResponse);
         return typedResponse;
     }

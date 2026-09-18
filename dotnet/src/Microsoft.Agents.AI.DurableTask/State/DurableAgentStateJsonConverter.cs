@@ -881,7 +881,7 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
 
                 DurableAgentStateContract.ValidateIdentifier(
                     value: correlation.GetString(),
-                    propertyPath:
+                    diagnosticPath:
                         $"{nameof(DurableAgentStateData.ConversationHistory)}.{nameof(DurableAgentStateEntry.CorrelationId)}");
             }
 

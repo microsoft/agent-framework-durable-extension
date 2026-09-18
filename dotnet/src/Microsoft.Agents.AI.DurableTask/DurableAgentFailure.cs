@@ -17,6 +17,14 @@ internal static class DurableAgentFailure
         new DurableAgentFailureMetadataException(
             JsonSerializer.Serialize(data, DurableAgentJsonUtilities.JsonContext.Default.DurableAgentFailureData), innerException);
 
+    /// <summary>
+    /// Attempts to reconstruct a durable-agent exception from metadata preserved by Durable Task.
+    /// </summary>
+    /// <remarks>
+    /// Returning <see langword="false"/> tells the caller's exception filter not to handle the failure. The original
+    /// SDK exception then continues unchanged, so malformed optional metadata never replaces or hides the actual
+    /// operation failure.
+    /// </remarks>
     internal static bool TryRestore(Exception exception, [NotNullWhen(true)] out Exception? restored)
     {
         restored = null;
@@ -71,11 +79,15 @@ internal static class DurableAgentFailure
         }
         catch (JsonException)
         {
-            // Unsupported/malformed metadata must leave the original SDK failure intact.
+            // Only the optional reconstruction metadata is malformed. Returning false makes the caller's
+            // exception filter skip its catch block, so the original SDK failure continues unchanged.
+            return false;
         }
         catch (InvalidOperationException)
         {
-            // Includes invalid canonical response metadata; never degrade it to success.
+            // The saved canonical response is internally inconsistent. Do not replace the authoritative
+            // SDK failure with this secondary parsing error or accidentally reinterpret the run as success.
+            return false;
         }
 
         return restored is not null;
