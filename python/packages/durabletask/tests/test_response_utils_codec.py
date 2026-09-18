@@ -69,17 +69,12 @@ def test_sparse_legacy_payloads_still_match_the_base_constructor(payload: dict[s
 
 
 @pytest.mark.parametrize("response_type", [None, "", False, 0, [], {}, "provider.CustomResponse", True, 1])
-def test_legacy_response_type_is_not_a_new_validation_or_runtime_dispatch_gate(response_type: Any) -> None:
+def test_present_response_type_requires_the_fixed_base_discriminator(response_type: Any) -> None:
     payload = {"type": response_type, "messages": [{"role": "assistant", "contents": ["answer"]}]}
-    try:
-        expected = AgentResponse.from_dict(deepcopy(payload))
-    except (ValueError, TypeError) as exc:
-        with pytest.raises(type(exc)):
-            load_agent_response(payload)
-        return
-    actual = load_agent_response(payload)
-    assert type(actual) is AgentResponse
-    assert actual.to_dict() == expected.to_dict()
+    before = deepcopy(payload)
+    with pytest.raises(ValueError, match="Response type"):
+        load_agent_response(payload)
+    assert payload == before
 
 
 @pytest.mark.parametrize("shape", ["single", "list", "tuple", "mapping"])

@@ -165,6 +165,24 @@ def test_nonmatching_envelopes_delegate_to_normal_loader_without_promoting_diagn
     assert raw == before
 
 
+@pytest.mark.parametrize("invalid_type", [None, "", False, 0, [], {}])
+def test_present_invalid_response_type_fails_in_the_real_loader_before_structured_parsing(
+    invalid_type: Any,
+    precompleted: bool,
+    response_format: type[BaseModel] | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = {"status": "error", "error": DIAGNOSTIC, "type": invalid_type}
+    before = deepcopy(raw)
+    ensure = Mock(side_effect=AssertionError("Malformed response entered structured parsing"))
+    monkeypatch.setattr(orchestration, "ensure_response_format", ensure)
+    task, child = _complete(raw, response_format, precompleted=precompleted)
+    assert child.state is TaskState.SUCCEEDED and task.state is TaskState.FAILED
+    assert type(task.result) is ValueError and "Response type" in str(task.result)
+    ensure.assert_not_called()
+    assert raw == before
+
+
 @pytest.mark.parametrize("envelope", ["typed", "messages-only", "type-only", "value-only", "empty"])
 def test_normal_core_constructor_inputs_remain_supported(
     envelope: str, monkeypatch: pytest.MonkeyPatch, precompleted: bool
