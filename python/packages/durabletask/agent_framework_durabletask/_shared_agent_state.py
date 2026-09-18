@@ -966,7 +966,9 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
             return  # Keep the caller's existing fallback timestamp policy.
         raw = self.to_dict()
         raw[DurableStateFields.CREATED_AT] = created_at
-        self.created_at = original_datetime if original_datetime is not None else _parse_transcript_created_at(created_at)
+        self.created_at = (
+            original_datetime if original_datetime is not None else _parse_transcript_created_at(created_at)
+        )
         self._capture_raw(raw)
 
     @staticmethod
