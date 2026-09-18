@@ -216,11 +216,13 @@ class DurableHistoryProvider(HistoryProvider):
         positions: dict[str, tuple[DurableAgentStateEntry, int]] = {}
         repairs: list[tuple[DurableAgentStateMessage, str]] = []
         stored_objects: set[int] = set()
+        for entry in history:
+            for stored in entry.messages:
+                if id(stored) in stored_objects:
+                    raise ValueError("History occurrences require distinct stored message objects.")
+                stored_objects.add(id(stored))
         for entry, index in self._replayable_entries(binding):
             stored = entry.messages[index]
-            if id(stored) in stored_objects:
-                raise ValueError("History occurrences require distinct stored message objects.")
-            stored_objects.add(id(stored))
             history_id = stored.message_id
             if not history_id or history_id in positions:
                 stored.validate_history_identity_update()
@@ -506,6 +508,22 @@ class DurableHistoryProvider(HistoryProvider):
             or getattr(message, _HISTORY_ID_ATTRIBUTE) in stored_by_id
         ]
         last_known: tuple[DurableAgentStateEntry, int] | None = None
+        # A prepended working-buffer message belongs before the first exposed
+        # occurrence, not before opaque/error/reasoning-only canonical prefixes.
+        first_exposed = next(
+            (
+                (entry, index)
+                for entry, index in self._replayable_entries(binding)
+                if self._to_message(entry.messages[index]) is not None
+            ),
+            None,
+        )
+        for entry in history:
+            if first_exposed is not None and entry is first_exposed[0]:
+                if first_exposed[1] > 0:
+                    last_known = (entry, first_exposed[1] - 1)
+                break
+            last_known = (entry, len(entry.messages) - 1)
         buffer_by_history_id = {
             history_id: message for message in buffer if (history_id := _history_message_id(message)) is not None
         }
