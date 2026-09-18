@@ -819,16 +819,24 @@ def _compaction_id_scope(messages: list[Message]) -> Generator[None]:
     """Give a strategy unique reconciliation IDs only for the duration of its hook."""
     original_messages = list(messages)
     original_state: dict[int, tuple[Message, str | None]] = {}
+    public_ids: dict[str, str | None] = {}
     for message in original_messages:
         original_state.setdefault(id(message), (message, message.message_id))
         history_id = getattr(message, _HISTORY_ID_ATTRIBUTE, None)
         if isinstance(history_id, str):
+            public_ids.setdefault(history_id, original_state[id(message)][1])
             message.message_id = history_id
     try:
         yield
     finally:
         for message, public_id in original_state.values():
             message.message_id = public_id
+        for message in messages:
+            if id(message) in original_state:
+                continue
+            history_id = getattr(message, _HISTORY_ID_ATTRIBUTE, None)
+            if history_id in public_ids and message.message_id == history_id:
+                message.message_id = public_ids[history_id]
 
 
 class _DurableCompactionProvider(CompactionProvider):

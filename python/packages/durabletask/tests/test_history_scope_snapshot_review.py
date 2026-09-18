@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import pytest
 from agent_framework import CompactionProvider, Message, SessionContext
 
@@ -69,6 +71,31 @@ async def test_compaction_scope_restores_original_objects_after_id_rename_insert
     assert removed.message_id == "public-removed"
     assert inserted.message_id == "public-inserted"
     assert replacement.message_id == ("private-removed" if hook == "after" else "private-original")
+
+
+async def test_after_compaction_restores_detached_copies_of_existing_occurrences() -> None:
+    original = _message("original", public_id="public-original", durable_id="private-original")
+    copies: list[Message] = []
+
+    async def strategy(messages: list[Message]) -> bool:
+        assert messages[0].message_id == "private-original"
+        copies.extend(deepcopy(messages))
+        messages[:] = copies
+        return True
+
+    provider = _DurableCompactionProvider(
+        CompactionProvider(
+            after_strategy=strategy,
+            history_source_id="durable",
+        )
+    )
+    context = SessionContext(input_messages=[])
+    # Only the after hook owns the replaceable stored list. Core before hooks
+    # project by original object identity and do not adopt detached replacements.
+    session = type("Session", (), {"state": {"durable": {"messages": [original]}}})()
+    await provider.after_run(agent=None, session=session, context=context, state={})
+    assert len(copies) == 1
+    assert copies[0].message_id == "public-original"
 
 
 @pytest.mark.parametrize("hook", ["before", "after"])
