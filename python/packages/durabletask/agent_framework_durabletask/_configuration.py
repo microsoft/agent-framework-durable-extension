@@ -6,12 +6,48 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Literal
+from enum import Enum
+from typing import Final, Literal, TypeAlias
 
 from agent_framework import SupportsAgentRun
 
 from ._callbacks import AgentResponseCallbackProtocol
 from ._history_provider import ensure_durable_history
+from ._retention import DEFAULT_RETENTION, RetentionMode, StateBudget, resolve_state_budget, validate_retention
+
+__all__ = [
+    "INHERIT",
+    "AgentRegistrationSettings",
+    "Inherit",
+    "RegistrationIdentity",
+    "StateBudgetOverride",
+    "resolve_state_budget_override",
+    "validate_agent_configuration",
+    "validate_response_delivery_window",
+    "validate_runtime_deployment",
+]
+
+
+class Inherit(Enum):
+    """Use the enclosing host's setting instead of an explicit override."""
+
+    INHERIT = "inherit"
+
+
+INHERIT: Final[Inherit] = Inherit.INHERIT
+"""Inherit the configured budget, unlike None which disables pressure eviction."""
+
+StateBudgetOverride: TypeAlias = StateBudget | Inherit
+
+
+def resolve_state_budget_override(
+    value: StateBudgetOverride,
+    default: int | None,
+    *,
+    backend_limit: int | None = None,
+) -> int | None:
+    """Resolve an inherited or explicit budget without conflating None with omission."""
+    return resolve_state_budget(default if isinstance(value, Inherit) else value, backend_limit=backend_limit)
 
 
 def validate_runtime_deployment(deployment_mode: str | None = None) -> None:
@@ -37,10 +73,11 @@ def validate_response_delivery_window(response_delivery_window_seconds: int) -> 
         raise ValueError("response_delivery_window_seconds must be a positive integer, not a boolean or another type.")
 
 
-def validate_agent_configuration(agent: SupportsAgentRun) -> None:
+def validate_agent_configuration(agent: SupportsAgentRun, *, retention: RetentionMode = DEFAULT_RETENTION) -> None:
     """Dry-prepare history without replacing the registered caller-owned agent."""
+    validate_retention(retention)
     try:
-        ensure_durable_history(agent)
+        ensure_durable_history(agent, prune_excluded=retention == "follow_compaction")
     except ValueError:
         raise
     except Exception as exc:
@@ -51,6 +88,10 @@ def validate_agent_configuration(agent: SupportsAgentRun) -> None:
 class AgentRegistrationSettings:
     """Resolved values and callback identity for a reusable hosted registration."""
 
+    retention: RetentionMode
+    max_state_bytes: int | None
+    high_watermark: float
+    low_watermark: float
     response_delivery_window_seconds: int
     callback: AgentResponseCallbackProtocol | None = field(default=None, compare=False)
 

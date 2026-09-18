@@ -14,14 +14,18 @@ from typing import Any
 
 from agent_framework import SupportsAgentRun, Workflow
 from agent_framework._telemetry import mark_feature_used
+from durabletask.azuremanaged.worker import DurableTaskSchedulerWorker
 from durabletask.task import ActivityContext, OrchestrationContext
 from durabletask.worker import TaskHubGrpcWorker
 
 from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentResponseCallbackProtocol
 from ._configuration import (
+    INHERIT,
     AgentRegistrationSettings,
     RegistrationIdentity,
+    StateBudgetOverride,
+    resolve_state_budget_override,
     validate_agent_configuration,
     validate_response_delivery_window,
     validate_runtime_deployment,
@@ -30,6 +34,17 @@ from ._constants import DELIVERY_WINDOW_SECONDS
 from ._entities import AgentEntity, DurableTaskEntityStateProvider
 from ._feature_usage import FeatureIndex
 from ._response_utils import serialize_agent_response
+from ._retention import (
+    DEFAULT_MAX_STATE_BYTES,
+    DEFAULT_RETENTION,
+    DTS_MAX_STATE_BYTES,
+    HIGH_WATERMARK,
+    LOW_WATERMARK,
+    RetentionMode,
+    StateBudget,
+    resolve_state_budget,
+    validate_retention,
+)
 from ._workflows.activity import execute_workflow_activity
 from ._workflows.dt_context import DurableTaskWorkflowContext
 from ._workflows.naming import (
@@ -97,6 +112,10 @@ class DurableAIAgentWorker:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         deployment_mode: str | None = None,
+        retention: RetentionMode = DEFAULT_RETENTION,
+        max_state_bytes: StateBudget = DEFAULT_MAX_STATE_BYTES,
+        high_watermark: float = HIGH_WATERMARK,
+        low_watermark: float = LOW_WATERMARK,
         response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
     ):
         """Initialize the worker wrapper.
@@ -106,12 +125,26 @@ class DurableAIAgentWorker:
             callback: Optional callback for agent response notifications
             deployment_mode: Exactly ``isolated_v2`` to acknowledge an isolated schema 2
                 deployment with upgraded clients. None reads ``DURABLE_AGENTS_DEPLOYMENT_MODE``.
+            retention: Eager pruning policy, defaulting to ``keep_all``. ``follow_compaction``
+                prunes compaction exclusions independently of the pressure budget.
+            max_state_bytes: Optional serialized-state budget. None disables pressure eviction.
+                ``backend_limit`` requires a DurableTaskSchedulerWorker with its known 1 MiB limit.
+                An explicit positive integer works with any backend.
+            high_watermark: Budget fraction at which pressure eviction starts, defaulting to 0.85.
+            low_watermark: Target budget fraction after pressure eviction, defaulting to 0.70.
             response_delivery_window_seconds: Positive integer response delivery window in seconds.
         """
         validate_runtime_deployment(deployment_mode)
+        validate_retention(retention, high_watermark, low_watermark)
+        self._backend_limit = DTS_MAX_STATE_BYTES if isinstance(worker, DurableTaskSchedulerWorker) else None
+        resolved_max_state_bytes = resolve_state_budget(max_state_bytes, backend_limit=self._backend_limit)
         validate_response_delivery_window(response_delivery_window_seconds)
         self._worker = worker
         self._callback = callback
+        self._retention: RetentionMode = retention
+        self._max_state_bytes = resolved_max_state_bytes
+        self._high_watermark = high_watermark
+        self._low_watermark = low_watermark
         self._response_delivery_window_seconds = response_delivery_window_seconds
         self._registered_agents: dict[str, SupportsAgentRun] = {}
         self._workflows: dict[str, Workflow] = {}
@@ -130,6 +163,10 @@ class DurableAIAgentWorker:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         entity_id: str | None = None,
+        retention: RetentionMode | None = None,
+        max_state_bytes: StateBudgetOverride = INHERIT,
+        high_watermark: float | None = None,
+        low_watermark: float | None = None,
         response_delivery_window_seconds: int | None = None,
     ) -> None:
         """Register an agent with the worker.
@@ -144,11 +181,15 @@ class DurableAIAgentWorker:
             entity_id: Optional identity to register the entity under instead of
                 ``agent.name``. Workflow hosting passes the executor's ``id`` so the
                 entity matches the identity the orchestrator dispatches to.
+            retention: Per-agent eager pruning policy, or None to inherit the worker default.
+            max_state_bytes: Per-agent budget. INHERIT uses the worker default. None disables it.
+            high_watermark: Pressure trigger override, or None to inherit the worker default.
+            low_watermark: Pressure target override, or None to inherit the worker default.
             response_delivery_window_seconds: Delivery window override, or None to inherit.
 
         Raises:
-            ValueError: If the name or history-provider composition is invalid, or the
-                agent is already registered.
+            ValueError: If the name, retention settings, or history-provider composition is invalid,
+                or the agent is already registered.
         """
         self._ensure_registration_usable()
         registration_name = entity_id or agent.name
@@ -158,15 +199,24 @@ class DurableAIAgentWorker:
         if registration_name in self._registered_agents:
             raise ValueError(f"Agent '{registration_name}' is already registered")
 
+        effective_retention = self._retention if retention is None else retention
+        effective_budget = resolve_state_budget_override(
+            max_state_bytes, self._max_state_bytes, backend_limit=self._backend_limit
+        )
+        effective_high = self._high_watermark if high_watermark is None else high_watermark
+        effective_low = self._low_watermark if low_watermark is None else low_watermark
         effective_window = (
             self._response_delivery_window_seconds
             if response_delivery_window_seconds is None
             else response_delivery_window_seconds
         )
+        validate_retention(effective_retention, effective_high, effective_low)
         validate_response_delivery_window(effective_window)
-        validate_agent_configuration(agent)
+        validate_agent_configuration(agent, retention=effective_retention)
         effective_callback = self._callback if callback is None else callback
-        settings = AgentRegistrationSettings(effective_window, effective_callback)
+        settings = AgentRegistrationSettings(
+            effective_retention, effective_budget, effective_high, effective_low, effective_window, effective_callback
+        )
         identities = dict(self._registration_identities)
         RegistrationIdentity(agent, agent, "entity", settings, f"agent '{registration_name}'").reserve(
             identities, f"dafx-{registration_name}", namespace="entity-name"
@@ -181,6 +231,10 @@ class DurableAIAgentWorker:
             agent,
             effective_callback,
             entity_id=registration_name,
+            retention=effective_retention,
+            max_state_bytes=effective_budget,
+            high_watermark=effective_high,
+            low_watermark=effective_low,
             response_delivery_window_seconds=effective_window,
         )
 
@@ -256,6 +310,10 @@ class DurableAIAgentWorker:
         workflow: Workflow,
         callback: AgentResponseCallbackProtocol | None = None,
         *,
+        retention: RetentionMode | None = None,
+        max_state_bytes: StateBudgetOverride = INHERIT,
+        high_watermark: float | None = None,
+        low_watermark: float | None = None,
         response_delivery_window_seconds: int | None = None,
     ) -> None:
         """Register a :class:`Workflow` for automatic orchestration.
@@ -282,6 +340,11 @@ class DurableAIAgentWorker:
                 across restarts and would break durable resume). Every nested
                 sub-workflow must likewise be named.
             callback: Optional callback for agent response notifications.
+            retention: Eager pruning policy for this workflow's agent nodes, or None to inherit.
+            max_state_bytes: Budget for this workflow and its nested workflows. INHERIT uses the
+                worker default. None disables pressure eviction.
+            high_watermark: Pressure trigger override, or None to inherit the worker default.
+            low_watermark: Pressure target override, or None to inherit the worker default.
             response_delivery_window_seconds: Delivery window override, or None to inherit.
 
         Raises:
@@ -292,13 +355,27 @@ class DurableAIAgentWorker:
         self._ensure_registration_usable()
         workflow_name = workflow.name
         validate_workflow_name(workflow_name)
+        effective_retention = self._retention if retention is None else retention
+        effective_budget = resolve_state_budget_override(
+            max_state_bytes, self._max_state_bytes, backend_limit=self._backend_limit
+        )
+        effective_high = self._high_watermark if high_watermark is None else high_watermark
+        effective_low = self._low_watermark if low_watermark is None else low_watermark
         effective_window = (
             self._response_delivery_window_seconds
             if response_delivery_window_seconds is None
             else response_delivery_window_seconds
         )
+        validate_retention(effective_retention, effective_high, effective_low)
         validate_response_delivery_window(effective_window)
-        settings = AgentRegistrationSettings(effective_window, self._callback if callback is None else callback)
+        settings = AgentRegistrationSettings(
+            effective_retention,
+            effective_budget,
+            effective_high,
+            effective_low,
+            effective_window,
+            self._callback if callback is None else callback,
+        )
 
         # Reserve the actual derived identities for the entire composition before any SDK calls.
         hosted_workflows = list(collect_hosted_workflows(workflow))
@@ -314,7 +391,7 @@ class DurableAIAgentWorker:
             plan = plan_workflow_registration(hosted)
             for agent_executor in plan.agent_executors:
                 validate_executor_id(agent_executor.id)
-                validate_agent_configuration(agent_executor.agent)
+                validate_agent_configuration(agent_executor.agent, retention=effective_retention)
                 RegistrationIdentity(
                     hosted,
                     agent_executor.agent,
@@ -349,6 +426,10 @@ class DurableAIAgentWorker:
                 self._register_single_workflow(
                     hosted,
                     callback,
+                    retention=effective_retention,
+                    max_state_bytes=effective_budget,
+                    high_watermark=effective_high,
+                    low_watermark=effective_low,
                     response_delivery_window_seconds=effective_window,
                 )
         except Exception:
@@ -365,6 +446,10 @@ class DurableAIAgentWorker:
         workflow: Workflow,
         callback: AgentResponseCallbackProtocol | None,
         *,
+        retention: RetentionMode | None = None,
+        max_state_bytes: StateBudgetOverride = INHERIT,
+        high_watermark: float | None = None,
+        low_watermark: float | None = None,
         response_delivery_window_seconds: int | None = None,
     ) -> None:
         """Register one workflow's durable primitives (no recursion into sub-workflows).
@@ -374,7 +459,6 @@ class DurableAIAgentWorker:
         via ``plan_workflow_registration``.
         """
         validate_workflow_name(workflow.name)
-        self._registered_orchestrations[workflow.name.casefold()] = workflow
         plan = plan_workflow_registration(workflow)
 
         # Register agent executors as durable entities, scoped by workflow name so
@@ -388,6 +472,10 @@ class DurableAIAgentWorker:
                 agent_executor.agent,
                 callback=callback,
                 entity_id=scoped_id,
+                retention=retention,
+                max_state_bytes=max_state_bytes,
+                high_watermark=high_watermark,
+                low_watermark=low_watermark,
                 response_delivery_window_seconds=response_delivery_window_seconds,
             )
 
@@ -453,6 +541,10 @@ class DurableAIAgentWorker:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         entity_id: str | None = None,
+        retention: RetentionMode = DEFAULT_RETENTION,
+        max_state_bytes: int | None = None,
+        high_watermark: float = HIGH_WATERMARK,
+        low_watermark: float = LOW_WATERMARK,
         response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
     ) -> type[DurableTaskEntityStateProvider]:
         """Factory function to create a DurableEntity class configured with an agent.
@@ -466,6 +558,10 @@ class DurableAIAgentWorker:
             entity_id: Optional identity to register the entity under instead of
                 ``agent.name`` (used by workflow hosting to key entities by
                 executor id).
+            retention: Eager pruning policy, independent of pressure eviction.
+            max_state_bytes: Resolved pressure budget, or None to disable pressure eviction.
+            high_watermark: Budget fraction at which pressure eviction starts.
+            low_watermark: Target budget fraction after pressure eviction.
             response_delivery_window_seconds: Response delivery window in seconds.
 
         Returns:
@@ -484,6 +580,10 @@ class DurableAIAgentWorker:
                     agent=agent,
                     callback=callback,
                     state_provider=self,
+                    retention=retention,
+                    max_state_bytes=max_state_bytes,
+                    high_watermark=high_watermark,
+                    low_watermark=low_watermark,
                     response_delivery_window_seconds=response_delivery_window_seconds,
                 )
                 logger.debug(

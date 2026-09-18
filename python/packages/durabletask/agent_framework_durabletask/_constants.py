@@ -143,8 +143,11 @@ class DurableStateFields:
     COMPLETED_AT: Final[str] = "completedAt"
     OUTCOME: Final[str] = "outcome"
 
-    # Preserve existing truncation metadata without enabling any deletion policy.
+    # Canonical truncation evidence for staged transcript eviction.
     TRUNCATION: Final[str] = "truncation"
+    EVICTED_MESSAGE_COUNT: Final[str] = "evictedMessageCount"
+    FIRST_EVICTED_AT: Final[str] = "firstEvictedAt"
+    LAST_EVICTED_AT: Final[str] = "lastEvictedAt"
 
 
 class ContentTypes:

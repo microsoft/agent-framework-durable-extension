@@ -46,6 +46,19 @@ from ._invocation_safety import DurableServiceClient, DurableToolGuard, Invocati
 from ._message_identity import message_identity
 from ._models import RunRequest
 from ._response_utils import is_terminal_agent_response, load_agent_response, preserve_input_envelope
+from ._retention import (
+    DEFAULT_MAX_STATE_BYTES,
+    DEFAULT_RETENTION,
+    HIGH_WATERMARK,
+    LOW_WATERMARK,
+    RetentionMode,
+    StateBudget,
+    enforce_budget,
+    prunes_excluded,
+    resolve_state_budget,
+    validate_retention,
+)
+from ._retention_telemetry import record_write, retention_operation
 from ._shared_agent_state import (
     DurableAgentState,
     DurableAgentStateEntry,
@@ -268,14 +281,17 @@ class AgentEntityStateProviderMixin:
             validate_completion_transition(transition_baseline, payload)
         except BaseException:
             self._restore_persisted_cache(committed_snapshot)
+            record_write(state, stage="serialization", outcome="failed")
             raise
         try:
             self._set_state_dict(payload)
         except BaseException:
             self._write_acknowledgement_uncertain = True
             self._restore_persisted_cache(committed_snapshot)
+            record_write(state, stage="set_state", outcome="failed")
             raise
         self._persisted_state_snapshot = deepcopy(payload)
+        record_write(state, stage="set_state", outcome="returned")
 
     def _restore_persisted_cache(self, snapshot: dict[str, Any] | None = None) -> None:
         restored_snapshot = deepcopy(self._persisted_state_snapshot if snapshot is None else snapshot)
@@ -323,12 +339,21 @@ class AgentEntity:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         state_provider: AgentEntityStateProviderMixin,
+        retention: RetentionMode = DEFAULT_RETENTION,
+        max_state_bytes: StateBudget = DEFAULT_MAX_STATE_BYTES,
+        high_watermark: float = HIGH_WATERMARK,
+        low_watermark: float = LOW_WATERMARK,
         response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
     ) -> None:
+        validate_retention(retention, high_watermark, low_watermark)
         validate_response_delivery_window(response_delivery_window_seconds)
-        self.agent = ensure_durable_history(agent)
+        self.agent = ensure_durable_history(agent, prune_excluded=prunes_excluded(retention))
         self.callback = callback
         self._state_provider = state_provider
+        self._retention = retention
+        self._max_state_bytes = resolve_state_budget(max_state_bytes)
+        self._high_watermark = high_watermark
+        self._low_watermark = low_watermark
         self._response_delivery_window_seconds = response_delivery_window_seconds
 
         logger.debug("[AgentEntity] Initialized with agent type: %s", type(agent).__name__)
@@ -358,6 +383,7 @@ class AgentEntity:
             return 0
         self._state_provider.replace_cached_state(staged)
         try:
+            self._validate_control_budget()
             self.persist_state()
         except BaseException:
             self._state_provider.replace_cached_state(original)
@@ -383,6 +409,7 @@ class AgentEntity:
             self.state.data.conversation_history.clear()
             self.state.data.session = None
             self.state.expire_responses()
+            self._validate_control_budget()
             self.persist_state()
         except BaseException:
             self._state_provider.replace_cached_state(original)
@@ -453,11 +480,19 @@ class AgentEntity:
         staged.data.unknown_fields["migration"].update({"requestDigest": digest, "destinationSessionId": destination})
         self._state_provider.replace_cached_state(staged)
         try:
+            self._validate_control_budget()
             self.persist_state()
         except BaseException:
             self._state_provider.replace_cached_state(original)
             raise
         return {"status": "migrated", "migrationId": request["migrationId"], "sessionId": destination}
+
+    def _validate_control_budget(self) -> None:
+        """Reject an oversized maintenance commit, without pruning any protected state."""
+        if self._max_state_bytes is not None:
+            size = len(json.dumps(self.state.to_dict(), allow_nan=False))
+            if size > self._max_state_bytes:
+                raise ValueError("Retained delivery/control state cannot fit within max_state_bytes.")
 
     def _is_error_response(self, entry: DurableAgentStateEntry) -> bool:
         """Check if a conversation history entry records a failed turn."""
@@ -486,14 +521,16 @@ class AgentEntity:
             self.expire_responses()
             return already_answered
         self._state_provider.replace_cached_state(deepcopy(original))
-        try:
-            self.state.expire_responses()
-            response = await self._execute_request(run_request)
-            self.persist_state()
-            return response
-        except BaseException:
-            self._state_provider.replace_cached_state(original)
-            raise
+        with retention_operation(self.state):
+            try:
+                self.state.expire_responses()
+                response = await self._execute_request(run_request)
+                await self._enforce_retention()
+                self.persist_state()
+                return response
+            except BaseException:
+                self._state_provider.replace_cached_state(original)
+                raise
 
     async def _execute_request(self, run_request: RunRequest) -> AgentResponse:
         """Stage a turn without committing until every local slice is valid."""
@@ -914,6 +951,17 @@ class AgentEntity:
             cause,
         )
         return None
+
+    async def _enforce_retention(self) -> None:
+        """Apply optional whole-state pressure budgeting independently of eager pruning."""
+        if self._max_state_bytes is None:
+            return
+        await enforce_budget(
+            self.state,
+            max_state_bytes=self._max_state_bytes,
+            high_watermark=self._high_watermark,
+            low_watermark=self._low_watermark,
+        )
 
     def _has_context_pipeline(self) -> bool:
         return isinstance(getattr(self.agent, "context_providers", None), (list, tuple))

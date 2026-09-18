@@ -24,17 +24,35 @@ from agent_framework_azurefunctions import AgentFunctionApp
 
 The same entry-point types are also re-exported from `agent_framework.azure` in the core
 `agent-framework` package for backward compatibility. **New and updated samples should use the
-direct package imports above** — the canonical, self-contained path for this repo — rather than
-routing through the `agent_framework.azure` shim.
+direct package imports above** rather than the `agent_framework.azure` shim.
+
+## History and Retention Sample
+
+- **[14_conversation_compaction](14_conversation_compaction/)** shows durable compaction with independent eager-pruning and explicit local byte-budget settings.
+
+## Retention Defaults
+
+`AgentFunctionApp` defaults to `retention="keep_all"` and `max_state_bytes=None`.
+`follow_compaction` enables eligible eager pruning. An independent positive byte budget enables
+pressure eviction at the `0.85` high watermark toward the `0.70` low watermark, subject to protected
+state. Functions rejects `"backend_limit"`, even with DTS. Whole-entity ASCII-escaped JSON size is
+a Python-host estimate, not a backend acceptance guarantee.
+
+Agent and workflow budget overrides distinguish `INHERIT` from explicit `None`, which disables pressure
+eviction. Protected delivery records and session state can cause `StateCapacityError` rather than
+being deleted to fit. There is no bounded receipt cleanup. Idle response expiry requires
+application-owned maintenance, and retention metrics never confirm durable commits. See the
+[Functions retention contract](../../packages/azurefunctions/README.md#retention-and-state-budgets)
+and [metric semantics](../../packages/azurefunctions/README.md#retention-metrics).
 
 ## Quick Prerequisites Checklist
 
 Install and verify these tools before [Environment Setup](#environment-setup):
 
 - **[Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local?tabs=windows%2Cpython%2Cv2&pivots=programming-language-python#install-the-azure-functions-core-tools)** – run samples locally with `func start`
-- **[Azurite](https://learn.microsoft.com/azure/storage/common/storage-install-azurite)** – local storage emulator; must be running before `func start`
+- **[Azurite](https://learn.microsoft.com/azure/storage/common/storage-install-azurite)** – local storage emulator, required before `func start`
 - **[Docker](https://docs.docker.com/get-docker/)** – run the local Durable Task Scheduler emulator
-- **[Durable Task Scheduler emulator](https://learn.microsoft.com/azure/durable-task/scheduler/develop-with-durable-task-scheduler#durable-task-scheduler-emulator)** – local durable task backend; must be running before `func start`
+- **[Durable Task Scheduler emulator](https://learn.microsoft.com/azure/durable-task/scheduler/develop-with-durable-task-scheduler#durable-task-scheduler-emulator)** – local durable task backend, required before `func start`
 - **[uv](https://docs.astral.sh/uv/)** – create virtual environments (recommended, especially on Windows)
 - **[Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli)** – authenticate with `az login` for `AzureCliCredential`
 
@@ -84,7 +102,7 @@ docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 \
 azurite
 ```
 
-The scheduler endpoint is `http://localhost:8080`; its dashboard is available at
+The scheduler endpoint is `http://localhost:8080`. Its dashboard is available at
 `http://localhost:8082`.
 
 ## Environment Setup

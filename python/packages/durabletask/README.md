@@ -14,8 +14,8 @@ The durable task integration lets you host Microsoft Agent Framework agents usin
 
 ### Current Runtime Contract On This Unreleased Stack
 
-This README describes the current `impl/python-evidence-migration` worktree. It documents
-unreleased behavior and should not be read as a released compatibility promise.
+This README describes the current unreleased schema-v2 runtime, not a released compatibility
+promise.
 
 The public mutable state model is now canonical `DurableAgentState` schema `2.0.0`.
 `read_agent_state(raw)` remains explicitly backward compatible with legacy `1.x` payloads.
@@ -131,20 +131,10 @@ rejected parent response can receive up to three additional identical-request re
 visibility delay, but only before any output, tool execution or session advance. The saved parent
 ID is not cleared. Old recorded workflow histories must remain on the old engine.
 
-Retention defaults currently preserve every physical message. Response delivery availability is
-time-bounded, with a default expiry window of `60` seconds, but receipt records are retained and
-never deleted by response expiry alone. `reset` clears local transcript and session state while
-preserving completion receipts and live results. External-primary reset requires a provider-owned
-clear operation and is rejected rather than silently clearing only local state.
-
 The optional migration helper budget `max_state_bytes` is a neutral admission limit, not a
 pressure policy. If the fully staged destination exceeds that bound, migration fails with
 `StateCapacityError`. It does not prune transcript, receipts, session state, or unknown JSON to
-fit. There is no documented runtime pressure policy yet.
-
-There are no retention controls yet for automatic transcript pruning or receipt cleanup. The
-application remains responsible for its own maintenance policy. Per-agent and per-workflow
-delivery windows are configurable through the host registration APIs.
+fit. Runtime transcript retention is configured separately below.
 
 The Core requirement remains `agent-framework-core>=1.13.0,<2`. This package directly requires
 `pydantic>=2.11,<3` for structured response handling.
@@ -157,6 +147,88 @@ history source raise an error rather than automatically reassigning a namespace.
 Canonical media keeps its declared content kind rather than inferring it from the URI scheme.
 New response timestamps without an offset are interpreted as UTC. Valid stored timestamps retain
 their original offset and fractional precision.
+
+### Retention and State Budgets
+
+The defaults are `retention="keep_all"` and `max_state_bytes=None`. They preserve physical
+transcript messages and impose no local pressure cap. Backend limits still apply.
+
+Eager pruning and pressure eviction are independent opt-ins.
+
+- `retention="follow_compaction"` physically removes eligible compaction exclusions when durable
+  history is flushed, even without a pressure budget. It does not configure a compaction strategy.
+- A positive integer `max_state_bytes` enables pressure eviction, including with `keep_all`.
+  At `high_watermark=0.85`, the runtime plans removal of oldest eligible atomic message groups
+  toward `low_watermark=0.70`, or the protected floor if it is higher but still below the high
+  watermark. Watermarks must be finite and satisfy `0 < low_watermark < high_watermark <= 1`.
+- `max_state_bytes=None` disables pressure eviction, not eager pruning. Booleans, zero and
+  negative budgets are rejected.
+
+The estimate covers the whole entity using Python's default JSON serialization with ASCII
+escaping, including non-text content, delivery records, session state, metadata and truncation
+records. It excludes transport framing and is not a backend acceptance guarantee.
+`max_state_bytes="backend_limit"` is a 1 MiB (`1_048_576` bytes) convenience only when the wrapped
+worker is a `DurableTaskSchedulerWorker`. A generic `TaskHubGrpcWorker` cannot resolve it.
+`AgentFunctionApp` rejects it, even when Functions uses DTS. Use an explicit positive budget or
+`None` there.
+
+Pressure eviction leaves terminal results, completion and ingestion receipts, session/control
+state, opaque unknown entries and retained entry metadata intact. System messages and the latest
+exchange are protected, and linked tool, reasoning and persisted atomic groups are not split.
+Eager pruning also protects pending tool calls and groups with any included member. These
+protections can prevent the requested reduction. A protected floor at or above the high watermark,
+or an unreachable safe target, raises `StateCapacityError` without applying a partial pressure plan.
+The enclosing run restores its local staged/cache state on failure. This does not undo model,
+tool or external-provider side effects. If a host state write raises, backend acknowledgement is
+unknown, not proof of rollback. The next operation reloads authoritative state.
+
+#### Registration and History Ownership
+
+`DurableAIAgentWorker` sets host defaults. `add_agent()` and `configure_workflow()` accept
+`retention`, `max_state_bytes`, both watermarks and `response_delivery_window_seconds` overrides.
+Workflow settings apply to its agent entities and nested workflows, not one aggregate workflow
+budget. For budget overrides, omission or `INHERIT` from `agent_framework_durabletask` uses the
+host default, while explicit `None` disables pressure eviction. For the other overrides, `None`
+inherits. Shared workflow registrations must have matching settings.
+
+A hand-configured `DurableHistoryProvider(prune_excluded=...)` keeps its explicit value, including
+`False`, ahead of the inherited eager-pruning policy. This does not disable a pressure budget.
+An exact built-in in-memory primary is replaced with durable history while preserving its
+`source_id` and storage settings. An external primary, including an in-memory subclass, stays
+primary without a second durable primary. More than one load-enabled primary is rejected.
+Local retention does not delete external-provider history.
+
+History ownership is resolved per run. A service-owned conversation bypasses durable history
+loading and eager compaction flushes. A configured pressure budget still checks local entity
+state and can evict eligible older local transcript, but it neither compacts the remote
+conversation nor clears the saved service branch ID.
+
+#### Delivery and Maintenance
+
+Response availability has a default `response_delivery_window_seconds=60`. Transcript deletion
+does not delete the independent result or its completion outcome. Response expiry removes delivery
+payloads without deleting completion or ingestion receipts. There is no bounded receipt cleanup,
+so receipt growth alone can exhaust a configured budget. Runs perform expiry checks, but idle
+entities need application-owned maintenance to invoke `expire_responses()`. Polling reads do not
+persist cleanup. `reset` clears local transcript and session state while preserving completion
+receipts and live results. External-primary reset is rejected without a provider-owned clear
+operation.
+
+### Retention Metrics
+
+The `agent_framework.durabletask` meter emits `durable.retention.*` metrics for evaluations,
+resolved budgets, before/after JSON size, staged message and entry removals, reclaimed bytes,
+capacity failures, write attempts and observed run operations. Labels are bounded categories,
+not agent, session, correlation or message identifiers, content or exception text.
+
+Deletion measurements describe staged local state with `commit_status="not_attempted"`.
+Write and operation observations distinguish `outcome="returned"` from `"failed"`. After a
+`set_state` attempt, `commit_status="unknown"` applies even when the call returns. Neither
+status confirms a durable commit, and staged deletions may later roll back locally.
+
+Instrumentation uses only the OpenTelemetry API. The package does not configure an SDK, metric
+reader or exporter. Applications own that setup, and telemetry failures do not replace the
+operation's result or error.
 
 ### Basic Usage Example
 
