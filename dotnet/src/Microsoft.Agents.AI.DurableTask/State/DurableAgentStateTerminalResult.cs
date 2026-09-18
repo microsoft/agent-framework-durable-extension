@@ -73,7 +73,7 @@ internal sealed class DurableAgentStateTerminalResult
             diagnosticPath: $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(dictionaryKey)}");
         DurableAgentStateContract.ValidateIdentifier(
             value: this.CorrelationId,
-            diagnosticPath: $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(CorrelationId)}");
+            diagnosticPath: $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(this.CorrelationId)}");
         if (!string.Equals(dictionaryKey, this.CorrelationId, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(

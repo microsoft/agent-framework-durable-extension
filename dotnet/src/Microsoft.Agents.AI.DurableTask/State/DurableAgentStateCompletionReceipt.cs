@@ -90,7 +90,7 @@ internal sealed class DurableAgentStateCompletionReceipt
             diagnosticPath: $"{nameof(DurableAgentStateData.CompletionReceipts)}.{nameof(dictionaryKey)}");
         DurableAgentStateContract.ValidateIdentifier(
             value: this.CorrelationId,
-            diagnosticPath: $"{nameof(DurableAgentStateData.CompletionReceipts)}.{nameof(CorrelationId)}");
+            diagnosticPath: $"{nameof(DurableAgentStateData.CompletionReceipts)}.{nameof(this.CorrelationId)}");
         if (!string.Equals(dictionaryKey, this.CorrelationId, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(

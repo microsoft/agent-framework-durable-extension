@@ -252,15 +252,15 @@ internal sealed class DurableAgentStateTerminalResponse
         ValidateOptionalIdentifier(
             value: this.ResponseId,
             diagnosticPath:
-                $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(DurableAgentStateTerminalResult.Response)}.{nameof(ResponseId)}");
+                $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(DurableAgentStateTerminalResult.Response)}.{nameof(this.ResponseId)}");
         ValidateOptionalIdentifier(
             value: this.AgentId,
             diagnosticPath:
-                $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(DurableAgentStateTerminalResult.Response)}.{nameof(AgentId)}");
+                $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(DurableAgentStateTerminalResult.Response)}.{nameof(this.AgentId)}");
         ValidateOptionalIdentifier(
             value: this.FinishReason,
             diagnosticPath:
-                $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(DurableAgentStateTerminalResult.Response)}.{nameof(FinishReason)}");
+                $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(DurableAgentStateTerminalResult.Response)}.{nameof(this.FinishReason)}");
 
         if (this.ContinuationToken is not null)
         {
@@ -297,7 +297,7 @@ internal sealed class DurableAgentStateTerminalResponse
                 DurableAgentStateContract.ValidateIdentifier(
                     value: key,
                     diagnosticPath:
-                        $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(DurableAgentStateTerminalResult.Response)}.{nameof(AdditionalProperties)}.{nameof(key)}");
+                        $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(DurableAgentStateTerminalResult.Response)}.{nameof(this.AdditionalProperties)}.{nameof(key)}");
             }
         }
     }
