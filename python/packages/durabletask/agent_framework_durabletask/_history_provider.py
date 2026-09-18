@@ -199,11 +199,22 @@ class DurableHistoryProvider(HistoryProvider):
         history = binding.state_provider.state.data.conversation_history
         reserved = {message.message_id for entry in history for message in entry.messages if message.message_id}
         positions: dict[str, tuple[DurableAgentStateEntry, int]] = {}
+        repairs: list[tuple[DurableAgentStateMessage, str]] = []
+        stored_objects: set[int] = set()
         for entry, index in self._replayable_entries(binding):
             stored = entry.messages[index]
-            if not stored.message_id or stored.message_id in positions:
-                stored.set_history_id(self._unique_message_id(self._synthetic_message_id(entry, index), reserved))
-            positions[cast(str, stored.message_id)] = (entry, index)
+            if id(stored) in stored_objects:
+                raise ValueError("History occurrences require distinct stored message objects.")
+            stored_objects.add(id(stored))
+            history_id = stored.message_id
+            if not history_id or history_id in positions:
+                stored.validate_history_identity_update()
+                history_id = self._unique_message_id(self._synthetic_message_id(entry, index), reserved)
+                repairs.append((stored, history_id))
+            positions[history_id] = (entry, index)
+        # Admit the entire repair batch before changing any caller-owned message.
+        for stored, history_id in repairs:
+            stored.set_history_id(history_id)
         return positions
 
     async def get_messages(

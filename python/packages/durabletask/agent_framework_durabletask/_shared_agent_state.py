@@ -1020,9 +1020,15 @@ class DurableAgentStateMessage:
         return self.message_id
 
     def set_history_id(self, history_id: str) -> None:
+        self.validate_history_identity_update()
         self.original_message_id = self.public_message_id
         self._has_original_message_id = True
         self.message_id = history_id
+
+    def validate_history_identity_update(self) -> None:
+        """Reject identity replacement before touching opaque foreign profile fields."""
+        if {"pythonHistoryId", "pythonHistoryIdentity"}.intersection(self.unknown_fields):
+            raise ValueError("Cannot replace opaque foreign Python history identity metadata.")
 
     def to_dict(self) -> dict[str, Any]:
         projection = self._to_dict()
