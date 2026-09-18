@@ -82,6 +82,10 @@ history. After-only compaction retains the existing append-then-compact order. P
 history uses Core's middleware cadence and does not run compaction hooks per model call.
 Injection honors a single configured compaction history source. Conflicting sources require an
 explicit primary instead of silently selecting a source that cannot serve all configured hooks.
+Explicit durable and external primary providers retain the user's hook order, so place history
+before a matching before-compaction provider when that strategy must see loaded history.
+Provider namespaces must be unique, including store-only sinks, and conflicts with an injected
+history source raise an error rather than automatically reassigning a namespace.
 
 Canonical media keeps its declared content kind rather than inferring it from the URI scheme.
 New response timestamps without an offset are interpreted as UTC. Valid stored timestamps retain
