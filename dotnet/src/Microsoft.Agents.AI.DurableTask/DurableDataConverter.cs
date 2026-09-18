@@ -110,6 +110,29 @@ internal sealed class DurableDataConverter : DataConverter
     /// <see cref="System.Text.Json.Nodes.JsonObject"/>. It also lets this method inspect every top-level property for the
     /// reserved key before appending the durable envelope in the same JSON object.
     ///
+    /// For example, a native response shaped like:
+    /// <code>
+    /// {
+    ///   "messages": [ ... ]
+    /// }
+    /// </code>
+    /// is written across the Durable Task boundary as:
+    /// <code>
+    /// {
+    ///   "messages": [ ... ],
+    ///   "$microsoftAgentFrameworkDurableTask": {
+    ///     "kind": "agentResponse",
+    ///     "version": 1,
+    ///     "result": {
+    ///       "messages": [ ... ],
+    ///       "value": null
+    ///     }
+    ///   }
+    /// }
+    /// </code>
+    /// The original response properties remain at the root for normal <see cref="AgentResponse"/> deserialization. The
+    /// reserved property carries the separate, lossless result used by durable delivery.
+    ///
     /// A collision with the reserved property fails rather than overwriting either value. Accepting a collision could
     /// let provider/application response data masquerade as the framework's canonical committed result.
     /// </remarks>
