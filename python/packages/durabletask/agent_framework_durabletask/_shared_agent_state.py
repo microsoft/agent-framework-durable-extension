@@ -399,7 +399,11 @@ class DurableAgentStateContent:
         payload = {**deepcopy(cast(dict[str, Any], extra)), **self.core_projection()}
         if "additional_properties" not in extra and isinstance(self.extensionData, dict):
             payload["additional_properties"] = deepcopy(self.extensionData)
-        return load_agent_response({"messages": [{"role": "assistant", "contents": [payload]}]}).messages[0].contents[0]
+        return (
+            load_agent_response({"messages": [{"role": "assistant", "contents": [deepcopy(payload)]}]})
+            .messages[0]
+            .contents[0]
+        )
 
     def to_dict(self) -> dict[str, Any]:
         raise NotImplementedError
@@ -1263,11 +1267,13 @@ class DurableAgentStateErrorContent(DurableAgentStateContent):
     @staticmethod
     def from_error_content(content: Content) -> DurableAgentStateErrorContent:
         return DurableAgentStateErrorContent(
-            message=content.message, error_code=content.error_code, details=content.error_details
+            message=content.message, error_code=content.error_code, details=deepcopy(content.error_details)
         )
 
     def to_ai_content(self) -> Content:
-        return Content.from_error(message=self.message, error_code=self.error_code, error_details=self.details)
+        return Content.from_error(
+            message=self.message, error_code=self.error_code, error_details=deepcopy(self.details)
+        )
 
 
 class DurableAgentStateFunctionCallContent(DurableAgentStateContent):
@@ -1332,7 +1338,7 @@ class DurableAgentStateFunctionResultContent(DurableAgentStateContent):
         )
 
     def to_ai_content(self) -> Content:
-        return Content.from_function_result(call_id=self.call_id, result=self.result)
+        return Content.from_function_result(call_id=self.call_id, result=deepcopy(self.result))
 
 
 class DurableAgentStateHostedFileContent(DurableAgentStateContent):

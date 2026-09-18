@@ -68,6 +68,11 @@ def _history_message_id(message: Message) -> str | None:
     return getattr(message, _HISTORY_ID_ATTRIBUTE, None) or message.message_id
 
 
+def _collect_used_message_ids(history: Sequence[DurableAgentStateEntry]) -> set[str]:
+    """Collect every stored history identity, including opaque non-replayable entries."""
+    return {message.message_id for entry in history for message in entry.messages if message.message_id is not None}
+
+
 @dataclass
 class DurableHistoryBinding:
     """Per-operation binding between a durable owner and the history provider."""
@@ -196,10 +201,15 @@ class DurableHistoryProvider(HistoryProvider):
         reserved.add(message_id)
         return message_id
 
-    def _positions(self, binding: DurableHistoryBinding) -> dict[str, tuple[DurableAgentStateEntry, int]]:
+    def _positions(
+        self,
+        binding: DurableHistoryBinding,
+        *,
+        used_ids: set[str] | None = None,
+    ) -> dict[str, tuple[DurableAgentStateEntry, int]]:
         """Index current storage, repairing anonymous or duplicate identities in legacy entries."""
         history = binding.state_provider.state.data.conversation_history
-        reserved = {message.message_id for entry in history for message in entry.messages if message.message_id}
+        reserved = used_ids if used_ids is not None else _collect_used_message_ids(history)
         positions: dict[str, tuple[DurableAgentStateEntry, int]] = {}
         repairs: list[tuple[DurableAgentStateMessage, str]] = []
         stored_objects: set[int] = set()
@@ -288,7 +298,14 @@ class DurableHistoryProvider(HistoryProvider):
             else DurableAgentStateResponse
         )
         kind = DurableAgentStateEntryJsonType.REQUEST if response is None else response_type.JSON_TYPE
-        stored_messages, working_messages = self._copy_append_messages(binding, messages, kind, created_at)
+        used_ids = _collect_used_message_ids(binding.state_provider.state.data.conversation_history)
+        stored_messages, working_messages = self._copy_append_messages(
+            binding,
+            messages,
+            kind,
+            created_at,
+            used_ids=used_ids,
+        )
         if response is None:
             entry = DurableAgentStateRequest(binding.correlation_id, created_at, stored_messages)
         else:
@@ -307,7 +324,7 @@ class DurableHistoryProvider(HistoryProvider):
             buffer = cast("list[Message]", state.setdefault(WORKING_BUFFER_KEY, []))
             if not isinstance(entry, DurableAgentStateErrorResponse):
                 buffer.extend(working_messages)
-            positions = self._positions(binding)
+            positions = self._positions(binding, used_ids=used_ids)
             exposed_ids = {_history_message_id(message) for message in buffer}
             previous_positions = state.get(POSITIONS_KEY)
             if isinstance(previous_positions, dict):
@@ -322,11 +339,17 @@ class DurableHistoryProvider(HistoryProvider):
         messages: Sequence[Message],
         kind: DurableAgentStateEntryJsonType,
         created_at: datetime,
+        *,
+        used_ids: set[str] | None = None,
     ) -> tuple[list[DurableAgentStateMessage], list[Message]]:
         """Allocate stored identities without changing input messages or caller responses."""
         history = binding.state_provider.state.data.conversation_history
-        used = {message.message_id for entry in history for message in entry.messages if message.message_id}
-        reserved = used | {message.message_id for message in messages if message.message_id}
+        used = used_ids if used_ids is not None else _collect_used_message_ids(history)
+        reserved = (
+            used
+            if used_ids is not None and kind == DurableAgentStateEntryJsonType.COMPACTION and len(messages) == 1
+            else used | {message.message_id for message in messages if message.message_id}
+        )
         scope = binding.correlation_id or created_at.isoformat()
         ordinal = binding.append_ordinal
         binding.append_ordinal += 1
@@ -468,7 +491,9 @@ class DurableHistoryProvider(HistoryProvider):
         previous_ids: set[str] = set()
         if isinstance(raw_positions, dict):
             previous_ids.update(cast("dict[str, Any]", raw_positions))
-        stored_by_id = self._positions(binding)
+        history = binding.state_provider.state.data.conversation_history
+        used_ids = _collect_used_message_ids(history)
+        stored_by_id = self._positions(binding, used_ids=used_ids)
         # Only loaded occurrences carry this transient marker. Drop stale loaded
         # references before a newly inserted occurrence can reuse their public ID.
         buffer[:] = [
@@ -478,6 +503,9 @@ class DurableHistoryProvider(HistoryProvider):
             or getattr(message, _HISTORY_ID_ATTRIBUTE) in stored_by_id
         ]
         last_known: tuple[DurableAgentStateEntry, int] | None = None
+        buffer_by_history_id = {
+            history_id: message for message in buffer if (history_id := _history_message_id(message)) is not None
+        }
 
         for message in buffer:
             loaded_occurrence = isinstance(getattr(message, _HISTORY_ID_ATTRIBUTE, None), str)
@@ -500,23 +528,48 @@ class DurableHistoryProvider(HistoryProvider):
                 if not summary_revision and loaded_occurrence and history_id in previous_ids:
                     continue
                 original_id = message.message_id
-                position = self._insert_new_message(binding, message, after=last_known)
+                position = self._insert_new_message(
+                    binding,
+                    message,
+                    after=last_known,
+                    index=stored_by_id,
+                    used_ids=used_ids,
+                )
                 if original_id and original_id != message.message_id and summary_ids is not None:
+                    summary_source_ids = set(summary_ids)
                     group = message.additional_properties.get(GROUP_ANNOTATION_KEY)
                     if isinstance(group, dict):
                         group[GROUP_ID_KEY] = f"group_{message.message_id}"
-                    for source in buffer:
-                        if source is message or _history_message_id(source) not in summary_ids:
+                    for summary_source_id in summary_source_ids:
+                        source = buffer_by_history_id.get(summary_source_id)
+                        stored_source: DurableAgentStateMessage | None = None
+                        if source is None:
+                            source_position = stored_by_id.get(summary_source_id)
+                            if source_position is None:
+                                continue
+                            source_entry, source_index = source_position
+                            stored_source = source_entry.messages[source_index]
+                            source = self._to_message(stored_source)
+                            if source is None:
+                                continue
+                            setattr(source, _HISTORY_ID_ATTRIBUTE, source_entry.messages[source_index].message_id)
+                        if source is message:
                             continue
                         source_group = source.additional_properties.get(GROUP_ANNOTATION_KEY)
                         if (
                             isinstance(source_group, dict)
                             and cast("dict[str, Any]", source_group).get(SUMMARIZED_BY_SUMMARY_ID_KEY) == original_id
                         ):
-                            source_group[SUMMARIZED_BY_SUMMARY_ID_KEY] = message.message_id
+                            repaired_group = copy.deepcopy(cast("dict[str, Any]", source_group))
+                            repaired_group[SUMMARIZED_BY_SUMMARY_ID_KEY] = message.message_id
+                            source.additional_properties[GROUP_ANNOTATION_KEY] = repaired_group
                         if source.additional_properties.get(SUMMARIZED_BY_SUMMARY_ID_KEY) == original_id:
                             source.additional_properties[SUMMARIZED_BY_SUMMARY_ID_KEY] = message.message_id
-                stored_by_id = self._positions(binding)
+                        if stored_source is not None:
+                            stored_source.extension_data = copy.deepcopy(source.additional_properties)
+                        source_history_id = _history_message_id(source)
+                        if source_history_id is not None:
+                            buffer_by_history_id[source_history_id] = source
             last_known = position
 
         for message in buffer:
@@ -544,7 +597,7 @@ class DurableHistoryProvider(HistoryProvider):
         # Synchronize transient references if the owner replaced its staged history.
         # This removes no stored messages and prevents a later flush from resurrecting
         # entries that no longer belong to the current snapshot.
-        stored_by_id = self._positions(binding)
+        stored_by_id = self._positions(binding, used_ids=used_ids)
         buffer[:] = [message for message in buffer if _history_message_id(message) in stored_by_id]
         # Only previously exposed entries can be considered removed by a strategy.
         # A replacement owner may contain new entries this buffer has never loaded.
@@ -568,6 +621,8 @@ class DurableHistoryProvider(HistoryProvider):
         message: Message,
         *,
         after: tuple[DurableAgentStateEntry, int] | None,
+        index: dict[str, tuple[DurableAgentStateEntry, int]] | None = None,
+        used_ids: set[str] | None = None,
     ) -> tuple[DurableAgentStateEntry, int]:
         """Persist a compaction-produced message as an entry of its own."""
         history = binding.state_provider.state.data.conversation_history
@@ -577,6 +632,7 @@ class DurableHistoryProvider(HistoryProvider):
             [message],
             DurableAgentStateEntryJsonType.COMPACTION,
             created_at,
+            used_ids=used_ids,
         )
         message.message_id = stored[0].public_message_id
         setattr(message, _HISTORY_ID_ATTRIBUTE, stored[0].message_id)
@@ -596,11 +652,19 @@ class DurableHistoryProvider(HistoryProvider):
                     tail.usage = copy.deepcopy(tail.usage)
                 owner.messages = owner.messages[: message_index + 1]
                 history[position:position] = [entry, tail]
+                if index is not None:
+                    for tail_index, moved_message in enumerate(tail.messages):
+                        if moved_message.message_id is not None:
+                            index[moved_message.message_id] = (tail, tail_index)
             else:
                 history.insert(position, entry)
+            if index is not None:
+                index[cast(str, stored[0].message_id)] = (entry, 0)
             return entry, 0
 
         history.insert(0, entry)
+        if index is not None:
+            index[cast(str, stored[0].message_id)] = (entry, 0)
         return entry, 0
 
 
@@ -684,7 +748,12 @@ def _injected_history_source(providers: Sequence[Any]) -> str:
 
 
 class _ObservedHistoryProvider(HistoryProvider):
-    """Delegate the original primary's hooks and observe only completed persistence hooks."""
+    """Delegate the original primary and observe only the base save hook path.
+
+    Custom hook overrides remain responsible for any extra observability they require.
+    This wrapper preserves explicit binding.accept responsibility on the completed base
+    persistence surface only and does not instrument opaque custom hook behavior here.
+    """
 
     def __init__(self, provider: HistoryProvider) -> None:
         super().__init__(
@@ -778,10 +847,9 @@ class _DurableCompactionProvider(CompactionProvider):
 class _ServiceOwnedHistoryProvider(HistoryProvider):
     """Occupy the primary slot without invoking the inactive external branch.
 
-    Custom primary hooks can load or persist directly, so invoking them while trying
-    to bypass only get_messages/save_messages would not reliably silence that branch.
-    Hooks that must run regardless of history ownership belong in a separate context
-    provider or store-only sink, neither of which is silenced by this adapter.
+    Custom primary hooks can load or persist directly, so this adapter suppresses the
+    whole primary path explicitly instead of partially bypassing selected methods.
+    Hooks that must always run belong in a separate context provider or store-only sink.
     """
 
     def __init__(self, provider: HistoryProvider) -> None:
