@@ -103,6 +103,13 @@ internal sealed class DurableDataConverter : DataConverter
     /// Adds framework-owned delivery metadata to the native response sent over the Durable Task boundary.
     /// </summary>
     /// <remarks>
+    /// The streaming writer is intentional. The native response can contain arbitrary provider-defined or future
+    /// properties that this package does not understand. Copying each serialized property with
+    /// <see cref="JsonElement.WriteTo(Utf8JsonWriter)"/> preserves those JSON values without translating the response
+    /// through a framework-owned DTO or materializing the entire response as a mutable
+    /// <see cref="System.Text.Json.Nodes.JsonObject"/>. It also lets this method inspect every top-level property for the
+    /// reserved key before appending the durable envelope in the same JSON object.
+    ///
     /// A collision with the reserved property fails rather than overwriting either value. Accepting a collision could
     /// let provider/application response data masquerade as the framework's canonical committed result.
     /// </remarks>
