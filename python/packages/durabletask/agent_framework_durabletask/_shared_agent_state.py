@@ -535,7 +535,7 @@ class DurableAgentStateData:
             result[DurableStateFields.EXTENSION_DATA] = self.extension_data
         if self.session is not None:
             result[DurableStateFields.SESSION] = self.session
-        if self.ingested_positions:
+        if self.ingested_positions is not None:
             result[DurableStateFields.INGESTED_POSITIONS] = self.ingested_positions
         if self.truncation:
             result[DurableStateFields.TRUNCATION] = self.truncation

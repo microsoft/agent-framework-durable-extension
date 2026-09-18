@@ -80,6 +80,8 @@ With no primary, history is injected before a matching before-compaction provide
 hooks forward and after hooks in reverse, so that provider's after hook sees the previously stored
 history. After-only compaction retains the existing append-then-compact order. Per-service-call
 history uses Core's middleware cadence and does not run compaction hooks per model call.
+Injection honors a single configured compaction history source. Conflicting sources require an
+explicit primary instead of silently selecting a source that cannot serve all configured hooks.
 
 These modules are not exported or connected to either host. Public `DurableAgentState` remains
 the legacy writer, and the existing v2 mutation guards remain active. There is no new supported

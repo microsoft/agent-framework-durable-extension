@@ -345,7 +345,9 @@ class DurableHistoryProvider(HistoryProvider):
                 prefix = "durable_revision" if stored.message_id else "durable"
                 candidate = f"{prefix}_{kind.value}_{scope}_{ordinal}_{index}"
                 internal_id = self._unique_message_id(candidate, reserved)
-                if kind == DurableAgentStateEntryJsonType.COMPACTION:
+                if kind == DurableAgentStateEntryJsonType.COMPACTION and (
+                    stored.public_message_id is None or self._summary_original_ids(message) is not None
+                ):
                     stored.message_id = internal_id
                 else:
                     stored.set_history_id(internal_id)
@@ -467,11 +469,20 @@ class DurableHistoryProvider(HistoryProvider):
         if isinstance(raw_positions, dict):
             previous_ids.update(cast("dict[str, Any]", raw_positions))
         stored_by_id = self._positions(binding)
+        # Only loaded occurrences carry this transient marker. Drop stale loaded
+        # references before a newly inserted occurrence can reuse their public ID.
+        buffer[:] = [
+            message
+            for message in buffer
+            if not isinstance(getattr(message, _HISTORY_ID_ATTRIBUTE, None), str)
+            or getattr(message, _HISTORY_ID_ATTRIBUTE) in stored_by_id
+        ]
         last_known: tuple[DurableAgentStateEntry, int] | None = None
 
         for message in buffer:
+            loaded_occurrence = isinstance(getattr(message, _HISTORY_ID_ATTRIBUTE, None), str)
             history_id = _history_message_id(message)
-            position = stored_by_id.get(history_id) if history_id else None
+            position = stored_by_id.get(history_id) if history_id and loaded_occurrence else None
             summary_ids = self._summary_original_ids(message)
             summary_revision = False
             if position is not None and summary_ids is not None:
@@ -486,7 +497,7 @@ class DurableHistoryProvider(HistoryProvider):
                 summary_revision = original_payload != working_payload or original_ids != summary_ids
 
             if position is None or summary_revision:
-                if not summary_revision and history_id in previous_ids:
+                if not summary_revision and loaded_occurrence and history_id in previous_ids:
                     continue
                 original_id = message.message_id
                 position = self._insert_new_message(binding, message, after=last_known)
@@ -567,7 +578,7 @@ class DurableHistoryProvider(HistoryProvider):
             DurableAgentStateEntryJsonType.COMPACTION,
             created_at,
         )
-        message.message_id = stored[0].message_id
+        message.message_id = stored[0].public_message_id
         setattr(message, _HISTORY_ID_ATTRIBUTE, stored[0].message_id)
         entry = DurableAgentStateCompaction(created_at=created_at, messages=stored)
 
@@ -654,12 +665,22 @@ def validate_history_providers(agent: SupportsAgentRun) -> None:
                 "Assign distinct source_id values to history, audit and other context providers."
             )
         sources.add(source_id)
-    if not primaries and InMemoryHistoryProvider.DEFAULT_SOURCE_ID in sources:
-        raise ValueError(
-            "Cannot inject durable history: 'in_memory' is already used by a context provider or store-only sink. "
-            "Set that provider's source_id to a unique value such as 'audit', or explicitly configure a "
-            "DurableHistoryProvider with a distinct source_id and matching compaction history_source_id."
-        )
+    if not primaries:
+        source_id = _injected_history_source(cast("Sequence[Any]", providers))
+        if source_id in sources:
+            raise ValueError(
+                f"Cannot inject durable history: {source_id!r} is already used by a context provider "
+                "or store-only sink. "
+                "Set that provider's source_id to a unique value such as 'audit', or explicitly configure a "
+                "DurableHistoryProvider with a distinct source_id and matching compaction history_source_id."
+            )
+
+
+def _injected_history_source(providers: Sequence[Any]) -> str:
+    sources = {provider.history_source_id for provider in providers if isinstance(provider, CompactionProvider)}
+    if len(sources) > 1:
+        raise ValueError("Cannot inject ambiguous compaction history sources; configure a primary explicitly.")
+    return next(iter(sources), InMemoryHistoryProvider.DEFAULT_SOURCE_ID)
 
 
 class _ObservedHistoryProvider(HistoryProvider):
@@ -922,18 +943,19 @@ def ensure_durable_history(agent: SupportsAgentRun) -> SupportsAgentRun:
     )
 
     if existing is None:
+        source_id = _injected_history_source(provider_list)
         insertion = next(
             (
                 index
                 for index, provider in enumerate(provider_list)
                 if isinstance(provider, CompactionProvider)
-                and provider.history_source_id == InMemoryHistoryProvider.DEFAULT_SOURCE_ID
+                and provider.history_source_id == source_id
                 and provider.before_strategy is not None
             ),
             len(provider_list),
         )
         updated = list(provider_list)
-        updated.insert(insertion, DurableHistoryProvider(source_id=InMemoryHistoryProvider.DEFAULT_SOURCE_ID))
+        updated.insert(insertion, DurableHistoryProvider(source_id=source_id))
     elif isinstance(existing, DurableHistoryProvider):
         updated = list(provider_list)
     elif type(existing) is InMemoryHistoryProvider:
