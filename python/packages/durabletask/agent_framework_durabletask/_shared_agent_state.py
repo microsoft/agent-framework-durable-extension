@@ -189,13 +189,13 @@ class DurableAgentStateEntryJsonType(str, Enum):
 
 def _parse_created_at(value: Any) -> datetime:
     if isinstance(value, datetime):
-        return value
+        return value.replace(tzinfo=timezone.utc) if value.utcoffset() is None else value
 
     if isinstance(value, str):
         try:
             parsed = date_parser.parse(value)
             if isinstance(parsed, datetime):
-                return parsed
+                return parsed.replace(tzinfo=timezone.utc) if parsed.utcoffset() is None else parsed
         except (ValueError, TypeError):
             pass
 
@@ -1240,7 +1240,7 @@ class DurableAgentStateDataContent(DurableAgentStateContent):
         return DurableAgentStateDataContent(uri=content.uri, media_type=content.media_type)
 
     def to_ai_content(self) -> Content:
-        return Content.from_uri(uri=self.uri, media_type=self.media_type)
+        return Content(type="data", uri=self.uri, media_type=self.media_type)
 
 
 class DurableAgentStateErrorContent(DurableAgentStateContent):
@@ -1447,7 +1447,7 @@ class DurableAgentStateUriContent(DurableAgentStateContent):
         return DurableAgentStateUriContent(uri=content.uri, media_type=content.media_type)
 
     def to_ai_content(self) -> Content:
-        return Content.from_uri(uri=self.uri, media_type=self.media_type)
+        return Content(type="uri", uri=self.uri, media_type=self.media_type)
 
 
 class DurableAgentStateUsage:

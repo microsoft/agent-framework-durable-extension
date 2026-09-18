@@ -83,6 +83,10 @@ history uses Core's middleware cadence and does not run compaction hooks per mod
 Injection honors a single configured compaction history source. Conflicting sources require an
 explicit primary instead of silently selecting a source that cannot serve all configured hooks.
 
+Canonical media keeps its declared content kind rather than inferring it from the URI scheme.
+New response timestamps without an offset are interpreted as UTC. Valid stored timestamps retain
+their original offset and fractional precision.
+
 These modules are not exported or connected to either host. Public `DurableAgentState` remains
 the legacy writer, and the existing v2 mutation guards remain active. There is no new supported
 deployment mode, migration operation, retention policy or workflow engine in this layer.
