@@ -301,6 +301,7 @@ class DurableHistoryProvider(HistoryProvider):
                 if response.additional_properties
                 else None,
             )
+            entry.preserve_response_timestamp(response.created_at)
         binding.state_provider.state.data.conversation_history.append(entry)
         if state is not None:
             buffer = cast("list[Message]", state.setdefault(WORKING_BUFFER_KEY, []))
@@ -800,6 +801,17 @@ class _ServiceOwnedHistoryProvider(HistoryProvider):
         return None
 
 
+class _InactiveHistoryCompactionProvider(_DurableCompactionProvider):
+    """Keep context compaction active without touching an inactive history branch."""
+
+    async def before_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+        # Core's before hook operates on current context, not history_source_id.
+        await self.__wrapped__.before_run(agent=agent, session=session, context=context, state=state)
+
+    async def after_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
+        return None
+
+
 def prepare_history_owner(agent: SupportsAgentRun, service_owns_history: bool) -> SupportsAgentRun:
     """Return a per-run view that silences only a service-owned run's external primary."""
     providers = getattr(agent, "context_providers", None)
@@ -813,6 +825,21 @@ def prepare_history_owner(agent: SupportsAgentRun, service_owns_history: bool) -
         for provider in cast("Sequence[Any]", providers)
         if isinstance(provider, DurableHistoryProvider)
     }
+    inactive_sources: set[str] = set()
+    if service_owns_history:
+        for provider in cast("Sequence[Any]", providers):
+            primary = (
+                provider.__wrapped__
+                if isinstance(provider, (_ServiceOwnedHistoryProvider, _ObservedHistoryProvider))
+                else provider
+            )
+            if (
+                isinstance(primary, HistoryProvider)
+                and primary.load_messages
+                and not isinstance(primary, DurableHistoryProvider)
+                and type(primary) is not InMemoryHistoryProvider
+            ):
+                inactive_sources.add(primary.source_id)
     for provider in cast("Sequence[Any]", providers):
         original = (
             provider.__wrapped__
@@ -843,8 +870,16 @@ def prepare_history_owner(agent: SupportsAgentRun, service_owns_history: bool) -
             and not isinstance(original, DurableHistoryProvider)
         ):
             replacement = _ObservedHistoryProvider(original)
+        elif isinstance(original, CompactionProvider) and original.history_source_id in inactive_sources:
+            replacement = (
+                provider
+                if isinstance(provider, _InactiveHistoryCompactionProvider)
+                else _InactiveHistoryCompactionProvider(original)
+            )
         elif isinstance(original, CompactionProvider) and original.history_source_id in durable_sources:
-            replacement = _DurableCompactionProvider(original)
+            replacement = (
+                provider if type(provider) is _DurableCompactionProvider else _DurableCompactionProvider(original)
+            )
         changed |= replacement is not provider
         updated.append(replacement)
     if not changed:
@@ -900,7 +935,7 @@ def ensure_durable_history(agent: SupportsAgentRun) -> SupportsAgentRun:
         updated = list(provider_list)
         updated.insert(insertion, DurableHistoryProvider(source_id=InMemoryHistoryProvider.DEFAULT_SOURCE_ID))
     elif isinstance(existing, DurableHistoryProvider):
-        return agent
+        updated = list(provider_list)
     elif type(existing) is InMemoryHistoryProvider:
         replacement = DurableHistoryProvider(
             source_id=existing.source_id,
@@ -916,4 +951,15 @@ def ensure_durable_history(agent: SupportsAgentRun) -> SupportsAgentRun:
     else:
         return agent
 
+    durable_sources = {provider.source_id for provider in updated if isinstance(provider, DurableHistoryProvider)}
+    updated = [
+        _DurableCompactionProvider(provider)
+        if isinstance(provider, CompactionProvider)
+        and not isinstance(provider, _DurableCompactionProvider)
+        and provider.history_source_id in durable_sources
+        else provider
+        for provider in updated
+    ]
+    if len(updated) == len(provider_list) and all(a is b for a, b in zip(updated, provider_list, strict=True)):
+        return agent
     return _copy_with_history_providers(agent, updated)

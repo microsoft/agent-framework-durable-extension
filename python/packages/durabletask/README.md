@@ -72,6 +72,8 @@ External primary providers, service-owned history and store-only audit sinks kee
 On a service-owned turn, the inactive external primary's custom hooks are also suppressed because
 they may load or persist history directly. Ownership-independent work belongs in a separate context
 provider or store-only sink. Client-owned turns retain the original primary's hooks and resources.
+Compaction aimed at an inactive external history source does not run its stored-history after
+hook. Its before hook still operates on unrelated current context, as Core specifies.
 Ordinary input and response IDs are preserved. Newly generated compaction summary occurrences get
 unique IDs when a strategy reuses a candidate ID, so both summary revisions and their links survive.
 With no primary, history is injected before a matching before-compaction provider. Core runs before

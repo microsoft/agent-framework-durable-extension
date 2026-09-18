@@ -944,16 +944,21 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
             usage=DurableAgentStateUsage.from_usage(response.usage_details),
             extension_data=deepcopy(response.additional_properties) if response.additional_properties else None,
         )
-        if isinstance(response.created_at, str):
-            try:
-                validate_timestamp(response.created_at)
-            except ValueError:
-                pass  # Keep the existing typed/default timestamp policy for invalid input.
-            else:
-                raw = entry._to_dict()
-                raw[DurableStateFields.CREATED_AT] = response.created_at
-                entry._capture_raw(raw)
+        entry.preserve_response_timestamp(response.created_at)
         return entry
+
+    def preserve_response_timestamp(self, created_at: str | None) -> None:
+        """Overlay a valid original response timestamp without rebuilding allocated messages."""
+        if not isinstance(created_at, str):
+            return
+        try:
+            validate_timestamp(created_at)
+        except ValueError:
+            return  # Keep the caller's existing fallback timestamp policy.
+        raw = self.to_dict()
+        raw[DurableStateFields.CREATED_AT] = created_at
+        self.created_at = _parse_transcript_created_at(created_at)
+        self._capture_raw(raw)
 
     @staticmethod
     def to_run_response(response_entry: DurableAgentStateResponse) -> AgentResponse:
