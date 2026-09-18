@@ -12,8 +12,16 @@ namespace Microsoft.Agents.AI.DurableTask;
 /// Custom data converter for durable agents and workflows that ensures proper JSON serialization.
 /// </summary>
 /// <remarks>
-/// This converter handles special cases like <see cref="DurableAgentState"/> using source-generated
-/// JSON contexts for AOT compatibility, and falls back to reflection-based serialization for other types.
+/// <para>
+/// This converter handles special cases like <see cref="DurableAgentState"/> using source-generated JSON contexts for
+/// AOT compatibility, and falls back to reflection-based serialization for other types.
+/// </para>
+/// <para>
+/// It also carries the lossless terminal result associated with an <see cref="AgentResponse"/> across the Durable Task
+/// serialization boundary. The ordinary SDK response projection cannot hold every persisted field, while the
+/// process-local sidecar association cannot cross processes by itself. A reserved envelope transports that exact
+/// committed JSON without changing how unrelated serializers represent <see cref="AgentResponse"/>.
+/// </para>
 /// </remarks>
 internal sealed class DurableDataConverter : DataConverter
 {
@@ -40,6 +48,9 @@ internal sealed class DurableDataConverter : DataConverter
             return JsonSerializer.Deserialize(data, DurableAgentStateJsonContext.Default.DurableAgentState);
         }
 
+        // The entity-side response object no longer exists after serialization. Read its retained result from the
+        // framework envelope, create the orchestration-side response, and establish the same sidecar association on
+        // that new object. Otherwise GetDurableResult() would be lost at exactly the process boundary it must survive.
         JsonElement? retainedResult = typeof(AgentResponse).IsAssignableFrom(targetType)
             ? ReadRetainedResult(data)
             : null;
@@ -74,6 +85,9 @@ internal sealed class DurableDataConverter : DataConverter
         if (value is AgentResponse response &&
             DurableAgentJsonUtilities.GetRetainedResult(response) is JsonElement result)
         {
+            // The native response is a lossy view of the entity's committed terminal result. Send both: the normal SDK
+            // response for compatibility and the canonical result for lossless duplicate delivery. The private envelope
+            // is added only by this Durable Task converter, so ordinary AgentResponse serialization remains unchanged.
             JsonElement native = typeInfo is not null
                 ? JsonSerializer.SerializeToElement(value, typeInfo)
                 : JsonSerializer.SerializeToElement(value, value.GetType(), s_options);
@@ -85,6 +99,13 @@ internal sealed class DurableDataConverter : DataConverter
             : JsonSerializer.Serialize(value, s_options);
     }
 
+    /// <summary>
+    /// Adds framework-owned delivery metadata to the native response sent over the Durable Task boundary.
+    /// </summary>
+    /// <remarks>
+    /// A collision with the reserved property fails rather than overwriting either value. Accepting a collision could
+    /// let provider/application response data masquerade as the framework's canonical committed result.
+    /// </remarks>
     private static string WriteResponseEnvelope(JsonElement nativeResponse, JsonElement result)
     {
         using MemoryStream stream = new();
@@ -114,6 +135,14 @@ internal sealed class DurableDataConverter : DataConverter
         return System.Text.Encoding.UTF8.GetString(stream.ToArray());
     }
 
+    /// <summary>
+    /// Reads and validates the framework delivery envelope without interpreting ordinary response JSON as durable data.
+    /// </summary>
+    /// <remarks>
+    /// Responses without an envelope remain compatible and simply have no retained result. If the reserved envelope is
+    /// present, however, malformed, duplicate, or unsupported fields fail closed so untrusted or corrupted metadata
+    /// cannot be exposed as the entity's committed outcome.
+    /// </remarks>
     private static JsonElement? ReadRetainedResult(string data)
     {
         using JsonDocument document = JsonDocument.Parse(data);

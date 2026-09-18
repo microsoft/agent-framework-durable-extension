@@ -30,10 +30,12 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
     /// or rewrite state.
     /// </summary>
     /// <remarks>
-    /// <see cref="TaskEntity{TState}.RunAsync"/> is non-virtual and writes state after every successful dispatch,
-    /// including successful void operations. Reimplementing <see cref="ITaskEntity"/> provides the only interception
-    /// point where a delayed signal can be made a true zero-write no-op. No-input cleanup calls are explicit recovery
-    /// requests and intentionally continue through the standard dispatcher.
+    /// The standard <see cref="TaskEntity{TState}.RunAsync"/> dispatcher initializes state before invoking an operation
+    /// and writes state after every successful dispatch, including successful void operations. The Durable Task runtime
+    /// invokes entities through <see cref="ITaskEntity"/>, so reimplementing that interface gives scheduled-expiration
+    /// signals a pre-dispatch guard. A stale delayed signal can therefore return without hydrating, creating, or
+    /// rewriting entity state. No-input cleanup calls are explicit recovery requests and intentionally continue through
+    /// the standard dispatcher.
     /// </remarks>
     ValueTask<object?> ITaskEntity.RunAsync(TaskEntityOperation operation)
     {
@@ -172,7 +174,7 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         {
             DurableAgentStateContract.ValidateIdentifier(
                 value: correlationId,
-                propertyPath: nameof(RunRequest.CorrelationId));
+                diagnosticPath: nameof(RunRequest.CorrelationId));
         }
 
         if (!this._options.EnablePersistentRequestOutcomes &&
