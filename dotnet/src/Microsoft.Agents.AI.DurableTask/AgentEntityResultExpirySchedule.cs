@@ -120,7 +120,7 @@ internal sealed class AgentEntityResultExpirySchedule
         return new DurableAgentState
         {
             SchemaVersion = state.SchemaVersion,
-            MailboxWritesAuthorized = state.MailboxWritesAuthorized,
+            PersistentRequestOutcomesAuthorized = state.PersistentRequestOutcomesAuthorized,
             Data = state.Data,
             ExtensionData = extensions,
             UnknownProperties = state.UnknownProperties,

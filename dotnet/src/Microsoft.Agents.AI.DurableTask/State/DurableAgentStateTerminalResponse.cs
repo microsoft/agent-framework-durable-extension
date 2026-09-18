@@ -249,9 +249,18 @@ internal sealed class DurableAgentStateTerminalResponse
             message.Validate(version);
         }
 
-        ValidateOptionalIdentifier(this.ResponseId, "terminalResults.response.responseId");
-        ValidateOptionalIdentifier(this.AgentId, "terminalResults.response.agentId");
-        ValidateOptionalIdentifier(this.FinishReason, "terminalResults.response.finishReason");
+        ValidateOptionalIdentifier(
+            value: this.ResponseId,
+            propertyPath:
+                $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(DurableAgentStateTerminalResult.Response)}.{nameof(ResponseId)}");
+        ValidateOptionalIdentifier(
+            value: this.AgentId,
+            propertyPath:
+                $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(DurableAgentStateTerminalResult.Response)}.{nameof(AgentId)}");
+        ValidateOptionalIdentifier(
+            value: this.FinishReason,
+            propertyPath:
+                $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(DurableAgentStateTerminalResult.Response)}.{nameof(FinishReason)}");
 
         if (this.ContinuationToken is not null)
         {
@@ -285,16 +294,21 @@ internal sealed class DurableAgentStateTerminalResponse
         {
             foreach (string key in this.AdditionalProperties.Keys)
             {
-                DurableAgentStateContract.ValidateIdentifier(key, "terminalResults.response.extensionData key");
+                DurableAgentStateContract.ValidateIdentifier(
+                    value: key,
+                    propertyPath:
+                        $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(DurableAgentStateTerminalResult.Response)}.{nameof(AdditionalProperties)}.{nameof(key)}");
             }
         }
     }
 
-    private static void ValidateOptionalIdentifier(string? value, string propertyName)
+    private static void ValidateOptionalIdentifier(string? value, string propertyPath)
     {
         if (value is not null)
         {
-            DurableAgentStateContract.ValidateIdentifier(value, propertyName);
+            DurableAgentStateContract.ValidateIdentifier(
+                value: value,
+                propertyPath: propertyPath);
         }
     }
 

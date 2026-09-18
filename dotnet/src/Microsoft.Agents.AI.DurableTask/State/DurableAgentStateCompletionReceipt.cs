@@ -85,8 +85,12 @@ internal sealed class DurableAgentStateCompletionReceipt
 
     public void Validate(string dictionaryKey)
     {
-        DurableAgentStateContract.ValidateIdentifier(dictionaryKey, "completionReceipts key");
-        DurableAgentStateContract.ValidateIdentifier(this.CorrelationId, "completionReceipts.correlationId");
+        DurableAgentStateContract.ValidateIdentifier(
+            value: dictionaryKey,
+            propertyPath: $"{nameof(DurableAgentStateData.CompletionReceipts)}.{nameof(dictionaryKey)}");
+        DurableAgentStateContract.ValidateIdentifier(
+            value: this.CorrelationId,
+            propertyPath: $"{nameof(DurableAgentStateData.CompletionReceipts)}.{nameof(CorrelationId)}");
         if (!string.Equals(dictionaryKey, this.CorrelationId, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(

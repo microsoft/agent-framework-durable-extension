@@ -135,7 +135,7 @@ public sealed class AgentRunHandleTests
             includeTranscript: true,
             completedAt,
             expiresAt);
-        state.MailboxWritesAuthorized = true;
+        state.PersistentRequestOutcomesAuthorized = true;
         string before = JsonSerializer.Serialize(state, DurableAgentStateJsonContext.Default.DurableAgentState);
 
         DurableAgentResultUnavailableException exception =

@@ -307,7 +307,7 @@ public sealed class AgentEntityResultExpirationTests
     {
         DurableAgentState state = CreateState();
         string before = Serialize(state);
-        EntityHarness cleanup = CreateHarness(new RecordingAgent("agent"), state, enableMailboxWrites: false,
+        EntityHarness cleanup = CreateHarness(new RecordingAgent("agent"), state, enablePersistentRequestOutcomes: false,
             onSignal: (_, _) => Assert.Fail("must not schedule"));
         await Assert.ThrowsAsync<InvalidOperationException>(() => cleanup.CheckResultsExpirationAsync());
         Assert.Equal(before, Serialize(state));
@@ -453,7 +453,7 @@ public sealed class AgentEntityResultExpirationTests
         DurableAgentState state = new()
         {
             SchemaVersion = DurableAgentState.RevisedSchemaVersion,
-            MailboxWritesAuthorized = true,
+            PersistentRequestOutcomesAuthorized = true,
             Data = new DurableAgentStateData
             {
                 TerminalResults = new Dictionary<string, DurableAgentStateTerminalResult>

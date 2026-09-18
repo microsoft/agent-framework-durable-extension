@@ -26,57 +26,136 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
         ? cancellationToken
         : services.GetService<IHostApplicationLifetime>()?.ApplicationStopping ?? CancellationToken.None;
 
+    /// <summary>
+    /// Rejects stale scheduled result-expiration operations before the standard entity dispatcher can initialize
+    /// or rewrite state.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="TaskEntity{TState}.RunAsync"/> is non-virtual and writes state after every successful dispatch,
+    /// including successful void operations. Reimplementing <see cref="ITaskEntity"/> provides the only interception
+    /// point where a delayed signal can be made a true zero-write no-op. No-input cleanup calls are explicit recovery
+    /// requests and intentionally continue through the standard dispatcher.
+    /// </remarks>
     ValueTask<object?> ITaskEntity.RunAsync(TaskEntityOperation operation)
     {
-        if (string.Equals(operation.Name, nameof(CheckAndExpireResults), StringComparison.OrdinalIgnoreCase) &&
-            operation.HasInput)
+        if (IsScheduledResultExpirationOperation(operation) &&
+            !this.ShouldDispatchScheduledResultExpiration(operation))
         {
-            this._cancellationToken.ThrowIfCancellationRequested();
-            AgentEntityResultExpirationCheck? check =
-                (AgentEntityResultExpirationCheck?)operation.GetInput(typeof(AgentEntityResultExpirationCheck));
-            // TaskEntity writes State back on every successful dispatch. Bypass it for stale
-            // signals so a duplicate cannot even rewrite state or initialize a missing entity.
-            DurableAgentState? state = (DurableAgentState?)operation.State.GetState(typeof(DurableAgentState));
-            if (state is null)
-            {
-                return new ValueTask<object?>((object?)null);
-            }
-
-            _ = DurableAgentStateSchemaVersion.ParseSupported(state.SchemaVersion);
-            if (state.SchemaVersion != DurableAgentState.RevisedSchemaVersion)
-            {
-                // Preserve legacy validation without dispatching a successful void operation,
-                // which would call the SDK state setter even though cleanup has no work to do.
-                ValidateForCommit(state);
-                return new ValueTask<object?>((object?)null);
-            }
-
-            AgentEntityResultExpirySchedule? schedule =
-                AgentEntityResultExpirySchedule.Read(state, operation.Context.Id.ToString());
-            if (schedule?.Pending is null || schedule.Pending != check)
-            {
-                return new ValueTask<object?>((object?)null);
-            }
+            return new ValueTask<object?>((object?)null);
         }
 
+        // Explicit interface implementations are only callable through the interface. This resolves to the inherited
+        // TaskEntity<DurableAgentState>.RunAsync method and preserves the standard dispatch and persistence behavior.
         return this.RunAsync(operation);
     }
 
     protected override DurableAgentState InitializeState(TaskEntityOperation entityOperation)
     {
-        return this._options.EnableMailboxWrites &&
-            entityOperation.Name is nameof(Run) or nameof(RunAgentAsync)
-            ? new DurableAgentState
-            {
-                SchemaVersion = DurableAgentState.RevisedSchemaVersion,
-                MailboxWritesAuthorized = true,
-                Data = new DurableAgentStateData
-                {
-                    TerminalResults = new Dictionary<string, DurableAgentStateTerminalResult>(StringComparer.Ordinal),
-                    CompletionReceipts = new Dictionary<string, DurableAgentStateCompletionReceipt>(StringComparer.Ordinal),
-                },
-            }
+        // Readers accept both state layouts, but this internal rollout gate controls whether this runtime may create
+        // a revised mailbox containing authoritative terminal results and completion receipts.
+        bool shouldInitializePersistentRequestOutcomes =
+            this._options.EnablePersistentRequestOutcomes && IsAgentRunOperation(entityOperation);
+        return shouldInitializePersistentRequestOutcomes
+            ? CreateEmptyPersistentRequestOutcomeState()
             : base.InitializeState(entityOperation);
+    }
+
+    /// <summary>
+    /// Determines whether a scheduled result-expiration signal still owns the current persisted schedule generation.
+    /// </summary>
+    /// <remarks>
+    /// Returning <see langword="false"/> tells the explicit interface dispatcher to bypass normal dispatch entirely,
+    /// avoiding initialization or state write-back for missing, legacy, duplicate, or superseded signals.
+    /// </remarks>
+    private bool ShouldDispatchScheduledResultExpiration(TaskEntityOperation operation)
+    {
+        this._cancellationToken.ThrowIfCancellationRequested();
+        AgentEntityResultExpirationCheck? scheduledCheck =
+            (AgentEntityResultExpirationCheck?)operation.GetInput(typeof(AgentEntityResultExpirationCheck));
+
+        // Read persisted state directly from the operation. Entering the base dispatcher first would initialize a
+        // missing entity and write that placeholder back after the successful void operation.
+        DurableAgentState? persistedState =
+            (DurableAgentState?)operation.State.GetState(typeof(DurableAgentState));
+        if (persistedState is null)
+        {
+            return false;
+        }
+
+        _ = DurableAgentStateSchemaVersion.ParseSupported(persistedState.SchemaVersion);
+        if (persistedState.SchemaVersion != DurableAgentState.RevisedSchemaVersion)
+        {
+            // Result expiration applies only to the revised mailbox. Validate legacy state, but do not dispatch a
+            // successful no-op because the base dispatcher would still rewrite it.
+            ValidateForCommit(persistedState);
+            return false;
+        }
+
+        AgentEntityResultExpirySchedule? schedule =
+            AgentEntityResultExpirySchedule.Read(persistedState, operation.Context.Id.ToString());
+        return IsCurrentScheduledResultExpiration(schedule, scheduledCheck);
+    }
+
+    /// <summary>
+    /// Identifies delayed result-expiration self-signals without matching explicit no-input recovery requests.
+    /// </summary>
+    /// <remarks>
+    /// Scheduled signals carry an <see cref="AgentEntityResultExpirationCheck"/> input. A no-input invocation asks the
+    /// entity to inspect or repair its current schedule and must continue through normal dispatch.
+    /// </remarks>
+    private static bool IsScheduledResultExpirationOperation(TaskEntityOperation operation)
+    {
+        return operation.HasInput &&
+            string.Equals(operation.Name, nameof(CheckAndExpireResults), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Identifies operations that are allowed to create a new agent mailbox generation.
+    /// </summary>
+    /// <remarks>
+    /// Matching is case-insensitive to mirror <see cref="TaskEntity{TState}"/> method dispatch; initialization must not
+    /// select a different state contract merely because a caller used different operation-name casing.
+    /// </remarks>
+    private static bool IsAgentRunOperation(TaskEntityOperation operation)
+    {
+        return string.Equals(operation.Name, nameof(Run), StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(operation.Name, nameof(RunAgentAsync), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Checks whether a delivered expiration signal exactly matches the generation persisted in entity state.
+    /// </summary>
+    /// <remarks>
+    /// Record equality covers the scheduled time, random token, and entity identity. The persisted generation is the
+    /// authority, so timestamp-only, duplicated, superseded, and foreign-entity signals fail closed.
+    /// </remarks>
+    private static bool IsCurrentScheduledResultExpiration(
+        AgentEntityResultExpirySchedule? schedule,
+        AgentEntityResultExpirationCheck? scheduledCheck)
+    {
+        return schedule?.Pending == scheduledCheck;
+    }
+
+    /// <summary>
+    /// Creates the initial revised state used to persist request outcomes.
+    /// </summary>
+    /// <remarks>
+    /// Callers must first verify the internal writer rollout gate. Initializing both maps establishes the invariant
+    /// that terminal results and completion receipts are authoritative for every committed revised-mailbox outcome.
+    /// </remarks>
+    private static DurableAgentState CreateEmptyPersistentRequestOutcomeState()
+    {
+        return new DurableAgentState
+        {
+            SchemaVersion = DurableAgentState.RevisedSchemaVersion,
+            PersistentRequestOutcomesAuthorized = true,
+            Data = new DurableAgentStateData
+            {
+                TerminalResults = new Dictionary<string, DurableAgentStateTerminalResult>(StringComparer.Ordinal),
+                CompletionReceipts =
+                    new Dictionary<string, DurableAgentStateCompletionReceipt>(StringComparer.Ordinal),
+            },
+        };
     }
 
     public Task<AgentResponse> RunAgentAsync(RunRequest request)
@@ -105,10 +184,13 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
         }
 
         DateTimeOffset currentTime = this._timeProvider.GetUtcNow();
-        DurableAgentRunOutcome existingOutcome;
+
+        // Resolve does not assume that this request has run before. Pending means that no
+        // committed completion exists for this correlation ID, so this is a new attempt.
+        DurableAgentRunOutcome resolvedOutcome;
         try
         {
-            existingOutcome = DurableAgentStateOutcomeResolver.Resolve(
+            resolvedOutcome = DurableAgentStateOutcomeResolver.Resolve(
                 this.State,
                 correlationId,
                 currentTime);
@@ -122,16 +204,16 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
             throw;
         }
 
-        if (existingOutcome.Kind != DurableAgentRunOutcomeKind.Pending)
+        if (resolvedOutcome.Kind != DurableAgentRunOutcomeKind.Pending)
         {
             // Correlation is the caller's idempotency key. Retained terminal state is reused
             // without comparing request content, so callers must not reuse it for another request.
             // Surface failures before optional migration so failed delivery never writes state.
-            AgentResponse committedResponse = existingOutcome.GetResponse(correlationId);
-            if (this._options.EnableMailboxWrites &&
+            AgentResponse committedResponse = resolvedOutcome.GetResponse(correlationId);
+            if (this._options.EnablePersistentRequestOutcomes &&
                 this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
                 this._options.AuthorizeLegacyMigration?.Invoke(this.State) == true &&
-                existingOutcome.Kind != DurableAgentRunOutcomeKind.CompletedResultUnavailable)
+                resolvedOutcome.Kind != DurableAgentRunOutcomeKind.CompletedResultUnavailable)
             {
                 // Legacy evidence is converted without constructing or invoking the agent.
                 DurableAgentState migrated = DurableAgentStateOutcomeResolver.PrepareRevisedWorkingState(
@@ -150,30 +232,33 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
                 nameof(request));
         }
 
-        if (this._options.EnableMailboxWrites)
+        if (this._options.EnablePersistentRequestOutcomes)
         {
-            DurableAgentStateContract.ValidateIdentifier(correlationId, "correlationId");
+            DurableAgentStateContract.ValidateIdentifier(
+                value: correlationId,
+                propertyPath: nameof(RunRequest.CorrelationId));
         }
 
-        if (!this._options.EnableMailboxWrites &&
+        if (!this._options.EnablePersistentRequestOutcomes &&
             this.State.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
         {
-            throw new InvalidOperationException("New mailbox requests require EnableMailboxWrites to be enabled.");
+            throw new InvalidOperationException(
+                $"New persistent request outcomes require {nameof(DurableAgentsOptions.EnablePersistentRequestOutcomes)} to be enabled.");
         }
 
         this._cancellationToken.ThrowIfCancellationRequested();
         // TaskEntity hydrates State with the backend-owned object. Mutate an independent copy so
         // an exception leaves the hydrated state unchanged.
-        bool migrateLegacy = this._options.EnableMailboxWrites &&
+        bool migrateLegacy = this._options.EnablePersistentRequestOutcomes &&
             this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
             this._options.AuthorizeLegacyMigration?.Invoke(this.State) == true;
         DurableAgentState workingState = migrateLegacy
             ? DurableAgentStateOutcomeResolver.PrepareRevisedWorkingState(this.State, hasAuthoritativeLegacyHistory: true)
             : this.State.Clone();
-        if (this._options.EnableMailboxWrites &&
+        if (this._options.EnablePersistentRequestOutcomes &&
             workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
         {
-            workingState.MailboxWritesAuthorized = true;
+            workingState.PersistentRequestOutcomesAuthorized = true;
             // A future/invalid runtime profile cannot be silently replaced after invoking the model.
             _ = AgentEntityResultExpirySchedule.Read(workingState, this.Context.Id.ToString());
         }
@@ -371,15 +456,16 @@ internal class AgentEntity(IServiceProvider services, CancellationToken cancella
                 return;
             }
 
-            if (!this._options.EnableMailboxWrites)
+            if (!this._options.EnablePersistentRequestOutcomes)
             {
-                throw new InvalidOperationException("Result expiration requires EnableMailboxWrites to be enabled.");
+                throw new InvalidOperationException(
+                    $"Result expiration requires {nameof(DurableAgentsOptions.EnablePersistentRequestOutcomes)} to be enabled.");
             }
 
             // Unlike a new run, cleanup must not assign history identities or promote legacy state.
             DurableAgentState workingState = DurableAgentStateJsonConverter.DeserializeRevisedContract(
                 DurableAgentStateJsonConverter.SerializeRevisedContract(this.State));
-            workingState.MailboxWritesAuthorized = true;
+            workingState.PersistentRequestOutcomesAuthorized = true;
             this.CommitWorkingState(workingState, sessionId, logger, deletionCheckExpiration: null,
                 previousResultCheckTime: scheduledCheck?.ScheduledTime);
         }

@@ -32,7 +32,7 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         {
             // This worker understands receipts. Preserve already revised state without a downgrade,
             // including when a read-only duplicate operation republishes the hydrated state.
-            state.MailboxWritesAuthorized = true;
+            state.PersistentRequestOutcomesAuthorized = true;
         }
 
         return state;
@@ -137,7 +137,7 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
     /// <inheritdoc/>
     public override void Write(Utf8JsonWriter writer, DurableAgentState value, JsonSerializerOptions options)
     {
-        WriteValue(writer, value, allowRevisedSchema: value.MailboxWritesAuthorized);
+        WriteValue(writer, value, allowRevisedSchema: value.PersistentRequestOutcomesAuthorized);
     }
 
     private static void WriteValue(
@@ -813,8 +813,9 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
                 }
 
                 DurableAgentStateContract.ValidateIdentifier(
-                    correlation.GetString(),
-                    "conversationHistory.correlationId");
+                    value: correlation.GetString(),
+                    propertyPath:
+                        $"{nameof(DurableAgentStateData.ConversationHistory)}.{nameof(DurableAgentStateEntry.CorrelationId)}");
             }
 
             if (entry.TryGetProperty("messages", out JsonElement messages))

@@ -89,7 +89,7 @@ public sealed class LegacyPromotionMetadataTests
             Assert.False(Assert.IsType<JsonElement>(polled.AdditionalProperties!["false"]).GetBoolean());
             polled.AdditionalProperties["false"] = "native mutation";
 
-            EntityHarness duplicate = CreateHarness(agent, committed, enableMailboxWrites: false,
+            EntityHarness duplicate = CreateHarness(agent, committed, enablePersistentRequestOutcomes: false,
                 registerWithFactory: true,
                 onFactoryInvoked: () => Assert.Fail("Duplicate must bypass the agent factory."),
                 onSignal: (_, _) => Assert.Fail("Duplicate must not schedule a signal."));
