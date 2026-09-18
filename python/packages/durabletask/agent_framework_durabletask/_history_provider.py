@@ -848,6 +848,7 @@ def prepare_history_owner(agent: SupportsAgentRun, service_owns_history: bool) -
     }
     inactive_sources: set[str] = set()
     if service_owns_history:
+        inactive_sources.update(durable_sources)
         for provider in cast("Sequence[Any]", providers):
             primary = (
                 provider.__wrapped__
@@ -970,6 +971,20 @@ def ensure_durable_history(agent: SupportsAgentRun) -> SupportsAgentRun:
         if hasattr(existing, "after_run_once_per_turn"):
             replacement.after_run_once_per_turn = existing.after_run_once_per_turn
         updated = [replacement if provider is existing else provider for provider in provider_list]
+        original_index = updated.index(replacement)
+        insertion = next(
+            (
+                index
+                for index, provider in enumerate(updated[:original_index])
+                if isinstance(provider, CompactionProvider)
+                and provider.history_source_id == replacement.source_id
+                and provider.before_strategy is not None
+            ),
+            original_index,
+        )
+        if insertion != original_index:
+            updated.pop(original_index)
+            updated.insert(insertion, replacement)
     else:
         return agent
 

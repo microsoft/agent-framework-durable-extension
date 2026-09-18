@@ -28,6 +28,7 @@ from ._message_identity import message_identity
 from ._models import RunRequest, serialize_response_format
 from ._response_utils import (
     load_agent_response,
+    preserve_input_envelope,
     serialize_input_content,
 )
 from ._shared_state_validation import (
@@ -1140,6 +1141,7 @@ class DurableAgentStateMessage:
         _validate_core_message(raw)
         _validate_core_message_keys(raw)
         message = load_agent_response({"messages": [raw]}).messages[0]
+        preserve_input_envelope(message, raw)
         stored = DurableAgentStateMessage.from_chat_message(message)
         for content, original in zip(stored.contents, raw.get("contents", []), strict=True):
             if not isinstance(original, dict):
