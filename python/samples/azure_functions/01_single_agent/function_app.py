@@ -46,7 +46,7 @@ HTTP/1.1 202 Accepted
   "status": "accepted",
   "response": "Agent request accepted",
   "message": "Tell me a short joke about cloud computing.",
-  "conversation_id": "<guid>",
-  "correlation_id": "<guid>"
+  "sessionId": "<guid>",
+  "correlationId": "<guid>"
 }
 """

@@ -27,7 +27,7 @@ Poll the returned `statusQueryGetUri` or call the status route directly:
 curl http://localhost:7071/api/spamdetection/status/<instanceId>
 ```
 
-> **Note:** The spam detection run endpoint waits for responses by default. To opt into an immediate HTTP 202, set the `x-ms-wait-for-response` header or include `"wait_for_response": false` in the POST body.
+> **Note:** `spamdetection/run` is a custom route in this sample that always starts the orchestration and returns HTTP 202. The generated agent run endpoints wait for responses by default, so if you invoke one of those directly and need an immediate HTTP 202, set the `x-ms-wait-for-response` header or include `"waitForResponse": false` in the request body.
 
 ## Expected Responses
 - Spam payloads return `Email marked as spam: <reason>` by invoking the `handle_spam_email` activity.

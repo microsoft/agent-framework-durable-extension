@@ -19,7 +19,7 @@ With the environment setup and function app running, you can test the sample by 
 
 You can use the `demo.http` file to send messages to the agents, or a command line tool like `curl` as shown below:
 
-> **Note:** Each endpoint waits for the agent response by default. To receive an immediate HTTP 202 instead, set the `x-ms-wait-for-response` header or include `"wait_for_response": false` in the request body.
+> **Note:** Each endpoint waits for the agent response by default. To receive an immediate HTTP 202 instead, set the `x-ms-wait-for-response` header or include `"waitForResponse": false` in the request body.
 
 ### Test the Weather Agent
 
@@ -29,6 +29,7 @@ Weather agent request:
 ```bash
 curl -X POST http://localhost:7071/api/agents/WeatherAgent/run \
     -H "Content-Type: application/json" \
+    -H "x-ms-wait-for-response: false" \
     -d '{"message": "What is the weather in Seattle?"}'
 ```
 
@@ -39,8 +40,8 @@ Expected HTTP 202 payload:
   "status": "accepted",
   "response": "Agent request accepted",
   "message": "What is the weather in Seattle?",
-  "session_id": "<guid>",
-  "correlation_id": "<guid>"
+  "sessionId": "<guid>",
+  "correlationId": "<guid>"
 }
 ```
 
@@ -49,6 +50,7 @@ Math agent request:
 ```bash
 curl -X POST http://localhost:7071/api/agents/MathAgent/run \
     -H "Content-Type: application/json" \
+    -H "x-ms-wait-for-response: false" \
     -d '{"message": "Calculate a 20% tip on a $50 bill"}'
 ```
 
@@ -59,8 +61,8 @@ Expected HTTP 202 payload:
   "status": "accepted",
   "response": "Agent request accepted",
   "message": "Calculate a 20% tip on a $50 bill",
-  "session_id": "<guid>",
-  "correlation_id": "<guid>"
+  "sessionId": "<guid>",
+  "correlationId": "<guid>"
 }
 ```
 

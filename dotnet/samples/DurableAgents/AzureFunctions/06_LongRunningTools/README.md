@@ -57,7 +57,7 @@ x-ms-session-id: 351ec855-7f4d-4527-a60d-498301ced36d
 The content generation workflow for the topic "The Future of Artificial Intelligence" has been successfully started, and the instance ID is **6a04276e8d824d8d941e1dc4142cc254**. If you need any further assistance or updates on the workflow, feel free to ask!
 ```
 
-The `x-ms-session-id` response header contains the session ID, which can be used to continue the conversation by passing it as a query parameter (`session_id`) to the `run` endpoint. The commands above show how to save the session ID to a `$sessionId` variable for use in subsequent requests.
+The `x-ms-session-id` response header contains the session ID, which can be used to continue the conversation by passing it as a query parameter (`sessionId`) to the `run` endpoint. The commands above show how to save the session ID to a `$sessionId` variable for use in subsequent requests.
 
 Behind the scenes, the publisher agent will:
 
@@ -70,12 +70,12 @@ Bash (Linux/macOS/WSL):
 
 ```bash
 # Approve the content
-curl -X POST "http://localhost:7071/api/agents/publisher/run?session_id=$sessionId" \
+curl -X POST "http://localhost:7071/api/agents/publisher/run?sessionId=$sessionId" \
     -H "Content-Type: text/plain" \
     -d 'Approve the content'
 
 # Reject the content with feedback
-curl -X POST "http://localhost:7071/api/agents/publisher/run?session_id=$sessionId" \
+curl -X POST "http://localhost:7071/api/agents/publisher/run?sessionId=$sessionId" \
     -H "Content-Type: text/plain" \
     -d 'Reject the content with feedback: The article needs more technical depth and better examples.'
 ```
@@ -85,13 +85,13 @@ PowerShell:
 ```powershell
 # Approve the content
 Invoke-RestMethod -Method Post `
-    -Uri "http://localhost:7071/api/agents/publisher/run?session_id=$sessionId" `
+    -Uri "http://localhost:7071/api/agents/publisher/run?sessionId=$sessionId" `
     -ContentType text/plain `
     -Body 'Approve the content'
 
 # Reject the content with feedback
 Invoke-RestMethod -Method Post `
-    -Uri "http://localhost:7071/api/agents/publisher/run?session_id=$sessionId" `
+    -Uri "http://localhost:7071/api/agents/publisher/run?sessionId=$sessionId" `
     -ContentType text/plain `
     -Body 'Reject the content with feedback: The article needs more technical depth and better examples.'
 ```
@@ -101,7 +101,7 @@ Once the workflow has completed, you can get the status by prompting the publish
 Bash (Linux/macOS/WSL):
 
 ```bash
-curl -X POST "http://localhost:7071/api/agents/publisher/run?session_id=$sessionId" \
+curl -X POST "http://localhost:7071/api/agents/publisher/run?sessionId=$sessionId" \
     -H "Content-Type: text/plain" \
     -d 'Get the status of the workflow you previously started'
 ```
@@ -110,7 +110,7 @@ PowerShell:
 
 ```powershell
 Invoke-RestMethod -Method Post `
-    -Uri "http://localhost:7071/api/agents/publisher/run?session_id=$sessionId" `
+    -Uri "http://localhost:7071/api/agents/publisher/run?sessionId=$sessionId" `
     -ContentType text/plain `
     -Body 'Get the status of the workflow you previously started'
 ```
