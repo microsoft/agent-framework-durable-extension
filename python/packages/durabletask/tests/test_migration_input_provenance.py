@@ -163,6 +163,20 @@ def test_matching_id_and_producer_are_not_proof_of_cursor_attribution(version: s
     assert (source, evidence) == before
 
 
+@pytest.mark.parametrize("version", VERSIONS)
+@pytest.mark.parametrize("position", [0.0, 3.0, 9007199254740992.0])
+def test_integral_json_positions_are_preserved_while_comparing_normalized_maxima(version: str, position: float) -> None:
+    source = _source(None, version=version)
+    source["data"]["ingestedPositions"] = {"producer": position}
+    message = Message("user", ["accepted"], message_id="opaque")
+    evidence = _delivery(source, [message], messagePositions=[{"producer": "producer", "position": int(position)}])
+    before = deepcopy(source), deepcopy(evidence)
+    state = _cold(_migrate(source, evidence))
+    raw_position = state.to_dict()["data"]["ingestedPositions"]["producer"]
+    assert raw_position == position and type(raw_position) is float
+    assert (source, evidence) == before
+
+
 @pytest.mark.parametrize(
     "positions",
     [

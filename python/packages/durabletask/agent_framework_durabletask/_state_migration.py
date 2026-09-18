@@ -85,6 +85,10 @@ def _legacy_positions(data: dict[str, Any]) -> dict[str, int]:
     positions: dict[str, int] = {}
     for producer, position in cast(dict[str, Any], raw).items():
         _nonblank(producer, "ingestedPositions producer")
+        # The published JSON Schema integer type admits integral floating-point
+        # representations. Normalize only the detached comparison value.
+        if isinstance(position, float) and position.is_integer():
+            position = int(position)
         if isinstance(position, bool) or not isinstance(position, int) or position < 0:
             raise ValueError("Every ingestedPositions position must be a nonnegative integer, not a boolean.")
         positions[producer] = position
