@@ -15,80 +15,16 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
-from agent_framework import AgentResponse, Content, Message
+from agent_framework import AgentResponse
 
+from ._delivery_state import (
+    _lookup_response,  # pyright: ignore[reportPrivateUsage]
+    validate_delivery_state,
+)
 from ._durable_agent_state import DurableAgentState
-from ._response_utils import is_terminal_agent_response
 from ._shared_response import load_terminal_response
-from ._shared_state_validation import timestamp_reached, validate_identifier, validate_shared_state
 
 __all__ = ["SharedAgentStateReader", "read_agent_state"]
-
-
-def _validate_completion_outcomes(results: dict[str, Any]) -> None:
-    """Reject affirmative failure evidence on a succeeded result without decoding it.
-
-    This deliberately adopts only the donor's source-level outcome check after
-    shared snapshot validation. The shared schema alone does not classify error
-    content. A non-tool shared error or reserved durable_status=error conflicts
-    with succeeded, while a tool error need not mean the invocation failed.
-    Opaque content and native profiles are not examined as runtime projections.
-    """
-    for result in results.values():
-        if result["outcome"] != "succeeded":
-            continue
-        response = result["response"]
-        failed = response.get("extensionData", {}).get("durable_status") == "error" or any(
-            content["$type"] == "error"
-            for message in response["messages"]
-            if message["role"] != "tool"
-            for content in message.get("contents", [])
-        )
-        if failed:
-            raise ValueError("A succeeded terminal result conflicts with its response failure evidence.")
-
-
-def _available_response(result: dict[str, Any], correlation_id: str) -> AgentResponse:
-    # Give the codec its own copy even though its current implementation also
-    # detaches. Neither consumer edits nor synthesized error details may alias state.
-    response = load_terminal_response(deepcopy(result["response"]))
-    properties = response.additional_properties
-    if properties.get("durable_status") in ("accepted", "already_completed"):
-        properties.pop("durable_status")
-    if "durable_outcome" in properties:
-        properties["durable_outcome"] = result["outcome"]
-
-    if result["outcome"] == "succeeded":
-        # A recognized native content profile can project an error that the raw
-        # shared snapshot cannot classify. Reject this requested projection rather
-        # than deliver a failure in contradiction to the authoritative receipt.
-        if is_terminal_agent_response(response):
-            raise ValueError("A succeeded terminal result conflicts with its response failure evidence.")
-        return response
-
-    error = deepcopy(result["error"])
-    code = error["code"] if error["code"] != "response_expired" else "agent_error"
-    errors = [
-        content
-        for message in response.messages
-        if message.role != "tool"
-        for content in message.contents
-        if content.type == "error"
-    ]
-    for content in errors:
-        if not content.error_code or not content.error_code.strip() or content.error_code == "response_expired":
-            content.error_code = code
-        if not content.message or not content.message.strip():
-            content.message = error["message"]
-    properties.update(durable_status="error", correlation_id=correlation_id)
-    if not errors:
-        response.messages.append(
-            Message(
-                "system",
-                [Content.from_error(message=error["message"], error_code=code, error_details=error.get("details"))],
-            )
-        )
-    return response
 
 
 class SharedAgentStateReader:
@@ -104,10 +40,7 @@ class SharedAgentStateReader:
 
     def __init__(self, raw: dict[str, Any]) -> None:
         """Validate the complete v2 snapshot before retaining a detached copy."""
-        validate_shared_state(raw)
-        if raw["schemaVersion"] != "2.0.0":
-            raise ValueError("SharedAgentStateReader requires schemaVersion 2.0.0.")
-        _validate_completion_outcomes(raw["data"]["terminalResults"])
+        validate_delivery_state(raw)
         self._raw = deepcopy(raw)
 
     @property
@@ -138,33 +71,12 @@ class SharedAgentStateReader:
         only in the detached consumer response. Incompatible targeted native
         profiles may fail projection without affecting stored JSON or other lookups.
         """
-        validate_identifier(correlation_id, "correlation_id")
-        data = self._raw["data"]
-        receipt = data["completionReceipts"].get(correlation_id)
-        if receipt is None:
-            return None
-        expiry = receipt.get("resultExpiresAt")
-        if receipt["resultState"] == "available" and (
-            expiry is None or not timestamp_reached(expiry, now=now if now is not None else datetime.now(timezone.utc))
-        ):
-            return _available_response(data["terminalResults"][correlation_id], correlation_id)
-        return AgentResponse(
-            messages=[
-                Message(
-                    "system",
-                    [
-                        Content.from_error(
-                            message="This request completed, but its response delivery window has expired.",
-                            error_code="response_expired",
-                        )
-                    ],
-                )
-            ],
-            additional_properties={
-                "durable_status": "already_completed",
-                "correlation_id": correlation_id,
-                "durable_outcome": receipt["outcome"],
-            },
+        return _lookup_response(
+            self._raw,
+            correlation_id,
+            now=now,
+            clock=lambda: datetime.now(timezone.utc),
+            load_response=load_terminal_response,
         )
 
 
