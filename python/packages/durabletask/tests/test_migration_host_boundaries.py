@@ -297,6 +297,76 @@ def test_agent_entity_migrate_unknown_acknowledgement_refreshes_same_provider_wi
     assert client.received_messages == []
 
 
+def test_identical_migration_retry_rejects_warm_receipt_outcome_mismatch_without_repair() -> None:
+    entity, provider, client = _json_provider_entity()
+    source = _legacy_source(_error_response_entry())
+    request = _migration_request(
+        source, provider.core_session_id, completionEvidence=_completion_journal(source, _original_result())
+    )
+    original_request = deepcopy(request)
+    assert entity.migrate(request)["status"] == "migrated"
+    committed = deepcopy(provider.raw)
+    writes = (provider.attempted_writes, provider.successful_writes)
+    warm = provider.state
+    assert warm.to_dict() == committed
+    assert writes == (1, 1)
+
+    # Only the cache is corrupt. The JSON provider still returns valid committed state.
+    receipt = warm.data.completed_correlations["done"]
+    assert receipt["outcome"] == warm.data.response_mailbox["done"]["outcome"] == "failed"
+    receipt["outcome"] = "succeeded"
+    mutated_receipts = deepcopy(warm.data.completed_correlations)
+    with pytest.raises(ValueError, match="Result and receipt must agree"):
+        warm.to_dict()
+
+    with pytest.raises(ValueError, match="Result and receipt must agree"):
+        entity.migrate(request)
+
+    assert entity.state is provider.state is warm
+    assert warm.data.completed_correlations["done"] is receipt
+    assert warm.data.completed_correlations == mutated_receipts
+    assert warm.data.response_mailbox == committed["data"]["terminalResults"]
+    assert warm.data.unknown_fields["migration"] == committed["data"]["migration"]
+    assert provider.raw == committed
+    assert (provider.attempted_writes, provider.successful_writes) == writes
+    assert request == original_request
+    assert client.received_messages == []
+
+
+def test_identical_migration_retry_rejects_warm_non_json_root_field_without_repair() -> None:
+    entity, provider, client = _json_provider_entity()
+    source = _legacy_source(_error_response_entry())
+    request = _migration_request(
+        source, provider.core_session_id, completionEvidence=_completion_journal(source, _original_result())
+    )
+    original_request = deepcopy(request)
+    assert entity.migrate(request)["status"] == "migrated"
+    committed = deepcopy(provider.raw)
+    writes = (provider.attempted_writes, provider.successful_writes)
+    warm = provider.state
+    assert warm.to_dict() == committed
+    assert writes == (1, 1)
+
+    root_extension = {"opaque": b"not-json"}
+    warm.unknown_fields["extensionData"] = root_extension
+    mutated_root_fields = deepcopy(warm.unknown_fields)
+    assert warm.data.to_dict() == committed["data"]
+    with pytest.raises(ValueError, match="State must be strict JSON"):
+        warm.to_dict()
+
+    with pytest.raises(ValueError, match="State must be strict JSON"):
+        entity.migrate(request)
+
+    assert entity.state is provider.state is warm
+    assert warm.unknown_fields["extensionData"] is root_extension
+    assert warm.unknown_fields == mutated_root_fields
+    assert warm.data.to_dict() == committed["data"]
+    assert provider.raw == committed
+    assert (provider.attempted_writes, provider.successful_writes) == writes
+    assert request == original_request
+    assert client.received_messages == []
+
+
 async def test_migration_idempotency_survives_cold_reload_without_refreshing_receipt_grace() -> None:
     source = _legacy_source(_error_response_entry())
     request = _migration_request(
