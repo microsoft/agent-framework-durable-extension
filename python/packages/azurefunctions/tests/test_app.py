@@ -22,8 +22,11 @@ from agent_framework_durabletask import (
     AgentEntity,
     AgentEntityStateProviderMixin,
     DurableAgentState,
+    LegacyDurableAgentState,
+    SharedAgentStateReader,
     workflow_orchestrator_name,
 )
+from agent_framework_durabletask._workflows.protocol import wrap_workflow_input
 
 from agent_framework_azurefunctions import AgentFunctionApp
 from agent_framework_azurefunctions._app import (
@@ -273,7 +276,12 @@ class TestAgentFunctionAppSetup:
             app.add_agent(mock_agent, enable_http_endpoint=True)
 
         http_route_mock.assert_called_once_with("OverrideAgent")
-        agent_entity_mock.assert_called_once_with(mock_agent, "OverrideAgent", ANY)
+        agent_entity_mock.assert_called_once_with(
+            mock_agent,
+            "OverrideAgent",
+            ANY,
+            response_delivery_window_seconds=60,
+        )
         assert app._agent_metadata["OverrideAgent"].http_endpoint_enabled is True
 
     def test_agent_override_disables_http_route_when_app_enabled(self) -> None:
@@ -290,7 +298,12 @@ class TestAgentFunctionAppSetup:
             app.add_agent(mock_agent, enable_http_endpoint=False)
 
         http_route_mock.assert_not_called()
-        agent_entity_mock.assert_called_once_with(mock_agent, "DisabledOverride", ANY)
+        agent_entity_mock.assert_called_once_with(
+            mock_agent,
+            "DisabledOverride",
+            ANY,
+            response_delivery_window_seconds=60,
+        )
         assert app._agent_metadata["DisabledOverride"].http_endpoint_enabled is False
 
     def test_multiple_apps_independent(self) -> None:
@@ -589,7 +602,7 @@ class TestAgentEntityFactory:
         mock_context = Mock()
         mock_context.operation_name = "reset"
         mock_context.get_state.return_value = {
-            "schemaVersion": "1.0.0",
+            "schemaVersion": "2.0.0",
             "data": {
                 "conversationHistory": [
                     {
@@ -609,6 +622,22 @@ class TestAgentEntityFactory:
                         ],
                     }
                 ],
+                "terminalResults": {
+                    "corr-reset-test": {
+                        "correlationId": "corr-reset-test",
+                        "outcome": "succeeded",
+                        "completedAt": "2024-01-01T00:00:00Z",
+                        "response": {"messages": []},
+                    }
+                },
+                "completionReceipts": {
+                    "corr-reset-test": {
+                        "correlationId": "corr-reset-test",
+                        "outcome": "succeeded",
+                        "completedAt": "2024-01-01T00:00:00Z",
+                        "resultState": "available",
+                    }
+                },
             },
         }
 
@@ -619,6 +648,12 @@ class TestAgentEntityFactory:
         assert mock_context.set_result.called
         result_call = mock_context.set_result.call_args[0][0]
         assert result_call["status"] == "reset"
+        persisted = mock_context.set_state.call_args[0][0]
+        assert persisted["data"]["conversationHistory"] == []
+        assert persisted["data"]["terminalResults"] == mock_context.get_state.return_value["data"]["terminalResults"]
+        assert (
+            persisted["data"]["completionReceipts"] == mock_context.get_state.return_value["data"]["completionReceipts"]
+        )
 
     def test_entity_function_handles_unknown_operation(self) -> None:
         """Test that the entity function handles an unknown operation."""
@@ -640,8 +675,9 @@ class TestAgentEntityFactory:
         assert "unknown_operation" in result_call["error"]
 
     def test_entity_function_restores_state(self) -> None:
-        """Test that the entity function restores state from the context."""
+        """Legacy state is rejected before any decode or execution begins."""
         mock_agent = Mock()
+        mock_agent.run = AsyncMock(return_value=AgentResponse(messages=[]))
         entity_function = create_agent_entity(mock_agent)
 
         # Mock context with existing state
@@ -696,7 +732,82 @@ class TestAgentEntityFactory:
         with patch.object(DurableAgentState, "from_dict", wraps=DurableAgentState.from_dict) as from_dict_mock:
             entity_function(mock_context)
 
-        from_dict_mock.assert_called_once_with(existing_state)
+        from_dict_mock.assert_not_called()
+        mock_agent.run.assert_not_called()
+        mock_context.set_state.assert_not_called()
+        mock_context.set_result.assert_called_once()
+        result_call = mock_context.set_result.call_args[0][0]
+        assert result_call["status"] == "error"
+        assert "Legacy state is read-only" in result_call["error"]
+
+    def test_create_agent_entity_requires_explicit_isolated_acknowledgement(self) -> None:
+        """Entity registration fails without the isolated-v2 deployment acknowledgement."""
+        mock_agent = Mock()
+
+        with (
+            patch("os.getenv", return_value=None),
+            pytest.raises(ValueError, match="Schema 2 requires an isolated task hub/deployment"),
+        ):
+            create_agent_entity(mock_agent)
+
+    def test_create_agent_entity_allows_explicit_isolated_acknowledgement(self) -> None:
+        """An explicit isolated-v2 deployment mode bypasses the ambient environment check."""
+        mock_agent = Mock()
+
+        entity_function = create_agent_entity(mock_agent, deployment_mode="isolated_v2")
+
+        assert callable(entity_function)
+
+    def test_create_agent_entity_rejects_invalid_delivery_window_type(self) -> None:
+        """Response delivery window validation is shared with the durabletask host."""
+        mock_agent = Mock()
+        invalid_window: Any = 60.0
+
+        with pytest.raises(ValueError, match="response_delivery_window_seconds must be a positive integer"):
+            create_agent_entity(mock_agent, response_delivery_window_seconds=invalid_window)
+
+
+class TestStateReaderIntegration:
+    """Tests for the app's read-only durable state reader integration."""
+
+    async def test_read_cached_state_preserves_legacy_1_1_reader(self) -> None:
+        """Legacy schema 1.1 state still uses DurableAgentState for compatibility."""
+        mock_agent = Mock()
+        mock_agent.name = "ReaderAgent"
+        app = AgentFunctionApp(agents=[mock_agent], enable_health_check=False)
+        client = AsyncMock()
+        entity_id = df.EntityId(name="dafx-ReaderAgent", key="session-1")
+        client.read_entity_state.return_value = Mock(
+            entity_exists=True,
+            entity_state={"schemaVersion": "1.1.0", "data": {"conversationHistory": []}},
+        )
+
+        state = await app._read_cached_state(client, entity_id)
+
+        assert isinstance(state, LegacyDurableAgentState)
+
+    async def test_read_cached_state_uses_read_only_shared_reader_for_v2(self) -> None:
+        """Canonical schema 2 snapshots are exposed through SharedAgentStateReader."""
+        mock_agent = Mock()
+        mock_agent.name = "ReaderAgent"
+        app = AgentFunctionApp(agents=[mock_agent], enable_health_check=False)
+        client = AsyncMock()
+        entity_id = df.EntityId(name="dafx-ReaderAgent", key="session-2")
+        client.read_entity_state.return_value = Mock(
+            entity_exists=True,
+            entity_state={
+                "schemaVersion": "2.0.0",
+                "data": {
+                    "conversationHistory": [],
+                    "completionReceipts": {},
+                    "terminalResults": {},
+                },
+            },
+        )
+
+        state = await app._read_cached_state(client, entity_id)
+
+        assert isinstance(state, SharedAgentStateReader)
 
 
 class TestErrorHandling:
@@ -1042,6 +1153,7 @@ class TestWorkflowRunRoute:
 
         workflow = Mock()
         workflow.name = workflow_name
+        workflow.executors = {}
         app = AgentFunctionApp(enable_health_check=False)
 
         with (
@@ -1089,7 +1201,7 @@ class TestWorkflowRunRoute:
         client.start_new.assert_awaited_once_with(
             "dafx-test_workflow",
             instance_id="custom-run",
-            client_input={"message": "hello"},
+            client_input=wrap_workflow_input({"message": "hello"}),
         )
 
     async def test_wait_for_response_header_waits_with_default_timeout(self) -> None:
@@ -1124,6 +1236,11 @@ class TestWorkflowRunRoute:
             "instance-1",
             timeout_in_milliseconds=_DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS * 1000,
             retry_interval_in_milliseconds=1000,
+        )
+        client.start_new.assert_awaited_once_with(
+            "dafx-test_workflow",
+            instance_id=None,
+            client_input=wrap_workflow_input({"message": "hello"}),
         )
 
     async def test_default_returns_async_workflow_handle(self) -> None:
@@ -2247,16 +2364,21 @@ class TestAgentFunctionAppSubworkflow:
 
         with (
             patch.object(AgentFunctionApp, "_setup_executor_activity"),
-            patch.object(AgentFunctionApp, "_setup_workflow_orchestration") as setup_orch,
-            pytest.raises(ValueError, match="collides"),
+            patch.object(AgentFunctionApp, "_setup_workflow_orchestration"),
         ):
-            AgentFunctionApp(workflows=[first, second])
+            app = AgentFunctionApp(workflow=first)
 
-        # Only 'first' and its child 'shared' committed primitives; the collision aborted
-        # before 'second' (or its colliding child) registered anything.
-        registered = {call.args[0].name for call in setup_orch.call_args_list}
-        assert registered == {"first", "shared"}
-        assert "second" not in registered
+            registered_before = dict(app._registered_orchestrations)
+            workflows_before = app.workflows
+
+            with pytest.raises(ValueError, match="collides"):
+                app.configure_workflow(second)
+
+        assert app._registered_orchestrations == registered_before
+        assert app.workflows == workflows_before
+        assert set(app.workflows) == {"first"}
+        assert set(app._registered_orchestrations) == {"first", "shared"}
+        assert "second" not in app._registered_orchestrations
 
     def test_executor_id_with_reserved_separator_is_rejected(self) -> None:
         """An executor id containing the nested-HITL separator is rejected at registration."""

@@ -2,11 +2,22 @@
 
 """Unit tests for multi-agent support in AgentFunctionApp."""
 
-from unittest.mock import Mock
+from collections.abc import Callable
+from typing import Any, TypeVar
+from unittest.mock import Mock, patch
 
 import pytest
 
 from agent_framework_azurefunctions import AgentFunctionApp
+
+FuncT = TypeVar("FuncT", bound=Callable[..., Any])
+
+
+def _identity_decorator(*args: Any, **kwargs: Any) -> Callable[[FuncT], FuncT]:
+    def decorator(func: FuncT) -> FuncT:
+        return func
+
+    return decorator
 
 
 class TestMultiAgentInit:
@@ -40,17 +51,24 @@ class TestMultiAgentInit:
         assert len(app.agents) == 0
 
     def test_init_with_duplicate_agent_names(self) -> None:
-        """Test initialization with duplicate agent names deduplicates with warning."""
+        """Different agents must not claim the same durable registration name."""
         agent1 = Mock()
         agent1.name = "TestAgent"
         agent2 = Mock()
         agent2.name = "TestAgent"
 
-        app = AgentFunctionApp(agents=[agent1, agent2])
+        with pytest.raises(ValueError, match="different registrations must not share a durable identity"):
+            AgentFunctionApp(agents=[agent1, agent2])
 
-        # Duplicate is skipped, only the first agent is registered
-        assert len(app.agents) == 1
-        assert "TestAgent" in app.agents
+    def test_init_with_case_insensitive_duplicate_agent_names_skips_second_agent(self) -> None:
+        """Case-only differences still collide for two different agents."""
+        agent1 = Mock()
+        agent1.name = "TestAgent"
+        agent2 = Mock()
+        agent2.name = "testagent"
+
+        with pytest.raises(ValueError, match="different registrations must not share a durable identity"):
+            AgentFunctionApp(agents=[agent1, agent2])
 
     def test_init_with_agent_without_name(self) -> None:
         """Test initialization with agent missing name attribute raises error."""
@@ -58,7 +76,7 @@ class TestMultiAgentInit:
         agent1.name = "Agent1"
         agent2 = Mock(spec=[])  # Mock without name attribute
 
-        with pytest.raises(ValueError, match="does not have a 'name' attribute"):
+        with pytest.raises(ValueError, match="Agent must have a name to be registered"):
             AgentFunctionApp(agents=[agent1, agent2])
 
 
@@ -95,7 +113,18 @@ class TestAddAgentMethod:
         assert "Agent2" in app.agents
 
     def test_add_agent_with_duplicate_name_skips(self) -> None:
-        """Test that adding agent with duplicate name logs warning and skips."""
+        """Re-adding the same agent object keeps the original registration."""
+        agent1 = Mock()
+        agent1.name = "MyAgent"
+
+        app = AgentFunctionApp(agents=[agent1])
+
+        app.add_agent(agent1)
+
+        assert len(app.agents) == 1
+
+    def test_add_agent_with_duplicate_name_rejects_different_agent(self) -> None:
+        """A different agent object with the same name is rejected during preflight."""
         agent1 = Mock()
         agent1.name = "MyAgent"
         agent2 = Mock()
@@ -103,11 +132,53 @@ class TestAddAgentMethod:
 
         app = AgentFunctionApp(agents=[agent1])
 
-        # Duplicate is silently skipped with a warning
-        app.add_agent(agent2)
+        with pytest.raises(ValueError, match="different registrations must not share a durable identity"):
+            app.add_agent(agent2)
 
-        # Only the original agent remains
+    def test_add_agent_with_case_insensitive_duplicate_name_skips(self) -> None:
+        """Case-only name collisions are rejected for different agent objects."""
+        agent1 = Mock()
+        agent1.name = "MyAgent"
+        agent2 = Mock()
+        agent2.name = "myagent"
+
+        app = AgentFunctionApp(agents=[agent1])
+
+        with pytest.raises(ValueError, match="different registrations must not share a durable identity"):
+            app.add_agent(agent2)
+
+    def test_add_agent_reuses_same_registration_identity_with_identical_configuration(self) -> None:
+        """Preflight reuse does not raise when a donor registration matches exactly."""
+        agent = Mock()
+        agent.name = "SharedAgent"
+
+        with (
+            patch.object(AgentFunctionApp, "function_name", new=_identity_decorator),
+            patch.object(AgentFunctionApp, "route", new=_identity_decorator),
+            patch.object(AgentFunctionApp, "durable_client_input", new=_identity_decorator),
+            patch.object(AgentFunctionApp, "entity_trigger", new=_identity_decorator),
+        ):
+            app = AgentFunctionApp(enable_health_check=False)
+            app.add_agent(agent, response_delivery_window_seconds=60)
+            app.add_agent(agent, response_delivery_window_seconds=60)
+
         assert len(app.agents) == 1
+
+    def test_add_agent_rejects_same_name_with_different_configuration(self) -> None:
+        """A colliding derived identity with different settings is rejected during preflight."""
+        agent = Mock()
+        agent.name = "SharedAgent"
+
+        with (
+            patch.object(AgentFunctionApp, "function_name", new=_identity_decorator),
+            patch.object(AgentFunctionApp, "route", new=_identity_decorator),
+            patch.object(AgentFunctionApp, "durable_client_input", new=_identity_decorator),
+            patch.object(AgentFunctionApp, "entity_trigger", new=_identity_decorator),
+        ):
+            app = AgentFunctionApp(enable_health_check=False)
+            app.add_agent(agent, response_delivery_window_seconds=60)
+            with pytest.raises(ValueError, match="different settings"):
+                app.add_agent(agent, response_delivery_window_seconds=30)
 
     def test_add_agent_to_app_with_existing_agents(self) -> None:
         """Test adding agent to app that already has agents."""
@@ -129,7 +200,7 @@ class TestAddAgentMethod:
 
         agent = Mock(spec=[])  # Mock without name attribute
 
-        with pytest.raises(ValueError, match="does not have a 'name' attribute"):
+        with pytest.raises(ValueError, match="Agent does not have a 'name' attribute"):
             app.add_agent(agent)
 
 

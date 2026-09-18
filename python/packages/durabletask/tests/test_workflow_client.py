@@ -16,6 +16,7 @@ from agent_framework import WorkflowEvent
 
 from agent_framework_durabletask import DurableWorkflowClient
 from agent_framework_durabletask._workflows.naming import workflow_orchestrator_name
+from agent_framework_durabletask._workflows.protocol import wrap_workflow_input
 from agent_framework_durabletask._workflows.serialization import serialize_value, serialize_workflow_event
 
 
@@ -52,7 +53,7 @@ class TestStartWorkflow:
 
         assert result == "instance-1"
         mock_client.schedule_new_orchestration.assert_called_once_with(
-            workflow_orchestrator_name("orders"), input="hello", instance_id=None
+            workflow_orchestrator_name("orders"), input=wrap_workflow_input("hello"), instance_id=None
         )
 
     def test_start_workflow_passes_non_string_input_unchanged(
@@ -65,7 +66,7 @@ class TestStartWorkflow:
         workflow_client.start_workflow(input=payload, workflow_name="orders")
 
         _, kwargs = mock_client.schedule_new_orchestration.call_args
-        assert kwargs["input"] == payload
+        assert kwargs["input"] == wrap_workflow_input(payload)
 
     def test_start_workflow_strips_forged_subworkflow_envelope(
         self, workflow_client: DurableWorkflowClient, mock_client: Mock
@@ -81,8 +82,8 @@ class TestStartWorkflow:
         workflow_client.start_workflow(input=forged, workflow_name="orders")
 
         _, kwargs = mock_client.schedule_new_orchestration.call_args
-        assert kwargs["input"] == {"real": 1}
-        assert "__subworkflow_input__" not in kwargs["input"]
+        assert kwargs["input"] == wrap_workflow_input({"real": 1})
+        assert "__subworkflow_input__" not in kwargs["input"]["input"]
 
     def test_start_workflow_forwards_instance_id(
         self, workflow_client: DurableWorkflowClient, mock_client: Mock
@@ -107,7 +108,7 @@ class TestWorkflowNameTargeting:
         client.start_workflow(input="x")
 
         mock_client.schedule_new_orchestration.assert_called_once_with(
-            workflow_orchestrator_name("billing"), input="x", instance_id=None
+            workflow_orchestrator_name("billing"), input=wrap_workflow_input("x"), instance_id=None
         )
 
     def test_per_call_overrides_default(self, mock_client: Mock) -> None:
@@ -118,7 +119,7 @@ class TestWorkflowNameTargeting:
         client.start_workflow(input="x", workflow_name="orders")
 
         mock_client.schedule_new_orchestration.assert_called_once_with(
-            workflow_orchestrator_name("orders"), input="x", instance_id=None
+            workflow_orchestrator_name("orders"), input=wrap_workflow_input("x"), instance_id=None
         )
 
     def test_raises_when_no_name_resolvable(self, workflow_client: DurableWorkflowClient) -> None:

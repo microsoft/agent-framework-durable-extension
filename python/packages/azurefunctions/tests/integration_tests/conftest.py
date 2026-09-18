@@ -340,7 +340,9 @@ def _start_function_app(sample_path: Path, port: int) -> subprocess.Popen[Any]:
     Returns the subprocess.Popen object for the running process.
     """
     env = os.environ.copy()
+    env["DURABLE_AGENTS_DEPLOYMENT_MODE"] = "isolated_v2"
     # Use a unique TASKHUB_NAME for each test run to ensure test isolation.
+    # Test-only isolated mode acknowledges the per-run unique hub contract here.
     # This prevents conflicts between parallel or repeated test runs, as Durable Functions
     # use the task hub name to separate orchestration state.
     env["TASKHUB_NAME"] = f"test{uuid.uuid4().hex[:8]}"

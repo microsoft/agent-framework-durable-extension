@@ -6,7 +6,7 @@ Run with: pytest tests/test_entities.py -v
 """
 
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, TypeVar
 from unittest.mock import AsyncMock, Mock
 
@@ -67,6 +67,17 @@ class _InMemoryStateProvider(AgentEntityStateProviderMixin):
 
     def _get_session_id_from_entity(self) -> str:
         return self._session_id
+
+
+def _aware_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _fresh_state(*, session: dict[str, Any] | None = None) -> DurableAgentState:
+    state = DurableAgentState()
+    if session is not None:
+        state.data.session = session
+    return state
 
 
 def _make_entity(agent: Any, callback: Any = None, *, session_id: str = "test-session") -> AgentEntity:
@@ -247,19 +258,21 @@ class TestDurableTaskEntityStateProvider:
     def test_reset_persists_cleared_state(self) -> None:
         mock_agent = Mock()
 
-        existing_state = {
-            "schemaVersion": "1.0.0",
+        existing_state = DurableAgentState.from_dict({
+            "schemaVersion": "2.0.0",
             "data": {
                 "conversationHistory": [
                     {
                         "$type": "request",
                         "correlationId": "corr-existing-1",
-                        "createdAt": "2024-01-01T00:00:00Z",
+                        "createdAt": "2024-01-01T00:00:00+00:00",
                         "messages": [{"role": "user", "contents": [{"$type": "text", "text": "msg1"}]}],
                     }
-                ]
+                ],
+                "terminalResults": {},
+                "completionReceipts": {},
             },
-        }
+        }).to_dict()
 
         entity, ctx = self._make_durabletask_entity_provider(mock_agent, initial_state=existing_state)
 
@@ -267,7 +280,10 @@ class TestDurableTaskEntityStateProvider:
 
         persisted = ctx.get_state(dict, default={})
         assert isinstance(persisted, dict)
+        assert persisted["schemaVersion"] == DurableAgentState.SCHEMA_VERSION
         assert persisted["data"]["conversationHistory"] == []
+        assert persisted["data"]["terminalResults"] == {}
+        assert persisted["data"]["completionReceipts"] == {}
 
 
 class TestAgentEntityRunAgent:
@@ -296,6 +312,11 @@ class TestAgentEntityRunAgent:
         # Verify result
         assert isinstance(result, AgentResponse)
         assert result.text == "Test response"
+        assert (
+            entity.state.data.response_mailbox["corr-entity-1"]["response"]["messages"][0]["contents"][0]["text"]
+            == "Test response"
+        )
+        assert entity.state.data.completed_correlations["corr-entity-1"]["resultState"] == "available"
 
     async def test_run_agent_streaming_callbacks_invoked(self) -> None:
         """Ensure streaming updates trigger callbacks when using run(stream=True)."""
@@ -340,7 +361,12 @@ class TestAgentEntityRunAgent:
         # Validate callback arguments
         stream_calls = callback.stream_mock.await_args_list
         for expected_update, recorded_call in zip(updates, stream_calls, strict=True):
-            assert recorded_call.args[0] is expected_update
+            recorded_update = recorded_call.args[0]
+            assert isinstance(recorded_update, AgentResponseUpdate)
+            assert recorded_update is not expected_update
+            assert [content.text for content in recorded_update.contents] == [
+                content.text for content in expected_update.contents
+            ]
             context = recorded_call.args[1]
             assert context.agent_name == "StreamingAgent"
             assert context.correlation_id == "corr-stream-1"
@@ -380,7 +406,10 @@ class TestAgentEntityRunAgent:
 
         final_call = callback.response_mock.await_args
         assert final_call is not None
-        assert final_call.args[0] is agent_response
+        callback_response = final_call.args[0]
+        assert isinstance(callback_response, AgentResponse)
+        assert callback_response is not agent_response
+        assert callback_response.text == agent_response.text
         final_context = final_call.args[1]
         assert final_context.agent_name == "NonStreamingAgent"
         assert final_context.correlation_id == "corr-final-1"
@@ -410,6 +439,11 @@ class TestAgentEntityRunAgent:
         assistant_msg = assistant_history[0]
         assert _role_value(assistant_msg) == "assistant"
         assert assistant_msg.text == "Agent response"
+        assert (
+            entity.state.data.response_mailbox["corr-entity-2"]["response"]["messages"][0]["contents"][0]["text"]
+            == "Agent response"
+        )
+        assert entity.state.data.completed_correlations["corr-entity-2"]["resultState"] == "available"
 
     async def test_run_agent_increments_message_count(self) -> None:
         """Test that run_agent increments the message count."""
@@ -454,6 +488,17 @@ class TestAgentEntityRunAgent:
         history = entity.state.data.conversation_history
         assert len(history) == 6
         assert entity.state.message_count == 6
+        assert set(entity.state.data.response_mailbox) == {
+            "corr-entity-8a",
+            "corr-entity-8b",
+            "corr-entity-8c",
+        }
+        assert set(entity.state.data.completed_correlations) == {
+            "corr-entity-8a",
+            "corr-entity-8b",
+            "corr-entity-8c",
+        }
+        assert entity.state.data.response_mailbox is not entity.state.data.completed_correlations
 
     async def test_run_filters_reasoning_content_from_replayed_history(self) -> None:
         """Replayed durable history should not include reasoning-only content items."""
@@ -469,11 +514,12 @@ class TestAgentEntityRunAgent:
         mock_agent.run = mock_run
 
         entity = _make_entity(mock_agent)
+        entity.state = _fresh_state()
         entity.state.data = DurableAgentStateData(
             conversation_history=[
                 DurableAgentStateRequest(
                     correlation_id="corr-entity-prev-request",
-                    created_at=datetime.now(),
+                    created_at=_aware_now(),
                     messages=[
                         DurableAgentStateMessage(
                             role="user",
@@ -483,7 +529,7 @@ class TestAgentEntityRunAgent:
                 ),
                 DurableAgentStateResponse(
                     correlation_id="corr-entity-prev-response",
-                    created_at=datetime.now(),
+                    created_at=_aware_now(),
                     messages=[
                         DurableAgentStateMessage(
                             role="assistant",
@@ -494,14 +540,25 @@ class TestAgentEntityRunAgent:
                         )
                     ],
                 ),
-            ]
+            ],
+            response_mailbox={},
+            completed_correlations={},
         )
 
         await entity.run({"message": "What next?", "correlationId": "corr-entity-replay"})
 
         assert captured_messages
         assert all(content.type != "reasoning" for message in captured_messages for content in message.contents)
+        assert all(
+            "Let me think." not in (content.text or "") for message in captured_messages for content in message.contents
+        )
         assert [message.text for message in captured_messages] == ["Hi", "Hello there.", "What next?"]
+        persisted_response = entity.state.data.conversation_history[1].messages[0].contents
+        assert [content.type for content in persisted_response] == ["reasoning", "text"]
+        assert (
+            entity.state.data.response_mailbox["corr-entity-replay"]["response"]["messages"][0]["contents"][0]["text"]
+            == "Response"
+        )
 
 
 class TestAgentEntityReset:
@@ -516,7 +573,7 @@ class TestAgentEntityReset:
         entity.state.data.conversation_history = [
             DurableAgentStateRequest(
                 correlation_id="test-1",
-                created_at=datetime.now(),
+                created_at=_aware_now(),
                 messages=[
                     DurableAgentStateMessage(
                         role="user",
@@ -529,6 +586,8 @@ class TestAgentEntityReset:
         entity.reset()
 
         assert entity.state.data.conversation_history == []
+        assert entity.state.data.response_mailbox == {}
+        assert entity.state.data.completed_correlations == {}
 
     def test_reset_with_extension_data(self) -> None:
         """Test that reset works when entity has extension data."""
@@ -536,11 +595,43 @@ class TestAgentEntityReset:
         entity = _make_entity(mock_agent)
 
         # Set up some initial state with conversation history
-        entity.state.data = DurableAgentStateData(conversation_history=[], extension_data={"some_key": "some_value"})
+        entity.state.data = DurableAgentStateData(
+            conversation_history=[],
+            extension_data={"some_key": "some_value"},
+            response_mailbox={
+                "corr-reset": {
+                    "correlationId": "corr-reset",
+                    "outcome": "succeeded",
+                    "response": {"messages": [{"role": "assistant", "contents": [{"$type": "text", "text": "value"}]}]},
+                    "completedAt": "2024-01-01T00:00:00+00:00",
+                    "resultExpiresAt": "2024-01-01T00:05:00+00:00",
+                }
+            },
+            completed_correlations={
+                "corr-reset": {
+                    "correlationId": "corr-reset",
+                    "outcome": "succeeded",
+                    "resultState": "available",
+                    "completedAt": "2024-01-01T00:00:00+00:00",
+                    "resultExpiresAt": "2024-01-01T00:05:00+00:00",
+                }
+            },
+        )
 
         entity.reset()
 
         assert len(entity.state.data.conversation_history) == 0
+        assert entity.state.data.extension_data == {"some_key": "some_value"}
+        assert entity.state.data.response_mailbox == {}
+        receipt = entity.state.data.completed_correlations["corr-reset"]
+        assert receipt["correlationId"] == "corr-reset"
+        assert receipt["outcome"] == "succeeded"
+        assert receipt["resultState"] == "unavailable"
+        assert receipt["completedAt"] == "2024-01-01T00:00:00+00:00"
+        assert receipt["resultExpiresAt"] == "2024-01-01T00:05:00+00:00"
+        unavailable_at = datetime.fromisoformat(receipt["resultUnavailableAt"])
+        assert unavailable_at.tzinfo is not None
+        assert unavailable_at.utcoffset() is not None
 
     def test_reset_clears_message_count(self) -> None:
         """Test that reset clears the message count."""
@@ -640,6 +731,14 @@ class TestErrorHandling:
         assert len(result.messages) == 1
         content = result.messages[0].contents[0]
         assert isinstance(content, Content)
+        assert entity.state.data.conversation_history[0].messages[0].text == "Test message"
+        assert (
+            entity.state.data.response_mailbox["corr-entity-error-4"]["response"]["messages"][0]["contents"][0][
+                "message"
+            ]
+            == "Error"
+        )
+        assert entity.state.data.completed_correlations["corr-entity-error-4"]["outcome"] == "failed"
 
 
 class TestConversationHistory:
@@ -658,6 +757,8 @@ class TestConversationHistory:
         for entry in entity.state.data.conversation_history:
             timestamp = entry.created_at
             assert timestamp is not None
+            assert timestamp.tzinfo is not None
+            assert timestamp.utcoffset() is not None
             # Verify timestamp is in ISO format
             datetime.fromisoformat(str(timestamp))
 

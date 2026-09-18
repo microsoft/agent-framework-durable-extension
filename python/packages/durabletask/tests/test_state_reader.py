@@ -14,8 +14,8 @@ from unittest.mock import Mock
 import pytest
 from agent_framework import AgentResponse
 
+from agent_framework_durabletask import DurableAgentState, LegacyDurableAgentState
 from agent_framework_durabletask import _state_reader as reader_module
-from agent_framework_durabletask._durable_agent_state import DurableAgentState
 from agent_framework_durabletask._response_utils import is_terminal_agent_response
 from agent_framework_durabletask._shared_state_validation import validate_shared_state
 from agent_framework_durabletask._state_reader import SharedAgentStateReader, read_agent_state
@@ -194,19 +194,21 @@ def test_all_fixtures_validate_but_only_v2_views_promise_lossless_snapshots(fixt
 
 @pytest.mark.parametrize("version", VERSIONS)
 @pytest.mark.parametrize("as_json", [False, True])
-def test_version_dispatch_keeps_mutable_default_legacy(version: str, as_json: bool) -> None:
+def test_version_dispatch_keeps_legacy_reads_separate_from_v2_writer(version: str, as_json: bool) -> None:
     raw = _empty() if version == "2.0.0" else {"schemaVersion": version, "data": {"conversationHistory": []}}
     state = read_agent_state(json.dumps(raw) if as_json else raw)
     assert state.schema_version == version
     assert isinstance(state, SharedAgentStateReader) is (version == "2.0.0")
-    assert isinstance(state, DurableAgentState) is (version != "2.0.0")
-    assert DurableAgentState().schema_version == "1.1.0"
+    assert isinstance(state, LegacyDurableAgentState) is (version != "2.0.0")
+    assert not isinstance(state, DurableAgentState)
+    assert LegacyDurableAgentState().schema_version == "1.1.0"
+    assert DurableAgentState().schema_version == "2.0.0"
 
 
 @pytest.mark.parametrize("raw", [{}, "{}"])
 def test_only_empty_object_deliberately_requests_fresh_state(raw: Any) -> None:
     state = read_agent_state(raw)
-    assert isinstance(state, DurableAgentState)
+    assert isinstance(state, LegacyDurableAgentState)
     assert state.schema_version == "1.1.0"
     assert state.message_count == 0
 
@@ -230,7 +232,7 @@ def test_legacy_loader_still_accepts_existing_nullable_usage_counts(version: str
     # Do not impose v2 usage-count constraints on the existing legacy loader.
     for value in (raw, json.dumps(raw)):
         state = read_agent_state(value)
-        assert isinstance(state, DurableAgentState)
+        assert isinstance(state, LegacyDurableAgentState)
         response = state.try_get_agent_response("legacy")
         assert response is not None and response.text == "legacy result"
 

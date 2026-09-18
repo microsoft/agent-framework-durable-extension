@@ -10,9 +10,17 @@ from . import _constants
 from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentCallbackContext, AgentResponseCallbackProtocol
 from ._client import DurableAIAgentClient
+from ._configuration import (
+    AgentRegistrationSettings,
+    RegistrationIdentity,
+    validate_agent_configuration,
+    validate_response_delivery_window,
+    validate_runtime_deployment,
+)
 from ._constants import (
     DEFAULT_MAX_POLL_RETRIES,
     DEFAULT_POLL_INTERVAL_SECONDS,
+    DELIVERY_WINDOW_SECONDS,
     LEGACY_THREAD_ID_FIELD,
     MIMETYPE_APPLICATION_JSON,
     MIMETYPE_TEXT_PLAIN,
@@ -26,14 +34,23 @@ from ._constants import (
     ContentTypes,
     DurableStateFields,
 )
-from ._durable_agent_state import (
+from ._durable_agent_state import DurableAgentState as LegacyDurableAgentState
+from ._entities import AgentEntity, AgentEntityStateProviderMixin
+from ._executors import DurableAgentExecutor
+from ._history_provider import DurableHistoryProvider
+from ._models import AgentSessionId, DurableAgentSession, RunRequest
+from ._orchestration_context import DurableAIAgentOrchestrationContext
+from ._response_utils import ensure_response_format, load_agent_response, serialize_agent_response
+from ._shared_agent_state import (
     DurableAgentState,
+    DurableAgentStateCompaction,
     DurableAgentStateContent,
     DurableAgentStateData,
     DurableAgentStateDataContent,
     DurableAgentStateEntry,
     DurableAgentStateEntryJsonType,
     DurableAgentStateErrorContent,
+    DurableAgentStateErrorResponse,
     DurableAgentStateFunctionCallContent,
     DurableAgentStateFunctionResultContent,
     DurableAgentStateHostedFileContent,
@@ -44,16 +61,12 @@ from ._durable_agent_state import (
     DurableAgentStateTextContent,
     DurableAgentStateTextReasoningContent,
     DurableAgentStateUnknownContent,
+    DurableAgentStateUnknownEntry,
     DurableAgentStateUriContent,
     DurableAgentStateUsage,
     DurableAgentStateUsageContent,
 )
-from ._entities import AgentEntity, AgentEntityStateProviderMixin
-from ._executors import DurableAgentExecutor
-from ._models import AgentSessionId, DurableAgentSession, RunRequest
-from ._orchestration_context import DurableAIAgentOrchestrationContext
-from ._response_utils import ensure_response_format, load_agent_response, serialize_agent_response
-from ._shim import DurableAIAgent
+from ._shim import DurableAIAgent, build_agent_task
 from ._state_reader import SharedAgentStateReader, read_agent_state
 from ._worker import DurableAIAgentWorker
 from ._workflows.activity import execute_workflow_activity
@@ -69,6 +82,7 @@ from ._workflows.naming import (
     workflow_orchestrator_name,
 )
 from ._workflows.orchestrator import run_workflow_orchestrator
+from ._workflows.protocol import WORKFLOW_ENGINE_VERSION, unwrap_workflow_input, wrap_workflow_input
 from ._workflows.registration import WorkflowRegistrationPlan, collect_hosted_workflows, plan_workflow_registration
 from ._workflows.runner_context import CapturingRunnerContext
 from ._workflows.serialization import deserialize_workflow_output
@@ -114,6 +128,7 @@ def __dir__() -> list[str]:
 __all__ = [
     "DEFAULT_MAX_POLL_RETRIES",
     "DEFAULT_POLL_INTERVAL_SECONDS",
+    "DELIVERY_WINDOW_SECONDS",
     "DURABLE_NAME_PREFIX",
     "LEGACY_THREAD_ID_FIELD",
     "MIMETYPE_APPLICATION_JSON",
@@ -126,9 +141,11 @@ __all__ = [
     "THREAD_ID_HEADER",
     "WAIT_FOR_RESPONSE_FIELD",
     "WAIT_FOR_RESPONSE_HEADER",
+    "WORKFLOW_ENGINE_VERSION",
     "AgentCallbackContext",
     "AgentEntity",
     "AgentEntityStateProviderMixin",
+    "AgentRegistrationSettings",
     "AgentResponseCallbackProtocol",
     "AgentSessionId",
     "ApiResponseFields",
@@ -141,12 +158,14 @@ __all__ = [
     "DurableAgentExecutor",
     "DurableAgentSession",
     "DurableAgentState",
+    "DurableAgentStateCompaction",
     "DurableAgentStateContent",
     "DurableAgentStateData",
     "DurableAgentStateDataContent",
     "DurableAgentStateEntry",
     "DurableAgentStateEntryJsonType",
     "DurableAgentStateErrorContent",
+    "DurableAgentStateErrorResponse",
     "DurableAgentStateFunctionCallContent",
     "DurableAgentStateFunctionResultContent",
     "DurableAgentStateHostedFileContent",
@@ -157,17 +176,22 @@ __all__ = [
     "DurableAgentStateTextContent",
     "DurableAgentStateTextReasoningContent",
     "DurableAgentStateUnknownContent",
+    "DurableAgentStateUnknownEntry",
     "DurableAgentStateUriContent",
     "DurableAgentStateUsage",
     "DurableAgentStateUsageContent",
+    "DurableHistoryProvider",
     "DurableStateFields",
     "DurableTaskWorkflowContext",
     "DurableWorkflowClient",
+    "LegacyDurableAgentState",
+    "RegistrationIdentity",
     "RunRequest",
     "SharedAgentStateReader",
     "WorkflowOrchestrationContext",
     "WorkflowRegistrationPlan",
     "__version__",
+    "build_agent_task",
     "collect_hosted_workflows",
     "deserialize_workflow_output",
     "ensure_response_format",
@@ -179,8 +203,13 @@ __all__ = [
     "run_agent_coroutine",
     "run_workflow_orchestrator",
     "serialize_agent_response",
+    "unwrap_workflow_input",
+    "validate_agent_configuration",
     "validate_executor_id",
+    "validate_response_delivery_window",
+    "validate_runtime_deployment",
     "validate_workflow_name",
     "workflow_name_from_orchestrator",
     "workflow_orchestrator_name",
+    "wrap_workflow_input",
 ]
