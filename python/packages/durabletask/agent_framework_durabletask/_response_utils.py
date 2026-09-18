@@ -273,7 +273,7 @@ def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -
             if type(version) is not int or version != _DELIVERY_VERSION:
                 raise ValueError("Unsupported durable response version")
         response_type = agent_response.get("type")
-        if response_type and response_type != "agent_response":
+        if "type" in agent_response and (not isinstance(response_type, str) or response_type != "agent_response"):
             raise ValueError("Response type does not match agent_response.")
         if (
             agent_response
