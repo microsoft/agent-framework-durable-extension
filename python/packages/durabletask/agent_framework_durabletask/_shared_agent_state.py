@@ -687,13 +687,17 @@ class DurableAgentState:
             delivery_window_seconds=delivery_window_seconds,
             now=now,
         )
+        if correlation_id in self.data.completed_correlations:
+            return
         data = candidate[DurableStateFields.DATA]
         self.data.response_mailbox = deepcopy(data[DurableStateFields.RESPONSE_MAILBOX])
         self.data.completed_correlations = deepcopy(data[DurableStateFields.COMPLETED_CORRELATIONS])
 
     def expire_responses(self, *, now: datetime | None = None) -> None:
         """Remove due payloads while retaining typed history and immutable completion facts."""
-        candidate, _ = stage_expiry(self.to_dict(), now=now)
+        candidate, removed = stage_expiry(self.to_dict(), now=now)
+        if not removed:
+            return
         data = candidate[DurableStateFields.DATA]
         self.data.response_mailbox = deepcopy(data[DurableStateFields.RESPONSE_MAILBOX])
         self.data.completed_correlations = deepcopy(data[DurableStateFields.COMPLETED_CORRELATIONS])

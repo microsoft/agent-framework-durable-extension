@@ -514,9 +514,10 @@ class DurableHistoryProvider(HistoryProvider):
                 continue
             entry, index = position
             stored = entry.messages[index]
-            stored.extension_data = (
-                copy.deepcopy(message.additional_properties) if message.additional_properties else None
-            )
+            if message.additional_properties or stored.extension_data:
+                stored.extension_data = (
+                    copy.deepcopy(message.additional_properties) if message.additional_properties else None
+                )
 
         remaining_ids = {_history_message_id(message) for message in buffer if _history_message_id(message)}
         for message_id in previous_ids - remaining_ids:
