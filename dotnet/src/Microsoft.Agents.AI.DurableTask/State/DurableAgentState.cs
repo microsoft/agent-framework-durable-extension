@@ -39,10 +39,10 @@ internal sealed class DurableAgentState
     [JsonPropertyName("schemaVersion")]
     public string SchemaVersion { get; init; } = CurrentSchemaVersion;
 
-    // Not persisted: only mailbox-aware hydration or an explicitly enabled entity operation
-    // authorizes the production writer. Merely constructing a schema-2 DTO does not enable rollout.
+    // Not persisted: only schema-2-aware hydration or an explicitly enabled entity operation
+    // authorizes persistent request outcomes. Merely constructing a schema-2 DTO does not enable rollout.
     [JsonIgnore]
-    internal bool MailboxWritesAuthorized { get; set; }
+    internal bool PersistentRequestOutcomesAuthorized { get; set; }
 
     /// <summary>
     /// Gets application-defined root extension metadata from the schema's <c>extensionData</c> property.
@@ -69,7 +69,7 @@ internal sealed class DurableAgentState
         return new DurableAgentState
         {
             SchemaVersion = SelectSchemaVersionForWrite(clone.SchemaVersion),
-            MailboxWritesAuthorized = this.MailboxWritesAuthorized,
+            PersistentRequestOutcomesAuthorized = this.PersistentRequestOutcomesAuthorized,
             Data = clone.Data,
             ExtensionData = clone.ExtensionData,
             UnknownProperties = clone.UnknownProperties,

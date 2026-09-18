@@ -14,6 +14,13 @@ internal static class DurableAgentStateOutcomeResolver
     private const string LegacyErrorMessage =
         "The durable agent request completed with a recorded terminal error.";
 
+    /// <summary>
+    /// Classifies the committed outcome for a correlation ID.
+    /// </summary>
+    /// <remarks>
+    /// A <see cref="DurableAgentRunOutcomeKind.Pending"/> result means that no committed
+    /// completion was found; it is the normal result for a request's first execution.
+    /// </remarks>
     public static DurableAgentRunOutcome Resolve(
         DurableAgentState state,
         string correlationId,
@@ -62,7 +69,7 @@ internal static class DurableAgentStateOutcomeResolver
         DurableAgentState clone = state.Clone();
         if (version.Major == DurableAgentState.RevisedSchemaMajorVersion)
         {
-            clone.MailboxWritesAuthorized = true;
+            clone.PersistentRequestOutcomesAuthorized = true;
             return clone;
         }
 
@@ -83,8 +90,9 @@ internal static class DurableAgentStateOutcomeResolver
             try
             {
                 DurableAgentStateContract.ValidateIdentifier(
-                    response.CorrelationId,
-                    "conversationHistory.correlationId");
+                    value: response.CorrelationId,
+                    propertyPath:
+                        $"{nameof(DurableAgentStateData.ConversationHistory)}.{nameof(DurableAgentStateEntry.CorrelationId)}");
             }
             catch (InvalidOperationException exception)
             {
@@ -113,7 +121,7 @@ internal static class DurableAgentStateOutcomeResolver
         return new DurableAgentState
         {
             SchemaVersion = DurableAgentState.RevisedSchemaVersion,
-            MailboxWritesAuthorized = true,
+            PersistentRequestOutcomesAuthorized = true,
             Data = new DurableAgentStateData
             {
                 ConversationHistory = clone.Data.ConversationHistory,

@@ -121,7 +121,7 @@ public sealed class DurableAgentStateMailboxTests
                 DurableAgentState state = new()
                 {
                     SchemaVersion = schemaVersion,
-                    MailboxWritesAuthorized = revised,
+                    PersistentRequestOutcomesAuthorized = revised,
                     Data = new()
                     {
                         ConversationHistory =

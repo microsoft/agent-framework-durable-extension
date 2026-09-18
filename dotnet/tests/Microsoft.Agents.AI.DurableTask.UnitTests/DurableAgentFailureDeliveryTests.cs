@@ -284,7 +284,7 @@ public sealed class DurableAgentFailureDeliveryTests
             this._serializedState = JsonSerializer.Serialize(this._state, DurableAgentStateJsonContext.Default.DurableAgentState);
             this._entity = AgentEntityDeliveryTests.CreateHarness(
                 this._agent, this._state, registerWithFactory: true, onFactoryInvoked: () => this._factoryCalls++,
-                enableMailboxWrites: false, authorizeLegacyMigration: false);
+                enablePersistentRequestOutcomes: false, authorizeLegacyMigration: false);
             try
             {
                 AgentResponse response = await this._entity.RunAsync(request);
@@ -318,7 +318,7 @@ public sealed class DurableAgentFailureDeliveryTests
         return new DurableAgentState
         {
             SchemaVersion = DurableAgentState.RevisedSchemaVersion,
-            MailboxWritesAuthorized = true,
+            PersistentRequestOutcomesAuthorized = true,
             Data = new DurableAgentStateData
             {
                 // Contradictory transcript text cannot override schema-2 completion evidence.

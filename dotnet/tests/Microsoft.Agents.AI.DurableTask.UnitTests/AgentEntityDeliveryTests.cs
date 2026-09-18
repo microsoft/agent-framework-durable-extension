@@ -17,10 +17,10 @@ public sealed class AgentEntityDeliveryTests
     public async Task DefaultRolloutLeavesProductionWritesLegacyAsync()
     {
         DurableAgentsOptions defaults = new();
-        Assert.False(defaults.EnableMailboxWrites);
+        Assert.False(defaults.EnablePersistentRequestOutcomes);
         Assert.Null(defaults.ResultRetentionPeriod);
         EntityHarness harness = CreateHarness(
-            new RecordingAgent("agent"), new DurableAgentState(), enableMailboxWrites: false);
+            new RecordingAgent("agent"), new DurableAgentState(), enablePersistentRequestOutcomes: false);
 
         await harness.RunAsync(new RunRequest("request") { CorrelationId = "new" });
 
@@ -50,7 +50,7 @@ public sealed class AgentEntityDeliveryTests
             ResponseUpdate = new AgentResponseUpdate(
                 inResponse ? new ChatRole("developer") : ChatRole.Assistant, "response"),
         };
-        EntityHarness harness = CreateHarness(agent, state, enableMailboxWrites: false,
+        EntityHarness harness = CreateHarness(agent, state, enablePersistentRequestOutcomes: false,
             registerWithFactory: true, onFactoryInvoked: () => factoryCalls++);
         RunRequest request = new([
             new ChatMessage(inResponse ? ChatRole.User : new ChatRole("developer"), "request"),
@@ -69,7 +69,7 @@ public sealed class AgentEntityDeliveryTests
         Assert.Equal(DurableAgentRunOutcomeKind.Pending,
             DurableAgentStateOutcomeResolver.Resolve(state, "new", DateTimeOffset.UtcNow).Kind);
 
-        EntityHarness retry = CreateHarness(new RecordingAgent("agent"), state, enableMailboxWrites: false);
+        EntityHarness retry = CreateHarness(new RecordingAgent("agent"), state, enablePersistentRequestOutcomes: false);
         Assert.Equal("response", (await retry.RunAsync(new RunRequest("corrected") { CorrelationId = "new" })).Text);
         DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(retry.PersistedState));
         Assert.Equal(DurableAgentState.CurrentSchemaVersion, committed.SchemaVersion);
@@ -99,7 +99,7 @@ public sealed class AgentEntityDeliveryTests
             ResponseUpdate = new AgentResponseUpdate(ChatRole.Assistant, [call]),
         };
         EntityHarness harness = CreateHarness(agent,
-            new DurableAgentState { SchemaVersion = schemaVersion }, enableMailboxWrites: false);
+            new DurableAgentState { SchemaVersion = schemaVersion }, enablePersistentRequestOutcomes: false);
 
         await harness.RunAsync(new RunRequest([new ChatMessage(ChatRole.User, [call])]) { CorrelationId = "new" });
 
@@ -158,7 +158,7 @@ public sealed class AgentEntityDeliveryTests
 
         committed.Data.ConversationHistory.Clear();
         EntityHarness duplicate = CreateHarness(new RecordingAgent("agent"), Reload(committed),
-            enableMailboxWrites: false, registerWithFactory: true,
+            enablePersistentRequestOutcomes: false, registerWithFactory: true,
             onFactoryInvoked: () => throw new InvalidOperationException("duplicate must bypass factory"));
         AgentResponse retained = await duplicate.RunAsync(new RunRequest([]) { CorrelationId = "new" });
         Assert.True(JsonElement.DeepEquals(originalResult, Assert.IsType<JsonElement>(retained.GetDurableResult())));
@@ -179,7 +179,7 @@ public sealed class AgentEntityDeliveryTests
         Assert.Equal(2, committed.Data.CompletionReceipts!.Count);
         committed.Data.ConversationHistory.Clear();
         EntityHarness duplicate = CreateHarness(new RecordingAgent("agent"), Reload(committed),
-            enableMailboxWrites: false, registerWithFactory: true,
+            enablePersistentRequestOutcomes: false, registerWithFactory: true,
             onFactoryInvoked: () => throw new InvalidOperationException("duplicate must bypass factory"));
 
         AgentResponse response = await duplicate.RunAsync(new RunRequest([]) { CorrelationId = "corr-lossless" });
@@ -205,7 +205,7 @@ public sealed class AgentEntityDeliveryTests
         DurableAgentStateMessage message = JsonSerializer.Deserialize(
             MessageJson, DurableAgentStateJsonContext.Default.DurableAgentStateMessage)!;
         DurableAgentState state = CreateRevisedState("old", "retained");
-        state.MailboxWritesAuthorized = true;
+        state.PersistentRequestOutcomesAuthorized = true;
         state.Data.ConversationHistory.Add(requestHistory
             ? new DurableAgentStateRequest { CorrelationId = "old", Messages = [message] }
             : new DurableAgentStateResponse { CorrelationId = "old", Messages = [message] });
@@ -257,13 +257,17 @@ public sealed class AgentEntityDeliveryTests
         Assert.Equal("https://example.test/media", uri.Uri.ToString());
     }
 
-    [Fact]
-    public async Task NewMissingStateGenerationCanInitializeMailboxOnlyUnderInternalGateAsync()
+    [Theory]
+    [InlineData(nameof(AgentEntity.Run))]
+    [InlineData("run")]
+    [InlineData(nameof(AgentEntity.RunAgentAsync))]
+    [InlineData("runagentasync")]
+    public async Task NewMissingStateGenerationCanInitializeMailboxOnlyUnderInternalGateAsync(string operationName)
     {
         EntityHarness harness = CreateHarness(new RecordingAgent("agent"), state: null,
             authorizeLegacyMigration: false);
 
-        await harness.RunAsync(new RunRequest("request") { CorrelationId = "new" });
+        await harness.RunAsync(new RunRequest("request") { CorrelationId = "new" }, operationName);
 
         DurableAgentState state = Assert.IsType<DurableAgentState>(harness.PersistedState);
         Assert.Equal(DurableAgentState.RevisedSchemaVersion, state.SchemaVersion);
@@ -307,7 +311,7 @@ public sealed class AgentEntityDeliveryTests
     public void MailboxActivationAndDeletionHaveNoPublicOptInOrImplicitTtl()
     {
         DurableAgentsOptions options = new();
-        Assert.Null(typeof(DurableAgentsOptions).GetProperty("EnableMailboxWrites"));
+        Assert.Null(typeof(DurableAgentsOptions).GetProperty("EnablePersistentRequestOutcomes"));
         Assert.Null(typeof(DurableAgentsOptions).GetProperty("EnableMailboxEntityDeletion"));
         Assert.Equal(TimeSpan.FromDays(14), options.GetTimeToLive("agent"));
         Assert.Null(options.GetTimeToLive("agent", revisedState: true));
@@ -322,7 +326,7 @@ public sealed class AgentEntityDeliveryTests
     {
         RecordingAgent agent = new("agent");
         DurableAgentState state = CreateRevisedState("old", "retained");
-        EntityHarness harness = CreateHarness(agent, state, enableMailboxWrites: false);
+        EntityHarness harness = CreateHarness(agent, state, enablePersistentRequestOutcomes: false);
 
         Assert.Equal("retained", (await harness.RunAsync(new RunRequest([]) { CorrelationId = "old" })).Text);
         await Assert.ThrowsAsync<InvalidOperationException>(
@@ -583,7 +587,7 @@ public sealed class AgentEntityDeliveryTests
     public async Task PythonShapedFailedUnavailableReceiptBypassesFactoryWithRolloutOffAsync()
     {
         DurableAgentState state = ReadFixture("shared-durable-agent-state-2.0.json");
-        EntityHarness harness = CreateHarness(new RecordingAgent("agent"), state, enableMailboxWrites: false,
+        EntityHarness harness = CreateHarness(new RecordingAgent("agent"), state, enablePersistentRequestOutcomes: false,
             registerWithFactory: true, onFactoryInvoked: () => throw new InvalidOperationException("factory must not run"));
 
         DurableAgentResultUnavailableException exception = await Assert.ThrowsAsync<DurableAgentResultUnavailableException>(
@@ -1002,7 +1006,7 @@ public sealed class AgentEntityDeliveryTests
         DurableAgentState? state,
         bool registerWithFactory = false,
         Action? onFactoryInvoked = null,
-        bool enableMailboxWrites = true,
+        bool enablePersistentRequestOutcomes = true,
         TimeSpan? resultRetentionPeriod = null,
         TimeProvider? timeProvider = null,
         Action<object?>? onCommit = null,
@@ -1016,7 +1020,7 @@ public sealed class AgentEntityDeliveryTests
         DurableAgentsOptions options = new()
         {
             DefaultTimeToLive = null,
-            EnableMailboxWrites = enableMailboxWrites,
+            EnablePersistentRequestOutcomes = enablePersistentRequestOutcomes,
             ResultRetentionPeriod = resultRetentionPeriod,
             AuthorizeLegacyMigration = authorizeLegacyMigration
                 ? candidate => ReferenceEquals(candidate, state)
@@ -1092,9 +1096,11 @@ public sealed class AgentEntityDeliveryTests
 
         public bool StateWasPersisted => this.PersistedState is not null;
 
-        public async Task<AgentResponse> RunAsync(RunRequest request)
+        public async Task<AgentResponse> RunAsync(
+            RunRequest request,
+            string operationName = nameof(AgentEntity.Run))
         {
-            operation.SetupGet(value => value.Name).Returns(nameof(AgentEntity.Run));
+            operation.SetupGet(value => value.Name).Returns(operationName);
             operation.SetupGet(value => value.HasInput).Returns(true);
             operation.Setup(value => value.GetInput(typeof(RunRequest))).Returns(request);
             object? result = await ((ITaskEntity)entity).RunAsync(operation.Object);

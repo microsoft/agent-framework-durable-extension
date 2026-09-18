@@ -150,7 +150,7 @@ public sealed class ResultExpiryAtomicityTests(ITestOutputHelper output)
                 services.AddSingleton<TimeProvider>(clock);
                 services.ConfigureDurableAgents(options =>
                 {
-                    options.EnableMailboxWrites = true;
+                    options.EnablePersistentRequestOutcomes = true;
                     options.DefaultTimeToLive = null;
                     options.ResultRetentionPeriod = TimeSpan.FromSeconds(1);
                     options.AddAIAgent(agent);
