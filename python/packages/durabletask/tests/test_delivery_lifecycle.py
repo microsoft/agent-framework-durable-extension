@@ -553,6 +553,59 @@ def test_lookup_uses_only_exact_mailbox_identity_and_detaches_consumer_metadata(
     assert _json(serialize_terminal_response(again)) == _json(_result(raw)["response"])
 
 
+@pytest.mark.parametrize("count", [1, 100])
+@pytest.mark.parametrize("lookup", ["live", "missing", "expired"])
+def test_validated_reader_does_not_repeat_full_snapshot_validation(
+    count: int, lookup: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw = _root()
+    if lookup != "expired":
+        _deadline(raw, ABSENT)
+    for index in range(count):
+        key = f"other-{index}"
+        raw["data"]["completionReceipts"][key] = {
+            "correlationId": key,
+            "outcome": "succeeded",
+            "completedAt": COMPLETED,
+            "resultState": "unavailable",
+            "resultUnavailableAt": NOW.isoformat(),
+        }
+    source_before = _json(raw)
+    validate = Mock(wraps=delivery.validate_delivery_state)
+    monkeypatch.setattr(delivery, "validate_delivery_state", validate)
+    monkeypatch.setattr(reader, "validate_delivery_state", validate)
+    view = reader.SharedAgentStateReader(raw)
+    validate.assert_called_once_with(raw)
+    # Input and exported snapshots are not the reader's validated private state.
+    raw["data"]["completionReceipts"].clear()
+    view.to_dict()["data"]["terminalResults"].clear()
+    for _ in range(3):
+        response = view.try_get_agent_response("missing" if lookup == "missing" else "c", now=NOW)
+        if lookup == "missing":
+            assert response is None
+        elif lookup == "expired":
+            _expired(response)
+        else:
+            assert response is not None and response.text == "retained answer"
+    assert validate.call_count == 1
+    assert _json(view.to_dict()) == source_before
+
+
+def test_raw_lookup_revalidates_mutable_input_on_every_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw = _root()
+    _deadline(raw, ABSENT)
+    validate = Mock(wraps=delivery.validate_delivery_state)
+    monkeypatch.setattr(delivery, "validate_delivery_state", validate)
+    for _ in range(2):
+        result = delivery.lookup_response(raw, "c", now=NOW)
+        assert result is not None and result.text == "retained answer"
+    assert validate.call_count == 2
+    raw["data"]["completionReceipts"]["c"]["outcome"] = "failed"
+    with pytest.raises(ValueError):
+        delivery.lookup_response(raw, "missing", now=NOW)
+    assert validate.call_count == 3
+
+
 def test_new_response_serialization_failure_leaves_all_existing_json_untouched() -> None:
     raw = _root()
     before = _json(raw)

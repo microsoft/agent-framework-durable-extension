@@ -232,8 +232,11 @@ def _lookup_response(
     clock: Callable[[], datetime],
     load_response: Callable[[dict[str, Any]], AgentResponse],
 ) -> AgentResponse | None:
-    """Share lookup logic while retaining the reader's lazy clock and codec boundaries."""
-    validate_delivery_state(state)
+    """Look up an already validated, privately owned snapshot.
+
+    Raw callers must enter through lookup_response, which validates every call.
+    The detached reader validates once at construction and never mutates its copy.
+    """
     validate_identifier(correlation_id, "correlation_id")
     data = state["data"]
     receipt = data["completionReceipts"].get(correlation_id)
@@ -271,6 +274,7 @@ def lookup_response(state: dict[str, Any], correlation_id: str, *, now: datetime
     returns an already-completed response carrying the retained outcome. No
     transcript fallback or response-profile projection occurs for those cases.
     """
+    validate_delivery_state(state)
     return _lookup_response(
         state,
         correlation_id,
