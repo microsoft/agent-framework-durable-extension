@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -188,10 +188,24 @@ def test_ensure_durable_history_is_idempotent_without_mutating_the_original_agen
     assert any(getattr(p, "__wrapped__", None) is compaction for p in prepared.context_providers)
 
 
-async def test_history_after_run_preserves_raw_response_timestamp_and_allocates_unique_internal_ids() -> None:
+@pytest.mark.parametrize(
+    "created_at",
+    [
+        "2026-09-18T01:02:03.123456789+05:30",
+        datetime(2026, 1, 2, 3, 4, 5),
+        datetime.fromisoformat("2026-01-02T03:04:05.123456+05:30"),
+    ],
+)
+async def test_history_after_run_preserves_raw_response_timestamp_and_allocates_unique_internal_ids(
+    created_at: Any,
+) -> None:
     provider = _CanonicalStateProvider()
     history = DurableHistoryProvider(store_inputs=False, skip_excluded=False)
-    created_at = "2026-09-18T01:02:03.123456789+05:30"
+    expected = created_at
+    if isinstance(created_at, datetime):
+        expected = (
+            created_at.replace(tzinfo=timezone.utc) if created_at.utcoffset() is None else created_at
+        ).isoformat()
     response = AgentResponse(
         created_at=created_at,
         messages=[
@@ -209,12 +223,12 @@ async def test_history_after_run_preserves_raw_response_timestamp_and_allocates_
     assert len(provider.state.data.conversation_history) == 1
     stored = provider.state.data.conversation_history[0]
     assert isinstance(stored, DurableAgentStateResponse)
-    assert stored.to_dict()["createdAt"] == created_at
+    assert stored.to_dict()["createdAt"] == expected
     rows = [message.to_dict() for message in stored.messages]
     assert [row.get("messageId") for row in rows] == ["duplicate", None, "duplicate"]
     assert len({row.get("pythonHistoryId", row.get("messageId")) for row in rows}) == 3
     restored = DurableAgentStateResponse.to_run_response(stored)
-    assert restored.created_at == created_at
+    assert restored.created_at == expected
 
 
 @pytest.mark.parametrize("created_at", [None, "not-a-timestamp"], ids=["missing", "invalid"])
