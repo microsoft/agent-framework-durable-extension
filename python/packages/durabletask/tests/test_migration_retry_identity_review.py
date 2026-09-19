@@ -8,11 +8,11 @@ import json
 from collections.abc import Callable
 from copy import deepcopy
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from _execution_test_support import JsonStateProvider, RecordingChatClient
-from agent_framework import Agent, Message
+from agent_framework import Agent, AgentResponse, Message
 from test_migration_host_boundaries import (
     SOURCE_SESSION_ID,
     _completion_journal,
@@ -30,6 +30,7 @@ from agent_framework_durabletask import AgentEntity, state_snapshot_digest
 _Host = tuple[AgentEntity, JsonStateProvider, RecordingChatClient, _ObservedExternalHistory]
 _Retry = tuple[AgentEntity, JsonStateProvider, RecordingChatClient, _ObservedExternalHistory, dict[str, Any]]
 _BINDING_ERROR = "Committed migration binding does not match the retry request"
+_SESSION_BINDING_ERROR = "Committed migration session binding is invalid"
 
 
 def _host(raw: dict[str, Any] | None = None) -> _Host:
@@ -131,6 +132,21 @@ def test_matching_digest_rejects_changed_committed_identity(
     retry_host: Callable[..., _Retry], field: str, replacement: str
 ) -> None:
     retry = retry_host(mutate=lambda binding: binding.update({field: replacement}))
+    # The stored session cross-check now rejects a changed source before retry admission.
+    _assert_retry_rejected(retry, _SESSION_BINDING_ERROR if field == "sourceSessionId" else _BINDING_ERROR)
+
+
+def test_consistently_changed_source_still_rejects_original_retry(retry_host: Callable[..., _Retry]) -> None:
+    replacement = "another-provider:source-session"
+    retry = retry_host(mutate=lambda binding: binding.update({"sourceSessionId": replacement}))
+    _, provider, _, _, _ = retry
+    if provider._state_cache is None:
+        provider.raw["data"]["session"]["session_id"] = replacement
+    else:
+        assert provider.state.data.session is not None
+        provider.state.data.session["session_id"] = replacement
+
+    # Agreement between stored identities does not establish agreement with the original request.
     _assert_retry_rejected(retry, _BINDING_ERROR)
 
 
@@ -192,7 +208,7 @@ def test_registered_backend_migrate_rejects_changed_source_binding_without_write
     write = Mock(wraps=entity._set_state_dict)
     monkeypatch.setattr(entity, "_set_state_dict", write)
 
-    with pytest.raises(ValueError, match=_BINDING_ERROR):
+    with pytest.raises(ValueError, match=_SESSION_BINDING_ERROR):
         entity.migrate(request)
 
     write.assert_not_called()
@@ -203,6 +219,137 @@ def test_registered_backend_migrate_rejects_changed_source_binding_without_write
     assert entity.state.data.unknown_fields["migration"]["requestDigest"] == state_snapshot_digest(request)
     assert client.received_messages == []
     assert request == request_before
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+@pytest.mark.parametrize(
+    "operation", ["run", "run-no-context", "create-session", "reset", "expire_responses", "migrate"]
+)
+@pytest.mark.parametrize(
+    "change",
+    ["metadata-source", "other-id", "null-id", "empty-id", "blank-id", "number-id", "missing-id", "empty-session"],
+)
+async def test_stored_session_binding_rejects_before_operation_without_mutation(
+    cold: bool, operation: str, change: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entity, provider, client, external = _host()
+    request = _migration_request(_legacy_source(), provider.core_session_id)
+    assert entity.migrate(request)["status"] == "migrated"
+    raw = deepcopy(provider.raw)
+    if change == "metadata-source":
+        raw["data"]["migration"]["sourceSessionId"] = "another-provider:source-session"
+    elif change == "empty-session":
+        raw["data"]["session"] = {}
+    elif change == "missing-id":
+        # Even nonempty opaque session state cannot substitute for its identity.
+        raw["data"]["session"] = {"state": {"external": {"key": "original"}}}
+    else:
+        raw["data"]["session"]["session_id"] = {
+            "other-id": "another-provider:source-session",
+            "null-id": None,
+            "empty-id": "",
+            "blank-id": " \t\n",
+            "number-id": 7,
+        }[change]
+    if cold:
+        entity, provider, client, external = _host(raw)
+        assert provider._state_cache is None
+    else:
+        provider.state.data.session = deepcopy(raw["data"]["session"])
+        provider.state.data.unknown_fields["migration"] = deepcopy(raw["data"]["migration"])
+    provider.attempted_writes = provider.successful_writes = 0
+    backing_before = deepcopy(provider.raw)
+    cache_before = provider._state_cache
+    snapshot_before = deepcopy(provider._persisted_state_snapshot)
+    request_before = deepcopy(request)
+    create_session = Mock(wraps=entity.agent.create_session)
+    monkeypatch.setattr(entity.agent, "create_session", create_session)
+    no_context = Mock(spec=["run"])
+    no_context.run = AsyncMock(return_value=AgentResponse(messages=[Message("assistant", ["unexpected"])]))
+    if operation == "run-no-context":
+        entity = AgentEntity(no_context, state_provider=provider)
+        assert not entity._has_context_pipeline()
+
+    with pytest.raises(ValueError, match=_SESSION_BINDING_ERROR):
+        if operation in ("run", "run-no-context"):
+            await entity.run({"message": "follow-up", "correlationId": "invalid-session"})
+        elif operation == "create-session":
+            entity._create_session()
+        elif operation == "migrate":
+            entity.migrate(request)
+        else:
+            getattr(entity, operation)()
+
+    assert provider.raw == backing_before
+    assert provider.state.to_dict() == raw
+    if cache_before is not None:
+        assert provider.state is cache_before
+        assert provider._persisted_state_snapshot == snapshot_before
+    else:
+        assert provider._persisted_state_snapshot == backing_before
+    assert provider.attempted_writes == provider.successful_writes == 0
+    assert external.calls == client.received_messages == []
+    create_session.assert_not_called()
+    no_context.run.assert_not_called()
+    assert request == request_before
+
+
+@pytest.mark.parametrize("stored", [[], "session", 7, False])
+def test_nonobject_warm_migrated_session_is_rejected_without_repair(stored: Any) -> None:
+    entity, provider, client, external = _host()
+    request = _migration_request(_legacy_source(), provider.core_session_id)
+    entity.migrate(request)
+    committed = deepcopy(provider.raw)
+    warm = provider.state
+    warm.data.session = stored
+
+    with pytest.raises(ValueError, match=_SESSION_BINDING_ERROR):
+        entity._migration_session_id()
+
+    assert provider.state is warm
+    assert warm.data.session is stored
+    assert warm.data.unknown_fields["migration"] == committed["data"]["migration"]
+    assert provider.raw == committed
+    assert provider.attempted_writes == provider.successful_writes == 1
+    assert external.calls == client.received_messages == []
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+async def test_reset_clears_local_session_but_preserves_migration_identity(cold: bool) -> None:
+    # Reset with durable local history is supported. External clears are provider-owned.
+    entity, provider, client = _json_provider_entity()
+    request = _migration_request(_legacy_source(), provider.core_session_id)
+    assert entity.migrate(request)["status"] == "migrated"
+    metadata = deepcopy(provider.raw["data"]["migration"])
+    entity.reset()
+    assert provider.state.data.session is None
+    assert "session" not in provider.raw["data"]
+    assert provider.raw["data"]["migration"] == metadata
+    assert client.received_messages == []
+    if cold:
+        entity, provider, client = _json_provider_entity(json.loads(json.dumps(provider.raw, allow_nan=False)))
+    reset_state = deepcopy(provider.raw)
+    writes = (provider.attempted_writes, provider.successful_writes)
+    assert entity.expire_responses() == 0
+    assert entity.migrate(request)["status"] == "migrated"
+    assert entity._create_session().session_id == SOURCE_SESSION_ID
+    assert provider.state.data.session is None
+    assert provider.raw == reset_state
+    assert (provider.attempted_writes, provider.successful_writes) == writes
+
+    response = await entity.run({"message": "after reset", "correlationId": "after-reset"})
+
+    assert response.text == "reply-1"
+    assert len(client.received_messages) == 1
+    assert provider.raw["data"]["session"]["session_id"] == SOURCE_SESSION_ID
+    assert provider.raw["data"]["migration"] == metadata
+    # A later cold external-history run must still use the original source key.
+    entity, provider, client, external = _host(json.loads(json.dumps(provider.raw, allow_nan=False)))
+    response = await entity.run({"message": "continued", "correlationId": "after-reset-external"})
+    assert response.text == "reply-1"
+    assert external.calls == [("load", SOURCE_SESSION_ID), ("save", SOURCE_SESSION_ID)]
+    assert provider.raw["data"]["session"]["session_id"] == SOURCE_SESSION_ID
+    assert provider.raw["data"]["migration"] == metadata
 
 
 @pytest.mark.parametrize("field", ["source", "ownershipTransferId", "deliveryEvidence", "completionEvidence"])
