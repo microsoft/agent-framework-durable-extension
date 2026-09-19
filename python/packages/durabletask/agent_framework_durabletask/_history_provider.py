@@ -749,7 +749,7 @@ def service_stores_history(agent: Any, options: Mapping[str, Any] | None = None)
 
 
 def validate_history_providers(agent: SupportsAgentRun) -> None:
-    """Reject competing primaries and shared state namespaces, allowing distinct store-only sinks."""
+    """Reject competing canonical adapters after preparation, allowing ordinary store-only sinks."""
     providers = getattr(agent, "context_providers", None)
     if not isinstance(providers, (list, tuple)):
         return
@@ -760,6 +760,17 @@ def validate_history_providers(agent: SupportsAgentRun) -> None:
     ]
     if len(primaries) > 1:
         raise ValueError("A durable agent supports only one load-enabled primary history provider.")
+    durable_count = sum(isinstance(provider, DurableHistoryProvider) for provider in cast("Sequence[Any]", providers))
+    if not primaries or type(primaries[0]) is InMemoryHistoryProvider:
+        durable_count += 1  # Preparation injects or replaces the primary with a durable adapter.
+    if durable_count > 1:
+        # source_id isolates session namespaces, not the canonical transcript or
+        # binding. Even zero-store adapters can repair IDs and flush annotations.
+        raise ValueError(
+            "A durable agent supports only one DurableHistoryProvider, including injected or replaced history. "
+            "Multiple durable adapters are unsupported even with loading or all store flags disabled. "
+            "Use an ordinary store-only HistoryProvider with a distinct source_id for audits."
+        )
     sources: set[str] = set()
     for provider in cast("Sequence[Any]", providers):
         source_id = provider.source_id
@@ -1042,7 +1053,8 @@ def ensure_durable_history(agent: SupportsAgentRun) -> SupportsAgentRun:
     default history source. Place it before a matching before-compaction provider so
     Core's forward hooks can load prior context first. Otherwise append it, retaining
     the existing reverse after-hook cadence. Only exact built-in
-    :class:`InMemoryHistoryProvider` instances are replaced. Other primaries, including
+    :class:`InMemoryHistoryProvider` instances are replaced, in their original position.
+    Explicit provider order is preserved for both before and after hooks. Other primaries, including
     in-memory subclasses, keep their original hooks and state without an additional durable
     provider. Service ownership is resolved per run.
     """
@@ -1085,20 +1097,6 @@ def ensure_durable_history(agent: SupportsAgentRun) -> SupportsAgentRun:
         if hasattr(existing, "after_run_once_per_turn"):
             replacement.after_run_once_per_turn = existing.after_run_once_per_turn
         updated = [replacement if provider is existing else provider for provider in provider_list]
-        original_index = updated.index(replacement)
-        insertion = next(
-            (
-                index
-                for index, provider in enumerate(updated[:original_index])
-                if isinstance(provider, CompactionProvider)
-                and provider.history_source_id == replacement.source_id
-                and provider.before_strategy is not None
-            ),
-            original_index,
-        )
-        if insertion != original_index:
-            updated.pop(original_index)
-            updated.insert(insertion, replacement)
     else:
         return agent
 

@@ -4,15 +4,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
+from inspect import getattr_static, isawaitable
+from types import FunctionType, MemberDescriptorType, MethodType
 from typing import Any, cast
 
 from agent_framework import (
+    BaseChatClient,
     ChatContext,
     ChatMiddleware,
     ChatResponse,
+    ChatResponseUpdate,
     FunctionInvocationContext,
     FunctionMiddleware,
     Message,
@@ -26,6 +31,7 @@ class InvocationProgress:
 
     stream_started: bool = False
     function_started: bool = False
+    service_completed: bool = False
 
 
 class DurableToolGuard(FunctionMiddleware):
@@ -49,7 +55,11 @@ class DurableToolGuard(FunctionMiddleware):
 
 
 class DurableServiceAcceptance(ChatMiddleware):
-    """Observe a completed service response without treating dispatch as acceptance."""
+    """Observe middleware inputs for direct callers, not exact post-compaction inputs.
+
+    Kept for compatibility. Production acceptance uses ``DurableServiceClient``
+    because even the innermost chat middleware runs before BaseChatClient compaction.
+    """
 
     def __init__(self, accept: Callable[[Sequence[Message]], None]) -> None:
         self._accept = accept
@@ -71,24 +81,171 @@ class DurableServiceAcceptance(ChatMiddleware):
 
 
 class DurableServiceClient:
-    """Borrow a client and place acceptance observation after the complete middleware list."""
+    """Observe completed Core provider calls on an isolated, run-local client chain.
 
-    def __init__(self, client: Any, accept: Callable[[Sequence[Message]], None]) -> None:
+    Supports BaseChatClient and ordinary Python wrappers delegating through stored
+    ``inner`` or ``__wrapped__`` attributes. Constructors and copy hooks are not run.
+    SDK clients and other referenced resources remain borrowed, not recursively
+    cloned. The original get_response implementation and its layers still execute.
+
+    Opaque clients, computed delegation and non-rebindable entry points fail before
+    dispatch. There is deliberately no middleware approximation for those clients.
+    Acceptance describes prepared Core inputs, not provider wire transformations or
+    a durable remote commit. Continuation-token retrieval accepts no new inputs.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        accept: Callable[[Sequence[Message]], None],
+        on_completed: Callable[[ChatResponse], None] | None = None,
+    ) -> None:
         self.__wrapped__ = client
-        self._observer = DurableServiceAcceptance(accept)
+        self._client = _clone_service_client(client, accept, on_completed)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.__wrapped__, name)
 
     def get_response(self, messages: Sequence[Message], **kwargs: Any) -> Any:
-        # Agent and provider middleware, including per-call persistence, are now
-        # assembled. An earlier short circuit never reaches the observer, while
-        # a leaf completion is observed before a later persistence hook can fail.
-        client_kwargs = dict(kwargs.get("client_kwargs") or {})
-        existing = client_kwargs.get("middleware")
-        if isinstance(existing, (list, tuple)):
-            middleware = list(cast("Sequence[Any]", existing))
-        else:
-            middleware = [existing] if existing else []
-        client_kwargs["middleware"] = [*middleware, self._observer]
-        return self.__wrapped__.get_response(messages=messages, **{**kwargs, "client_kwargs": client_kwargs})
+        return self._client.get_response(messages=messages, **kwargs)
+
+
+def _unsupported_client(client: Any, reason: str) -> ValueError:
+    return ValueError(
+        f"Cannot observe exact service acceptance for {type(client).__name__}: {reason}. "
+        "Use a BaseChatClient with a rebindable _inner_get_response method, optionally "
+        "behind wrappers delegating through stored inner or __wrapped__ attributes. "
+        "Opaque clients need an explicit BaseChatClient adapter."
+    )
+
+
+def _client_state(client: Any) -> dict[str, Any]:
+    """Read stored state only, without evaluating properties or SDK attributes."""
+    try:
+        state = dict(cast("dict[str, Any]", object.__getattribute__(client, "__dict__")))
+    except AttributeError:
+        state = {}
+    client_type = cast("type[Any]", type(client))
+    for cls in client_type.__mro__:
+        for name, descriptor in vars(cls).items():
+            if isinstance(descriptor, MemberDescriptorType):
+                # An uninitialized slot must stay uninitialized.
+                with suppress(AttributeError):
+                    state[name] = descriptor.__get__(client, client_type)
+    return state
+
+
+def _client_method(client: Any, name: str, state: dict[str, Any]) -> Callable[..., Any]:
+    """Resolve a Python method without silently discarding instance overrides."""
+    method: Any = getattr_static(client, name, None)
+    if isinstance(method, MethodType) and method.__self__ is client:
+        return method.__func__
+    if isinstance(method, FunctionType) and name not in state:
+        return method
+    raise _unsupported_client(client, f"{name} is not a Python method bound to this client")
+
+
+def _clone_service_client(
+    client: Any,
+    accept: Callable[[Sequence[Message]], None],
+    on_completed: Callable[[ChatResponse], None] | None,
+) -> Any:
+    # Only these declared delegation edges are followed. In particular, a provider's
+    # SDK `client` attribute is never searched for a chat-client-shaped object.
+    chain: list[tuple[Any, dict[str, Any], list[str]]] = []
+    seen: set[int] = set()
+    current = client
+    while True:
+        if id(current) in seen:
+            raise _unsupported_client(client, "the delegation chain contains a cycle")
+        seen.add(id(current))
+        current_type = cast("type[Any]", type(current))
+        if getattr_static(current_type, "__getattribute__") is not object.__getattribute__:
+            raise _unsupported_client(client, "custom attribute lookup can bypass the isolated provider leaf")
+        state = _client_state(current)
+        _client_method(current, "get_response", state)
+        if isinstance(current, BaseChatClient):
+            current = cast(Any, current)
+            leaf = _client_method(current, "_inner_get_response", state)
+            chain.append((current, state, []))
+            break
+        links = [name for name in ("inner", "__wrapped__") if name in state and state[name] is not None]
+        if not links:
+            raise _unsupported_client(client, "no stored delegation chain reaches BaseChatClient")
+        target = state[links[0]]
+        if any(state[name] is not target for name in links):
+            raise _unsupported_client(client, "inner and __wrapped__ designate different clients")
+        chain.append((current, state, links))
+        current = target
+
+    clones: dict[int, Any] = {}
+    try:
+        for original, _, _ in chain:
+            # Bypass user __new__, __init__, __copy__ and serialization hooks.
+            original_type = cast("type[Any]", type(original))
+            clones[id(original)] = object.__new__(original_type)
+        for original, state, links in chain:
+            clone = clones[id(original)]
+            for name, value in state.items():
+                if name in links:
+                    value = clones[id(value)]
+                elif isinstance(value, MethodType) and id(value.__self__) in clones:
+                    value = MethodType(value.__func__, clones[id(value.__self__)])
+                object.__setattr__(clone, name, value)
+        leaf_clone = clones[id(current)]
+        bound_leaf = MethodType(leaf, leaf_clone)
+
+        def observed_leaf(
+            *, messages: Sequence[Message], stream: bool, options: Mapping[str, Any], **kwargs: Any
+        ) -> Any:
+            # Snapshot before the provider can mutate messages or polling options.
+            inputs = deepcopy(list(messages)) if options.get("continuation_token") is None else None
+            notified = False
+
+            def completed(response: ChatResponse) -> ChatResponse:
+                nonlocal notified
+                if not isinstance(response, ChatResponse):
+                    raise ValueError("Exact service acceptance requires a finalized ChatResponse from the provider.")
+                if not notified:
+                    notified = True
+                    try:
+                        if inputs is not None:
+                            accept(inputs)
+                    finally:
+                        if on_completed is not None:
+                            on_completed(response)
+                return response
+
+            result = bound_leaf(messages=messages, stream=stream, options=options, **kwargs)
+            # ResponseStream is itself awaitable. Do not await or reconstruct it:
+            # its own finalizer and existing hooks must produce the observed result.
+            if isinstance(result, ResponseStream):
+                return cast("ResponseStream[ChatResponseUpdate, ChatResponse]", result).with_result_hook(completed)
+            if isawaitable(result):
+                pending = result
+                if stream:
+
+                    async def resolve_stream() -> ResponseStream[ChatResponseUpdate, ChatResponse]:
+                        resolved = await pending
+                        if not isinstance(resolved, ResponseStream):
+                            raise ValueError(
+                                "Streaming service acceptance requires a ResponseStream from the provider."
+                            )
+                        return cast("ResponseStream[ChatResponseUpdate, ChatResponse]", resolved).with_result_hook(
+                            completed
+                        )
+
+                    return ResponseStream[ChatResponseUpdate, ChatResponse].from_awaitable(resolve_stream())
+
+                async def resolve_response() -> ChatResponse:
+                    return completed(await pending)
+
+                return resolve_response()
+            if stream:
+                raise ValueError("Streaming service acceptance requires a ResponseStream from the provider.")
+            return completed(result)
+
+        object.__setattr__(leaf_clone, "_inner_get_response", observed_leaf)
+    except (AttributeError, TypeError) as exc:
+        raise _unsupported_client(client, "its instance state cannot be isolated without reconstruction") from exc
+    return clones[id(client)]

@@ -426,6 +426,21 @@ class DurableAgentStateContent:
                         "fields": {key: value for key, value in payload.items() if key not in mapped},
                     }
                 }
+                original = getattr(content, "_durable_original_core_content", None)
+                if (
+                    stored._NULLABLE_FIELDS
+                    and isinstance(original, dict)
+                    and cast(dict[str, Any], original).get("type") == content.type
+                ):
+                    # Core has no absence bit for nullable mapped fields. Preserve
+                    # literal input presence without changing plain Core defaults.
+                    projection = stored.to_persisted_dict()
+                    raw = deepcopy(projection)
+                    for field_name in stored._NULLABLE_FIELDS:
+                        core_name = "error_details" if field_name == DurableStateFields.DETAILS else field_name
+                        if core_name not in original and core_name not in payload and raw.get(field_name) is None:
+                            raw.pop(field_name, None)
+                    stored._raw_shadow = _RawShadow(raw, projection)
         return stored
 
     @staticmethod
