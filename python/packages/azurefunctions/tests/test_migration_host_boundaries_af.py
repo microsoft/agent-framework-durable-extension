@@ -4,13 +4,14 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
 from _execution_test_support import RecordingChatClient
-from agent_framework import Agent
+from agent_framework import Agent, AgentSession
 from agent_framework_durabletask import state_snapshot_digest
 
 from agent_framework_azurefunctions import AgentFunctionApp
@@ -95,16 +96,44 @@ class _MigrationContext:
             raise OSError("storage acknowledgement lost after write")
 
 
-def test_af_entity_migrate_operation_commits_without_model_or_core_decode(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    "service_session_id",
+    [
+        None,
+        "",
+        " \t\n",
+        " provider-id ",
+        {},
+        {"conversation": "provider-id"},
+        {
+            "conversation_id": "c",
+            "response_id": "r",
+            "future_id": "opaque",
+            "metadata": {"type": "message", "values": [None, False, 0, 1.5, {}, [], "雪"]},
+        },
+    ],
+)
+def test_af_entity_migrate_operation_commits_without_model_or_core_decode(
+    version: str, service_session_id: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def forbidden(*args: Any, **kwargs: Any) -> None:
         pytest.fail("Migration must retain canonical result JSON and never decode through Core.")
 
     monkeypatch.setattr("agent_framework_durabletask._state_migration.load_agent_response", forbidden)
+    monkeypatch.setattr(AgentSession, "from_dict", forbidden)
+    monkeypatch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
     client = RecordingChatClient(response_message_id="af-message")
     entity_function = create_agent_entity(
         Agent(client=client, name="af-migration-agent"), deployment_mode="isolated_v2"
     )
-    source = _legacy_source(_error_response_entry())
+    source = _legacy_source(_error_response_entry(), version=version)
+    source["data"]["session"] = {
+        "session_id": SOURCE_SESSION_ID,
+        "service_session_id": deepcopy(service_session_id),
+        "state": {"typed": {"type": "message", "opaque": [None, False, 0]}},
+        "futureSession": {"keep": [1]},
+    }
     context = _MigrationContext(
         None,
         request=_migration_request(
@@ -113,6 +142,7 @@ def test_af_entity_migrate_operation_commits_without_model_or_core_decode(monkey
             completionEvidence=_completion_journal(source, _original_result()),
         ),
     )
+    before = deepcopy((source, context.get_input.return_value))
 
     entity_function(context)
 
@@ -124,6 +154,12 @@ def test_af_entity_migrate_operation_commits_without_model_or_core_decode(monkey
     assert client.received_messages == []
     assert context.raw["data"]["migration"]["destinationSessionId"] == "@dafx-af-migration-agent@dest-session"
     assert context.raw["data"]["terminalResults"]["done"]["response"] == _original_result()["response"]
+    assert context.raw["data"]["session"] == source["data"]["session"]
+    assert json.dumps(context.raw["data"]["session"], sort_keys=True) == json.dumps(
+        source["data"]["session"], sort_keys=True
+    )
+    assert context._write_count == 1
+    assert (source, context.get_input.return_value) == before
 
 
 @pytest.mark.parametrize(
@@ -163,6 +199,88 @@ def test_af_entity_migrate_rejects_identity_mismatches_before_write(mutate: Any,
     assert message in result["error"]
     assert context._write_count == 0
     assert context.raw is None
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    "marker",
+    [
+        None,
+        {},
+        {"profile": "foreign", "version": 1, "messages": {"accepted": ["a" * 64]}},
+        {"profile": "agent-framework-python.ingestion", "version": 1, "messages": {"accepted": ["a" * 64]}},
+    ],
+)
+def test_af_entity_migrate_rejects_reserved_ingestion_without_write(version: str, marker: Any) -> None:
+    client = RecordingChatClient()
+    entity_function = create_agent_entity(
+        Agent(client=client, name="af-migration-agent"), deployment_mode="isolated_v2"
+    )
+    source = _legacy_source(version=version)
+    source["data"]["pythonIngestion"] = deepcopy(marker)
+    request = _migration_request(source, "@dafx-af-migration-agent@dest-session")
+    context = _MigrationContext(None, request=request)
+    before = deepcopy((source, request, context.get_input.return_value))
+
+    entity_function(context)
+
+    context.set_result.assert_called_once()
+    result = context.set_result.call_args.args[0]
+    assert result["status"] == "error"
+    assert "Legacy data contains reserved pythonIngestion metadata" in result["error"]
+    assert context._write_count == 0
+    assert context.raw is None
+    assert (source, request, context.get_input.return_value) == before
+    assert client.received_messages == []
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("state", []),
+        ("state", None),
+        ("state", 7),
+        ("state", False),
+        ("state", "opaque"),
+        ("service_session_id", []),
+        ("service_session_id", ["provider-id"]),
+        ("service_session_id", 7),
+        ("service_session_id", 1.5),
+        ("service_session_id", False),
+        ("service_session_id", True),
+    ],
+)
+def test_af_entity_migrate_rejects_invalid_session_without_side_effects(
+    version: str, field: str, value: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = RecordingChatClient()
+    entity_function = create_agent_entity(
+        Agent(client=client, name="af-migration-agent"), deployment_mode="isolated_v2"
+    )
+    source = _legacy_source(version=version)
+    source["data"]["session"] = {"session_id": SOURCE_SESSION_ID, field: deepcopy(value)}
+    request = _migration_request(
+        source, "@dafx-af-migration-agent@dest-session", completionEvidence=_completion_journal(source)
+    )
+    context = _MigrationContext(None, request=request)
+    before = deepcopy((source, request, context.get_input.return_value))
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Migration must not deserialize session values or register provider types.")
+
+    monkeypatch.setattr(AgentSession, "from_dict", forbidden)
+    monkeypatch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+    entity_function(context)
+
+    context.set_result.assert_called_once()
+    result = context.set_result.call_args.args[0]
+    assert result["status"] == "error"
+    assert f"Legacy session.{field} must be" in result["error"]
+    assert context._write_count == 0
+    assert context.raw is None
+    assert (source, request, context.get_input.return_value) == before
+    assert client.received_messages == []
 
 
 @pytest.mark.parametrize(

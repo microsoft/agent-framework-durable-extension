@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
-from agent_framework import AgentResponse, Content, Message
+from agent_framework import AgentResponse, AgentSession, Content, Message
 from typing_extensions import Self
 
 from agent_framework_durabletask import migrate_legacy_state, state_snapshot_digest
@@ -706,6 +706,7 @@ def test_raw_unknown_nested_fields_order_session_and_source_are_preserved() -> N
         None,
         {},
         {"state": {"keep": [1]}},
+        {"session_id": None, "state": {"keep": [1]}},
         {"session_id": "", "state": {"keep": [1]}},
         {"session_id": " ", "state": {"keep": [1]}},
     ],
@@ -727,6 +728,109 @@ def test_conflicting_or_malformed_session_identity_fails(session: Any) -> None:
     source["data"]["session"] = session
     with pytest.raises(ValueError, match="session"):
         _migrate(source, completion_evidence=_completions(source, _original_result()))
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("state", []),
+        ("state", None),
+        ("state", 7),
+        ("state", False),
+        ("state", "opaque"),
+        ("service_session_id", []),
+        ("service_session_id", ["provider-id"]),
+        ("service_session_id", 7),
+        ("service_session_id", 1.5),
+        ("service_session_id", False),
+        ("service_session_id", True),
+    ],
+)
+def test_migration_rejects_invalid_session_fields_without_mutating_inputs(
+    version: str, field: str, value: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source()
+    source["schemaVersion"] = version
+    source["data"]["session"] = {field: deepcopy(value), "futureSession": {"keep": [False, None]}}
+    evidence = _completions(source, _original_result())
+    before_source, before_evidence = deepcopy(source), deepcopy(evidence)
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Migration must validate session JSON without Core deserialization or provider registration.")
+
+    monkeypatch.setattr(AgentSession, "from_dict", forbidden)
+    monkeypatch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+    with pytest.raises(ValueError, match=rf"Legacy session\.{field} must be"):
+        _migrate(source, completion_evidence=evidence)
+    assert source == before_source
+    assert evidence == before_evidence
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    "service_fields",
+    [
+        {},
+        {"service_session_id": None},
+        {"service_session_id": " provider-id "},
+        {"service_session_id": ""},
+        {"service_session_id": " \t\n"},
+        {"service_session_id": {}},
+        {"service_session_id": {"conversation": "provider-id"}},
+        {"service_session_id": {"conversation_id": "c", "response_id": "r", "future_id": "opaque"}},
+        {
+            "service_session_id": {
+                "conversation_id": "c",
+                "response_id": "r",
+                "metadata": {"type": "message", "values": [None, False, 0, 1.5, {}, [], "雪"]},
+            }
+        },
+        {"service_session_id": {"conversation_id": None, "response_id": 7, "future_id": False}},
+    ],
+)
+@pytest.mark.parametrize(
+    "state_fields",
+    [
+        {},
+        {"state": {}},
+        {"state": {"typed": {"type": "message", "opaque": [None, False, 0]}, "nested": [1, {}, None]}},
+    ],
+)
+def test_migration_preserves_session_json_without_core_deserialization(
+    version: str, service_fields: dict[str, Any], state_fields: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source()
+    source["schemaVersion"] = version
+    source["data"]["session"] = {
+        "session_id": SESSION_ID,
+        "futureSession": {"pythonIngestion": {"messages": ["opaque"]}},
+        **deepcopy(service_fields),
+        **deepcopy(state_fields),
+    }
+    evidence = _completions(source, _original_result())
+    before_source, before_evidence = deepcopy(source), deepcopy(evidence)
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Migration must not deserialize typed session values or register provider types.")
+
+    monkeypatch.setattr(AgentSession, "from_dict", forbidden)
+    monkeypatch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+    staged = _migrate(source, completion_evidence=evidence)
+    assert staged.data.session is not source["data"]["session"]
+    result = _cold(staged)
+    expected = deepcopy(source["data"]["session"])
+    expected.setdefault("state", {})
+    assert result.data.session == expected
+    assert json.dumps(result.data.session, sort_keys=True) == json.dumps(expected, sort_keys=True)
+    assert result.data.session is not None
+    assert result.data.session["session_id"] == SESSION_ID
+    assert staged.data.session is not None
+    if isinstance(staged.data.session.get("service_session_id"), dict):
+        staged.data.session["service_session_id"]["migration_result_edit"] = [1]
+        assert result.data.session == expected
+    assert source == before_source
+    assert evidence == before_evidence
 
 
 def test_metadata_exact_contract_fixed_now_repeatability_and_parent_owned_idempotency() -> None:
@@ -832,6 +936,40 @@ def test_legacy_source_rejects_shared_v2_fields_even_when_empty(version: str, fi
     with pytest.raises(ValueError, match="Legacy state must not contain"):
         _migrate(source)
     assert source == before
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    "marker",
+    [
+        None,
+        {},
+        {"profile": "foreign", "version": 1, "messages": {"accepted": ["a" * 64]}},
+        {"profile": "agent-framework-python.ingestion", "version": 1, "messages": {"accepted": ["a" * 64]}},
+    ],
+)
+@pytest.mark.parametrize("retained_request", [False, True])
+def test_migration_rejects_reserved_python_ingestion_before_legacy_parse(
+    version: str, marker: Any, retained_request: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source()
+    source["schemaVersion"] = version
+    source["data"]["pythonIngestion"] = deepcopy(marker)
+    if not retained_request:
+        # No ingestion markers will be generated. A recognized profile must not
+        # pass through as opaque JSON and become active only on the v2 cold load.
+        source["data"].pop("conversationHistory")
+    completions = _completions(source, *([_original_result()] if retained_request else []))
+    delivery = _evidence(source, [Message("user", ["accepted"], message_id="custom-id")] if retained_request else [])
+    before = deepcopy((source, completions, delivery))
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Reserved legacy fields must be rejected before DurableAgentState.from_dict.")
+
+    monkeypatch.setattr(DurableAgentState, "from_dict", forbidden)
+    with pytest.raises(ValueError, match="Legacy data contains reserved pythonIngestion metadata"):
+        _migrate(source, completion_evidence=completions, delivery_evidence=delivery)
+    assert (source, completions, delivery) == before
 
 
 @pytest.mark.parametrize("digest", ["a" * 64, "A" * 64, "short", None])
