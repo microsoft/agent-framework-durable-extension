@@ -75,6 +75,11 @@ legacy and unsupported versions before changing stored history or working state.
 `read_agent_state()` for legacy inspection instead.
 
 External primary providers, service-owned history and store-only audit sinks keep separate roles.
+Preparation permits only one `DurableHistoryProvider`, including an injected or replaced primary.
+Different source IDs do not create separate durable transcripts. Multiple durable adapters are
+rejected before model execution, even when loading or all store flags are disabled, because loading
+and flushing can still update shared history. Use an ordinary store-only `HistoryProvider` with a
+distinct source ID for an independent audit store.
 On a service-owned turn, the inactive external primary's custom hooks are also suppressed because
 they may load or persist history directly. Ownership-independent work belongs in a separate context
 provider or store-only sink. Client-owned turns retain the original primary's hooks and resources.
@@ -88,12 +93,19 @@ history. After-only compaction retains the existing append-then-compact order. P
 history uses Core's middleware cadence and does not run compaction hooks per model call.
 Injection honors a single configured compaction history source. Conflicting sources require an
 explicit primary instead of silently selecting a source that cannot serve all configured hooks.
-Explicit durable and external primary providers retain the user's hook order, so place history
-before a matching before-compaction provider when that strategy must see loaded history.
+All explicit primary providers retain the user's hook order, including a built-in in-memory provider
+replaced with durable history. With `[compaction, history]`, before compaction cannot see history
+loaded later, while reverse after hooks append the current input and output before compaction.
+With `[history, compaction]`, before compaction sees loaded history, while the ordinary per-run
+after compaction runs before the current turn is appended. Choose the order explicitly for the
+strategy's intended inputs. Preparation does not mutate the caller's agent or provider list.
 Provider namespaces must be unique, including store-only sinks, and conflicts with an injected
 history source raise an error rather than automatically reassigning a namespace.
 
 Canonical media keeps its declared content kind rather than inferring it from the URI scheme.
+Literal Core input preserves absent versus explicit-null function results and error details on
+the first canonical write and later cold reads. Plain Core objects without an attached input
+envelope keep canonical nullable defaults. Existing shared JSON retains its raw field presence.
 New response timestamps without an offset are interpreted as UTC. Valid stored timestamps retain
 their original offset and fractional precision.
 

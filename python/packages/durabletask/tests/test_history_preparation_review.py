@@ -19,22 +19,62 @@ from agent_framework_durabletask._response_utils import load_agent_response, pre
 from agent_framework_durabletask._shared_agent_state import DurableAgentStateMessage
 
 
-async def test_replaced_builtin_history_loads_before_matching_before_compaction() -> None:
+@pytest.mark.parametrize("before_enabled", [False, True])
+async def test_replaced_builtin_history_preserves_core_before_and_after_order(before_enabled: bool) -> None:
     observed: list[list[str]] = []
+    after_observed: list[list[str]] = []
 
     async def before(messages: list[Message]) -> bool:
         observed.append([m.text for m in messages])
         return False
 
+    async def after(messages: list[Message]) -> bool:
+        after_observed.append([m.text for m in messages])
+        return False
+
     primary = InMemoryHistoryProvider("custom")
-    compaction = CompactionProvider(before_strategy=before, history_source_id="custom")
-    agent = Agent(client=_PassiveChatClient(), context_providers=[compaction, primary])
+    compaction = CompactionProvider(
+        before_strategy=before if before_enabled else None, after_strategy=after, history_source_id="custom"
+    )
+    client = _PassiveChatClient()
+    agent = Agent(client=client, context_providers=[compaction, primary])
+    providers = agent.context_providers
+    primary_before = deepcopy(vars(primary))
+
+    # Compare against the actual Core pipeline, not an assumed hook schedule.
+    baseline_session = agent.create_session()
+    baseline_session.state["custom"] = {"messages": [Message("user", ["prior"], message_id="prior")]}
+    await agent.run("current", session=baseline_session)
+    expected_before = deepcopy(observed)
+    expected_after = deepcopy(after_observed)
+    assert expected_before == []  # Compaction precedes history loading.
+    assert expected_after == [["prior", "current", "answer-1"]]
+    expected_model = [message.text for message in client.received_messages[0]]
+    observed.clear()
+    after_observed.clear()
+    client.received_messages.clear()
+
     prepared = ensure_durable_history(agent)
+    assert isinstance(prepared, Agent)
+    assert [p.source_id for p in prepared.context_providers] == [compaction.source_id, primary.source_id]
+    assert isinstance(prepared.context_providers[1], DurableHistoryProvider)
     provider = _CanonicalStateProvider([_request("seed", _stored("prior", message_id="prior"))])
+    session = prepared.create_session()
     with _bound(provider):
-        await prepared.run("current", session=prepared.create_session())
-    assert observed == [["prior"]]
-    assert agent.context_providers == [compaction, primary]
+        await prepared.run("current", session=session)
+        prepared.context_providers[1].flush(session.state["custom"])
+    assert observed == expected_before
+    assert after_observed == expected_after
+    assert [message.text for message in client.received_messages[0]] == expected_model == ["prior", "current"]
+    assert [m.text for entry in provider.state.data.conversation_history for m in entry.messages] == [
+        "prior",
+        "current",
+        "answer-1",
+    ]
+    assert agent.context_providers is providers and providers == [compaction, primary]
+    assert vars(primary) == primary_before
+    assert compaction.before_strategy is (before if before_enabled else None)
+    assert compaction.after_strategy is after
 
 
 async def test_service_owned_durable_primary_does_not_compact_parked_history() -> None:
