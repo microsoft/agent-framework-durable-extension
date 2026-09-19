@@ -669,7 +669,10 @@ def test_af_strict_maintenance_budget_includes_full_retained_floor_and_metadata(
         assert full_size > _size(expected["data"]["terminalResults"])
     rejected = Host(raw, max_state_bytes=full_size - 1)
     result = rejected.invoke(operation, request)
-    assert result["status"] == "error" and "max_state_bytes" in result["error"]
+    assert result["status"] == "error"
+    assert f"serialized size is {full_size} bytes" in result["error"]
+    assert f"budget is {full_size - 1} bytes" in result["error"]
+    assert f"protected floor is {full_size} bytes" in result["error"]
     assert rejected.raw == raw and rejected.writes == 0
     rejected.contexts[-1].set_state.assert_not_called()
     accepted = Host(raw, max_state_bytes=full_size)

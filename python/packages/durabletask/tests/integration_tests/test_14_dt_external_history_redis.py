@@ -25,7 +25,7 @@ from typing import Any, Protocol
 import pytest
 import redis.asyncio as aioredis
 
-from agent_framework_durabletask import DurableAgentState, DurableAIAgentClient, serialize_agent_response
+from agent_framework_durabletask import DurableAgentState, DurableAIAgentClient
 from agent_framework_durabletask._shared_response import serialize_terminal_response
 
 
@@ -93,7 +93,7 @@ class TestExternalHistoryProvider:
         assert agent.name == "Archivist"
 
     def test_history_from_the_external_store_reaches_the_model(self) -> None:
-        """Nothing else could supply the earlier turn, so recall proves the provider ran."""
+        """Check recall on a later turn with Redis configured as the history provider."""
         agent = self.agent_client.get_agent("Archivist")
         session = agent.create_session()
 
@@ -104,7 +104,7 @@ class TestExternalHistoryProvider:
         assert "4417" in answer.text
 
     async def test_provider_is_keyed_by_the_stable_session_id(self) -> None:
-        """All turns must land under one key; a per-operation id would scatter them."""
+        """All turns must land under one key. A per-operation id would scatter them."""
         agent = self.agent_client.get_agent("Archivist")
         session = agent.create_session()
 
@@ -128,7 +128,7 @@ class TestExternalHistoryProvider:
             response = agent.run(prompt, session=session)
             assert response.text
             assert all(content.type != "error" for message in response.messages for content in message.contents)
-            expected = json.loads(json.dumps(serialize_terminal_response(serialize_agent_response(response))))
+            expected = json.loads(json.dumps(serialize_terminal_response(response)))
             assert expected["createdAt"], "the Foundry result timestamp was lost"
 
             state = self._read_state(session.durable_session_id)

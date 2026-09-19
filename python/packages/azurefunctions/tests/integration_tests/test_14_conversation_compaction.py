@@ -23,8 +23,7 @@ import json
 import uuid
 
 import pytest
-from agent_framework import AgentResponse
-from agent_framework_durabletask import serialize_agent_response
+from agent_framework_durabletask import load_agent_response, serialize_agent_response
 
 # Matches function_app.py: only the most recent groups stay in the model's context.
 KEEP_LAST_GROUPS = 4
@@ -72,7 +71,7 @@ class TestSampleConversationCompaction:
         snapshot = result["agent_response"]
         assert snapshot["type"] == "agent_response"
         assert snapshot["created_at"], "the Foundry result timestamp was lost"
-        delivered = AgentResponse.from_dict(snapshot)
+        delivered = load_agent_response(snapshot)
         assert delivered.text == result["response"]
         assert all(content.type != "error" for message in delivered.messages for content in message.contents)
         assert json.loads(json.dumps(serialize_agent_response(delivered))) == snapshot
@@ -119,7 +118,7 @@ class TestSampleConversationCompaction:
             # The original payload's message count and date must round-trip on their own.
             # They are not synthesized from the echoed request or message_count above.
             snapshot = result["agent_response"]
-            delivered = AgentResponse.from_dict(snapshot)
+            delivered = load_agent_response(snapshot)
             round_tripped = json.loads(json.dumps(serialize_agent_response(delivered)))
             assert len(delivered.messages) == len(snapshot["messages"])
             assert delivered.messages

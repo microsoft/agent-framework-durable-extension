@@ -27,7 +27,6 @@ from agent_framework_durabletask import (
     DurableAgentStateRequest,
     DurableAgentStateResponse,
     DurableAIAgentClient,
-    serialize_agent_response,
 )
 from agent_framework_durabletask._shared_response import serialize_terminal_response
 
@@ -60,18 +59,22 @@ class TestConversationCompaction:
         """Setup test fixtures."""
         self.dts_client, self.agent_client = agent_client_factory.create()
 
-    def _read_state(self, session_id: Any) -> DurableAgentState:
-        """Load the agent entity's persisted state straight from the scheduler."""
+    def _read_raw_state(self, session_id: Any) -> dict[str, Any]:
+        """Read scheduler JSON without normalizing it through the typed state model."""
         entity_id = EntityInstanceId(entity=session_id.entity_name, key=session_id.key)
         metadata = self.dts_client.get_entity(entity_id)
         assert metadata is not None, f"no durable state found for {entity_id}"
 
         raw = metadata.get_state()
-        # The scheduler returns the entity payload as serialized JSON.
+        # Decode only the transport JSON. Schema checks must see the actual stored fields.
         if isinstance(raw, str):
-            return DurableAgentState.from_json(raw)
+            raw = json.loads(raw)
         assert isinstance(raw, dict), f"unexpected entity state payload: {type(raw)}"
-        return DurableAgentState.from_dict(raw)
+        return raw
+
+    def _read_state(self, session_id: Any) -> DurableAgentState:
+        """Project persisted state through the canonical public model for semantic assertions."""
+        return DurableAgentState.from_dict(self._read_raw_state(session_id))
 
     def test_agent_registration(self) -> None:
         """The compacting agent is registered like any other agent."""
@@ -119,13 +122,15 @@ class TestConversationCompaction:
         assert "in_memory" not in slices, f"durable history slice leaked into the session: {slices}"
 
     def test_persisted_state_matches_the_shared_schema(self) -> None:
-        """Real scheduler round-tripped state must satisfy the cross-language contract.
+        """Validate scheduler JSON against the shared schema before any typed projection.
 
-        Unit tests validate a synthetic dict. This validates what the entity actually wrote and
-        the scheduler actually stored, which is where drift between the two would show up.
+        A typed round trip can normalize invalid or missing fields. Validate the raw backend
+        snapshot first, then use the public state model for message identity assertions.
         """
         jsonschema = pytest.importorskip("jsonschema")
+        # integration_tests -> tests -> durabletask -> packages -> python -> worktree root.
         schema_path = Path(__file__).resolve().parents[5] / "schemas" / "durable-agent-entity-state.json"
+        assert schema_path.is_file(), f"shared schema not found in this worktree: {schema_path}"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
         agent = self.agent_client.get_agent("Historian")
@@ -135,8 +140,9 @@ class TestConversationCompaction:
         # identities to new messages in the provider's append hooks.
         assert agent.run("Name another.", session=session) is not None
 
-        state = self._read_state(session.durable_session_id)
-        jsonschema.Draft202012Validator(schema).validate(state.to_dict())
+        raw = self._read_raw_state(session.durable_session_id)
+        jsonschema.Draft202012Validator(schema).validate(raw)
+        state = DurableAgentState.from_dict(raw)
 
         # The fields compaction depends on must actually be present, not merely permitted.
         stored = [m for entry in state.data.conversation_history for m in entry.messages]
@@ -188,7 +194,7 @@ class TestConversationCompaction:
         assert len({m.message_id for m in stored}) == len(stored), "stored message ids must be unique"
 
     def test_local_provider_retains_selected_inputs_and_outputs_with_keep_all(self) -> None:
-        """This local provider stores both sides; compaction alone does not delete them."""
+        """This local provider stores both sides. Compaction alone does not delete them."""
         agent = self.agent_client.get_agent("Historian")
         session = agent.create_session()
 
@@ -221,7 +227,7 @@ class TestConversationCompaction:
         response = agent.run("Name a river.", session=session)
         assert response.text
         assert all(content.type != "error" for message in response.messages for content in message.contents)
-        expected = json.loads(json.dumps(serialize_terminal_response(serialize_agent_response(response))))
+        expected = json.loads(json.dumps(serialize_terminal_response(response)))
         assert expected["createdAt"], "the Foundry result timestamp was lost"
 
         state = self._read_state(session.durable_session_id)

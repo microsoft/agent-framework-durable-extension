@@ -108,6 +108,9 @@ def test_function_app_subprocess_opts_into_isolated_mode_on_every_start(
                     "TASKHUB_NAME": hub,
                     "AzureFunctionsJobHost__extensions__durableTask__hubName": hub,
                     "DURABLE_AGENTS_DEPLOYMENT_MODE": "isolated_v2",
+                    "DURABLE_TASK_SCHEDULER_CONNECTION_STRING": (
+                        f"Endpoint=http://localhost:8080;Authentication=None;TaskHub={hub}"
+                    ),
                 },
             }
             if platform == "win32":

@@ -3,9 +3,9 @@
 """Live Functions/Azure Storage retention with a deterministic core model, not Foundry.
 
 Requires func v4, Azurite on 10000/10001/10002 (with --skipApiVersionCheck),
-DTS on 8080, and the selected venv's test dependencies including psutil and
-opentelemetry-sdk. The test generates its app/settings under tmp_path and supplies
-local emulator defaults. It never uses the sample-starting fixture.
+DTS on 8080, and the selected venv's test dependencies including psutil,
+jsonschema, and opentelemetry-sdk. The test generates its app/settings under tmp_path
+and supplies local emulator defaults. It never uses the sample-starting fixture.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ import pytest
 import requests
 from agent_framework import Content, Message
 from agent_framework_durabletask import AgentSessionId, DurableAgentState, DurableHistoryProvider
+from jsonschema import Draft202012Validator, FormatChecker
 
 import agent_framework_azurefunctions
 
@@ -47,6 +48,7 @@ pytestmark = [
     pytest.mark.sample("13_subworkflow_hitl"),
 ]
 PYTHON_ROOT = Path(__file__).resolve().parents[4]
+SCHEMA = json.loads((PYTHON_ROOT.parent / "schemas" / "durable-agent-entity-state.json").read_text(encoding="utf-8"))
 TEMPLATE = Path(__file__).with_name("live_media_app") / "function_app.py"
 AGENT = "live-media-retention"
 MAX_STATE_BYTES = 50_000
@@ -65,7 +67,12 @@ def _equal(actual: Any, expected: Any, label: str) -> None:
 
 
 def _stored(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    # Validate the untouched backend snapshot before any typed projection can normalize it.
+    assert raw["schemaVersion"] == "2.0.0"
+    Draft202012Validator(SCHEMA, format_checker=FormatChecker()).validate(raw)
+    assert {"responseMailbox", "completedCorrelations", "ingestedMessages"}.isdisjoint(raw["data"])
     state = DurableAgentState.from_json(json.dumps(raw))
+    _equal(json.loads(state.to_json()), raw, "full canonical backend JSON round-trip before message projection")
     return [
         message.to_chat_message().to_dict() for entry in state.data.conversation_history for message in entry.messages
     ]
@@ -228,7 +235,7 @@ def _prepare(app: Path, session: str, hub: str) -> dict[str, str]:
     for package, path in zip((agent_framework_azurefunctions, agent_framework_durabletask), source_paths):
         assert package.__file__ is not None
         assert Path(package.__file__).resolve().parent == path / package.__name__, (
-            "Run using packages from this exact pr59 worktree"
+            "Run using packages from this exact worktree"
         )
     shutil.copyfile(TEMPLATE, app / "function_app.py")
     config = {
@@ -315,11 +322,17 @@ def _metrics(host: _Host, boot: str, removed: int, calls: int) -> None:
             "bounded deletion metric labels",
         )
     assert sum(row["value"] for row in deletions) == removed
-    for metric, extra in (
-        ("write_attempts", {"stage": "set_state"}),
-        ("operations", {}),
+    for metric, extra, commit_status in (
+        ("write_attempts", {"stage": "serialization"}, "not_attempted"),
+        ("write_attempts", {"stage": "set_state"}, "unknown"),
+        ("operations", {}, "unknown"),
     ):
-        observations = [row for row in rows if row["name"] == f"durable.retention.{metric}"]
+        observations = [
+            row
+            for row in rows
+            if row["name"] == f"durable.retention.{metric}"
+            and (not extra or row["attributes"].get("stage") == extra["stage"])
+        ]
         assert sum(row["value"] for row in observations) == calls
         for row in observations:
             attributes = row["attributes"]
@@ -329,7 +342,7 @@ def _metrics(host: _Host, boot: str, removed: int, calls: int) -> None:
                 {
                     **extra,
                     "outcome": "returned",
-                    "commit_status": "unknown",
+                    "commit_status": commit_status,
                     "deletion_staged": attributes["deletion_staged"],
                 },
                 "host write observations are not commit proof",
