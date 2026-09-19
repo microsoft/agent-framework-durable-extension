@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Acceptance at the real Core post-compaction provider boundary, without network calls."""
+"""Exact Core acceptance and opaque-client completion, without network calls."""
 
 from __future__ import annotations
 
@@ -165,6 +165,88 @@ class _OpaqueSdk:
         raise AssertionError("must not call the SDK to check completion")
 
 
+class _ProtocolClient:
+    """Standalone protocol client with its own filtering, state, and finalization."""
+
+    def __init__(self, record: _Record, *, deferred_stream: bool = False, failure: str | None = None) -> None:
+        self.record = record
+        self.deferred_stream = deferred_stream
+        self.failure = failure
+        self.error = RuntimeError(f"{failure} failed")
+        self.local_calls = 0
+        self.additional_properties = {"opaque": True}
+        self.function_invocation_configuration = {"enabled": False}
+        self.arguments: list[tuple[Sequence[Message], dict[str, Any]]] = []
+        self.responses: list[ChatResponse] = []
+
+    def get_response(self, messages: Sequence[Message], *, stream: bool = False, **kwargs: Any) -> Any:
+        self.local_calls += 1
+        self.record.instances.append(self)
+        self.record.events.append("opaque-call")
+        self.arguments.append((messages, kwargs))
+        # No BaseChatClient implementation participates in this projection.
+        self.record.received.append([message for message in messages if message.message_id != "A"])
+        if self.failure == "dispatch":
+            raise self.error
+        response = ChatResponse(
+            messages=[Message("assistant", [f"answer-{self.local_calls}"])],
+            conversation_id=f"S{self.local_calls}",
+            response_id=f"R{self.local_calls}",
+        )
+        self.responses.append(response)
+        if not stream:
+
+            async def get() -> ChatResponse:
+                self.record.events.append("opaque-await")
+                if self.failure == "await":
+                    raise self.error
+                return response
+
+            return get()
+
+        async def updates() -> AsyncIterable[ChatResponseUpdate]:
+            self.record.events.append("opaque-pull")
+            yield ChatResponseUpdate(role="assistant", contents=[Content.from_text(response.text)])
+            if self.failure == "stream":
+                raise self.error
+
+        def transform(update: ChatResponseUpdate) -> ChatResponseUpdate:
+            self.record.events.append("opaque-transform")
+            return update
+
+        def finalize(updates: Sequence[ChatResponseUpdate]) -> ChatResponse:
+            self.record.events.append("opaque-finalizer")
+            assert len(updates) == 1
+            if self.failure == "finalizer":
+                raise self.error
+            return response
+
+        def result_hook(value: ChatResponse) -> ChatResponse:
+            self.record.events.append("opaque-result")
+            if self.failure == "result-hook":
+                raise self.error
+            return value
+
+        result = ResponseStream(
+            updates(),
+            finalizer=finalize,
+            transform_hooks=[transform],
+            cleanup_hooks=[lambda: self.record.events.append("opaque-cleanup")],
+            result_hooks=[result_hook],
+        )
+        self.record.streams.append(result)
+        if self.deferred_stream:
+
+            async def resolve() -> ResponseStream[ChatResponseUpdate, ChatResponse]:
+                self.record.events.append("opaque-resolve")
+                if self.failure == "resolve":
+                    raise self.error
+                return result
+
+            return resolve()
+        return result
+
+
 class _LayeredClient(FunctionInvocationLayer, ChatMiddlewareLayer, ChatTelemetryLayer, _LeafClient):
     def __init__(self, record: _Record, **kwargs: Any) -> None:
         super().__init__(record=record, **kwargs)
@@ -230,6 +312,7 @@ async def test_acceptance_matches_actual_core_compaction_leaf(stream: bool, laye
     original = client_type(record)
     before = dict(vars(original))
     client = DurableServiceClient(original, record.accept, record.on_completed)
+    assert client.exact_acceptance is True
 
     result = client.get_response(_inputs(), stream=stream, compaction_strategy=_exclude_a)
     response = await result.get_final_response() if stream else await result
@@ -463,40 +546,340 @@ async def test_instance_bound_entry_and_leaf_overrides_rebind_to_clone(stream: b
     assert [[message.text for message in batch] for batch in record.accepted] == [["B"]]
 
 
-@pytest.mark.parametrize("kind", ["missing", "opaque", "sdk-only", "computed", "cycle", "ambiguous", "closure"])
-def test_unsupported_clients_fail_before_any_dispatch(kind: str) -> None:
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("kind", ["opaque", "sdk-only", "computed", "ambiguous", "closure", "leaf-closure"])
+async def test_unsupported_layouts_execute_original_without_acceptance(kind: str, stream: bool) -> None:
     record = _Record()
     leaf: Any = _LeafClient(record)
 
-    class Opaque:
-        def get_response(self, *args: Any, **kwargs: Any) -> Any:
-            raise AssertionError("must reject before calling client")
-
-    class Computed(Opaque):
+    class Computed(_ProtocolClient):
         @property
         def inner(self) -> Any:
             raise AssertionError("must not resolve computed delegation")
 
-    client: Any
-    if kind == "missing":
-        client = None
-    elif kind == "computed":
-        client = Computed()
-    elif kind == "closure":
-        client = leaf
-        bound_entry = leaf.get_response
-        client.get_response = lambda *args, **kwargs: bound_entry(*args, **kwargs)
+    original: Any
+    if kind == "computed":
+        original = Computed(record)
+    elif kind in {"closure", "leaf-closure"}:
+        original = leaf
+        name = "get_response" if kind == "closure" else "_inner_get_response"
+        bound_method = getattr(original, name)
+        setattr(original, name, lambda *args, **kwargs: bound_method(*args, **kwargs))
     else:
-        client = Opaque()
+        original = _ProtocolClient(record)
         if kind == "sdk-only":
-            client.client = leaf
-        elif kind == "cycle":
-            client.inner = client
+            original.client = _OpaqueSdk()
         elif kind == "ambiguous":
-            client.inner = leaf
-            client.__wrapped__ = _LeafClient(record)
-    with pytest.raises(ValueError, match="exact service acceptance.*BaseChatClient"):
-        DurableServiceClient(client, record.accept, record.on_completed)
+            original.inner = leaf
+            original.__wrapped__ = _LeafClient(record)
+    client = DurableServiceClient(original, record.accept, record.on_completed)
+    assert client.exact_acceptance is False
+    assert record.received == record.accepted == record.completed == []
+    result = client.get_response(_inputs(), stream=stream)
+    response = await result.get_final_response() if stream else await result
+    assert record.completed == [response]
+    assert record.accepted == []
+    assert record.instances == [original]
+    assert original.local_calls == 1
+
+
+@pytest.mark.parametrize("kind", ["missing", "no-method", "non-callable", "cycle", "indirect-cycle"])
+def test_invalid_clients_and_detected_cycles_fail_before_dispatch(kind: str) -> None:
+    record = _Record()
+    original: Any = _ProtocolClient(record)
+    match = "callable get_response"
+    if kind == "missing":
+        original = None
+    elif kind == "no-method":
+        original = object()
+    elif kind == "non-callable":
+        original.get_response = None
+    else:
+        match = "delegation chain contains a cycle"
+        if kind == "cycle":
+            original.inner = original
+        else:
+            other: Any = _ProtocolClient(record)
+            original.inner = other
+            other.__wrapped__ = original
+    with pytest.raises(ValueError, match=match):
+        DurableServiceClient(original, record.accept, record.on_completed)
+    assert record.instances == record.received == record.accepted == record.completed == []
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("deferred", [False, True])
+async def test_generic_protocol_preserves_original_state_options_and_outer_completion(
+    stream: bool, deferred: bool
+) -> None:
+    record = _Record()
+    original = _ProtocolClient(record, deferred_stream=deferred)
+    inputs = _inputs()
+    options = {"conversation_id": "previous", "custom": object()}
+    client_kwargs = {"opaque_option": object()}
+
+    async def invoke(call: int) -> None:
+        # A new run-local observer must not reset the original's scalar state.
+        returned = False
+
+        def completed(response: ChatResponse) -> None:
+            assert not returned
+            assert response is original.responses[call - 1]
+            assert response.conversation_id == f"S{call}"
+            record.on_completed(response)
+
+        client = DurableServiceClient(original, record.accept, completed)
+        assert client.exact_acceptance is False
+        assert client.local_calls == call - 1
+        assert client.additional_properties is original.additional_properties
+        assert client.function_invocation_configuration is original.function_invocation_configuration
+        result = client.get_response(inputs, stream=stream, options=options, client_kwargs=client_kwargs)
+        assert len(record.completed) == call - 1
+        response = await result.get_final_response() if stream else await result
+        returned = True
+        assert response is original.responses[call - 1]
+        assert response.text == f"answer-{call}"
+        assert record.completed[-1] is response
+        assert client.local_calls == original.local_calls == call
+        assert original.arguments[-1][0] is inputs
+        assert original.arguments[-1][1] == {"options": options, "client_kwargs": client_kwargs}
+        assert original.arguments[-1][1]["options"] is options
+        assert original.arguments[-1][1]["client_kwargs"] is client_kwargs
+        if stream:
+            assert await result.get_final_response() is response
+
+    for call in (1, 2):
+        await invoke(call)
+
+    assert record.instances == [original, original]
+    assert [response.conversation_id for response in record.completed] == ["S1", "S2"]
+    assert [[message.text for message in batch] for batch in record.received] == [["B"], ["B"]]
+    assert record.accepted == []
+    assert record.events.count("completed") == record.events.count("opaque-call") == 2
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+async def test_generic_stream_preserves_hooks_without_early_or_duplicate_completion(deferred: bool) -> None:
+    record = _Record()
+    original = _ProtocolClient(record, deferred_stream=deferred)
+    client = DurableServiceClient(original, record.accept, record.on_completed)
+    stream = client.get_response(_inputs(), stream=True)
+    assert isinstance(stream, ResponseStream)
+    assert record.events == ["opaque-call"]
+    if not deferred:
+        assert stream is record.streams[0]
+    assert await stream is stream
+    assert "opaque-pull" not in record.events
+    update = await anext(stream)
+    assert update.conversation_id is None
+    assert record.accepted == record.completed == []
+    response = await stream.get_final_response()
+    assert await stream.get_final_response() is response
+    assert response is original.responses[0]
+    assert response.conversation_id == "S1"
+    assert record.completed == [response]
+    assert record.accepted == []
+    for event in (
+        "opaque-call",
+        "opaque-pull",
+        "opaque-transform",
+        "opaque-cleanup",
+        "opaque-finalizer",
+        "opaque-result",
+    ):
+        assert record.events.count(event) == 1
+    assert record.events.count("completed") == 1
+    assert record.events.index("opaque-result") < record.events.index("completed")
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize("fail_outer", [False, True])
+async def test_generic_completion_precedes_outer_result_finalization(deferred: bool, fail_outer: bool) -> None:
+    record = _Record()
+    original = _ProtocolClient(record, deferred_stream=deferred)
+    client = DurableServiceClient(original, record.accept, record.on_completed)
+    stream = client.get_response(_inputs(), stream=True)
+
+    def finalize_outer(updates: Sequence[ChatResponseUpdate]) -> ChatResponse:
+        assert len(updates) == 1
+        assert record.completed == [original.responses[0]]
+        assert record.completed[0].conversation_id == "S1"
+        assert record.accepted == []
+        record.events.append("outer-finalizer")
+        if fail_outer:
+            raise RuntimeError("outer finalization failed")
+        return ChatResponse(messages=[Message("assistant", ["outer answer"])])
+
+    outer = stream.map(lambda update: update, finalize_outer)
+    if fail_outer:
+        with pytest.raises(RuntimeError, match="outer finalization failed"):
+            await outer.get_final_response()
+    else:
+        assert (await outer.get_final_response()).text == "outer answer"
+    assert record.events.index("completed") < record.events.index("outer-finalizer")
+    assert record.events.count("completed") == original.local_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("stream", "deferred", "failure"),
+    [
+        (False, False, "dispatch"),
+        (False, False, "await"),
+        (True, False, "dispatch"),
+        (True, True, "resolve"),
+        (True, False, "stream"),
+        (True, True, "stream"),
+        (True, False, "finalizer"),
+        (True, True, "finalizer"),
+        (True, False, "result-hook"),
+        (True, True, "result-hook"),
+    ],
+)
+async def test_generic_failure_propagates_without_receipt_completion_or_rerun(
+    stream: bool, deferred: bool, failure: str
+) -> None:
+    record = _Record()
+    original = _ProtocolClient(record, deferred_stream=deferred, failure=failure)
+    client = DurableServiceClient(original, record.accept, record.on_completed)
+    with pytest.raises(RuntimeError) as error:
+        result = client.get_response(_inputs(), stream=stream)
+        if stream:
+            await result.get_final_response()
+        else:
+            await result
+    assert error.value is original.error
+    assert client.exact_acceptance is False
+    assert original.local_calls == 1
+    assert record.accepted == record.completed == []
+    assert not record.progress.service_completed
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_generic_completion_callback_is_optional(stream: bool) -> None:
+    record = _Record()
+    original = _ProtocolClient(record)
+    client = DurableServiceClient(original, record.accept)
+    result = client.get_response(_inputs(), stream=stream)
+    response = await result.get_final_response() if stream else await result
+    assert response is original.responses[0]
+    assert record.accepted == record.completed == []
+    assert original.local_calls == 1
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+async def test_generic_partial_stream_does_not_claim_completion(deferred: bool) -> None:
+    record = _Record()
+    original = _ProtocolClient(record, deferred_stream=deferred)
+    client = DurableServiceClient(original, record.accept, record.on_completed)
+    stream = client.get_response(_inputs(), stream=True)
+    await anext(stream)
+    producer: Any = record.streams[0]._stream_source
+    await producer.aclose()
+    assert record.accepted == record.completed == []
+    assert not record.progress.service_completed
+    assert "opaque-finalizer" not in record.events
+    assert original.local_calls == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_async_protocol_entry_executes_once_and_preserves_its_result(stream: bool) -> None:
+    record = _Record()
+
+    class AsyncProtocol(_ProtocolClient):
+        async def get_response(self, messages: Sequence[Message], *, stream: bool = False, **kwargs: Any) -> Any:
+            result = super().get_response(messages, stream=stream, **kwargs)
+            return result if stream else await result
+
+    original = AsyncProtocol(record)
+    client = DurableServiceClient(original, record.accept, record.on_completed)
+    result = client.get_response(_inputs(), stream=stream)
+    assert original.local_calls == 0
+    response = await result.get_final_response() if stream else await result
+    assert response is original.responses[0]
+    assert original.local_calls == 1
+    assert record.completed == [response]
+    assert record.accepted == []
+    assert client.exact_acceptance is False
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+async def test_generic_invalid_stream_shape_does_not_fake_completion(deferred: bool) -> None:
+    record = _Record()
+
+    class InvalidStream(_ProtocolClient):
+        def get_response(self, messages: Sequence[Message], **kwargs: Any) -> Any:
+            self.local_calls += 1
+            response = ChatResponse(messages=[Message("assistant", ["not a stream"])])
+            if deferred:
+
+                async def resolve() -> ChatResponse:
+                    return response
+
+                return resolve()
+            return response
+
+    original = InvalidStream(record)
+    client = DurableServiceClient(original, record.accept, record.on_completed)
+    with pytest.raises(ValueError, match="requires a ResponseStream"):
+        await client.get_response(_inputs(), stream=True).get_final_response()
+    assert record.accepted == record.completed == []
+    assert original.local_calls == 1
+
+
+async def test_generic_callback_failure_is_once_only_and_does_not_rerun_original() -> None:
+    record = _Record()
+    original = _ProtocolClient(record)
+    failure = RuntimeError("completion callback failed")
+
+    def completed(response: ChatResponse) -> None:
+        record.on_completed(response)
+        raise failure
+
+    client = DurableServiceClient(original, record.accept, completed)
+    stream = client.get_response(_inputs(), stream=True)
+    with pytest.raises(RuntimeError) as error:
+        await stream.get_final_response()
+    assert error.value is failure
+    # Core may revisit finalization while unwinding. Do not call the callback twice.
+    assert await stream.get_final_response() is original.responses[0]
+    assert record.completed == original.responses
+    assert record.accepted == []
+    assert original.local_calls == 1
+
+
+def test_unrelated_clone_value_error_is_not_misclassified_as_unsupported() -> None:
+    record = _Record()
+    failure = ValueError("client reconstruction failed")
+
+    class FailingClone(_LeafClient):
+        @property
+        def clone_guard(self) -> Any:
+            return self.__dict__["clone_guard"]
+
+        @clone_guard.setter
+        def clone_guard(self, value: Any) -> None:
+            raise failure
+
+    original = FailingClone(record)
+    vars(original)["clone_guard"] = True
+    with pytest.raises(ValueError) as error:
+        DurableServiceClient(original, record.accept, record.on_completed)
+    assert error.value is failure
+    assert record.received == record.accepted == record.completed == []
+
+
+def test_original_entry_lookup_error_is_not_masked_as_an_invalid_client() -> None:
+    record = _Record()
+    failure = ValueError("client entry lookup failed")
+
+    class BrokenLookup:
+        @property
+        def get_response(self) -> Any:
+            raise failure
+
+    with pytest.raises(ValueError) as error:
+        DurableServiceClient(BrokenLookup(), record.accept, record.on_completed)
+    assert error.value is failure
     assert record.received == record.accepted == record.completed == []
 
 
@@ -624,7 +1007,51 @@ async def test_two_run_local_clients_keep_observers_and_scalar_state_separate() 
     assert original.local_calls == 0
 
 
-def test_custom_attribute_lookup_is_rejected_before_calling_a_bypassed_leaf() -> None:
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("callback_kind", ["bound-method", "instance-function"])
+async def test_exact_receipt_capability_does_not_isolate_cached_middleware_callbacks(
+    stream: bool, callback_kind: str
+) -> None:
+    # Review control for the existing clone, not a full compatibility guarantee.
+    # Cached pipelines and referenced callback containers are still borrowed.
+    record = _Record()
+    original: Any = _LayeredClient(record)
+    callback_instances: list[Any] = []
+
+    async def audit(self: Any, context: ChatContext, call_next: Callable[[], Awaitable[None]]) -> None:
+        callback_instances.append(self)
+        self.local_calls += 10
+        await call_next()
+
+    if callback_kind == "bound-method":
+        original.audit = MethodType(audit, original)
+    else:
+
+        async def instance_audit(context: ChatContext, call_next: Callable[[], Awaitable[None]]) -> None:
+            await audit(original, context, call_next)
+
+        original.audit = instance_audit
+    original.chat_middleware = [original.audit]
+    await original.get_response(_inputs())
+    cached = original._cached_chat_middleware_pipeline
+    assert cached is not None
+    assert original.local_calls == 11
+
+    client = DurableServiceClient(original, record.accept, record.on_completed)
+    result = client.get_response(_inputs(), stream=stream)
+    response = await result.get_final_response() if stream else await result
+    clone = record.instances[-1]
+    assert client.exact_acceptance is True
+    assert clone is not original
+    assert clone._cached_chat_middleware_pipeline is cached
+    assert callback_instances == [original, original]
+    assert original.local_calls == 21
+    assert clone.local_calls == 12
+    assert len(record.accepted) == len(record.completed) == 1
+    assert response.text == "answer"
+
+
+async def test_custom_attribute_lookup_uses_original_without_claiming_exact_acceptance() -> None:
     record = _Record()
 
     class OpaqueLookup(_LeafClient):
@@ -632,9 +1059,13 @@ def test_custom_attribute_lookup_is_rejected_before_calling_a_bypassed_leaf() ->
             return super().__getattribute__(name)
 
     original = OpaqueLookup(record)
-    with pytest.raises(ValueError, match="custom attribute lookup"):
-        DurableServiceClient(original, record.accept)
-    assert record.received == record.accepted == record.completed == []
+    client = DurableServiceClient(original, record.accept, record.on_completed)
+    assert client.exact_acceptance is False
+    response = await client.get_response(_inputs())
+    assert record.instances == [original]
+    assert record.completed == [response]
+    assert record.accepted == []
+    assert original.local_calls == 1
 
 
 async def test_partial_stream_and_producer_close_do_not_count_as_completion() -> None:
