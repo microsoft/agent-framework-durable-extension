@@ -328,6 +328,13 @@ def _preserve_session(state: DurableAgentState, source_session_id: str) -> None:
         raise ValueError("Legacy session.session_id must be a string or null.")
     if isinstance(existing_id, str) and existing_id.strip() and existing_id != source_session_id:
         raise ValueError("Legacy session.session_id must match source_session_id to preserve external-store identity.")
+    if not isinstance(session.get("state", {}), dict):
+        raise ValueError("Legacy session.state must be an object when present.")
+    service_session_id = session.get("service_session_id")
+    # Core's ServiceSessionId is Mapping[str, Any], not a provider-specific schema.
+    # The source snapshot already enforces strict JSON, including string keys.
+    if service_session_id is not None and not isinstance(service_session_id, (str, dict)):
+        raise ValueError("Legacy session.service_session_id must be a string, object or null.")
     session["session_id"] = source_session_id
     session.setdefault("state", {})
 
@@ -378,6 +385,15 @@ def migrate_legacy_state(
     agree with its journal outcome. Partial non-error content never proves success.
     Delivery evidence proves accepted inputs only, independently of this journal.
     No private prototype completion maps or unversioned ingestedMessages are read.
+
+    Any legacy data.pythonIngestion field is rejected before parsing, including
+    null, empty, foreign and recognized profiles. It must not become active v2
+    bookkeeping. Session state must be an object when present, defaulting to {}
+    only when absent. service_session_id may be absent, null, any string or a JSON
+    object, matching Core's str | Mapping[str, Any] | None contract. Objects have
+    no required keys or string-only value restriction. Empty strings and objects,
+    session values and unknown siblings remain JSON, without Core deserialization.
+    Provider continuation compatibility is separate from session restoration.
 
     Original journal completedAt strings are immutable. Neither transcript createdAt
     nor the migration clock supplies a completion time. New matching result/receipt
@@ -440,6 +456,10 @@ def migrate_legacy_state(
     if not isinstance(raw_data, dict):
         raise ValueError("Legacy state data must be an object.")
     raw_data = cast(dict[str, Any], raw_data)
+    if "pythonIngestion" in raw_data:
+        raise ValueError(
+            "Legacy data contains reserved pythonIngestion metadata; explicit migration does not accept it."
+        )
     # History is optional in the legacy schema but required by the target. Add
     # only an absent array on the detached snapshot, never replace a present value.
     raw_data.setdefault("conversationHistory", [])

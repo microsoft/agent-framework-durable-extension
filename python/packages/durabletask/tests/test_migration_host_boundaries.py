@@ -12,12 +12,13 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 from _execution_test_support import JsonStateProvider, LostAcknowledgementJsonStateProvider, RecordingChatClient
-from agent_framework import Agent, HistoryProvider, Message
+from agent_framework import Agent, AgentSession, HistoryProvider, Message
 from durabletask.entities import EntityContext, EntityInstanceId
 from durabletask.internal.entity_state_shim import StateShim
 from durabletask.serialization import JsonDataConverter
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState, DurableAIAgentWorker, state_snapshot_digest
+from agent_framework_durabletask._history_provider import service_stores_history
 
 WINDOW = 60
 SOURCE_SESSION_ID = "legacy-provider:source-session"
@@ -143,19 +144,46 @@ class _ObservedExternalHistory(HistoryProvider):
         self.calls.append(("save", session_id))
 
 
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    "service_session_id",
+    [
+        None,
+        "",
+        " \t\n",
+        " provider-id ",
+        {},
+        {"conversation": "provider-id"},
+        {
+            "conversation_id": "c",
+            "response_id": "r",
+            "future_id": "opaque",
+            "metadata": {"type": "message", "values": [None, False, 0, 1.5, {}, [], "雪"]},
+        },
+    ],
+)
 def test_registered_dt_factory_migrate_uses_real_entity_boundary_without_model_or_core_decode(
-    monkeypatch: pytest.MonkeyPatch,
+    version: str, service_session_id: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def forbidden(*args: Any, **kwargs: Any) -> None:
         pytest.fail("Migration must retain canonical result JSON and never decode through Core.")
 
     monkeypatch.setattr("agent_framework_durabletask._state_migration.load_agent_response", forbidden)
-    source = _legacy_source(_error_response_entry())
+    monkeypatch.setattr(AgentSession, "from_dict", forbidden)
+    monkeypatch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+    source = _legacy_source(_error_response_entry(), version=version)
+    source["data"]["session"] = {
+        "session_id": SOURCE_SESSION_ID,
+        "service_session_id": deepcopy(service_session_id),
+        "state": {"typed": {"type": "message", "opaque": [None, False, 0]}},
+        "futureSession": {"keep": [1]},
+    }
     request = _migration_request(
         source,
         "@dafx-migration-agent@sdk-destination",
         completionEvidence=_completion_journal(source, _original_result()),
     )
+    before = deepcopy((source, request))
     entity, shim, client, native = _sdk_registered_entity()
 
     result = entity.migrate(request)
@@ -173,6 +201,11 @@ def test_registered_dt_factory_migrate_uses_real_entity_boundary_without_model_o
     assert payload["data"]["migration"]["destinationSessionId"] == "@dafx-migration-agent@sdk-destination"
     assert payload["data"]["migration"]["sourceSessionId"] == SOURCE_SESSION_ID
     assert payload["data"]["terminalResults"]["done"]["response"] == _original_result()["response"]
+    assert payload["data"]["session"] == source["data"]["session"]
+    assert json.dumps(payload["data"]["session"], sort_keys=True) == json.dumps(
+        source["data"]["session"], sort_keys=True
+    )
+    assert (source, request) == before
 
 
 @pytest.mark.parametrize(
@@ -215,6 +248,159 @@ def test_agent_entity_migrate_rejects_identity_mismatches_before_write(mutate: A
     assert provider.successful_writes == 0
     assert provider.raw == before == {}
     assert client.received_messages == []
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    "marker",
+    [
+        None,
+        {},
+        {"profile": "foreign", "version": 1, "messages": {"accepted": ["a" * 64]}},
+        {"profile": "agent-framework-python.ingestion", "version": 1, "messages": {"accepted": ["a" * 64]}},
+    ],
+)
+def test_agent_entity_migrate_rejects_reserved_ingestion_without_write(version: str, marker: Any) -> None:
+    entity, provider, client = _json_provider_entity()
+    source = _legacy_source(version=version)
+    source["data"]["pythonIngestion"] = deepcopy(marker)
+    request = _migration_request(source, provider.core_session_id)
+    before = deepcopy((source, request))
+    warm = provider.state
+
+    with pytest.raises(ValueError, match="Legacy data contains reserved pythonIngestion metadata"):
+        entity.migrate(request)
+
+    assert provider.state is warm
+    assert warm.to_dict() == DurableAgentState().to_dict()
+    assert provider.raw == {}
+    assert provider.attempted_writes == provider.successful_writes == 0
+    assert (source, request) == before
+    assert client.received_messages == []
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("state", []),
+        ("state", None),
+        ("state", 7),
+        ("state", False),
+        ("state", "opaque"),
+        ("service_session_id", []),
+        ("service_session_id", ["provider-id"]),
+        ("service_session_id", 7),
+        ("service_session_id", 1.5),
+        ("service_session_id", False),
+        ("service_session_id", True),
+    ],
+)
+def test_agent_entity_migrate_rejects_invalid_session_without_side_effects(
+    version: str, field: str, value: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    external = _ObservedExternalHistory()
+    client = RecordingChatClient()
+    entity, provider, _ = _json_provider_entity(
+        agent=Agent(client=client, name="migration-agent", context_providers=[external])
+    )
+    source = _legacy_source(version=version)
+    source["data"]["session"] = {"session_id": SOURCE_SESSION_ID, field: deepcopy(value)}
+    request = _migration_request(source, provider.core_session_id, completionEvidence=_completion_journal(source))
+    before = deepcopy((source, request))
+    warm = provider.state
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Migration must not deserialize session values or register provider types.")
+
+    monkeypatch.setattr(AgentSession, "from_dict", forbidden)
+    monkeypatch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+    with pytest.raises(ValueError, match=rf"Legacy session\.{field} must be"):
+        entity.migrate(request)
+
+    assert provider.state is warm
+    assert warm.to_dict() == DurableAgentState().to_dict()
+    assert provider.raw == {}
+    assert provider.attempted_writes == provider.successful_writes == 0
+    assert (source, request) == before
+    assert external.calls == []
+    assert client.received_messages == []
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    "service_session_id",
+    [
+        {},
+        {
+            "conversation_id": "c",
+            "response_id": "r",
+            "future_id": "opaque",
+            "metadata": {"type": "message", "values": [None, False, 0, 1.5, {}, [], "雪"]},
+        },
+    ],
+)
+def test_migration_cold_host_restores_structured_service_id_without_provider_io(
+    version: str, service_session_id: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _legacy_source(version=version)
+    source["data"]["session"] = {
+        "session_id": SOURCE_SESSION_ID,
+        "service_session_id": deepcopy(service_session_id),
+        "state": {"external-store": {"provider-key": "original", "nested": [None, False, 0]}},
+        "futureSession": {"keep": [1]},
+    }
+    external = _ObservedExternalHistory()
+    client = RecordingChatClient()
+    entity, provider, _ = _json_provider_entity(
+        agent=Agent(client=client, name="migration-agent", context_providers=[external])
+    )
+    request = _migration_request(source, provider.core_session_id, completionEvidence=_completion_journal(source))
+    before = deepcopy((source, request))
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Migration must not deserialize session values or register provider types.")
+
+    with monkeypatch.context() as migration_patch:
+        migration_patch.setattr(AgentSession, "from_dict", forbidden)
+        migration_patch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+        assert entity.migrate(request) == {
+            "status": "migrated",
+            "migrationId": "migration-1",
+            "sessionId": provider.core_session_id,
+        }
+    assert provider.attempted_writes == provider.successful_writes == 1
+    assert provider.raw["data"]["session"] == source["data"]["session"]
+    assert external.calls == []
+    assert client.received_messages == []
+
+    committed = json.loads(json.dumps(provider.raw, allow_nan=False))
+    cold_external = _ObservedExternalHistory()
+    cold_client = RecordingChatClient()
+    cold_entity, cold_provider, _ = _json_provider_entity(
+        raw=committed,
+        agent=Agent(
+            client=cold_client,
+            name="migration-agent",
+            context_providers=[cold_external],
+            default_options={"store": True},
+        ),
+    )
+    # The real service-owned run path restores this session without clearing its ID.
+    # Generic Core Agent continuation rejects mappings, so do not substitute a run mock.
+    assert service_stores_history(cold_entity.agent, {})
+    restored = cold_entity._create_session()
+
+    assert isinstance(restored, AgentSession)
+    assert restored.session_id == SOURCE_SESSION_ID
+    assert restored.service_session_id == service_session_id
+    assert json.dumps(restored.service_session_id, sort_keys=True) == json.dumps(service_session_id, sort_keys=True)
+    assert restored.state == source["data"]["session"]["state"]
+    assert cold_provider.raw == committed
+    assert cold_provider.attempted_writes == cold_provider.successful_writes == 0
+    assert cold_external.calls == []
+    assert cold_client.received_messages == []
+    assert (source, request) == before
 
 
 @pytest.mark.parametrize(

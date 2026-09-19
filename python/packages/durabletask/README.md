@@ -73,7 +73,10 @@ The backend may have committed, so the next operation reloads authoritative stat
 version `2.x` sources are rejected. There is no private prototype v2 converter. The migration
 path does not claim that nullable legacy fields are normalized, that lossy legacy data becomes
 canonical automatically, or that unversioned private shapes are accepted. An existing
-`source.data.migration` field is rejected, never overwritten.
+`source.data.migration` field is rejected, never overwritten. Any `source.data.pythonIngestion`
+field is rejected before legacy parsing, including null, empty, foreign and recognized profiles.
+It is neither relocated nor carried into v2 where it could become active bookkeeping. Other
+unknown application fields remain at their original locations.
 
 Nonempty legacy `ingestedPositions` requires `deliveryEvidence`. When supplied, this evidence
 must contain `sourceDigest` matching the source snapshot, a nonblank `evidenceId`, `complete=true`,
@@ -120,7 +123,17 @@ with `agent_framework_durabletask.state_snapshot_digest(source)` computed from t
 
 If the legacy source carries external session state, its original `session_id` is preserved and
 used by later host runs only after the migration is committed into the destination. Migration is
-the boundary that transfers that destination binding.
+the boundary that transfers that destination binding. A nonblank saved `session_id` must match
+`sourceSessionId`. An absent, null or blank saved ID is filled from `sourceSessionId`.
+Within a session object, `state` must be an object when present. Only omission defaults to `{}`,
+not null, a list or a scalar. `service_session_id` may be absent, null, any string or a JSON object,
+matching Core 1.13 and 1.16's `str | ServiceSessionId | None` contract, where `ServiceSessionId`
+is `Mapping[str, Any]`. Empty strings and objects are accepted. Object keys must be strings, but
+no particular keys are required and values may be any strict JSON, including unknown metadata.
+Service IDs, state values (including registered-type JSON), and unknown session siblings are
+preserved without trimming, Core session deserialization, provider imports or provider calls
+during migration. Cold session restoration preserves structured IDs. Continuation still requires
+a compatible agent/provider, since Core's generic chat `Agent` requires a string service ID.
 
 Workflow start input wrapping is not universal. `DurableWorkflowClient` and generated HTTP
 start routes wrap new inputs for host-generated workflows. Application-owned native orchestrators
