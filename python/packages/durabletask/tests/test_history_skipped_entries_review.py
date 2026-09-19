@@ -23,14 +23,20 @@ from agent_framework_durabletask._shared_agent_state import (
 )
 
 
-def _unknown_entry(*messages: DurableAgentStateMessage) -> DurableAgentStateUnknownEntry:
+def _unknown_entry(*messages: DurableAgentStateMessage, json_type: str = "unknown") -> DurableAgentStateUnknownEntry:
     entry = DurableAgentStateUnknownEntry({
-        "$type": "unknown",
+        "$type": json_type,
         "correlationId": "seed",
         "messages": [message.to_dict() for message in messages],
     })
     entry.messages = list(messages)
     return entry
+
+
+def _opaque_error_entry(*messages: DurableAgentStateMessage) -> DurableAgentStateUnknownEntry:
+    # Keep the opaque runtime class and shared object references, but serialize
+    # a canonical discriminator so v2 snapshot admission does not mask aliasing.
+    return _unknown_entry(*messages, json_type="errorResponse")
 
 
 def _error_entry(*messages: DurableAgentStateMessage) -> DurableAgentStateErrorResponse:
@@ -70,7 +76,7 @@ def _history_markers(provider: _CanonicalStateProvider) -> list[str]:
     "skipped_entry",
     [
         pytest.param(_error_entry, id="error-response"),
-        pytest.param(_unknown_entry, id="unknown-entry"),
+        pytest.param(_opaque_error_entry, id="unknown-entry"),
     ],
 )
 async def test_aliased_replayable_and_skipped_occurrences_reject_before_any_identity_repair(
@@ -78,11 +84,9 @@ async def test_aliased_replayable_and_skipped_occurrences_reject_before_any_iden
 ) -> None:
     shared = DurableAgentStateMessage.from_chat_message(Message("assistant", ["shared object"]))
     provider = _CanonicalStateProvider([_request("seed", shared), skipped_entry(shared)])
-    if skipped_entry is _unknown_entry:
-        # Exercise the private model's opaque legacy-entry surface, not v2
-        # admission of an unsupported entry discriminator or replay of it.
-        provider.state.schema_version = "1.2.0"
     before = provider.state.to_dict()
+    assert before["schemaVersion"] == "2.0.0"
+    assert before["data"]["conversationHistory"][1]["$type"] == "errorResponse"
     history = DurableHistoryProvider()
     state: dict[str, Any] = {}
 
@@ -99,9 +103,11 @@ async def test_aliased_replayable_and_skipped_occurrences_reject_before_any_iden
 
 async def test_aliased_nonreplayable_occurrences_reject_without_mutating_storage() -> None:
     shared = DurableAgentStateMessage.from_chat_message(Message("assistant", ["hidden shared object"]))
-    provider = _CanonicalStateProvider([_error_entry(shared), _unknown_entry(shared)])
-    provider.state.schema_version = "1.2.0"
+    provider = _CanonicalStateProvider([_error_entry(shared), _opaque_error_entry(shared)])
     before = provider.state.to_dict()
+    assert before["schemaVersion"] == "2.0.0"
+    assert isinstance(provider.state.data.conversation_history[1], DurableAgentStateUnknownEntry)
+    assert before["data"]["conversationHistory"][1]["$type"] == "errorResponse"
     history = DurableHistoryProvider()
 
     with _bound(provider), pytest.raises(ValueError, match="distinct stored message"):

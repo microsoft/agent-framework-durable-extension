@@ -149,6 +149,11 @@ delivery windows are configurable through the host registration APIs.
 The Core requirement remains `agent-framework-core>=1.13.0,<2`. This package directly requires
 `pydantic>=2.11,<3` for structured response handling.
 
+The history bridge requires an exact `2.0.0` snapshot. Even `get_messages()` may repair missing
+or duplicate internal IDs, so it is not a read-only inspection path. Mutation-capable hooks reject
+legacy and unsupported versions before changing stored history or working state. Use
+`read_agent_state()` for legacy inspection instead.
+
 Explicit durable and external primary providers retain the user's hook order, so place history
 before a matching before-compaction provider when that strategy must see loaded history.
 Provider namespaces must be unique, including store-only sinks, and conflicts with an injected

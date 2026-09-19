@@ -3,6 +3,7 @@
 """Real integration launchers acknowledge only their isolated child task hubs."""
 
 import importlib.util
+import json
 import os
 import sys
 from pathlib import Path
@@ -33,6 +34,9 @@ def _load(monkeypatch: pytest.MonkeyPatch, package: str) -> Any:
 @pytest.mark.parametrize("package", ["durabletask", "azurefunctions"])
 def test_launchers_set_only_child_isolation_and_unique_hubs(monkeypatch: pytest.MonkeyPatch, package: str) -> None:
     monkeypatch.delenv("DURABLE_AGENTS_DEPLOYMENT_MODE", raising=False)
+    host_hub_key = "AzureFunctionsJobHost__extensions__durableTask__hubName"
+    monkeypatch.setenv(host_hub_key, "parent-hub")
+    monkeypatch.setenv("TASKHUB_NAME", "parent-hub")
     launcher = _load(monkeypatch, package)
     process = Mock()
     process.poll.return_value = None
@@ -59,7 +63,18 @@ def test_launchers_set_only_child_isolation_and_unique_hubs(monkeypatch: pytest.
     assert captured[0][hub_key] != captured[1][hub_key]
     assert all(env["DURABLE_AGENTS_DEPLOYMENT_MODE"] == "isolated_v2" for env in captured)
     assert all(env is not os.environ for env in captured)
+    if package == "azurefunctions":
+        assert all(env[host_hub_key] == env[hub_key] for env in captured)
+        assert all(env[host_hub_key] != "parent-hub" for env in captured)
     assert popen.call_count == 2
+
+
+def test_mcp_sample_template_overrides_host_with_the_same_task_hub() -> None:
+    sample = Path(__file__).resolve().parents[3] / "samples" / "azure_functions" / "08_mcp_server"
+    values = json.loads((sample / "local.settings.json.template").read_text(encoding="utf-8"))["Values"]
+
+    assert values["AzureFunctionsJobHost__extensions__durableTask__hubName"] == values["TASKHUB_NAME"]
+    assert f"TaskHub={values['TASKHUB_NAME']};" in values["DURABLE_TASK_SCHEDULER_CONNECTION_STRING"]
 
 
 def test_real_host_constructor_rejects_absent_acknowledgement(monkeypatch: pytest.MonkeyPatch) -> None:

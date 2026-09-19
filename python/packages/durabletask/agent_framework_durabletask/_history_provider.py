@@ -161,7 +161,18 @@ class DurableHistoryProvider(HistoryProvider):
                 "[DurableHistoryProvider] No durable binding is active, so the provider yields no history. "
                 "This provider only works inside a durable owner operation."
             )
+        else:
+            self._require_writable_history(binding)
         return binding
+
+    @staticmethod
+    def _require_writable_history(binding: DurableHistoryBinding) -> None:
+        """Require the exact writable version without validating the complete snapshot per hook."""
+        if binding.state_provider.state.schema_version != "2.0.0":
+            raise ValueError(
+                "Durable history requires schemaVersion '2.0.0'. Legacy state is read-only. "
+                "Use read_agent_state() for inspection."
+            )
 
     def _replayable_entries(self, binding: DurableHistoryBinding) -> Iterator[tuple[DurableAgentStateEntry, int]]:
         """Yield ``(entry, message_index)`` pairs that participate in model context."""
@@ -169,7 +180,7 @@ class DurableHistoryProvider(HistoryProvider):
 
     @staticmethod
     def _synthetic_message_id(entry: DurableAgentStateEntry, index: int) -> str:
-        """Build a deterministic ID candidate for a legacy message."""
+        """Build a deterministic ID candidate for an anonymous or duplicate message."""
         scope = entry.correlation_id or (entry.created_at.isoformat() if entry.created_at is not None else "undated")
         kind = entry.json_type.value if isinstance(entry.json_type, DurableAgentStateEntryJsonType) else entry.json_type
         return f"durable_{kind}_{scope}_{index}"
@@ -210,7 +221,8 @@ class DurableHistoryProvider(HistoryProvider):
         *,
         used_ids: set[str] | None = None,
     ) -> dict[str, tuple[DurableAgentStateEntry, int]]:
-        """Index current storage, repairing anonymous or duplicate identities in legacy entries."""
+        """Index writable v2 storage, repairing anonymous or duplicate identities."""
+        self._require_writable_history(binding)
         history = binding.state_provider.state.data.conversation_history
         reserved = used_ids if used_ids is not None else _collect_used_message_ids(history)
         positions: dict[str, tuple[DurableAgentStateEntry, int]] = {}
@@ -230,6 +242,9 @@ class DurableHistoryProvider(HistoryProvider):
                 repairs.append((stored, history_id))
             positions[history_id] = (entry, index)
         # Admit the entire repair batch before changing any caller-owned message.
+        if repairs:
+            for entry, index in self._replayable_entries(binding):
+                self._to_message(entry.messages[index])
         for stored, history_id in repairs:
             stored.set_history_id(history_id)
         return positions
@@ -237,7 +252,7 @@ class DurableHistoryProvider(HistoryProvider):
     async def get_messages(
         self, session_id: str | None, *, state: dict[str, Any] | None = None, **kwargs: Any
     ) -> list[Message]:
-        """Load conversation history from canonical durable state."""
+        """Load a writable v2 snapshot, possibly repairing IDs. Inspect legacy state with ``read_agent_state``."""
         binding = self._binding()
         if binding is None:
             return []
@@ -287,6 +302,7 @@ class DurableHistoryProvider(HistoryProvider):
         response: AgentResponse | None = None,
     ) -> None:
         """Append one hook batch, exposing only nonterminal batches to core compaction."""
+        self._require_writable_history(binding)
         if not messages or binding.service_owns_history:
             return
         if state is not None and WORKING_BUFFER_KEY not in state:
@@ -398,6 +414,7 @@ class DurableHistoryProvider(HistoryProvider):
         """Load durable history into context, unless the service owns the conversation."""
         binding = current_durable_history_binding()
         if binding is not None:
+            self._require_writable_history(binding)
             binding.pending_inputs.clear()
             if binding.service_owns_history:
                 return
@@ -445,6 +462,7 @@ class DurableHistoryProvider(HistoryProvider):
         binding = current_durable_history_binding()
         if binding is None:
             return
+        self._require_writable_history(binding)
         pending_inputs = binding.pending_inputs
         binding.pending_inputs = []
         if (
@@ -487,6 +505,7 @@ class DurableHistoryProvider(HistoryProvider):
         binding = current_durable_history_binding()
         if binding is None or binding.service_owns_history:
             return
+        self._require_writable_history(binding)
 
         raw_buffer = state.get(WORKING_BUFFER_KEY)
         raw_positions = state.get(POSITIONS_KEY)

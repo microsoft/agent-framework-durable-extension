@@ -60,7 +60,7 @@ class TestMultiAgentInit:
         with pytest.raises(ValueError, match="different registrations must not share a durable identity"):
             AgentFunctionApp(agents=[agent1, agent2])
 
-    def test_init_with_case_insensitive_duplicate_agent_names_skips_second_agent(self) -> None:
+    def test_init_with_case_insensitive_duplicate_agent_names_rejects_second_agent(self) -> None:
         """Case-only differences still collide for two different agents."""
         agent1 = Mock()
         agent1.name = "TestAgent"
