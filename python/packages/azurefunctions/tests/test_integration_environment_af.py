@@ -109,7 +109,7 @@ def test_function_app_subprocess_opts_into_isolated_mode_on_every_start(
                     "AzureFunctionsJobHost__extensions__durableTask__hubName": hub,
                     "DURABLE_AGENTS_DEPLOYMENT_MODE": "isolated_v2",
                     "DURABLE_TASK_SCHEDULER_CONNECTION_STRING": (
-                        f"Endpoint=http://localhost:8080;Authentication=None;TaskHub={hub}"
+                        f"{parent_env['DURABLE_TASK_SCHEDULER_CONNECTION_STRING']};TaskHub={hub}"
                     ),
                 },
             }
