@@ -14,8 +14,8 @@ The durable agent extension lets you host Microsoft Agent Framework agents on Az
 
 ### Current Runtime Contract On This Unreleased Stack
 
-This README describes the current `impl/python-evidence-migration` worktree. It documents
-unreleased behavior and should not be read as a released compatibility promise.
+This README describes the current unreleased schema-v2 runtime, not a released compatibility
+promise.
 
 The Azure Functions host participates in the same canonical `DurableAgentState` schema `2.0.0`
 runtime as the standalone Durable Task host. `read_agent_state(raw)` remains explicitly backward
@@ -143,23 +143,76 @@ rejected parent response can receive up to three additional identical-request re
 visibility delay, but only before any output, tool execution or session advance. The saved parent
 ID is not cleared. Old recorded workflow histories must remain on the old engine.
 
-Retention defaults currently preserve every physical message. Response delivery availability is
-time-bounded, with a default expiry window of `60` seconds, but receipt records are retained and
-never deleted by response expiry alone. `reset` clears local transcript and session state while
-preserving completion receipts and live results. External-primary reset requires a provider-owned
-clear operation and is rejected rather than silently clearing only local state.
-
 The optional migration helper budget `max_state_bytes` is a neutral admission limit, not a
 pressure policy. If the fully staged destination exceeds that bound, migration fails with
 `StateCapacityError`. It does not prune transcript, receipts, session state, or unknown JSON to
-fit. There is no documented runtime pressure policy yet.
-
-There are no retention controls yet for automatic transcript pruning or receipt cleanup. The
-application remains responsible for its own maintenance policy. Per-agent and per-workflow
-delivery windows are configurable through the host registration APIs.
+fit. Runtime transcript retention is configured separately below.
 
 The Core requirement remains `agent-framework-core>=1.13.0,<2`. The Durable Task dependency
 directly requires `pydantic>=2.11,<3` for structured response handling.
+
+### Retention and State Budgets
+
+`AgentFunctionApp` defaults to `retention="keep_all"` and `max_state_bytes=None`, preserving
+physical transcript messages with no local pressure cap. Backend limits still apply.
+`retention="follow_compaction"` opts into eager removal of eligible compaction exclusions.
+Independently, a positive integer `max_state_bytes` enables oldest-group pressure eviction,
+including with `keep_all`. `None` disables pressure eviction only. Booleans, zero and negative
+budgets are rejected. Default watermarks are `high_watermark=0.85` and `low_watermark=0.70`, with
+`0 < low_watermark < high_watermark <= 1` and finite values required.
+
+The budget measures whole-entity Python JSON with ASCII escaping, not just transcript text.
+Transport framing is excluded, so it is not a backend acceptance guarantee.
+Functions rejects `max_state_bytes="backend_limit"` because it cannot infer the backend limit,
+even when using DTS. The 1 MiB convenience belongs only to a standalone
+`DurableAIAgentWorker` wrapping `DurableTaskSchedulerWorker`.
+
+`add_agent()` accepts per-agent retention, budget, watermark and delivery-window overrides.
+`configure_workflow()` applies overrides to that workflow's agent entities and nested workflows.
+The app also accepts `workflow_retention`, `workflow_max_state_bytes`,
+`workflow_high_watermark`, `workflow_low_watermark` and
+`workflow_response_delivery_window_seconds` defaults. A workflow budget is per agent entity,
+not an aggregate workflow cap. For budgets, omission or `INHERIT` from
+`agent_framework_durabletask` inherits the enclosing default, while explicit `None` disables
+pressure eviction. For the other overrides, `None` inherits. Shared registrations require matching
+settings.
+
+Explicit `DurableHistoryProvider(prune_excluded=False)` overrides inherited eager pruning without
+disabling pressure eviction. Explicit `True` also wins. External primary history providers remain
+primary, and replacement of a built-in in-memory primary preserves its `source_id` and storage
+settings. Local retention does not delete external history. Service-owned runs skip durable
+history loading and eager flushes, but a configured budget still checks local state and may evict
+eligible older local transcript. It does not compact remote history or clear a saved service ID.
+
+Pressure eviction preserves terminal results, completion and ingestion receipts, session/control
+state, opaque unknown entries and retained entry metadata. System messages and the latest exchange
+are protected, and atomic groups are not split. Eager pruning also protects pending tool calls
+and groups containing included messages. The low-watermark target may rise to the protected floor
+only while remaining below the high watermark. Otherwise, or when no safe target is reachable,
+`StateCapacityError` rejects the pressure plan. The enclosing run restores local staged/cache state,
+not external side effects. A failed host write leaves backend acknowledgement unknown and requires
+an authoritative reload on the next operation.
+
+Response availability defaults to `response_delivery_window_seconds=60`, independently of
+transcript retention. Expiry removes delivery payloads, not completion outcomes or ingestion
+receipts. There is no bounded receipt cleanup, so receipts alone can exhaust the budget. Idle
+entities need application-owned `expire_responses()` maintenance. Polling does not persist cleanup.
+`reset` preserves completion receipts and live results while clearing local transcript and session
+state. External-primary reset is rejected without a provider-owned clear operation.
+
+See the [shared retention contract](../durabletask/README.md#retention-and-state-budgets) for details.
+
+### Retention Metrics
+
+The shared `agent_framework.durabletask` meter emits `durable.retention.*` metrics for local
+retention, capacity failures and host write/operation outcomes. Deletion counts and reclaimed bytes
+describe staged state with `commit_status="not_attempted"`, not durable deletion. Write and
+operation `outcome` is `"returned"` or `"failed"`. A `set_state` attempt leaves
+`commit_status="unknown"` even on return. No metric confirms a durable commit.
+
+Only the OpenTelemetry API is used. Applications configure their own SDK, metric reader and
+exporter. Labels use bounded categories without identifiers, content or exception text.
+See the [shared metric semantics](../durabletask/README.md#retention-metrics).
 
 ### Basic Usage Example
 

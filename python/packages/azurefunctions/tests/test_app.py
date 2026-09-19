@@ -280,6 +280,10 @@ class TestAgentFunctionAppSetup:
             mock_agent,
             "OverrideAgent",
             ANY,
+            retention="keep_all",
+            max_state_bytes=None,
+            high_watermark=0.85,
+            low_watermark=0.70,
             response_delivery_window_seconds=60,
         )
         assert app._agent_metadata["OverrideAgent"].http_endpoint_enabled is True
@@ -302,6 +306,10 @@ class TestAgentFunctionAppSetup:
             mock_agent,
             "DisabledOverride",
             ANY,
+            retention="keep_all",
+            max_state_bytes=None,
+            high_watermark=0.85,
+            low_watermark=0.70,
             response_delivery_window_seconds=60,
         )
         assert app._agent_metadata["DisabledOverride"].http_endpoint_enabled is False

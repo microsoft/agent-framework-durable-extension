@@ -25,9 +25,14 @@ from agent_framework import SupportsAgentRun, Workflow
 from agent_framework._telemetry import mark_feature_used
 from agent_framework_durabletask import (
     DEFAULT_MAX_POLL_RETRIES,
+    DEFAULT_MAX_STATE_BYTES,
     DEFAULT_POLL_INTERVAL_SECONDS,
+    DEFAULT_RETENTION,
     DELIVERY_WINDOW_SECONDS,
+    HIGH_WATERMARK,
+    INHERIT,
     LEGACY_THREAD_ID_FIELD,
+    LOW_WATERMARK,
     MIMETYPE_APPLICATION_JSON,
     MIMETYPE_TEXT_PLAIN,
     REQUEST_RESPONSE_FORMAT_JSON,
@@ -43,16 +48,22 @@ from agent_framework_durabletask import (
     DurableAIAgent,
     LegacyDurableAgentState,
     RegistrationIdentity,
+    RetentionMode,
     RunRequest,
     SharedAgentStateReader,
+    StateBudget,
+    StateBudgetOverride,
     deserialize_workflow_output,
     execute_workflow_activity,
     plan_workflow_registration,
     read_agent_state,
+    resolve_state_budget,
+    resolve_state_budget_override,
     serialize_agent_response,
     unwrap_workflow_input,
     validate_agent_configuration,
     validate_response_delivery_window,
+    validate_retention,
     validate_runtime_deployment,
     validate_workflow_start_input,
     wrap_workflow_input,
@@ -267,9 +278,18 @@ class AgentFunctionApp(DFAppBase):
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
         enable_mcp_tool_trigger: bool = False,
         default_callback: AgentResponseCallbackProtocol | None = None,
+        retention: RetentionMode = DEFAULT_RETENTION,
+        workflow_retention: RetentionMode | None = None,
+        max_state_bytes: StateBudget = DEFAULT_MAX_STATE_BYTES,
         *,
         deployment_mode: str | None = None,
+        high_watermark: float = HIGH_WATERMARK,
+        low_watermark: float = LOW_WATERMARK,
         response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
+        workflow_max_state_bytes: StateBudgetOverride = INHERIT,
+        workflow_high_watermark: float | None = None,
+        workflow_low_watermark: float | None = None,
+        workflow_response_delivery_window_seconds: int | None = None,
     ):
         """Initialize the AgentFunctionApp.
 
@@ -292,13 +312,38 @@ class AgentFunctionApp(DFAppBase):
         :param default_callback: Optional callback invoked for agents without specific callbacks.
         :param deployment_mode: Exactly ``isolated_v2`` to acknowledge an isolated schema 2
             deployment with upgraded clients. None reads ``DURABLE_AGENTS_DEPLOYMENT_MODE``.
+        :param retention: Eager pruning policy, defaulting to ``keep_all``. ``follow_compaction``
+            prunes compaction exclusions independently of the pressure budget.
+        :param max_state_bytes: Positive integer serialized-state budget, or None to disable pressure
+            eviction. ``backend_limit`` is unsupported because Functions cannot infer its backend limit.
+        :param workflow_retention: Retention for workflow agent nodes, or None to inherit ``retention``.
+        :param high_watermark: Budget fraction at which pressure eviction starts, defaulting to 0.85.
+        :param low_watermark: Target budget fraction after pressure eviction, defaulting to 0.70.
         :param response_delivery_window_seconds: Positive integer response delivery window in seconds.
             Controls how long canonical response payloads remain available to polling readers.
+        :param workflow_max_state_bytes: Workflow budget default. INHERIT uses the host budget.
+            None disables pressure eviction for workflow agents.
+        :param workflow_high_watermark: Workflow pressure trigger, or None to inherit.
+        :param workflow_low_watermark: Workflow pressure target, or None to inherit.
+        :param workflow_response_delivery_window_seconds: Workflow delivery window, or None to inherit.
 
         :note: If no agents are provided, they can be added later using :meth:`add_agent`.
         """
         validate_runtime_deployment(deployment_mode)
+        validate_retention(retention, high_watermark, low_watermark)
+        resolved_budget = resolve_state_budget(max_state_bytes)
         validate_response_delivery_window(response_delivery_window_seconds)
+        resolved_workflow_retention = retention if workflow_retention is None else workflow_retention
+        resolved_workflow_budget = resolve_state_budget_override(workflow_max_state_bytes, resolved_budget)
+        resolved_workflow_high = high_watermark if workflow_high_watermark is None else workflow_high_watermark
+        resolved_workflow_low = low_watermark if workflow_low_watermark is None else workflow_low_watermark
+        resolved_workflow_window = (
+            response_delivery_window_seconds
+            if workflow_response_delivery_window_seconds is None
+            else workflow_response_delivery_window_seconds
+        )
+        validate_retention(resolved_workflow_retention, resolved_workflow_high, resolved_workflow_low)
+        validate_response_delivery_window(resolved_workflow_window)
         initial_workflows = self._collect_workflows(workflow, workflows)
         logger.debug("[AgentFunctionApp] Initializing with Durable Entities...")
 
@@ -320,21 +365,45 @@ class AgentFunctionApp(DFAppBase):
         self.enable_mcp_tool_trigger = enable_mcp_tool_trigger
         self.default_callback = default_callback
         self._deployment_mode = "isolated_v2"
+        self._retention: RetentionMode = retention
+        self._workflow_retention: RetentionMode = resolved_workflow_retention
+        self._max_state_bytes = resolved_budget
+        self._high_watermark = high_watermark
+        self._low_watermark = low_watermark
         self._response_delivery_window_seconds = response_delivery_window_seconds
+        self._workflow_max_state_bytes = resolved_workflow_budget
+        self._workflow_high_watermark = resolved_workflow_high
+        self._workflow_low_watermark = resolved_workflow_low
+        self._workflow_response_delivery_window_seconds = resolved_workflow_window
 
-        settings = AgentRegistrationSettings(response_delivery_window_seconds, default_callback)
+        agent_settings = AgentRegistrationSettings(
+            retention,
+            resolved_budget,
+            high_watermark,
+            low_watermark,
+            response_delivery_window_seconds,
+            default_callback,
+        )
+        workflow_settings = AgentRegistrationSettings(
+            resolved_workflow_retention,
+            resolved_workflow_budget,
+            resolved_workflow_high,
+            resolved_workflow_low,
+            resolved_workflow_window,
+            default_callback,
+        )
         if enable_health_check:
-            RegistrationIdentity(self, self, "health", settings, "health check").reserve(
+            RegistrationIdentity(self, self, "health", agent_settings, "health check").reserve(
                 self._registration_identities, "health_check", namespace="function-name"
             )
         identities = dict(self._registration_identities)
         for initial_workflow in initial_workflows:
-            self._preflight_workflow(initial_workflow, settings, identities)
+            self._preflight_workflow(initial_workflow, workflow_settings, identities)
         for agent_instance in agents or []:
             self._preflight_agent(
                 agent_instance,
                 getattr(agent_instance, "name", None),
-                settings,
+                agent_settings,
                 (enable_http_endpoints, enable_mcp_tool_trigger),
                 identities,
             )
@@ -401,7 +470,7 @@ class AgentFunctionApp(DFAppBase):
     ) -> None:
         if not isinstance(name, str) or not name:
             raise ValueError("Agent must have a name to be registered")
-        validate_agent_configuration(agent)
+        validate_agent_configuration(agent, retention=settings.retention)
         label = f"workflow '{owner.name}' agent '{name}'" if owner is not None else f"agent '{name}'"
         identity = RegistrationIdentity(agent if owner is None else owner, agent, "entity", settings, label, endpoints)
         entity_name = AgentSessionId.to_entity_name(name)
@@ -467,10 +536,34 @@ class AgentFunctionApp(DFAppBase):
         self,
         workflow: Workflow,
         *,
+        retention: RetentionMode | None = None,
+        max_state_bytes: StateBudgetOverride = INHERIT,
+        high_watermark: float | None = None,
+        low_watermark: float | None = None,
         response_delivery_window_seconds: int | None = None,
     ) -> None:
-        """Register a workflow with an optional delivery-window override for its agent nodes."""
-        self._register_workflow(workflow, response_delivery_window_seconds=response_delivery_window_seconds)
+        """Register a workflow with overrides for its agent nodes and nested workflows.
+
+        Args:
+            workflow: Named workflow to register, including its nested workflows.
+            retention: Eager pruning policy, or None to use the app's workflow default.
+            max_state_bytes: Workflow budget. INHERIT uses the workflow default. None disables it.
+            high_watermark: Pressure trigger override, or None to inherit the workflow default.
+            low_watermark: Pressure target override, or None to inherit the workflow default.
+            response_delivery_window_seconds: Delivery window override, or None to inherit.
+
+        Raises:
+            ValueError: Workflow names, history providers, or retention settings are invalid,
+                or a shared registration has different settings.
+        """
+        self._register_workflow(
+            workflow,
+            retention=retention,
+            max_state_bytes=max_state_bytes,
+            high_watermark=high_watermark,
+            low_watermark=low_watermark,
+            response_delivery_window_seconds=response_delivery_window_seconds,
+        )
         self.workflow = next(iter(self._workflows.values())) if len(self._workflows) == 1 else None
 
     def _collect_workflows(
@@ -502,6 +595,10 @@ class AgentFunctionApp(DFAppBase):
         self,
         workflow: Workflow,
         *,
+        retention: RetentionMode | None = None,
+        max_state_bytes: StateBudgetOverride = INHERIT,
+        high_watermark: float | None = None,
+        low_watermark: float | None = None,
         response_delivery_window_seconds: int | None = None,
     ) -> None:
         """Register a top-level workflow's durable primitives and HTTP routes.
@@ -515,18 +612,30 @@ class AgentFunctionApp(DFAppBase):
 
         Raises:
             ValueError: If the workflow (or a nested sub-workflow) name is
-                missing/invalid/auto-generated, or a top-level workflow with the
-                same name is already registered.
+                missing/invalid/auto-generated, a derived name has a different owner,
+                or a shared workflow has different settings.
         """
         self._ensure_registration_usable()
+        effective_retention = self._workflow_retention if retention is None else retention
+        effective_budget = resolve_state_budget_override(max_state_bytes, self._workflow_max_state_bytes)
+        effective_high = self._workflow_high_watermark if high_watermark is None else high_watermark
+        effective_low = self._workflow_low_watermark if low_watermark is None else low_watermark
         effective_window = (
-            self._response_delivery_window_seconds
+            self._workflow_response_delivery_window_seconds
             if response_delivery_window_seconds is None
             else response_delivery_window_seconds
         )
+        validate_retention(effective_retention, effective_high, effective_low)
         validate_response_delivery_window(effective_window)
 
-        settings = AgentRegistrationSettings(effective_window, self.default_callback)
+        settings = AgentRegistrationSettings(
+            effective_retention,
+            effective_budget,
+            effective_high,
+            effective_low,
+            effective_window,
+            self.default_callback,
+        )
         identities = dict(self._registration_identities)
         hosted_workflows = self._preflight_workflow(workflow, settings, identities)
         previous_metadata = dict(self._agent_metadata)
@@ -535,7 +644,14 @@ class AgentFunctionApp(DFAppBase):
             for hosted in hosted_workflows:
                 if hosted.name.casefold() in self._registered_orchestrations:
                     continue
-                self._register_workflow_primitives(hosted, response_delivery_window_seconds=effective_window)
+                self._register_workflow_primitives(
+                    hosted,
+                    retention=effective_retention,
+                    max_state_bytes=effective_budget,
+                    high_watermark=effective_high,
+                    low_watermark=effective_low,
+                    response_delivery_window_seconds=effective_window,
+                )
             if workflow.name not in self._workflows:
                 self._register_workflow_routes(workflow)
         except Exception:
@@ -552,6 +668,10 @@ class AgentFunctionApp(DFAppBase):
         self,
         workflow: Workflow,
         *,
+        retention: RetentionMode,
+        max_state_bytes: int | None,
+        high_watermark: float,
+        low_watermark: float,
         response_delivery_window_seconds: int,
     ) -> None:
         """Register one workflow's entities, activities, and orchestrator (no routes)."""
@@ -569,6 +689,10 @@ class AgentFunctionApp(DFAppBase):
                 agent_executor.agent,
                 callback=self.default_callback,
                 entity_id=workflow_scoped_executor_id(workflow.name, agent_executor.id),
+                retention=retention,
+                max_state_bytes=max_state_bytes,
+                high_watermark=high_watermark,
+                low_watermark=low_watermark,
                 response_delivery_window_seconds=response_delivery_window_seconds,
             )
         for executor in plan.activity_executors:
@@ -981,6 +1105,10 @@ class AgentFunctionApp(DFAppBase):
         enable_mcp_tool_trigger: bool | None = None,
         *,
         entity_id: str | None = None,
+        retention: RetentionMode | None = None,
+        max_state_bytes: StateBudgetOverride = INHERIT,
+        high_watermark: float | None = None,
+        low_watermark: float | None = None,
         response_delivery_window_seconds: int | None = None,
     ) -> None:
         """Add an agent to the function app after initialization.
@@ -998,10 +1126,16 @@ class AgentFunctionApp(DFAppBase):
                 durable entity (and the ``agents`` / ``get_agent`` key) matches the
                 identity the orchestrator dispatches to. Mirrors
                 ``DurableAIAgentWorker.add_agent(entity_id=...)``.
+            retention: Per-agent eager pruning policy, or None to inherit the app default.
+            max_state_bytes: Per-agent budget. INHERIT uses the app default. None disables it.
+                Functions requires an explicit integer instead of ``backend_limit``.
+            high_watermark: Pressure trigger override, or None to inherit the app default.
+            low_watermark: Pressure target override, or None to inherit the app default.
             response_delivery_window_seconds: Optional delivery-window override for this agent.
 
         Raises:
-            ValueError: If the agent doesn't have a 'name' attribute or its durable history cannot be prepared.
+            ValueError: If the name, retention settings, or history providers are invalid,
+                or an existing registration has a different agent, owner, or configuration.
         """
         self._ensure_registration_usable()
         # Get agent name from the agent's name attribute
@@ -1016,15 +1150,22 @@ class AgentFunctionApp(DFAppBase):
         if not isinstance(registration_name, str) or not registration_name.strip():
             raise ValueError("Agent registration requires a nonblank name or explicit entity_id.")
 
+        effective_retention = self._retention if retention is None else retention
+        effective_budget = resolve_state_budget_override(max_state_bytes, self._max_state_bytes)
+        effective_high = self._high_watermark if high_watermark is None else high_watermark
+        effective_low = self._low_watermark if low_watermark is None else low_watermark
         effective_window = (
             self._response_delivery_window_seconds
             if response_delivery_window_seconds is None
             else response_delivery_window_seconds
         )
+        validate_retention(effective_retention, effective_high, effective_low)
         validate_response_delivery_window(effective_window)
 
         effective_callback = self.default_callback if callback is None else callback
-        settings = AgentRegistrationSettings(effective_window, effective_callback)
+        settings = AgentRegistrationSettings(
+            effective_retention, effective_budget, effective_high, effective_low, effective_window, effective_callback
+        )
         identities = dict(self._registration_identities)
         self._preflight_agent(
             agent,
@@ -1074,6 +1215,10 @@ class AgentFunctionApp(DFAppBase):
                 effective_callback,
                 effective_enable_http_endpoint,
                 effective_enable_mcp_endpoint,
+                retention=effective_retention,
+                max_state_bytes=effective_budget,
+                high_watermark=effective_high,
+                low_watermark=effective_low,
                 response_delivery_window_seconds=effective_window,
             )
         except Exception:
@@ -1130,6 +1275,10 @@ class AgentFunctionApp(DFAppBase):
         enable_http_endpoint: bool,
         enable_mcp_tool_trigger: bool,
         *,
+        retention: RetentionMode = DEFAULT_RETENTION,
+        max_state_bytes: int | None = None,
+        high_watermark: float = HIGH_WATERMARK,
+        low_watermark: float = LOW_WATERMARK,
         response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
     ) -> None:
         """Set up the HTTP trigger, entity, and MCP tool trigger for a specific agent.
@@ -1140,6 +1289,10 @@ class AgentFunctionApp(DFAppBase):
             callback: Optional callback to receive response updates
             enable_http_endpoint: Whether to create HTTP endpoint
             enable_mcp_tool_trigger: Whether to create MCP tool trigger
+            retention: Eager pruning policy, independent of pressure eviction.
+            max_state_bytes: Resolved pressure budget, or None to disable pressure eviction.
+            high_watermark: Budget fraction at which pressure eviction starts.
+            low_watermark: Target budget fraction after pressure eviction.
             response_delivery_window_seconds: Response delivery window in seconds for
                 canonical host-state readers and entity writes.
         """
@@ -1156,6 +1309,10 @@ class AgentFunctionApp(DFAppBase):
             agent,
             agent_name,
             callback,
+            retention=retention,
+            max_state_bytes=max_state_bytes,
+            high_watermark=high_watermark,
+            low_watermark=low_watermark,
             response_delivery_window_seconds=response_delivery_window_seconds,
         )
 
@@ -1300,6 +1457,10 @@ class AgentFunctionApp(DFAppBase):
         agent_name: str,
         callback: AgentResponseCallbackProtocol | None,
         *,
+        retention: RetentionMode = DEFAULT_RETENTION,
+        max_state_bytes: int | None = None,
+        high_watermark: float = HIGH_WATERMARK,
+        low_watermark: float = LOW_WATERMARK,
         response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
     ) -> None:
         """Register the durable entity responsible for agent state.
@@ -1308,6 +1469,10 @@ class AgentFunctionApp(DFAppBase):
             agent: The agent instance
             agent_name: The agent name (used for both entity identification and function naming)
             callback: Optional callback for response updates
+            retention: Eager pruning policy, independent of pressure eviction.
+            max_state_bytes: Resolved pressure budget, or None to disable pressure eviction.
+            high_watermark: Budget fraction at which pressure eviction starts.
+            low_watermark: Target budget fraction after pressure eviction.
             response_delivery_window_seconds: Response delivery window in seconds.
         """
         # Use the prefixed entity name for both registration and function naming
@@ -1316,6 +1481,10 @@ class AgentFunctionApp(DFAppBase):
             agent,
             callback,
             deployment_mode=self._deployment_mode,
+            retention=retention,
+            max_state_bytes=max_state_bytes,
+            high_watermark=high_watermark,
+            low_watermark=low_watermark,
             response_delivery_window_seconds=response_delivery_window_seconds,
         )
 

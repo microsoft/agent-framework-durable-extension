@@ -11,8 +11,12 @@ from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentCallbackContext, AgentResponseCallbackProtocol
 from ._client import DurableAIAgentClient
 from ._configuration import (
+    INHERIT,
     AgentRegistrationSettings,
+    Inherit,
     RegistrationIdentity,
+    StateBudgetOverride,
+    resolve_state_budget_override,
     validate_agent_configuration,
     validate_response_delivery_window,
     validate_runtime_deployment,
@@ -41,6 +45,17 @@ from ._history_provider import DurableHistoryProvider
 from ._models import AgentSessionId, DurableAgentSession, RunRequest
 from ._orchestration_context import DurableAIAgentOrchestrationContext
 from ._response_utils import ensure_response_format, load_agent_response, serialize_agent_response
+from ._retention import (
+    DEFAULT_MAX_STATE_BYTES,
+    DEFAULT_RETENTION,
+    DTS_MAX_STATE_BYTES,
+    HIGH_WATERMARK,
+    LOW_WATERMARK,
+    RetentionMode,
+    StateBudget,
+    resolve_state_budget,
+    validate_retention,
+)
 from ._shared_agent_state import (
     DurableAgentState,
     DurableAgentStateCompaction,
@@ -134,10 +149,16 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "DEFAULT_MAX_POLL_RETRIES",
+    "DEFAULT_MAX_STATE_BYTES",
     "DEFAULT_POLL_INTERVAL_SECONDS",
+    "DEFAULT_RETENTION",
     "DELIVERY_WINDOW_SECONDS",
+    "DTS_MAX_STATE_BYTES",
     "DURABLE_NAME_PREFIX",
+    "HIGH_WATERMARK",
+    "INHERIT",
     "LEGACY_THREAD_ID_FIELD",
+    "LOW_WATERMARK",
     "MIMETYPE_APPLICATION_JSON",
     "MIMETYPE_TEXT_PLAIN",
     "REQUEST_RESPONSE_FORMAT_JSON",
@@ -191,10 +212,14 @@ __all__ = [
     "DurableStateFields",
     "DurableTaskWorkflowContext",
     "DurableWorkflowClient",
+    "Inherit",
     "LegacyDurableAgentState",
     "RegistrationIdentity",
+    "RetentionMode",
     "RunRequest",
     "SharedAgentStateReader",
+    "StateBudget",
+    "StateBudgetOverride",
     "StateCapacityError",
     "WorkflowOrchestrationContext",
     "WorkflowRegistrationPlan",
@@ -209,6 +234,8 @@ __all__ = [
     "migrate_legacy_state",
     "plan_workflow_registration",
     "read_agent_state",
+    "resolve_state_budget",
+    "resolve_state_budget_override",
     "run_agent_coroutine",
     "run_workflow_orchestrator",
     "serialize_agent_response",
@@ -217,6 +244,7 @@ __all__ = [
     "validate_agent_configuration",
     "validate_executor_id",
     "validate_response_delivery_window",
+    "validate_retention",
     "validate_runtime_deployment",
     "validate_workflow_name",
     "validate_workflow_start_input",

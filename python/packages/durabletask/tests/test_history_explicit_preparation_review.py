@@ -74,7 +74,7 @@ async def test_renamed_store_only_audit_coexists_with_injected_core_default_hist
 
 async def test_explicit_durable_history_after_before_compaction_preserves_user_order() -> None:
     current = CurrentContext("current-context")
-    history = DurableHistoryProvider("explicit-history")
+    history = DurableHistoryProvider("explicit-history", prune_excluded=False)
     strategy = SimpleCallable()
     compaction = CompactionProvider(before_strategy=strategy, history_source_id=history.source_id)
     client = RecordingChatClient()

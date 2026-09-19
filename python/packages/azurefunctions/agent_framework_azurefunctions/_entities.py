@@ -16,14 +16,22 @@ from typing import Any, cast
 import azure.durable_functions as df
 from agent_framework import SupportsAgentRun
 from agent_framework_durabletask import (
+    DEFAULT_MAX_STATE_BYTES,
+    DEFAULT_RETENTION,
     DELIVERY_WINDOW_SECONDS,
+    HIGH_WATERMARK,
+    LOW_WATERMARK,
     AgentEntity,
     AgentEntityStateProviderMixin,
     AgentResponseCallbackProtocol,
+    RetentionMode,
+    StateBudget,
+    resolve_state_budget,
     run_agent_coroutine,
     serialize_agent_response,
     validate_agent_configuration,
     validate_response_delivery_window,
+    validate_retention,
     validate_runtime_deployment,
 )
 
@@ -65,6 +73,10 @@ def create_agent_entity(
     callback: AgentResponseCallbackProtocol | None = None,
     *,
     deployment_mode: str | None = None,
+    retention: RetentionMode = DEFAULT_RETENTION,
+    max_state_bytes: StateBudget = DEFAULT_MAX_STATE_BYTES,
+    high_watermark: float = HIGH_WATERMARK,
+    low_watermark: float = LOW_WATERMARK,
     response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
 ) -> Callable[[df.DurableEntityContext], None]:
     """Factory function to create an agent entity class.
@@ -73,14 +85,21 @@ def create_agent_entity(
         agent: The Microsoft Agent Framework agent instance (must implement SupportsAgentRun)
         callback: Optional callback invoked during streaming and final responses
         deployment_mode: Explicit isolated-v2 acknowledgement, or None to read the environment.
+        retention: Eager pruning policy, independent of pressure eviction.
+        max_state_bytes: Positive integer pressure budget, or None to disable it. Functions cannot
+            resolve ``backend_limit`` because the storage backend is configured outside Python.
+        high_watermark: Budget fraction at which pressure eviction starts.
+        low_watermark: Target budget fraction after pressure eviction.
         response_delivery_window_seconds: Positive integer response availability window.
 
     Returns:
         Entity function configured with the agent
     """
     validate_runtime_deployment(deployment_mode)
+    validate_retention(retention, high_watermark, low_watermark)
+    resolved_budget = resolve_state_budget(max_state_bytes)
     validate_response_delivery_window(response_delivery_window_seconds)
-    validate_agent_configuration(agent)
+    validate_agent_configuration(agent, retention=retention)
 
     async def _entity_coroutine(context: df.DurableEntityContext) -> None:
         """Async handler that executes the entity operations."""
@@ -93,6 +112,10 @@ def create_agent_entity(
                 agent,
                 callback,
                 state_provider=state_provider,
+                retention=retention,
+                max_state_bytes=resolved_budget,
+                high_watermark=high_watermark,
+                low_watermark=low_watermark,
                 response_delivery_window_seconds=response_delivery_window_seconds,
             )
 
