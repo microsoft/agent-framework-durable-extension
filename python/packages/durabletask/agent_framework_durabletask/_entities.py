@@ -68,6 +68,7 @@ from ._shared_agent_state import (
     DurableAgentStateUnknownEntry,
 )
 from ._shared_state_validation import validate_completion_transition, validate_identifier, validate_timestamp
+from ._state_capacity import StateCapacityError
 from ._state_migration import migrate_legacy_state, state_snapshot_digest
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -516,7 +517,12 @@ class AgentEntity:
         if self._max_state_bytes is not None:
             size = len(json.dumps(self.state.to_dict(), allow_nan=False))
             if size > self._max_state_bytes:
-                raise ValueError("Retained delivery/control state cannot fit within max_state_bytes.")
+                raise StateCapacityError(
+                    size_bytes=size,
+                    max_state_bytes=self._max_state_bytes,
+                    floor_bytes=size,
+                    target_bytes=self._max_state_bytes,
+                )
 
     def _is_error_response(self, entry: DurableAgentStateEntry) -> bool:
         """Check if a conversation history entry records a failed turn."""
