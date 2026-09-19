@@ -129,7 +129,7 @@ def eager_state_size(state: DurableAgentState) -> int | None:
     try:
         if _instruments().noop:
             return None
-        return len(json.dumps(state.to_dict()))
+        return len(json.dumps(state.to_dict(), allow_nan=False))
     except Exception:
         return None
 
