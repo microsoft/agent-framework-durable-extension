@@ -346,6 +346,7 @@ def _start_function_app(sample_path: Path, port: int) -> subprocess.Popen[Any]:
     # This prevents conflicts between parallel or repeated test runs, as Durable Functions
     # use the task hub name to separate orchestration state.
     env["TASKHUB_NAME"] = f"test{uuid.uuid4().hex[:8]}"
+    env["AzureFunctionsJobHost__extensions__durableTask__hubName"] = env["TASKHUB_NAME"]
 
     # On Windows, use CREATE_NEW_PROCESS_GROUP to allow proper termination
     # shell=True only on Windows to handle PATH resolution

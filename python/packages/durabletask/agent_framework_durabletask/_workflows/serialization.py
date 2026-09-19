@@ -52,6 +52,7 @@ from agent_framework._workflows._events import WorkflowEventType
 from pydantic import BaseModel
 
 from .._response_utils import load_agent_response, serialize_agent_response
+from .._shared_state_validation import _json_value  # pyright: ignore[reportPrivateUsage]
 
 logger = logging.getLogger(__name__)
 
@@ -182,11 +183,14 @@ def strip_subworkflow_markers(data: Any) -> Any:
 
 
 def validate_workflow_json(value: Any) -> None:
-    """Reject non-finite numbers in a wire tree, without decoding checkpoint values.
+    """Require a strict JSON wire tree without decoding checkpoint values.
 
     Run this on encoded transport data or parsed JSON, not reconstructed Python
-    objects. It also catches overflow such as JSON's 1e309 parsed as infinity.
+    objects. Keys must be strings and values must be JSON-native, finite and acyclic.
+    Typed checkpoint objects must be serialized before validation.
     """
+    _json_value(value)
+    # Retain the transport encoder's limits after rejecting lossy JSON coercions.
     json.dumps(value, allow_nan=False)
 
 
