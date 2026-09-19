@@ -159,8 +159,8 @@ def _observe_outer_completion(result: Any, *, stream: bool, on_completed: Callab
         if isinstance(response, ChatResponse) and not notified:
             notified = True
             if on_completed is not None:
-                on_completed(response)
-        return response
+                on_completed(cast("ChatResponse[Any]", response))
+        return cast(Any, response)
 
     def observe(value: Any) -> Any:
         # ResponseStream is awaitable, but awaiting it only sets up the stream.
