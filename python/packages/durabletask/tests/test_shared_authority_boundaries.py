@@ -10,16 +10,18 @@ from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
 from agent_framework import Agent, AgentResponse, Content, ContextProvider, Message
+from clock_helpers import ClockDateTime
 from jsonschema import Draft202012Validator, FormatChecker
 from test_history_pipeline_revision import ToolChatClient
 from test_revision_contract import JsonStateProvider
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState
+from agent_framework_durabletask import _delivery_state as delivery_module
 from agent_framework_durabletask import _durable_agent_state as state_module
 from agent_framework_durabletask import _shared_state_validation as validation_module
 from agent_framework_durabletask._durable_agent_state import DurableAgentStateData
@@ -69,7 +71,7 @@ def validator() -> Draft202012Validator:
 
 @pytest.fixture(autouse=True)
 def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[datetime], None]:
-    class Clock(datetime):
+    class Clock(ClockDateTime):
         instant = NOW
 
         @classmethod
@@ -80,8 +82,8 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[datetime], None]:
     def set_time(instant: datetime) -> None:
         Clock.instant = instant
 
-    monkeypatch.setattr(state_module, "datetime", Clock)
-    monkeypatch.setattr(validation_module, "datetime", Clock)
+    for module in (state_module, delivery_module, validation_module):
+        monkeypatch.setattr(module, "datetime", Clock)
     return set_time
 
 
@@ -294,12 +296,15 @@ class _PriorCompletionHook(ContextProvider):
         else:
             raise AssertionError(f"Uncovered mutation: {self.mutation}")
         self.applied = True
-        self.after = deepcopy({"terminalResults": results, "completionReceipts": receipts})
+        self.after = deepcopy({
+            "terminalResults": state.data.response_mailbox,
+            "completionReceipts": state.data.completed_correlations,
+        })
         # Every attack remains a valid individual snapshot. Rejection needs prior-state authority.
         validate_shared_data({"conversationHistory": [], **self.after})
         if self.direct_persist:
             try:
-                binding.state_provider.persist_state()
+                cast(Any, binding.state_provider).persist_state()
             except ValueError as exc:
                 self.direct_error = exc
                 raise
@@ -515,7 +520,7 @@ def test_expired_malformed_profile_can_be_reported_and_removed_without_payload_c
     clock(DEADLINE)
     with monkeypatch.context() as patch:
         loader = Mock(side_effect=AssertionError("An expired lookup must not construct a stored response."))
-        patch.setattr(state_module, "load_terminal_response", loader)
+        patch.setattr(delivery_module, "load_terminal_response", loader)
         # The synthetic unavailable reply may construct Core objects, but A's payload must not.
         _unavailable(state.try_get_agent_response("A"))
         loader.assert_not_called()

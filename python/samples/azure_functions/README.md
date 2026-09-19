@@ -3,6 +3,14 @@
 These are common instructions for setting up your environment for every sample in this directory.
 These samples illustrate the Durable extensibility for Agent Framework running in Azure Functions.
 
+> [!WARNING]
+> This branch requires `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2` before `func start`.
+> Use only a **new, empty, uniquely named task hub** with matching upgraded clients and no old
+> or unrelated workers. Keep existing instances and recorded histories on their original hub
+> and engine. This is an operator acknowledgement, not proof of isolation or production readiness.
+> There is no automatic compatibility fallback or history migration. See the shared
+> [Environment Configuration](../README.md#environment-configuration) for the deployment requirements.
+
 All of these samples are set up to run in Azure Functions. Azure Functions has a local development tool called [CoreTools](https://learn.microsoft.com/azure/azure-functions/functions-run-local?tabs=windows%2Cpython%2Cv2&pivots=programming-language-python#install-the-azure-functions-core-tools) which we will set up to run these samples locally.
 
 ## Import convention
@@ -118,43 +126,31 @@ source .venv/bin/activate
 
 ### 3. Running the samples
 
-#### Acknowledge an isolated deployment
-
-Before `func start`, choose a **new isolated task hub** used only by compatible schema 2
-workers and upgraded clients. Keep old workflow histories on the old engine. Do not point
-these samples at an existing production hub or assume that `default` is unused.
-
-The nine `local.settings.json.template` files leave `DURABLE_AGENTS_DEPLOYMENT_MODE` blank
-intentionally. Samples 09 through 13 use `local.settings.json.sample` instead, and need the
-same explicit setting added before their code-created host can register workflows.
-
-After checking isolation and peer compatibility, merge these entries into `Values` in your
-local settings. Replace `DurableAgentsV2Sample` everywhere with your new hub's name, and
-configure any separate clients to use that same hub. The host override also covers samples
-whose `host.json` does not reference `TASKHUB_NAME`.
-
-```json
-{
-  "DURABLE_AGENTS_DEPLOYMENT_MODE": "isolated_v2",
-  "TASKHUB_NAME": "DurableAgentsV2Sample",
-  "AzureFunctionsJobHost__extensions__durableTask__hubName": "DurableAgentsV2Sample",
-  "DURABLE_TASK_SCHEDULER_CONNECTION_STRING": "Endpoint=http://localhost:8080;TaskHub=DurableAgentsV2Sample;Authentication=None"
-}
-```
-
-This is an explicit operator acknowledgement, **not runtime proof of isolation**. It does
-not migrate old histories or detect incompatible peers. Leave it unset until those
-conditions hold. Pure MAF mode (`python function_app.py --maf`) in samples 09 through 13
-does not construct a durable host and does not require this acknowledgement.
-
-#### Start the sample
-
 - Start the Durable Task Scheduler emulator and [Azurite](https://learn.microsoft.com/azure/storage/common/storage-install-azurite?tabs=npm%2Cblob-storage#run-azurite) as shown above.
 
 - Inside each sample:
   - Install Python dependencies – from the sample directory, run `pip install -r requirements.txt` (or the equivalent in your active virtual environment).
   - Copy the supplied `local.settings.json.template` or `local.settings.json.sample` to `local.settings.json`.
   - Configure the Foundry variables in that file (`FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`). The samples use `AzureCliCredential`, so ensure you're logged in via `az login`.
-  - Apply the isolated-deployment settings above only after verifying the new hub and compatible peers.
+  - Merge these required settings into the file's `Values` object, preserving the storage,
+    model, and other sample settings. Do not keep `TASKHUB_NAME` set to `default`.
+
+    ```json
+    {
+      "Values": {
+        "DURABLE_AGENTS_DEPLOYMENT_MODE": "isolated_v2",
+        "TASKHUB_NAME": "durablesamplev2UNIQUE",
+        "AzureFunctionsJobHost__extensions__durableTask__hubName": "durablesamplev2UNIQUE",
+        "DURABLE_TASK_SCHEDULER_CONNECTION_STRING": "Endpoint=http://localhost:8080;TaskHub=durablesamplev2UNIQUE;Authentication=None"
+      }
+    }
+    ```
+
+    Replace `UNIQUE` with your own unique alphanumeric suffix for a new, empty hub reserved for
+    this deployment. Keep all three hub values identical and point any separately configured
+    upgraded clients at the same hub and scheduler endpoint. The host override also covers
+    samples without a `TASKHUB_NAME` binding. This connection string is for the local emulator,
+    not production. Provision the new hub first if using an Azure-hosted scheduler.
+
   - Run the command `func start` from the root of the sample
   - Follow each sample's README for scenario-specific steps, and use its `demo.http` file (or provided curl examples) to trigger the hosted HTTP endpoints.

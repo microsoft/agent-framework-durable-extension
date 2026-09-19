@@ -24,6 +24,7 @@ from agent_framework import (
     Message,
     ResponseStream,
 )
+from clock_helpers import ClockDateTime
 
 from agent_framework_durabletask import (
     AgentEntity,
@@ -716,12 +717,13 @@ class TestTheWholeLoopStaysUnderBudget:
         self.clock_time = datetime.now(tz=timezone.utc)
         owner = self
 
-        class Clock(datetime):
+        class Clock(ClockDateTime):
             @classmethod
             def now(cls, tz: Any = None) -> Any:
                 return cls.fromtimestamp(owner.clock_time.timestamp(), tz=tz)
 
         monkeypatch.setattr("agent_framework_durabletask._durable_agent_state.datetime", Clock)
+        monkeypatch.setattr("agent_framework_durabletask._delivery_state.datetime", Clock)
         monkeypatch.setattr("agent_framework_durabletask._shared_state_validation.datetime", Clock)
 
     async def _drive(self, **entity_kwargs: Any) -> tuple[_EntityState, list[str]]:

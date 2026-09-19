@@ -21,9 +21,7 @@ points already do it at the boundary. See
 :mod:`agent_framework._workflows._checkpoint_encoding` for the full security model.
 
 Contents:
-- ``serialize_value`` / ``deserialize_value``: internal checkpoint encoding/decoding.
-- ``serialize_workflow_agent_response``: portable JSON for generated agent yields,
-  recognized by ``deserialize_value`` without loading worker response-format types.
+- ``serialize_value`` / ``deserialize_value``: internal codec aliases for encode/decode.
 - ``reconstruct_to_type``: rebuilds HITL response data (which arrives without type
   markers) to a known type.
 - ``resolve_type``: resolves 'module:class' type keys to Python types.
@@ -54,6 +52,7 @@ from agent_framework._workflows._events import WorkflowEventType
 from pydantic import BaseModel
 
 from .._response_utils import load_agent_response, serialize_agent_response
+from .._shared_state_validation import _json_value  # pyright: ignore[reportPrivateUsage]
 
 logger = logging.getLogger(__name__)
 
@@ -184,11 +183,14 @@ def strip_subworkflow_markers(data: Any) -> Any:
 
 
 def validate_workflow_json(value: Any) -> None:
-    """Reject non-finite numbers in a wire tree, without decoding checkpoint values.
+    """Require a strict JSON wire tree without decoding checkpoint values.
 
     Run this on encoded transport data or parsed JSON, not reconstructed Python
-    objects. It also catches overflow such as JSON's 1e309 parsed as infinity.
+    objects. Keys must be strings and values must be JSON-native, finite and acyclic.
+    Typed checkpoint objects must be serialized before validation.
     """
+    _json_value(value)
+    # Retain the transport encoder's limits after rejecting lossy JSON coercions.
     json.dumps(value, allow_nan=False)
 
 
@@ -241,11 +243,11 @@ def serialize_value(value: Any) -> Any:
     if isinstance(value, dict):
         data = cast(dict[Any, Any], value)
         if any(str(key) in _RESERVED_VALUE_DICT_KEYS for key in data):
-            # Escape the entire literal, just as core does for its own reserved
-            # keys. Do not encode its children first: unpickling returns the
-            # original dictionary without interpreting any nested marker keys.
             return _encode_pickle(value)
-        return {str(key): serialize_value(item) for key, item in data.items()}
+        invalid_keys = [key for key in data if not isinstance(key, str)]
+        if invalid_keys:
+            raise ValueError("Workflow transport dictionaries must use string keys.")
+        return {key: serialize_value(item) for key, item in cast("dict[str, Any]", data).items()}
     if isinstance(value, list):
         return [serialize_value(item) for item in cast(list[Any], value)]
     return encode_checkpoint_value(value)
@@ -277,12 +279,8 @@ def deserialize_value(value: Any) -> Any:
                 or not isinstance(data["response"], dict)
             ):
                 raise ValueError("Invalid or unsupported workflow agent response envelope")
-            # The response loader follows only known envelope fields. In particular,
-            # value/additional_properties remain application JSON, not codec input.
             return load_agent_response(cast("dict[str, Any]", data["response"]))
         if _PICKLE_MARKER in data and _TYPE_MARKER in data:
-            # Do not walk the restored object: the core codec also pickles ordinary
-            # application dictionaries that contain reserved checkpoint keys.
             return decode_checkpoint_value(data)
         return {key: deserialize_value(item) for key, item in data.items()}
     if isinstance(value, list):
@@ -431,8 +429,6 @@ def reconstruct_to_type(value: Any, target_type: type, *, encoded: bool = True) 
     if not encoded:
         value = strip_pickle_markers(value)
     elif isinstance(value, dict):
-        # Decode only once. A restored dictionary may itself contain literal
-        # codec markers, and construction must use its fields, not the wrapper.
         value = deserialize_value(value)
 
     if value is None or target_type is Any:
@@ -445,14 +441,11 @@ def reconstruct_to_type(value: Any, target_type: type, *, encoded: bool = True) 
     if not isinstance(value, dict):
         return value
 
-    # The declared type is trusted, but nested payload type names are not. Use
-    # the fixed envelope loader, leaving arbitrary application data opaque.
     if target_type is Message:
         return load_agent_response({"messages": [value]}).messages[0]
     if target_type is Content:
         return load_agent_response({"messages": [{"role": "user", "contents": [value]}]}).messages[0].contents[0]
 
-    # Try Pydantic model validation (for unmarked dicts, e.g., external HITL data)
     if isinstance(target_type, type) and issubclass(target_type, BaseModel):
         try:
             return target_type.model_validate(value)

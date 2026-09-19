@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import pytest
+from _prototype_response_expectations import assert_shared_transport, expected_shared_transport
 from agent_framework import AgentResponse, Annotation, Content, ContinuationToken, Message
 from pydantic import BaseModel
 
@@ -209,7 +210,10 @@ def test_record_response_snapshots_core_metadata_and_reloads_real_response() -> 
     restored = DurableAgentState.from_json(json.dumps(payload))
     delivered = restored.try_get_agent_response(CORRELATION_ID)
     assert isinstance(delivered, AgentResponse)
-    assert serialize_agent_response(direct) == serialize_agent_response(delivered) == expected
+    expected_delivery = expected_shared_transport(expected)
+    assert_shared_transport(direct, expected_delivery)
+    assert_shared_transport(delivered, expected_delivery)
+    assert restored.to_dict() == payload
     assert all(isinstance(message, Message) for message in delivered.messages)
     assert all(isinstance(content, Content) for message in delivered.messages for content in message.contents)
     assert delivered.messages[0].author_name == "planner"
@@ -338,7 +342,8 @@ def test_mutating_caller_response_and_transcript_cannot_change_mailbox() -> None
     assert restored.data.response_mailbox[CORRELATION_ID]["response"] == expected_wire
     delivered = restored.try_get_agent_response(CORRELATION_ID)
     assert isinstance(delivered, AgentResponse)
-    assert serialize_agent_response(delivered) == expected
+    assert_shared_transport(delivered, expected_shared_transport(expected))
+    assert restored.data.response_mailbox[CORRELATION_ID]["response"] == expected_wire
 
 
 def test_structured_value_is_detached_from_the_caller() -> None:

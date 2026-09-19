@@ -2,7 +2,10 @@
 
 """Run-local safeguards at core's function invocation boundary."""
 
+from __future__ import annotations
+
 from collections.abc import Awaitable, Callable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -30,7 +33,7 @@ class DurableToolGuard(FunctionMiddleware):
 
     This uses core's public per-run middleware contract. Arbitrary custom agents or
     clients that execute tools outside that contract remain responsible for their own
-    side effects; no portable wrapper can sandbox their implementation.
+    side effects. No portable wrapper can sandbox their implementation.
     """
 
     def __init__(self, progress: InvocationProgress, *, enabled: bool) -> None:
@@ -52,7 +55,7 @@ class DurableServiceAcceptance(ChatMiddleware):
         self._accept = accept
 
     async def process(self, context: ChatContext, call_next: Callable[[], Awaitable[None]]) -> None:
-        inputs = list(context.messages)
+        inputs = deepcopy(list(context.messages))
         await call_next()
 
         def completed(response: ChatResponse) -> ChatResponse:

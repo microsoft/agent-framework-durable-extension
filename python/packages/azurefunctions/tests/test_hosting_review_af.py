@@ -27,11 +27,11 @@ from agent_framework_durabletask import (
     DurableAgentState,
     ensure_response_format,
     load_agent_response,
-    serialize_agent_response,
 )
 from agent_framework_durabletask._configuration import AgentRegistrationSettings
 from agent_framework_durabletask._shared_response import serialize_terminal_response
 from pydantic import BaseModel
+from test_delivery_consumers_af import response_expectations as response_expectations
 
 from agent_framework_azurefunctions import AgentFunctionApp
 from agent_framework_azurefunctions._entities import AzureFunctionEntityStateProvider, create_agent_entity
@@ -417,6 +417,9 @@ def test_absent_state_still_initializes(raw: Any) -> None:
     provider, context = _provider(raw)
     assert provider.state.message_count == 0
     context.set_state.assert_not_called()
+    provider.persist_state()
+    context.set_state.assert_called_once_with(DurableAgentState().to_dict())
+    assert context.get_state.return_value is raw
 
 
 @pytest.mark.parametrize("field", ["conversationHistory", "terminalResults", "completionReceipts"])
@@ -493,9 +496,23 @@ def test_future_state_fields_survive_adapter_read_and_write() -> None:
     raw["data"]["futureSidecar"] = {"records": [{"version": 9}]}
     before = deepcopy(raw)
     provider, context = _provider(raw)
+    reads: list[dict[str, Any]] = []
+
+    def read_state(default: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        assert default() == {}
+        reads.append(deepcopy(raw))
+        return raw
+
+    context.get_state.side_effect = read_state
     assert provider._get_state_dict() is raw
-    _ = provider.state
+    cached = provider.state
+    assert provider.state is cached
+    assert context.get_state.call_count == 2 and reads == [before, before]
+    context.set_state.assert_not_called()
     provider.persist_state()
+    # Direct read, cache load, and persistence admission each inspect the same backing state.
+    assert context.get_state.call_count == 3 and reads == [before, before, before]
+    context.set_state.assert_called_once_with(before)
     saved = context.set_state.call_args.args[0]
     assert saved["futureEnvelope"] == raw["futureEnvelope"]
     assert saved["data"]["futureSidecar"] == raw["data"]["futureSidecar"]
@@ -533,7 +550,7 @@ def _http_handler(app: AgentFunctionApp, monkeypatch: pytest.MonkeyPatch) -> Htt
 
 @pytest.mark.parametrize("kind,expected", [("recovered_tool", 200), ("explicit_error", 500), ("direct_error", 500)])
 async def test_http_uses_shared_terminal_classification_and_canonical_delivery(
-    monkeypatch: pytest.MonkeyPatch, kind: str, expected: int
+    monkeypatch: pytest.MonkeyPatch, kind: str, expected: int, response_expectations: Any
 ) -> None:
     app = AgentFunctionApp(enable_health_check=False, enable_http_endpoints=False, max_poll_retries=1)
     handler = _http_handler(app, monkeypatch)
@@ -571,19 +588,30 @@ async def test_http_uses_shared_terminal_classification_and_canonical_delivery(
     outcome = "succeeded" if expected == 200 else "failed"
     assert stored["data"]["terminalResults"]["correlation"]["outcome"] == outcome
     assert stored["data"]["completionReceipts"]["correlation"]["outcome"] == outcome
-    expected_response = serialize_agent_response(original)
+    expected_response = response_expectations.expected_shared_transport(original)
+    if expected == 500:
+        expected_response["additional_properties"].update(durable_status="error", correlation_id="correlation")
+    if kind == "explicit_error":
+        expected_response["messages"].append(
+            Message(
+                "system", [Content.from_error(message="The agent invocation failed.", error_code="agent_error")]
+            ).to_dict()
+        )
     assert result["agent_response"] == expected_response
     assert stored == before
+    before_result = deepcopy(result)
     delivered = load_agent_response(result["agent_response"])
     assert type(delivered) is AgentResponse
-    assert serialize_agent_response(delivered) == expected_response
+    response_expectations.assert_shared_transport(delivered, expected_response)
     if expected == 200:
         ensure_response_format(Answer, "correlation", delivered)
         assert delivered.value == Answer(answer=42)
+        response_expectations.assert_shared_transport(delivered, expected_response)
         assert result["response"] == original.text
         assert result["message_count"] == 0 and result["message"] == "question"
         assert result["session_id"] == "session" and result["correlation_id"] == "correlation"
     else:
         assert result["response"] is None
         assert result["error_code"] != "response_expired"
+    assert result == before_result and stored == before
     client.read_entity_state.assert_awaited_once()

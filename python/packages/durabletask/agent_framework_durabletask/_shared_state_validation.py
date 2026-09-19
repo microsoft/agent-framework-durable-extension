@@ -7,9 +7,9 @@ fields are checked by presence, never filled in. Only explicitly declared metada
 objects have object constraints. Opaque profiles, tokens, and content are not
 activated or interpreted as runtime types.
 
-This checks one snapshot, not deployment authorization, migration evidence,
-immutability across operations, atomic commits, or retention/lookup policy. Error
-content classification is a separate producer/source-aware responsibility.
+Snapshot validation is separate from completion-transition immutability checks.
+Neither authorizes deployment, migration, atomic commits, or retention/lookup
+policy. Error content classification is a separate producer/source-aware responsibility.
 RFC 3339 leap seconds are unsupported. Fractional seconds otherwise compare
 exactly, without datetime microsecond truncation or Decimal context rounding.
 """
@@ -177,7 +177,7 @@ def validate_timestamp(value: Any, name: str = "timestamp") -> None:
 
 
 def timestamp_reached(deadline: str, *, now: datetime) -> bool:
-    """Compare an offset-aware clock to a shared deadline without rounding its fraction."""
+    """Compare a read clock with a shared deadline without rounding fractional seconds."""
     return _timestamp(now.isoformat(), "now") >= _timestamp(deadline, "deadline")
 
 
@@ -396,22 +396,28 @@ def validate_shared_state(state: dict[str, Any]) -> None:
     _data(_object(state["data"], "state.data"), version)
 
 
-def validate_completion_transition(previous: dict[str, Any], current: dict[str, Any]) -> None:
-    """Protect committed completion facts across an operation, not just within a snapshot.
+def validate_completion_transition(
+    previous: dict[str, Any], current: dict[str, Any], *, now: datetime | None = None
+) -> None:
+    """Validate both snapshots and protect all previously committed completion facts.
 
-    Original results and receipts may not be replaced, including their opaque JSON.
-    A retained result may only be removed with a matching unavailable receipt after
-    its stored expiry. Unavailable receipts never disappear or reopen delivery.
+    Existing receipts and available results retain their exact JSON, including
+    absent fields, timestamp representations and unknown properties. Only expiry
+    can remove a result, with an unavailable receipt no later than the aware clock.
+    New completions and unrelated history/session changes are allowed. This does
+    not authorize legacy migration or classify response failure evidence.
     """
-    if previous.get("schemaVersion") != "2.0.0":
+    validate_shared_state(previous)
+    validate_shared_state(current)
+    if previous["schemaVersion"] != "2.0.0":
         return
-    if current.get("schemaVersion") != "2.0.0":
+    if current["schemaVersion"] != "2.0.0":
         raise ValueError("Committed shared completion state cannot be downgraded.")
     old_data, new_data = previous["data"], current["data"]
-    validate_shared_data(old_data)
-    validate_shared_data(new_data)
+    timestamp = now
 
     def same(left: Any, right: Any) -> bool:
+        # Python equality conflates False, zero and floats. JSON comparison does not.
         return json.dumps(left, sort_keys=True, allow_nan=False) == json.dumps(right, sort_keys=True, allow_nan=False)
 
     for key, old_receipt in old_data["completionReceipts"].items():
@@ -422,7 +428,14 @@ def validate_completion_transition(previous: dict[str, Any], current: dict[str, 
         if old_receipt["resultState"] == "available" and new_receipt["resultState"] == "unavailable":
             if "resultExpiresAt" not in old_receipt:
                 raise ValueError("Removing a result without expiry requires an explicit supported removal policy.")
-            if not timestamp_reached(new_receipt["resultUnavailableAt"], now=datetime.now(timezone.utc)):
+            if timestamp is None:
+                timestamp = datetime.now(timezone.utc)
+            if not isinstance(timestamp, datetime) or timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                raise ValueError("now must be an offset-aware datetime.")
+            timestamp = timestamp.astimezone(timezone.utc)
+            if not timestamp_reached(old_receipt["resultExpiresAt"], now=timestamp) or not timestamp_reached(
+                new_receipt["resultUnavailableAt"], now=timestamp
+            ):
                 raise ValueError(
                     "A result cannot be removed before its actual expiry or with a future removal timestamp."
                 )

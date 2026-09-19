@@ -12,15 +12,17 @@ from typing import Any, cast, get_args, get_type_hints
 from unittest.mock import Mock
 
 import pytest
+from _prototype_response_expectations import assert_shared_transport, expected_shared_transport
 from agent_framework import AgentResponse, Content, ContinuationToken, Message
 from pydantic import BaseModel, ConfigDict, Field, Json, RootModel, ValidationError
 
-from agent_framework_durabletask._response_utils import (
+from agent_framework_durabletask import (
     ensure_response_format,
-    is_terminal_agent_response,
     load_agent_response,
     serialize_agent_response,
 )
+from agent_framework_durabletask._response_utils import is_terminal_agent_response
+from agent_framework_durabletask._shared_response import load_terminal_response, serialize_terminal_response
 
 CORRELATION_ID = "fidelity-review"
 
@@ -241,13 +243,40 @@ def test_ordinary_response_payload_is_canonical_and_accepted_by_core_loader() ->
     payload = _wire(response)
 
     assert payload["type"] == "agent_response"
+    assert "_durable_value_policy" not in payload
     assert AgentResponse.from_dict(deepcopy(payload)).to_dict() == response.to_dict()
-    assert load_agent_response(payload).to_dict() == response.to_dict()
+    assert _wire(load_agent_response(payload)) == payload
+
+
+@pytest.mark.parametrize("value", [7, "7"], ids=["exact-json-type", "coercion-rejected"])
+def test_shared_typed_delivery_preserves_full_wire_and_rejects_value_coercion(value: int | str) -> None:
+    original = _response({"aliasCount": value})
+    shared = serialize_terminal_response(original)
+    before_shared = deepcopy(shared)
+    payload = _wire(load_terminal_response(shared))
+    expected = expected_shared_transport(original)
+    assert payload == expected
+    before_payload = deepcopy(payload)
+
+    loaded: Any = load_agent_response(payload)
+    assert_shared_transport(loaded, expected)
+    if isinstance(value, str):
+        with pytest.raises(ValueError, match="cannot preserve the shared structured value"):
+            ensure_response_format(AliasCount, CORRELATION_ID, loaded)
+        assert loaded.value == {"aliasCount": "7"}
+        assert type(loaded.value["aliasCount"]) is str
+    else:
+        ensure_response_format(AliasCount, CORRELATION_ID, loaded)
+        assert type(loaded.value) is AliasCount
+        assert loaded.value == AliasCount(aliasCount=7)
+        assert type(loaded.value.count) is int
+    assert_shared_transport(loaded, expected)
+    assert payload == before_payload and shared == before_shared
 
 
 def test_unknown_envelope_fields_are_ignored_without_changing_raw_snapshot() -> None:
     payload = {
-        "type": "custom_response",
+        "type": "agent_response",
         "future_response": {"type": "future_type", "keep": [1]},
         "response_format": {"type": "object", "required": ["not_in_value"]},
         "messages": [
@@ -307,7 +336,11 @@ def test_stored_type_names_never_select_or_import_python_classes(monkeypatch: py
     with monkeypatch.context() as patch:
         patch.setattr(builtins, "__import__", guarded_import)
         patch.setattr(importlib, "import_module", forbidden_import)
-        loaded = load_agent_response(payload)
+        with pytest.raises(ValueError, match="Response type does not match agent_response"):
+            load_agent_response(payload)
+        canonical = {**payload, "type": "agent_response"}
+        before_canonical = deepcopy(canonical)
+        loaded = load_agent_response(canonical)
 
     forbidden_import.assert_not_called()
     assert type(loaded) is AgentResponse
@@ -317,6 +350,7 @@ def test_stored_type_names_never_select_or_import_python_classes(monkeypatch: py
     assert content.additional_properties == {"opaque": [2]}
     assert not hasattr(content, "future_content")
     assert payload == before
+    assert canonical == before_canonical
 
 
 @pytest.mark.parametrize("content_type", get_args(get_type_hints(Content.__init__)["type"]))
@@ -416,16 +450,17 @@ def test_rich_response_metadata_and_value_round_trip_independently() -> None:
         raw_representation=object(),
         value=AliasCount(aliasCount=7),
     )
-    expected = response.to_dict()
+    expected = _wire(response)
     payload = _wire(response)
     loaded = load_agent_response(payload)
 
-    assert loaded.to_dict() == expected
+    assert "_durable_value_policy" not in expected
+    assert _wire(loaded) == expected
     assert loaded.messages[0].contents[0].annotations == [citation]
     assert loaded.messages[1].contents[0].items == response.messages[1].contents[0].items
     ensure_response_format(AliasCount, CORRELATION_ID, loaded)
     assert loaded.value == AliasCount(aliasCount=7)
-    assert loaded.to_dict() == expected
+    assert _wire(loaded) == expected
     payload["additional_properties"]["provider_field"]["unknown"].append(9)
     assert response.additional_properties == application
     assert loaded.additional_properties == application
@@ -531,7 +566,7 @@ def test_optional_supported_delivery_version_is_still_readable() -> None:
     payload["_durable_response_version"] = 1
     before = deepcopy(payload)
 
-    assert load_agent_response(payload).to_dict() == response.to_dict()
+    assert _wire(load_agent_response(payload)) == _wire(response)
     assert payload == before
 
 
@@ -561,34 +596,53 @@ def test_loader_preserves_existing_instances_and_rejects_absent_input() -> None:
         {"type": "custom_response", "messages": None},
     ],
 )
-def test_loader_rejects_nonresponse_mappings_without_mutating_input(payload: dict[str, Any]) -> None:
+def test_loader_honors_core_mapping_contract_without_mutating_input(payload: dict[str, Any]) -> None:
     before = deepcopy(payload)
 
-    with pytest.raises(ValueError, match="requires a response type or messages"):
-        load_agent_response(payload)
+    if "invalid" in payload:
+        with pytest.raises(TypeError, match="does not contain any AgentResponse fields"):
+            load_agent_response(payload)
+    elif "type" in payload and payload["type"] != "agent_response":
+        with pytest.raises(ValueError, match="Response type does not match agent_response"):
+            load_agent_response(payload)
+    else:
+        expected = AgentResponse.from_dict(deepcopy(payload))
+        loaded = load_agent_response(payload)
+        assert type(loaded) is AgentResponse
+        assert serialize_agent_response(loaded) == serialize_agent_response(expected)
 
     assert payload == before
 
 
-@pytest.mark.parametrize("response_type", [None, "", False, 1, [], {}])
-def test_loader_rejects_corrupt_response_types_even_with_valid_messages(response_type: Any) -> None:
-    with pytest.raises(ValueError, match="type must be a non-empty string"):
-        load_agent_response({"type": response_type, "messages": []})
+@pytest.mark.parametrize(
+    "response_type", [None, "", False, 0, -0.0, [], {}, "custom_response", "provider.CustomResponse", True, 1]
+)
+def test_loader_rejects_present_falsey_and_mismatched_response_types(response_type: Any) -> None:
+    payload = {"type": response_type, "messages": []}
+    before = deepcopy(payload)
+    with pytest.raises(ValueError, match="Response type"):
+        load_agent_response(payload)
+    assert payload == before
 
 
 @pytest.mark.parametrize("response_type", [None, "agent_response", "custom_response"])
 @pytest.mark.parametrize("empty", [False, True])
-def test_loader_accepts_response_like_messages_with_or_without_type(response_type: str | None, empty: bool) -> None:
+def test_loader_honors_core_type_for_response_like_messages(response_type: str | None, empty: bool) -> None:
     response = AgentResponse(messages=[] if empty else [Message("assistant", ["internal helper"])])
     payload = response.to_dict()
     payload.pop("type", None)
     if response_type is not None:
         payload["type"] = response_type
+    before = deepcopy(payload)
 
-    loaded = load_agent_response(payload)
-
-    assert type(loaded) is AgentResponse
-    assert loaded.to_dict() == response.to_dict()
+    if response_type == "custom_response":
+        with pytest.raises(ValueError, match="Response type does not match agent_response"):
+            load_agent_response(payload)
+    else:
+        loaded = load_agent_response(payload)
+        assert type(loaded) is AgentResponse
+        assert loaded.to_dict() == response.to_dict()
+    assert payload == before
 
 
 def test_loader_accepts_canonical_empty_response_without_messages() -> None:

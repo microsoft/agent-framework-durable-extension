@@ -237,7 +237,10 @@ def test_unknown_fields_are_owned_by_actual_entry_subtype(kind: str, schema: dic
     assert loaded.to_dict() == before
 
 
-def test_core_context_preserves_nested_future_items_before_consumer_filtering(schema: dict[str, Any]) -> None:
+@pytest.mark.parametrize("level", ["message", "outer", "nested"])
+def test_core_context_preserves_nested_future_items_before_consumer_filtering(
+    level: str, schema: dict[str, Any]
+) -> None:
     raw: dict[str, Any] = {
         "role": "tool",
         "future_message": {"nested": [1]},
@@ -255,10 +258,26 @@ def test_core_context_preserves_nested_future_items_before_consumer_filtering(sc
         ],
         "additional_properties": {"nested": [4]},
     }
+    before = deepcopy(raw)
     request = RunRequest("", "c", context_messages=[raw])
     entry = DurableAgentStateRequest.from_run_request(request)
     assert entry.messages[0].message_id is None
-    assert entry.messages[0].ingestion_identity == message_identity(entry.messages[0].to_chat_message())
+    fingerprint = entry.messages[0].ingestion_identity
+    assert isinstance(fingerprint, str) and fingerprint
+    # Admission includes inert input extras that consumer replay deliberately filters.
+    repeated = DurableAgentStateRequest.from_run_request(RunRequest("", "c", context_messages=[deepcopy(raw)]))
+    assert repeated.messages[0].ingestion_identity == fingerprint
+    changed = deepcopy(raw)
+    unknowns = {
+        "message": changed["future_message"],
+        "outer": changed["contents"][0]["future_outer"],
+        "nested": changed["contents"][0]["items"][0]["future_content"],
+    }
+    unknowns[level]["nested"].append(99)
+    changed_entry = DurableAgentStateRequest.from_run_request(RunRequest("", "c", context_messages=[changed]))
+    changed_fingerprint = changed_entry.messages[0].ingestion_identity
+    assert isinstance(changed_fingerprint, str) and changed_fingerprint
+    assert changed_fingerprint != fingerprint
     state = DurableAgentState()
     state.data.conversation_history = [entry]
     loaded = _cold(state, schema)
@@ -271,6 +290,18 @@ def test_core_context_preserves_nested_future_items_before_consumer_filtering(sc
     assert items is not None
     assert items[0].text == "text"
     assert loaded.to_dict() == state.to_dict()
+    assert raw == before
+
+
+@pytest.mark.parametrize("explicit_defaults", [False, True], ids=["omitted-defaults", "explicit-defaults"])
+def test_core_context_identity_normalizes_known_defaults(explicit_defaults: bool) -> None:
+    raw: dict[str, Any] = {"role": "tool", "contents": [{"type": "text", "text": "text"}]}
+    if explicit_defaults:
+        raw.update(author_name=None, message_id=None, additional_properties={})
+        raw["contents"][0].update(annotations=None, additional_properties={}, informational_only=False)
+    entry = DurableAgentStateRequest.from_run_request(RunRequest("", "c", context_messages=[raw]))
+    # Known-only inputs retain the existing Core-normalized identity contract.
+    assert entry.messages[0].ingestion_identity == message_identity(Message("tool", [Content.from_text("text")]))
 
 
 @pytest.mark.parametrize("level", ["entry", "content"])

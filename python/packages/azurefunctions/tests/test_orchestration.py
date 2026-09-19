@@ -129,7 +129,7 @@ def executor_with_context(mock_context_with_uuid: tuple[Mock, str]) -> tuple[Any
 class TestAgentResponseHelpers:
     """Tests for response handling through public AgentTask API."""
 
-    @pytest.mark.parametrize("invalid_result", [{"invalid": "format"}, {}, {"messages": None}, {"messages": ""}])
+    @pytest.mark.parametrize("invalid_result", [{"invalid": "format"}, {"messages": ""}])
     def test_try_set_value_exception_handling(self, invalid_result: dict[str, Any]) -> None:
         """Test try_set_value handles exceptions raised when converting a successful task result to AgentResponse."""
         entity_task = _create_entity_task()
@@ -148,6 +148,30 @@ class TestAgentResponseHelpers:
         # Verify task failed due to conversion exception
         assert task.state == TaskState.FAILED
         assert isinstance(task.result, (TypeError, ValueError))
+
+    @pytest.mark.parametrize(
+        "raw_result",
+        [
+            pytest.param({}, id="empty-mapping"),
+            pytest.param({"messages": None}, id="null-messages"),
+            pytest.param({"messages": []}, id="empty-messages"),
+        ],
+    )
+    def test_try_set_value_empty_success(self, raw_result: dict[str, Any]) -> None:
+        """Core constructor defaults produce empty responses, not conversion errors."""
+        entity_task = _create_entity_task()
+        task = AgentTask(entity_task, None, "correlation-id")
+        entity_task.state = TaskState.SUCCEEDED
+        entity_task.result = raw_result
+        task.pending_tasks.clear()
+
+        task.try_set_value(entity_task)
+
+        assert entity_task.state is TaskState.SUCCEEDED
+        assert task.state is TaskState.SUCCEEDED
+        assert isinstance(task.result, AgentResponse)
+        assert task.result.messages == [] and task.result.text == "" and task.result.value is None
+        assert task.result.additional_properties == {}
 
     @pytest.mark.parametrize("include_type", [False, True])
     def test_try_set_value_success(self, include_type: bool) -> None:

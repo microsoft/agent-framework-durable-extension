@@ -24,7 +24,7 @@ from agent_framework import (
     included_token_count,
 )
 
-from ._constants import DurableStateFields
+from ._constants import DELIVERY_WINDOW_SECONDS, DurableStateFields
 from ._durable_agent_state import (
     DurableAgentState,
     DurableAgentStateEntry,
@@ -32,6 +32,7 @@ from ._durable_agent_state import (
     DurableAgentStateMessage,
 )
 from ._retention_telemetry import record_retention
+from ._state_capacity import StateCapacityError
 
 __all__ = [
     "DEFAULT_MAX_STATE_BYTES",
@@ -62,8 +63,6 @@ DEFAULT_MAX_STATE_BYTES: StateBudget = None
 DTS_MAX_STATE_BYTES = 1_048_576
 HIGH_WATERMARK = 0.85
 LOW_WATERMARK = 0.70
-DELIVERY_WINDOW_SECONDS = 60
-"""Legacy response protection when independent completion bookkeeping is absent."""
 
 _SYSTEM_ROLE = "system"
 _MAX_PASSES = 3
@@ -81,22 +80,6 @@ _BARE_ENTRY_FIELDS = {
     DurableStateFields.CREATED_AT,
     DurableStateFields.MESSAGES,
 }
-
-
-class StateCapacityError(ValueError):
-    """The protected state or an unreachable retention target prevents a safe commit."""
-
-    def __init__(self, *, size_bytes: int, max_state_bytes: int, floor_bytes: int, target_bytes: int) -> None:
-        """Describe the measured state, configured budget, protected floor and target."""
-        self.size_bytes = size_bytes
-        self.max_state_bytes = max_state_bytes
-        self.floor_bytes = floor_bytes
-        self.target_bytes = target_bytes
-        super().__init__(
-            f"Durable state capacity cannot meet the {target_bytes}-byte retention target: "
-            f"serialized size is {size_bytes} bytes, budget is {max_state_bytes} bytes, "
-            f"and the protected floor is {floor_bytes} bytes. No transcript changes were applied."
-        )
 
 
 def _positive_budget(value: object, name: str) -> int:

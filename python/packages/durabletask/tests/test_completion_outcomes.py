@@ -5,16 +5,20 @@
 import json
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from _prototype_response_expectations import assert_shared_transport, expected_shared_transport
 from agent_framework import Agent, AgentResponse, Content, Message
+from clock_helpers import ClockDateTime
 from test_durable_history_provider import RecordingChatClient
 from test_revision_contract import JsonStateProvider
 from typing_extensions import Self
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState, migrate_legacy_state, state_snapshot_digest
+from agent_framework_durabletask import _delivery_state as delivery_module
 from agent_framework_durabletask import _durable_agent_state as state_module
+from agent_framework_durabletask import _shared_state_validation as validation_module
 from agent_framework_durabletask._response_utils import invocation_outcome, serialize_agent_response
 
 NOW = datetime(2026, 9, 11, 12, tzinfo=timezone.utc)
@@ -23,7 +27,7 @@ WINDOW = 60
 CORRELATION = "outcome-correlation"
 
 
-class Clock(datetime):
+class Clock(ClockDateTime):
     current = NOW
 
     @classmethod
@@ -34,7 +38,8 @@ class Clock(datetime):
 @pytest.fixture(autouse=True)
 def clock(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Clock, "current", NOW)
-    monkeypatch.setattr(state_module, "datetime", Clock)
+    for module in (state_module, delivery_module, validation_module):
+        monkeypatch.setattr(module, "datetime", Clock)
 
 
 def _response(kind: str) -> AgentResponse[Any]:
@@ -98,12 +103,35 @@ def test_new_receipt_retains_invocation_outcome_without_payload_after_expiry(
         "resultState": "available",
     }
     assert state.data.completed_correlations[CORRELATION] == receipt
+    before_delivery = state.to_json()
+    expected_delivery = expected_shared_transport(response)
+    if kind == "error-content":
+        expected_delivery["messages"][0]["contents"][0]["error_code"] = "agent_error"
+    elif kind == "error-status":
+        expected_delivery["messages"].append(
+            Message(
+                "system",
+                [Content.from_error(message="The agent invocation failed.", error_code="agent_error")],
+            ).to_dict()
+        )
+    if expected == "failed":
+        expected_delivery["additional_properties"] = {
+            **response.additional_properties,
+            "durable_status": "error",
+            "correlation_id": CORRELATION,
+        }
+        assert state.data.response_mailbox[CORRELATION]["error"] == {
+            "code": "agent_error",
+            "message": "provider failed" if kind == "error-content" else "The agent invocation failed.",
+        }
     Clock.current = NOW + timedelta(seconds=WINDOW, microseconds=-1)
     delivered = state.try_get_agent_response(CORRELATION)
     assert delivered is not None
     assert invocation_outcome(delivered) == expected
-    # Existing status or native error content already represents failure. Delivery must not rewrite it.
-    assert serialize_agent_response(delivered) == serialize_agent_response(response)
+    # Only the consumer gains transport policy and missing authoritative failure fields.
+    assert_shared_transport(delivered, expected_delivery)
+    assert state.to_json() == before_delivery
+    assert "_durable_value_policy" not in serialize_agent_response(response)
 
     Clock.current = NOW + timedelta(seconds=WINDOW)
     if cleanup:
@@ -143,8 +171,28 @@ def test_authoritative_failed_result_delivers_failure_even_without_error_content
     state = DurableAgentState.from_dict(raw)
     if cold:
         state = _cold(state)
+    expected_messages = [Message("assistant", ["partial"])] if messages else []
+    expected_messages.append(
+        Message(
+            "system",
+            [
+                Content.from_error(
+                    message="authoritative failure",
+                    error_code="ProviderFailed",
+                    error_details=cast(Any, {"retry": False}),
+                )
+            ],
+        )
+    )
+    expected_delivery = expected_shared_transport(
+        AgentResponse(
+            messages=expected_messages,
+            additional_properties={"durable_status": "error", "correlation_id": CORRELATION},
+        )
+    )
     delivered = state.try_get_agent_response(CORRELATION)
     assert delivered is not None and invocation_outcome(delivered) == "failed"
+    assert_shared_transport(delivered, expected_delivery)
     assert delivered.additional_properties["durable_status"] == "error"
     errors = [content for message in delivered.messages for content in message.contents if content.type == "error"]
     assert len(errors) == 1
@@ -153,6 +201,62 @@ def test_authoritative_failed_result_delivers_failure_even_without_error_content
     if messages:
         assert delivered.messages[0].text == "partial"
     assert state.to_dict() == before and raw == before
+
+
+@pytest.mark.parametrize("outcome", ["succeeded", "failed"])
+@pytest.mark.parametrize("status", ["accepted", "already_completed"])
+def test_available_projection_corrects_reserved_metadata_without_rewriting_original_profiles(
+    outcome: str, status: str
+) -> None:
+    original = AgentResponse[Any](
+        messages=[
+            Message(
+                "assistant",
+                [
+                    Content.from_error(
+                        message="original failure",
+                        error_code="provider_error",
+                        error_details=cast(Any, {"keep": [None, False]}),
+                    )
+                ]
+                if outcome == "failed"
+                else [Content.from_text("original success")],
+                message_id="original-message",
+            )
+        ],
+        response_id="original-response",
+        value={"answer": 0},
+        additional_properties={"provider": {"keep": [None, False, 0]}},
+    )
+    state = DurableAgentState()
+    state.record_response(CORRELATION, original, delivery_window_seconds=WINDOW, now=NOW)
+    raw = state.to_dict()
+    wire = raw["data"]["terminalResults"][CORRELATION]["response"]
+    wire["extensionData"].update(
+        durable_status=status,
+        correlation_id="provider-correlation",
+        durable_outcome="succeeded" if outcome == "failed" else "failed",
+    )
+    wire["futureResponse"] = {"keep": [None, False, 0]}
+    wire["pythonCoreFields"] = {
+        "profile": "agent-framework-python.core-fields",
+        "version": 1,
+        "fields": {"future_response": {"keep": [None, False, 0]}},
+    }
+    before = deepcopy(raw)
+    restored = DurableAgentState.from_json(json.dumps(raw))
+    expected = expected_shared_transport(original)
+    expected["additional_properties"].update(
+        correlation_id=CORRELATION if outcome == "failed" else "provider-correlation",
+        durable_outcome=outcome,
+    )
+    if outcome == "failed":
+        expected["additional_properties"]["durable_status"] = "error"
+    delivered = restored.try_get_agent_response(CORRELATION)
+    assert delivered is not None
+    assert_shared_transport(delivered, expected)
+    assert invocation_outcome(delivered) == outcome
+    assert restored.to_dict() == before and raw == before
 
 
 @pytest.mark.parametrize("cold", [False, True])

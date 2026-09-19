@@ -13,6 +13,7 @@ from typing import Any
 import azure.durable_functions as df
 import pytest
 from agent_framework_durabletask import AgentEntity, DurableAgentState
+from test_delivery_consumers_af import response_expectations as response_expectations
 
 from agent_framework_azurefunctions import AgentFunctionApp
 from agent_framework_azurefunctions import _app as app_module
@@ -78,7 +79,7 @@ async def _poll(app: AgentFunctionApp, backend: Any, correlation: str) -> dict[s
 
 @pytest.mark.parametrize("phase", ["load", "store"])
 async def test_external_failure_and_rejected_error_write_timeout_until_a_real_commit(
-    phase: str, boundaries: Any, app: AgentFunctionApp
+    phase: str, boundaries: Any, app: AgentFunctionApp, response_expectations: Any
 ) -> None:
     entity, provider, external, client = boundaries.failure_boundary(phase)
     before = deepcopy(provider.raw)
@@ -106,18 +107,19 @@ async def test_external_failure_and_rejected_error_write_timeout_until_a_real_co
     calls = (external.loads, len(external.saved), len(client.effects))
     delivered = await _poll(app, backend, "provider-failed")
     assert delivered["status"] == "error" and delivered["error_code"] == "OSError"
-    assert delivered["agent_response"] == json.loads(json.dumps(failed.to_dict()))
+    expected = response_expectations.expected_shared_transport(failed)
+    assert delivered["agent_response"] == expected
     assert backend.reads == 4
     external.phase = None
     cold_provider = boundaries.JsonStateProvider(provider.raw)
     cold = AgentEntity(entity.agent, state_provider=cold_provider)
-    assert (await cold.run(request)).to_dict() == failed.to_dict()
+    response_expectations.assert_shared_transport(await cold.run(request), expected)
     assert (external.loads, len(external.saved), len(client.effects)) == calls
     assert cold_provider.writes == 0
 
 
 async def test_cancelling_caller_poll_does_not_cancel_concurrent_entity_or_allow_duplicate_run(
-    boundaries: Any, app: AgentFunctionApp
+    boundaries: Any, app: AgentFunctionApp, response_expectations: Any
 ) -> None:
     barrier = boundaries.PhaseBarrier()
     barrier.phase = "model"
@@ -154,13 +156,15 @@ async def test_cancelling_caller_poll_does_not_cancel_concurrent_entity_or_allow
         backend.pause = False
         delivered = await _poll(app, backend, "caller-cancelled")
         assert delivered["status"] == "success"
-        assert delivered["agent_response"] == response.to_dict()
+        expected = response_expectations.expected_shared_transport(response)
+        assert delivered["agent_response"] == expected
         assert backend.reads == 2
 
         cold_provider = boundaries.JsonStateProvider(raw)
         cold_agent = boundaries.NonStreamingAgent(client=client, name="boundary")
         cold = AgentEntity(cold_agent, state_provider=cold_provider)
-        assert (await cold.run(request)).to_dict() == response.to_dict()
+        response_expectations.assert_shared_transport(await cold.run(request), expected)
+        assert provider.raw == raw and cold_provider.raw == raw
         assert len(client.effects) == 1 and cold_provider.writes == 0
     finally:
         tasks = [execution, *([polling] if polling is not None else [])]

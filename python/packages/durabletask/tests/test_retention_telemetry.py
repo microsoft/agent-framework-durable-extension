@@ -25,6 +25,7 @@ from agent_framework_durabletask import (
     DurableAgentStateRequest,
     DurableAgentStateResponse,
     DurableHistoryProvider,
+    _entities,
     _history_provider,
 )
 from agent_framework_durabletask import _retention as retention
@@ -76,6 +77,13 @@ def _counter(metric: Metric, attributes: dict[str, Any], value: int) -> None:
     matches = [point for point in metric.data.data_points if point.attributes == attributes]
     assert len(matches) == 1
     assert matches[0].value == value
+
+
+def _counter_table(metric: Metric, expected: list[tuple[dict[str, Any], int]]) -> None:
+    assert isinstance(metric.data, Sum)
+    assert len(metric.data.data_points) == len(expected)
+    for attributes, value in expected:
+        _counter(metric, attributes, value)
 
 
 def _histogram(metric: Metric, attributes: dict[str, Any], total: int, count: int = 1) -> None:
@@ -253,8 +261,22 @@ async def test_entity_write_outcomes_remain_unconfirmed_and_failure_rolls_back(
         "commit_status": "unknown",
         "deletion_staged": True,
     }
-    _counter(metrics["operations"], attrs, 1)
-    _counter(metrics["write_attempts"], {**attrs, "stage": "set_state"}, 1)
+    _counter_table(metrics["operations"], [(attrs, 1)])
+    _counter_table(
+        metrics["write_attempts"],
+        [
+            (
+                {
+                    "stage": "serialization",
+                    "outcome": "returned",
+                    "commit_status": "not_attempted",
+                    "deletion_staged": True,
+                },
+                1,
+            ),
+            ({**attrs, "stage": "set_state"}, 1),
+        ],
+    )
     assert telemetry._current(attempted) is None
 
 
@@ -351,14 +373,21 @@ async def test_concurrent_scopes_do_not_share_write_status_or_deletion(reader: I
 
     await asyncio.gather(evict(), check())
     metrics = _metrics(reader)
-    assert len(metrics["operations"].data.data_points) == 2
-    _counter(metrics["operations"], {"outcome": "returned", "commit_status": "unknown", "deletion_staged": True}, 1)
-    _counter(
+    _counter_table(
         metrics["operations"],
-        {"outcome": "returned", "commit_status": "not_attempted", "deletion_staged": False},
-        1,
+        [
+            ({"outcome": "returned", "commit_status": "unknown", "deletion_staged": True}, 1),
+            ({"outcome": "returned", "commit_status": "not_attempted", "deletion_staged": False}, 1),
+        ],
     )
-    assert len(metrics["write_attempts"].data.data_points) == 1
+    attrs = {"outcome": "returned", "deletion_staged": True}
+    _counter_table(
+        metrics["write_attempts"],
+        [
+            ({**attrs, "stage": "serialization", "commit_status": "not_attempted"}, 1),
+            ({**attrs, "stage": "set_state", "commit_status": "unknown"}, 1),
+        ],
+    )
 
 
 async def test_nested_scope_state_identity_and_closed_inherited_context(reader: InMemoryMetricReader) -> None:
@@ -386,16 +415,20 @@ async def test_nested_scope_state_identity_and_closed_inherited_context(reader: 
     await task
     metrics = _metrics(reader)
     _counter(metrics["evaluations"], _attributes(outcome="below_threshold"), 3)
-    _counter(
+    _counter_table(
         metrics["operations"],
-        {"outcome": "returned", "commit_status": "not_attempted", "deletion_staged": False},
-        1,
+        [
+            ({"outcome": "returned", "commit_status": "not_attempted", "deletion_staged": False}, 1),
+            ({"outcome": "returned", "commit_status": "unknown", "deletion_staged": False}, 1),
+        ],
     )
-    _counter(metrics["operations"], {"outcome": "returned", "commit_status": "unknown", "deletion_staged": False}, 1)
-    _counter(
+    attrs = {"outcome": "returned", "deletion_staged": False}
+    _counter_table(
         metrics["write_attempts"],
-        {"stage": "set_state", "outcome": "returned", "commit_status": "unknown", "deletion_staged": False},
-        1,
+        [
+            ({**attrs, "stage": "serialization", "commit_status": "not_attempted"}, 1),
+            ({**attrs, "stage": "set_state", "commit_status": "unknown"}, 1),
+        ],
     )
 
 
@@ -406,7 +439,7 @@ async def test_dimensions_are_exact_bounded_values_and_never_state_data(reader: 
         "outcome": {"staged", "returned"},
         "commit_status": {"not_attempted", "unknown"},
         "phase": {"before", "after"},
-        "stage": {"set_state"},
+        "stage": {"serialization", "set_state"},
         "deletion_staged": {True, False},
     }
     for metric in _metrics(reader).values():
@@ -459,22 +492,28 @@ async def test_no_budget_and_no_eager_deletion_does_not_initialize_metrics(
     meter.assert_not_called()
 
 
-def test_commit_serialization_failure_keeps_not_attempted_status(
-    reader: InMemoryMetricReader, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("failure_stage", ["serialization", "transition_validation"])
+def test_commit_serialization_or_validation_failure_keeps_not_attempted_status(
+    reader: InMemoryMetricReader, monkeypatch: pytest.MonkeyPatch, failure_stage: str
 ) -> None:
     storage = _Storage(_state(1))
     state = storage.state
-    failure = ValueError("private serialization failure")
+    failure = ValueError(f"private {failure_stage} failure")
+    failing_call = Mock(side_effect=failure)
     with pytest.raises(ValueError) as caught, telemetry.retention_operation(state):
         telemetry.record_retention(state, mechanism="eager", outcome="staged", removed_messages=1)
-        monkeypatch.setattr(DurableAgentState, "to_dict", Mock(side_effect=failure))
+        if failure_stage == "serialization":
+            monkeypatch.setattr(DurableAgentState, "to_dict", failing_call)
+        else:
+            monkeypatch.setattr(_entities, "validate_completion_transition", failing_call)
         storage.persist_state()
     assert caught.value is failure
+    failing_call.assert_called_once()
     assert storage.attempts == []
     attrs = {"outcome": "failed", "commit_status": "not_attempted", "deletion_staged": True}
     metrics = _metrics(reader)
-    _counter(metrics["operations"], attrs, 1)
-    _counter(metrics["write_attempts"], {**attrs, "stage": "serialization"}, 1)
+    _counter_table(metrics["operations"], [(attrs, 1)])
+    _counter_table(metrics["write_attempts"], [({**attrs, "stage": "serialization"}, 1)])
 
 
 async def test_eager_then_pressure_in_one_operation_accumulates_without_double_counting(
@@ -503,7 +542,15 @@ async def test_eager_then_pressure_in_one_operation_accumulates_without_double_c
         _counter(metrics[metric], _attributes(), pressure_removed)
     _counter(metrics["reclaimed_bytes"], _attributes("eager"), initial_bytes - eager_bytes)
     _counter(metrics["reclaimed_bytes"], _attributes(), eager_bytes - _size(state))
-    _counter(metrics["operations"], {"outcome": "returned", "commit_status": "unknown", "deletion_staged": True}, 1)
+    attrs = {"outcome": "returned", "deletion_staged": True}
+    _counter_table(metrics["operations"], [({**attrs, "commit_status": "unknown"}, 1)])
+    _counter_table(
+        metrics["write_attempts"],
+        [
+            ({**attrs, "stage": "serialization", "commit_status": "not_attempted"}, 1),
+            ({**attrs, "stage": "set_state", "commit_status": "unknown"}, 1),
+        ],
+    )
 
 
 def test_explicit_noop_skips_eager_serialization(monkeypatch: pytest.MonkeyPatch) -> None:

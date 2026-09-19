@@ -23,6 +23,7 @@ from test_delivery_consumers_af import (
     _response,
     _runtime_error,
 )
+from test_delivery_consumers_af import response_expectations as response_expectations
 from test_failure_boundary_consumers import _JsonAFBackend
 from test_failure_boundary_consumers import boundaries as boundaries
 
@@ -166,6 +167,7 @@ async def test_mcp_wait_ending_does_not_cancel_core_execution_and_later_poll_com
     app: AgentFunctionApp,
     sleep: AsyncMock,
     caplog: pytest.LogCaptureFixture,
+    response_expectations: Any,
 ) -> None:
     caplog.set_level(logging.DEBUG, logger=app_module.logger.name)
     barrier = boundaries.PhaseBarrier()
@@ -235,7 +237,7 @@ async def test_mcp_wait_ending_does_not_cancel_core_execution_and_later_poll_com
 
         assert delivered["status"] == "success"
         assert delivered["response"] == response.text
-        assert delivered["agent_response"] == response.to_dict()
+        assert delivered["agent_response"] == response_expectations.expected_shared_transport(response)
         assert delivered["correlation_id"] == CORRELATION_ID
         assert delivered["session_id"] == CANONICAL_SESSION_ID
         assert "error" not in delivered

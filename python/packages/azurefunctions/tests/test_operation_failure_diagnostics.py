@@ -113,8 +113,7 @@ def _assert_operation_failure(task: orchestration.AgentTask, child: AtomicTask, 
     assert task.state is TaskState.FAILED
     assert type(task.result) is ValueError
     assert not isinstance(task.result, AgentResponse)
-    assert diagnostic in str(task.result)
-    assert CORRELATION_ID in str(task.result)
+    assert str(task.result) == f"Agent entity operation failed for correlation_id {CORRELATION_ID}: {diagnostic}"
     assert SPOOFED_CORRELATION not in str(task.result)
 
 
@@ -208,7 +207,6 @@ def test_core_response_envelopes_with_status_error_extensions_are_not_operation_
         pytest.param({"type": ""}, id="empty-type"),
         pytest.param({"type": 0}, id="numeric-type"),
         pytest.param({"type": []}, id="list-type"),
-        pytest.param({"messages": None}, id="null-messages"),
         pytest.param({"messages": ""}, id="string-messages"),
         pytest.param({"messages": False}, id="boolean-messages"),
         pytest.param({"messages": {}}, id="mapping-messages"),
@@ -241,6 +239,47 @@ def test_present_malformed_response_fields_keep_strict_normal_parse_failure(
     assert raw == before
 
 
+@pytest.mark.parametrize("messages", [None, []], ids=["null-messages", "empty-messages"])
+def test_empty_response_envelopes_use_constructor_defaults_and_requested_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    precompleted: bool,
+    response_format: type[BaseModel] | None,
+    messages: list[Any] | None,
+) -> None:
+    diagnostic = "not-an-operation-diagnostic"
+    raw = {"status": "error", "error": diagnostic, "messages": deepcopy(messages)}
+    before = deepcopy(raw)
+    load = Mock(wraps=orchestration.load_agent_response)
+    ensure = Mock(wraps=orchestration.ensure_response_format)
+    monkeypatch.setattr(orchestration, "load_agent_response", load)
+    monkeypatch.setattr(orchestration, "ensure_response_format", ensure)
+
+    task, child = _complete(raw, response_format, precompleted=precompleted)
+
+    assert child.state is TaskState.SUCCEEDED
+    load.assert_called_once_with(raw)
+    if response_format is None:
+        assert task.state is TaskState.SUCCEEDED
+        assert isinstance(task.result, AgentResponse)
+        assert task.result.messages == [] and task.result.text == "" and task.result.value is None
+        assert task.result.additional_properties == {}
+        ensure.assert_not_called()
+    else:
+        # None and [] are valid Core messages inputs. Only the requested Answer
+        # schema fails, after the empty response has been constructed successfully.
+        assert task.state is TaskState.FAILED
+        assert isinstance(task.result, ValueError)
+        assert not isinstance(task.result, AssertionError)
+        assert diagnostic not in str(task.result)
+        assert "Agent entity operation failed" not in str(task.result)
+        ensure.assert_called_once()
+        requested_format, correlation_id, response = ensure.call_args.args
+        assert requested_format is response_format and correlation_id == CORRELATION_ID
+        assert isinstance(response, AgentResponse)
+        assert response.messages == [] and response.text == "" and response.additional_properties == {}
+    assert raw == before
+
+
 @pytest.mark.parametrize("error_kind", ["null", "number", "boolean", "list", "mapping", "opaque"])
 def test_nonstring_error_is_not_rendered_or_promoted_to_an_operation_diagnostic(
     monkeypatch: pytest.MonkeyPatch,
@@ -269,8 +308,9 @@ def test_nonstring_error_is_not_rendered_or_promoted_to_an_operation_diagnostic(
         task, child = _complete(raw, response_format, precompleted=precompleted)
 
     assert child.state is TaskState.SUCCEEDED and task.state is TaskState.FAILED
-    assert type(task.result) is ValueError
-    assert "requires a response type or messages" in str(task.result)
+    assert type(task.result) in (TypeError, ValueError)
+    assert not isinstance(task.result, AssertionError)
+    assert "Agent entity operation failed" not in str(task.result)
     load.assert_called_once_with(raw)
     ensure.assert_not_called()
     assert raw == before and opaque.touches == []
@@ -297,7 +337,9 @@ def test_only_an_actual_dictionary_with_exact_error_status_uses_operation_failur
     raw = deepcopy(payload)
     before = deepcopy(raw)
     load = Mock(wraps=orchestration.load_agent_response)
+    ensure = Mock(side_effect=AssertionError("Invalid mappings must fail before structured parsing"))
     monkeypatch.setattr(orchestration, "load_agent_response", load)
+    monkeypatch.setattr(orchestration, "ensure_response_format", ensure)
 
     task, child = _complete(raw, response_format, precompleted=precompleted)
 
@@ -305,6 +347,7 @@ def test_only_an_actual_dictionary_with_exact_error_status_uses_operation_failur
     assert type(task.result) in (TypeError, ValueError)
     assert "not-an-operation-diagnostic" not in str(task.result)
     load.assert_called_once_with(raw)
+    ensure.assert_not_called()
     assert raw == before
 
 
@@ -350,6 +393,19 @@ class Model:
         return ResponseStream(updates(), finalizer=finalize) if stream else complete()
 
 
+def _assert_detached(actual: Any, original: Any) -> None:
+    """Check equality and independent ownership of every mutable JSON container."""
+    assert actual == original
+    if isinstance(original, dict):
+        assert actual is not original
+        for key, value in original.items():
+            _assert_detached(actual[key], value)
+    elif isinstance(original, list):
+        assert actual is not original
+        for actual_item, original_item in zip(actual, original, strict=True):
+            _assert_detached(actual_item, original_item)
+
+
 class Host:
     def __init__(self, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
         self.raw = DurableAgentState().to_dict()
@@ -387,7 +443,16 @@ class Host:
         context.entity_key = entity_id.key
         context.operation_name = operation
         context.get_input.return_value = payload
-        context.get_state.side_effect = lambda *args, **kwargs: deepcopy(self.raw)
+        persisted = self.raw
+        before = deepcopy(persisted)
+        reads: list[dict[str, Any]] = []
+
+        def read(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            snapshot = deepcopy(self.raw)
+            reads.append(snapshot)
+            return snapshot
+
+        context.get_state.side_effect = read
 
         def write(raw: dict[str, Any]) -> None:
             self.attempts.append(deepcopy(raw))
@@ -399,7 +464,13 @@ class Host:
         self.contexts.append(context)
         self.handler(context)
         context.get_input.assert_called_once_with()
-        context.get_state.assert_called_once()
+        context.get_state.assert_called()
+        assert context.get_state.call_count == len(reads)
+        assert persisted == before
+        for index, snapshot in enumerate(reads):
+            _assert_detached(snapshot, persisted)
+            for previous in reads[:index]:
+                _assert_detached(snapshot, previous)
         context.set_result.assert_called_once()
         return context.set_result.call_args.args[0]
 
@@ -490,11 +561,15 @@ def test_real_functions_operation_rejection_reaches_failed_task_without_committe
     load.assert_not_called()
     ensure.assert_not_called()
     assert host.raw == before
-    assert host.entities[0].state.to_dict() == before
+    # Legacy snapshots remain readable through the standalone reader, not the
+    # writer-facing entity.state property that rejected this operation.
+    state = DurableAgentState.from_dict(host.raw) if mode == "legacy" else host.entities[0].state
+    restored = state.to_dict()
+    assert restored == before
     assert len(host.model.calls) == model_calls
     assert len(host.attempts) == write_attempts
     assert host.contexts[0].set_state.call_count == write_attempts
-    for snapshot in (host.raw, host.entities[0].state.to_dict()):
+    for snapshot in (host.raw, restored):
         assert CORRELATION_ID not in snapshot["data"].get("completionReceipts", {})
         assert CORRELATION_ID not in snapshot["data"].get("terminalResults", {})
     if mode == "commit":

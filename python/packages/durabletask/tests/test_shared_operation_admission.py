@@ -13,13 +13,16 @@ from unittest.mock import Mock
 
 import pytest
 from agent_framework import Agent, AgentResponse, Content, ContextProvider, Message
+from clock_helpers import ClockDateTime
 from test_history_pipeline_revision import ToolChatClient
 from test_revision_contract import JsonStateProvider
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState, RunRequest
+from agent_framework_durabletask import _delivery_state as delivery_module
 from agent_framework_durabletask import _durable_agent_state as state_module
 from agent_framework_durabletask import _entities as entities_module
 from agent_framework_durabletask import _shared_state_validation as validation_module
+from agent_framework_durabletask import _state_migration as migration_module
 from agent_framework_durabletask._history_provider import current_durable_history_binding
 from agent_framework_durabletask._message_identity import message_identity
 from agent_framework_durabletask._response_utils import invocation_outcome
@@ -42,7 +45,7 @@ def _same(actual: Any, expected: Any) -> None:
 
 @pytest.fixture(autouse=True)
 def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[datetime], None]:
-    class Clock(datetime):
+    class Clock(ClockDateTime):
         instant = NOW
 
         @classmethod
@@ -53,8 +56,8 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[datetime], None]:
     def set_time(instant: datetime) -> None:
         Clock.instant = instant
 
-    # Both the state accessor and operation admission must observe the same instant.
-    for module in (state_module, entities_module, validation_module):
+    # State, delegated delivery and operation admission must observe the same instant.
+    for module in (state_module, delivery_module, entities_module, validation_module, migration_module):
         monkeypatch.setattr(module, "datetime", Clock)
     return set_time
 
@@ -442,8 +445,36 @@ async def test_cold_replay_filters_failure_entries_not_whole_failed_correlations
     }
     journal = _completion_journal(source, original)
     source_before, journal_before, original_before = deepcopy(source), deepcopy(journal), deepcopy(original)
+    capture: Any = ToolChatClient(tool_calls=False) if pipeline else _CaptureAgent()
+    agent: Any = Agent(client=capture) if pipeline else capture
     if migrated:
-        raw = _migrate(source, completion_evidence=journal).to_dict()
+        destination = JsonStateProvider()
+        migration_request = {
+            "source": source,
+            "sourceDigest": state_snapshot_digest(source),
+            "sourceSessionId": "original-legacy-session",
+            "destinationSessionId": destination.core_session_id,
+            "migrationId": "operation-admission-migration",
+            "ownershipTransferId": "operation-admission-transfer",
+            "completionEvidence": journal,
+        }
+        request_before = deepcopy(migration_request)
+        result = AgentEntity(agent, state_provider=destination, response_delivery_window_seconds=3600).migrate(
+            migration_request
+        )
+        assert result == {
+            "status": "migrated",
+            "migrationId": "operation-admission-migration",
+            "sessionId": destination.core_session_id,
+        }
+        assert destination.writes == 1 and capture.received_messages == []
+        raw = deepcopy(destination.raw)
+        metadata = raw["data"]["migration"]
+        assert metadata["requestDigest"] == state_snapshot_digest(request_before)
+        assert metadata["destinationSessionId"] == destination.core_session_id
+        assert metadata["sourceSessionId"] == "original-legacy-session"
+        assert raw["data"]["terminalResults"]["A"]["resultExpiresAt"] == DEADLINE.isoformat()
+        _same(migration_request, request_before)
     else:
         raw = _raw()
         raw["data"]["conversationHistory"] = deepcopy(history)
@@ -453,8 +484,6 @@ async def test_cold_replay_filters_failure_entries_not_whole_failed_correlations
     _same(raw["data"]["conversationHistory"], history)
     raw_before = deepcopy(raw)
     provider = JsonStateProvider(json.loads(_json(raw)))
-    capture: Any = ToolChatClient(tool_calls=False) if pipeline else _CaptureAgent()
-    agent: Any = Agent(client=capture) if pipeline else capture
     entity = AgentEntity(agent, state_provider=provider)
     assert entity._has_context_pipeline() is pipeline
     _same(entity.state.to_dict(), raw_before)

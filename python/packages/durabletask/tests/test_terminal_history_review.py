@@ -12,6 +12,7 @@ from inspect import signature
 from typing import Any, cast
 
 import pytest
+from _prototype_response_expectations import assert_shared_transport, expected_shared_transport
 from agent_framework import (
     GROUP_ANNOTATION_KEY,
     GROUP_ID_KEY,
@@ -102,8 +103,10 @@ def _mailbox(provider: _JsonState, correlation: str) -> dict[str, Any]:
 def _assert_terminal_snapshot(provider: _JsonState, correlation: str, response: AgentResponse[Any]) -> None:
     core = _json(serialize_agent_response(response))
     shared = _mailbox(provider, correlation)
+    before = deepcopy(shared)
     assert shared == serialize_terminal_response(core)
-    assert serialize_agent_response(load_terminal_response(shared)) == core
+    assert_shared_transport(load_terminal_response(shared), expected_shared_transport(core))
+    assert shared == before
     assert "response_id" not in shared and "additional_properties" not in shared
     for message in shared["messages"]:
         assert "message_id" not in message and "additional_properties" not in message
@@ -182,7 +185,8 @@ async def test_lazy_value_failure_is_mailbox_only_and_never_legacy_history(text:
     next_agent = _LegacyAgent(AgentResponse(messages=[Message("assistant", ["next answer"])]))
     cold = AgentEntity(cast(SupportsAgentRun, next_agent), state_provider=cold_provider)
     duplicate = await cold.run(request)
-    _assert_terminal_snapshot(provider, "first", duplicate)
+    assert_shared_transport(duplicate, expected_shared_transport(response))
+    assert cold_provider.raw == provider.raw
     assert next_agent.inputs == [] and cold_provider.writes == 0
     await cold.run({"message": "second input", "correlationId": "second"})
     assert [message.text for message in next_agent.inputs[0]] == [
@@ -306,8 +310,15 @@ async def test_real_core_terminal_outputs_are_not_replayed_after_json_reload(
         state_provider=cold_provider,
     )
     duplicate = await cold.run(request)
-    assert duplicate.to_dict() == response.to_dict()
-    _assert_terminal_snapshot(provider, "first", duplicate)
+    expected_delivery = expected_shared_transport(response)
+    if terminal:
+        expected_delivery["additional_properties"] = {
+            **response.additional_properties,
+            "durable_status": "error",
+            "correlation_id": "first",
+        }
+    assert_shared_transport(duplicate, expected_delivery)
+    assert cold_provider.raw == provider.raw
     assert cold_client.inputs == [] and cold_provider.writes == 0
     await cold.run({"message": "second input", "correlationId": "second"})
     assert [m.text for m in cold_client.inputs[0]] == [

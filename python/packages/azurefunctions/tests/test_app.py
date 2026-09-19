@@ -6,6 +6,7 @@
 
 import json
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from typing import Any, TypeVar
 from unittest.mock import ANY, AsyncMock, Mock, patch
 
@@ -689,7 +690,7 @@ class TestAgentEntityFactory:
         assert "unknown_operation" in result_call["error"]
 
     def test_entity_function_restores_state(self) -> None:
-        """Test that the entity function restores state from the context."""
+        """Legacy state remains readable outside the active writer, which rejects it before parsing."""
         mock_agent = Mock()
         entity_function = create_agent_entity(mock_agent)
 
@@ -742,10 +743,18 @@ class TestAgentEntityFactory:
         }
         mock_context.get_state.return_value = existing_state
 
+        before = deepcopy(existing_state)
+        parsed = DurableAgentState.from_dict(existing_state)
+        response = parsed.try_get_agent_response("corr-existing-1")
+        assert response is not None and response.text == "resp1"
+        assert parsed.to_dict() == before
         with patch.object(DurableAgentState, "from_dict", wraps=DurableAgentState.from_dict) as from_dict_mock:
             entity_function(mock_context)
 
-        from_dict_mock.assert_called_once_with(existing_state)
+        from_dict_mock.assert_not_called()
+        mock_context.get_state.assert_called_once_with(ANY)
+        assert mock_context.get_state.return_value is existing_state
+        assert parsed.to_dict() == existing_state == before
         result = mock_context.set_result.call_args.args[0]
         assert result["status"] == "error" and "read-only" in result["error"]
         mock_agent.run.assert_not_called()

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import AsyncIterable, Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import pytest
+from _prototype_response_expectations import assert_shared_transport, expected_shared_transport
 from agent_framework import (
     Agent,
     AgentExecutor,
@@ -45,7 +47,7 @@ from agent_framework_durabletask._invocation_safety import DurableToolGuard
 from agent_framework_durabletask._message_identity import message_identity
 from agent_framework_durabletask._response_utils import ensure_response_format, serialize_agent_response
 from agent_framework_durabletask._shared_response import serialize_terminal_response
-from agent_framework_durabletask._state_migration import migrate_legacy_state, state_snapshot_digest
+from agent_framework_durabletask._state_migration import state_snapshot_digest
 from agent_framework_durabletask._workflows.naming import workflow_message_id
 
 
@@ -207,7 +209,7 @@ async def test_tool_guard_reaches_delegated_core_invocation_without_mutating_con
     saved_session = _object(_data(provider)["session"])
     assert saved_session["service_session_id"] == "parked-service-id"
     assert _object(saved_session["state"])["foreign"] == {"pending": ["keep"]}
-    assert _delivered(provider, "guard").to_dict() == response.to_dict()
+    assert_shared_transport(_delivered(provider, "guard"), expected_shared_transport(response))
     assert current_durable_history_binding() is None
 
 
@@ -274,7 +276,7 @@ def _assert_missing_error(provider: JsonStateProvider, response: AgentResponse[A
     assert response.text == "_PreviousResponseMissing: service parent is not visible"
     errors = [content for message in response.messages for content in message.contents if content.type == "error"]
     assert len(errors) == 1 and errors[0].error_code == "_PreviousResponseMissing"
-    assert _delivered(provider, correlation).to_dict() == response.to_dict()
+    assert_shared_transport(_delivered(provider, correlation), expected_shared_transport(response))
     assert correlation in _object(_data(provider)["completionReceipts"])
     assert provider.writes == 1
 
@@ -324,7 +326,8 @@ async def test_missing_parent_on_tool_followup_does_not_restart_the_agent(
     _assert_missing_error(provider, response, "failed-followup")
     cold_provider = JsonStateProvider(_wire(provider.raw))
     duplicate = await AgentEntity(agent, state_provider=cold_provider).run(request)
-    assert duplicate.to_dict() == response.to_dict() and cold_provider.writes == 0
+    assert_shared_transport(duplicate, expected_shared_transport(response))
+    assert cold_provider.writes == 0
     assert len(client.received_messages) == 2 and calls == ["durable"] and agent.run_modes == [stream]
 
 
@@ -487,6 +490,8 @@ async def test_final_callback_keeps_model_format_and_detaches_value_content_and_
     delivered = _delivered(provider, "typed-callback")
     ensure_response_format(ReviewValue, "typed-callback", delivered)
     assert delivered.value == ReviewValue(nested=_NestedValue(values=[1, 2]))
+    expected_delivery = expected_shared_transport(cast(dict[str, Any], expected))
+    assert_shared_transport(delivered, expected_delivery)
     before = _wire(provider.raw)
     snapshot.value.nested.values.append(101)
     snapshot.messages[0].contents[0].text = "late callback mutation"
@@ -495,7 +500,8 @@ async def test_final_callback_keeps_model_format_and_detaches_value_content_and_
     duplicate = await AgentEntity(cast(SupportsAgentRun, agent), callback=callback, state_provider=cold_provider).run(
         request
     )
-    assert _wire(serialize_agent_response(duplicate)) == expected
+    assert_shared_transport(duplicate, expected_delivery)
+    assert _wire(cold_provider.raw) == before
     assert len(agent.inputs) == 1 and len(callback.responses) == 1 and cold_provider.writes == 0
 
 
@@ -508,6 +514,13 @@ async def test_custom_terminal_text_skips_typed_validation_and_is_not_replayed_n
     # This is a genuinely invalid lazy value, not an inert format marker.
     with pytest.raises(ValidationError):
         _ = deepcopy(original).value
+    expected = expected_shared_transport(original)
+    expected["additional_properties"]["correlation_id"] = "terminal"
+    expected["messages"].append(
+        Message(
+            "system", [Content.from_error(message="The agent invocation failed.", error_code="agent_error")]
+        ).to_dict()
+    )
     agent = _ReplyAgent(original)
     provider = JsonStateProvider()
     request = RunRequest("first input", "terminal", response_format=ReviewValue)
@@ -516,14 +529,19 @@ async def test_custom_terminal_text_skips_typed_validation_and_is_not_replayed_n
 
     assert response is original and response.text == "original terminal text, not JSON"
     delivered = _delivered(provider, "terminal")
-    assert delivered.text == original.text and delivered.additional_properties == original.additional_properties
+    assert_shared_transport(delivered, expected)
+    assert delivered.text == original.text
     assert delivered.value is None
-    assert all(content.type == "text" for message in delivered.messages for content in message.contents)
+    assert original.additional_properties == {
+        "durable_status": "error",
+        "provider_detail": {"labels": ["keep"]},
+    }
+    assert all(content.type == "text" for message in original.messages for content in message.contents)
     assert "value" not in _mailbox(provider, "terminal")
     assert all(_object(entry)["$type"] == "request" for entry in _array(_data(provider)["conversationHistory"]))
     cold_provider = JsonStateProvider(_wire(provider.raw))
     cold = AgentEntity(cast(SupportsAgentRun, agent), state_provider=cold_provider)
-    assert (await cold.run(request)).to_dict() == delivered.to_dict()
+    assert_shared_transport(await cold.run(request), expected)
     assert len(agent.inputs) == 1 and cold_provider.writes == 0
     agent.response = AgentResponse(messages=[Message("assistant", ["next answer"])])
     assert (await cold.run({"message": "second input", "correlationId": "next"})).text == "next answer"
@@ -616,6 +634,9 @@ async def test_rich_image_context_and_paired_ids_cross_entity_without_decoding_o
     raw_message = _wire(message.to_dict())
     raw_message["future_message"] = {"opaque": [1]}
     _object(_array(raw_message["contents"])[0])["future_content"] = {"opaque": [2]}
+    # Acceptance covers the complete supplied envelope, including inert future fields.
+    canonical = json.dumps(raw_message, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    expected_identity = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     request = {
         "message": "logging only",
         "correlationId": "rich-input",
@@ -641,7 +662,7 @@ async def test_rich_image_context_and_paired_ids_cross_entity_without_decoding_o
         assert isinstance(item.contents[0].outputs[0], dict)
     assert request == before and message.contents[0].outputs == outputs
     assert _ingested(provider) == {
-        identity: [message_identity(message)] for identity in ("image-occurrence-1", "image-occurrence-2")
+        identity: [expected_identity] for identity in ("image-occurrence-1", "image-occurrence-2")
     }
     raw = _wire(provider.raw)
     mailbox = _object(_object(_object(_object(raw["data"])["terminalResults"])["rich-input"])["response"])
@@ -697,28 +718,37 @@ async def test_contentless_migrated_public_id_uses_compatibility_or_original_jou
         "complete": True,
         "messages": [accepted.to_dict()],
     }
-    migrated = migrate_legacy_state(
-        source,
-        source_digest=state_snapshot_digest(source),
-        source_session_id="legacy-session",
-        migration_id="execution-followup",
-        ownership_transfer_id="quiesced-owner",
-        delivery_window_seconds=3600,
-        delivery_evidence=delivery if with_journal else None,
+    probe = _Inputs()
+    client = ToolChatClient(tool_calls=False)
+    agent = Agent(client=client, context_providers=[probe])
+    provider = JsonStateProvider()
+    migration_request = {
+        "source": source,
+        "sourceDigest": state_snapshot_digest(source),
+        "sourceSessionId": "legacy-session",
+        "destinationSessionId": "revision-session",
+        "migrationId": "execution-followup",
+        "ownershipTransferId": "quiesced-owner",
+        "deliveryEvidence": delivery if with_journal else None,
         # This request-only fixture has no original completions.
-        completion_evidence={
+        "completionEvidence": {
             "sourceDigest": state_snapshot_digest(source),
             "evidenceId": "request-only-completion-journal",
             "complete": True,
             "results": [],
         },
-    )
+    }
+    before_migration = deepcopy(migration_request)
+    result = AgentEntity(agent, state_provider=provider).migrate(migration_request)
+    assert result == {"status": "migrated", "migrationId": "execution-followup", "sessionId": "revision-session"}
+    assert provider.writes == 1 and migration_request == before_migration
+    migrated = DurableAgentState.from_json(json.dumps(provider.raw))
+    binding = migrated.data.unknown_fields["migration"]
+    assert binding["destinationSessionId"] == "revision-session"
+    assert binding["requestDigest"] == state_snapshot_digest(before_migration)
     expected_receipts = {identity: [message_identity(accepted)] if with_journal else None}
     assert migrated.data.ingested_messages == expected_receipts
     assert migrated.data.response_mailbox == migrated.data.completed_correlations == {}
-    probe = _Inputs()
-    client = ToolChatClient(tool_calls=False)
-    agent = Agent(client=client, context_providers=[probe])
     provider = JsonStateProvider(_wire(migrated.to_dict()))
     await AgentEntity(agent, state_provider=provider).run({"message": "unrelated turn", "correlationId": "unrelated"})
     assert _ingested(provider) == expected_receipts, "loading pruned history cannot invent exact acceptance"

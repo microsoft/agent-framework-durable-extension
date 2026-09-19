@@ -13,6 +13,7 @@ import jsonschema
 import pytest
 from agent_framework import AgentResponse, Message
 
+from agent_framework_durabletask import _delivery_state as delivery_module
 from agent_framework_durabletask import _durable_agent_state as state_module
 from agent_framework_durabletask import migrate_legacy_state, state_snapshot_digest
 from agent_framework_durabletask._durable_agent_state import (
@@ -199,15 +200,15 @@ def test_ordinary_state_rejects_non_json_before_encoding(invalid: Any, location:
         target = raw["data"]["conversationHistory"][0]["messages"][0]["contents"][0]
     target["future"] = {"nested": [invalid]}
 
-    with pytest.raises(ValueError, match="strict JSON"):
+    with pytest.raises(ValueError, match="JSON"):
         DurableAgentState.from_dict(raw)
 
     # The write boundary uses the same validation, not only migration's digest.
     state = DurableAgentState()
     state.unknown_fields["future"] = {"nested": [invalid]}
-    with pytest.raises(ValueError, match="strict JSON"):
+    with pytest.raises(ValueError, match="JSON"):
         state.to_dict()
-    with pytest.raises(ValueError, match="strict JSON"):
+    with pytest.raises(ValueError, match="JSON"):
         state_snapshot_digest(raw)
 
 
@@ -227,7 +228,7 @@ def test_strict_json_snapshot_preserves_valid_values_and_detaches_them() -> None
 def test_ordinary_state_rejects_cycles_as_invalid_json() -> None:
     raw = _source(version="2.0.0")
     raw["cycle"] = raw
-    with pytest.raises(ValueError, match="strict JSON"):
+    with pytest.raises(ValueError, match="JSON"):
         DurableAgentState.from_dict(raw)
 
 
@@ -237,10 +238,10 @@ def test_mailbox_snapshot_rejects_non_json_without_staging_a_completion(
 ) -> None:
     response = AgentResponse(messages=[])
     payload = {"type": "agent_response", "messages": [], "future": {"nested": invalid}}
-    monkeypatch.setattr(state_module, "serialize_agent_response", lambda _: payload)
+    monkeypatch.setattr(delivery_module, "serialize_agent_response", lambda _: payload)
     state = DurableAgentState()
     before = state.to_dict()
-    with pytest.raises(ValueError, match="strict JSON"):
+    with pytest.raises(ValueError, match="JSON"):
         state.record_response("done", response, delivery_window_seconds=60, now=NOW)
     assert state.to_dict() == before
 

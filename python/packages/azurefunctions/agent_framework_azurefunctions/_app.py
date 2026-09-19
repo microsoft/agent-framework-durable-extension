@@ -64,6 +64,7 @@ from agent_framework_durabletask import (
     validate_response_delivery_window,
     validate_retention,
     validate_runtime_deployment,
+    validate_workflow_start_input,
     wrap_workflow_input,
 )
 from agent_framework_durabletask._workflows.naming import (
@@ -819,6 +820,11 @@ class AgentFunctionApp(DFAppBase):
                     return self._build_error_response("Request body is required")
                 client_input = raw_body.decode("utf-8")
 
+            try:
+                validate_workflow_start_input(client_input)
+            except ValueError as exc:
+                return self._build_error_response(str(exc), status_code=400)
+
             # Neutralize a forged sub-workflow envelope before scheduling: only an
             # internal child dispatch (post trust boundary) may carry those reserved
             # keys, so stripping them here keeps untrusted input off the orchestrator's
@@ -943,6 +949,11 @@ class AgentFunctionApp(DFAppBase):
                 response_data = req.get_json()
             except ValueError:
                 return self._build_error_response("Request body must be valid JSON.")
+
+            try:
+                validate_workflow_start_input(response_data)
+            except ValueError as exc:
+                return self._build_error_response(str(exc), status_code=400)
 
             # Sanitize untrusted HTTP input before it reaches pickle.loads().
             # See strip_pickle_markers() docstring for details on the attack vector.

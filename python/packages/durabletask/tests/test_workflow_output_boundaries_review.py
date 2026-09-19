@@ -5,13 +5,14 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import json
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -157,11 +158,37 @@ def test_mixed_typed_values_literals_and_generated_envelopes_keep_distinct_contr
     _assert_same_value(deserialize_value(serialize_value(generated)), generated)
 
 
-def test_noncolliding_values_keep_core_encoding_and_dictionary_key_normalization() -> None:
-    value = {1: [False, 0, None, ""], "typed": _TypedLiteral({"business": "keep"}), "tuple": (1, False)}
+@pytest.mark.parametrize("key", [1, False, None, (1, 2)])
+@pytest.mark.parametrize("nested", [False, True])
+def test_nonstring_dictionary_keys_are_rejected_instead_of_normalized(key: Any, nested: bool) -> None:
+    value = {key: [False, 0, None, ""], "typed": _TypedLiteral({"business": "keep"}), "tuple": (1, False)}
+    if nested:
+        value = {"items": [value]}
+    before = deepcopy(value)
+    with pytest.raises(ValueError, match="string keys"):
+        serialize_value(value)
+    _assert_same_value(value, before)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        False,
+        0,
+        -0.0,
+        "",
+        [],
+        {},
+        {"1": [False, 0, None, ""], "typed": _TypedLiteral({"business": "keep"}), "tuple": (1, False)},
+    ],
+)
+def test_noncolliding_valid_values_keep_core_encoding_and_typed_checkpoints(value: Any) -> None:
+    before = deepcopy(value)
     encoded = serialize_value(value)
     assert encoded == _checkpoint_encoding.encode_checkpoint_value(value)
-    _assert_same_value(deserialize_value(json.loads(json.dumps(encoded))), {str(k): v for k, v in value.items()})
+    _assert_same_value(deserialize_value(json.loads(json.dumps(encoded))), before)
+    _assert_same_value(value, before)
 
 
 @pytest.mark.parametrize("key", sorted(_checkpoint_encoding._RESERVED_DICT_KEYS))
@@ -400,10 +427,45 @@ def test_invalid_known_envelope_rejected_before_core_decoder(envelope: Any) -> N
         deserialize_workflow_output([{"nested": envelope}])
 
 
-@pytest.mark.parametrize("payload", [{}, {"type": ""}, {"type": "agent_response", "messages": False}])
-def test_known_envelope_still_validates_base_response_fields(payload: Any) -> None:
-    with pytest.raises((ValueError, TypeError)):
+@pytest.mark.parametrize(
+    ("payload", "error", "message"),
+    [
+        ({"type": ""}, ValueError, "Response type"),
+        ({"type": "agent_response", "messages": False}, TypeError, "sequence of messages"),
+    ],
+)
+def test_known_envelope_still_validates_base_response_fields(
+    payload: Any, error: type[Exception], message: str
+) -> None:
+    before = deepcopy(payload)
+    with pytest.raises(error, match=message):
         deserialize_value({"_durable_agent_response": 1, "response": payload})
+    assert payload == before
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"type": "agent_response"},
+        {"messages": None},
+        {"type": "agent_response", "messages": None},
+        {"messages": []},
+        {"type": "agent_response", "messages": []},
+    ],
+)
+def test_known_envelope_accepts_sparse_and_null_messages_as_empty_response(payload: Any) -> None:
+    envelope = {"_durable_agent_response": 1, "response": payload}
+    before = deepcopy(envelope)
+    restored = deserialize_value(envelope)
+    output = deserialize_workflow_output([envelope])
+    assert len(output) == 1
+    for response in (restored, output[0]):
+        assert type(response) is AgentResponse
+        assert response.messages == []
+        assert response.text == ""
+        assert response.value is None
+    assert envelope == before
 
 
 def test_stored_response_type_and_format_are_not_client_constructor_instructions() -> None:
@@ -416,9 +478,35 @@ def test_stored_response_type_and_format_are_not_client_constructor_instructions
             "value": {"type": "business.kind", "flag": False},
         },
     }
-    with patch("importlib.import_module", side_effect=AssertionError("Stored type names are not imported")):
-        restored = deserialize_workflow_output(envelope)
+    before = deepcopy(envelope)
+    forbidden_import = Mock(side_effect=AssertionError("Stored type names are not imported"))
+    forbidden_constructor = Mock(side_effect=AssertionError("A rejected response must not construct its format"))
+    original_import = builtins.__import__
+
+    def guarded_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name.startswith("worker"):
+            return forbidden_import(name)
+        return original_import(name, *args, **kwargs)
+
+    with (
+        patch("importlib.import_module", forbidden_import),
+        patch.object(builtins, "__import__", guarded_import),
+    ):
+        with (
+            patch.object(AgentResponse, "__init__", forbidden_constructor),
+            pytest.raises(ValueError, match="Response type"),
+        ):
+            deserialize_workflow_output(envelope)
+        forbidden_constructor.assert_not_called()
+        canonical = deepcopy(envelope)
+        cast(dict[str, Any], canonical["response"])["type"] = "agent_response"
+        before_canonical = deepcopy(canonical)
+        restored = deserialize_workflow_output(canonical)
+    forbidden_import.assert_not_called()
     assert type(restored) is AgentResponse and restored.value == {"type": "business.kind", "flag": False}
+    assert "response_format" not in serialize_agent_response(restored)
+    assert envelope == before
+    assert canonical == before_canonical
 
 
 def test_existing_internal_pickle_contract_and_escaped_application_dictionary_are_unchanged() -> None:

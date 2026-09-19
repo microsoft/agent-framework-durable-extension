@@ -10,6 +10,7 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from _prototype_response_expectations import assert_shared_transport, expected_shared_transport
 from agent_framework import Agent, AgentResponse, Content, ContextProvider, HistoryProvider, Message
 from durabletask.entities import EntityInstanceId
 from test_durable_history_provider import RecordingChatClient
@@ -17,6 +18,7 @@ from test_revision_contract import JsonStateProvider
 from typing_extensions import Self
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState, DurableAIAgentWorker, serialize_agent_response
+from agent_framework_durabletask import _delivery_state as delivery_module
 from agent_framework_durabletask import _durable_agent_state as state_module
 from agent_framework_durabletask import _entities as entities_module
 from agent_framework_durabletask import _retention as retention_module
@@ -49,7 +51,14 @@ class Clock(datetime, metaclass=_ClockType):
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> type[Clock]:
     monkeypatch.setattr(Clock, "current", NOW)
-    for module in (state_module, entities_module, retention_module, migration_module, validation_module):
+    for module in (
+        state_module,
+        delivery_module,
+        entities_module,
+        retention_module,
+        migration_module,
+        validation_module,
+    ):
         monkeypatch.setattr(module, "datetime", Clock)
     return Clock
 
@@ -241,7 +250,7 @@ def _mailboxes() -> dict[str, Any]:
             now=NOW if correlation == "live" else NOW - timedelta(minutes=2),
         )
         canonical = state.data.response_mailbox[correlation]["response"]
-        assert serialize_agent_response(load_terminal_response(canonical)) == serialize_agent_response(response)
+        assert_shared_transport(load_terminal_response(canonical), expected_shared_transport(response))
     return json.loads(state.to_json())
 
 
@@ -260,27 +269,50 @@ def _without_expired(
     return expected
 
 
-@pytest.mark.parametrize("operation", ["new-run", "duplicate-run", "reset", "expire_responses"])
-async def test_legacy_entity_is_readable_but_every_writer_fails_before_execution(operation: str) -> None:
+@pytest.mark.parametrize(
+    "operation", ["new-run", "duplicate-run", "reset", "expire_responses", "persist_state", "state-setter", "migrate"]
+)
+@pytest.mark.parametrize("cache", ["cold", "injected-legacy", "injected-v2"])
+async def test_legacy_entity_is_readable_but_every_writer_fails_before_execution(operation: str, cache: str) -> None:
     raw = _source()
+    before = deepcopy(raw)
     store = Store(raw)
     agent, client, hooks, callback = _agent()
     entity = AgentEntity(agent, state_provider=store, callback=callback)
-    cached = entity.state
-    before = cached.to_dict()
-    legacy = cached.try_get_agent_response("legacy-done")
+    parsed = DurableAgentState.from_dict(raw)
+    legacy = parsed.try_get_agent_response("legacy-done")
     assert legacy is not None and legacy.text == "retained legacy failure"
     assert legacy.additional_properties["durable_status"] == "error"
+    assert parsed.to_dict() == before
+    cached = None
+    if cache == "cold":
+        # A rejected active-writer read must not admit legacy state into its cache.
+        with pytest.raises(ValueError, match="[Ll]egacy.*read-only"):
+            _ = entity.state
+        assert store._state_cache is None
+    else:
+        # A parsed or v2 cache cannot authorize writes over legacy backing state.
+        cached = parsed if cache == "injected-legacy" else DurableAgentState()
+        store.replace_cached_state(cached)
+    cached_before = cached.to_dict() if cached is not None else None
+    assert store._persisted_state_snapshot is None
 
     with pytest.raises(ValueError, match="[Ll]egacy.*read-only"):
         if operation.endswith("run"):
             correlation = "legacy-done" if operation == "duplicate-run" else "new"
             await entity.run({"message": "must not execute", "correlationId": correlation})
+        elif operation == "state-setter":
+            entity.state = DurableAgentState()
+        elif operation == "migrate":
+            entity.migrate(_request())
         else:
             getattr(entity, operation)()
 
-    assert entity.state is cached and entity.state.to_dict() == before
-    assert store.raw == raw and store.attempts == store.writes == 0
+    assert store._state_cache is cached and store._persisted_state_snapshot is None
+    if cached is not None:
+        assert cached.to_dict() == cached_before
+    assert parsed.to_dict() == raw == before
+    assert store.raw == before and store.attempts == store.writes == 0
     _quiet(client, hooks, callback)
 
 
@@ -764,12 +796,27 @@ def _host_entity(entity_type: Any, store: Store) -> Any:
 
 
 @pytest.mark.parametrize("operation", ["new-run", "duplicate-run", "reset", "expire_responses"])
-def test_registered_dt_legacy_writer_guards_execute_actual_entity(operation: str) -> None:
+@pytest.mark.parametrize("cache", ["cold", "injected-legacy", "injected-v2"])
+def test_registered_dt_legacy_writer_guards_execute_actual_entity(operation: str, cache: str) -> None:
     raw = _source()
+    before = deepcopy(raw)
     store = Store(raw)
     agent, client, hooks, callback = _agent()
     hosted = _host_entity(_registered(agent, callback), store)
-    assert hosted.state.try_get_agent_response("legacy-done").text == "retained legacy failure"
+    parsed = DurableAgentState.from_dict(raw)
+    legacy = parsed.try_get_agent_response("legacy-done")
+    assert legacy is not None and legacy.text == "retained legacy failure"
+    assert parsed.to_dict() == before
+    cached = None
+    if cache == "cold":
+        with pytest.raises(ValueError, match="[Ll]egacy.*read-only"):
+            _ = hosted.state
+        assert hosted._state_cache is None
+    else:
+        cached = parsed if cache == "injected-legacy" else DurableAgentState()
+        hosted.replace_cached_state(cached)
+    cached_before = cached.to_dict() if cached is not None else None
+    assert hosted._persisted_state_snapshot is None
     with pytest.raises(ValueError, match="[Ll]egacy.*read-only"):
         if operation.endswith("run"):
             hosted.run({
@@ -778,7 +825,11 @@ def test_registered_dt_legacy_writer_guards_execute_actual_entity(operation: str
             })
         else:
             getattr(hosted, operation)()
-    assert store.raw == raw and store.attempts == 0
+    assert hosted._state_cache is cached and hosted._persisted_state_snapshot is None
+    if cached is not None:
+        assert cached.to_dict() == cached_before
+    assert parsed.to_dict() == raw == before
+    assert store.raw == before and store.attempts == store.writes == 0
     _quiet(client, hooks, callback)
 
 

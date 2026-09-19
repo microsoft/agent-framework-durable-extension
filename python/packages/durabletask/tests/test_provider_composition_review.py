@@ -296,10 +296,18 @@ async def test_eager_pruning_requires_the_entire_old_atomic_group_to_be_excluded
         DurableAgentStateResponse("old", OLD, [DurableAgentStateMessage.from_chat_message(m) for m in messages]),
         DurableAgentStateRequest("current", OLD, [stored("current", "current")]),
     ])
+    # Reasoning-only messages never enter the replay buffer. Seed only the
+    # explicitly selected exclusions in canonical state, preserving saved metadata.
+    for message in transcript(provider):
+        if message.message_id in excluded:
+            if message.extension_data is None:
+                message.extension_data = {}
+            message.extension_data["_excluded"] = True
     history = DurableHistoryProvider(prune_excluded=True)
     state: dict[str, Any] = {}
     with bound(provider):
         await history.get_messages("session", state=state)
+        assert "reason" not in {message.message_id for message in state[WORKING_BUFFER_KEY]}
         for message in state[WORKING_BUFFER_KEY]:
             if message.message_id in excluded:
                 message.additional_properties["_excluded"] = True
@@ -307,6 +315,9 @@ async def test_eager_pruning_requires_the_entire_old_atomic_group_to_be_excluded
         removed = 3 if len(excluded) == 3 else 0
         assert len(transcript(provider)) == len(messages) + 1 - removed
         assert {"reason", "call", "result"} & set(ids(provider)) == (set() if removed else {"reason", "call", "result"})
+        assert {
+            message.message_id for message in transcript(provider) if (message.extension_data or {}).get("_excluded")
+        } == (set() if removed else excluded)
         assert (provider.state.data.truncation or {}).get("evictedMessageCount", 0) == removed
         snapshot = provider.state.to_dict()
         history.flush(state)

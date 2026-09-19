@@ -95,7 +95,10 @@ async def test_implicit_history_matches_core_first_turn_after_strategy(per_call:
     entity = AgentEntity(original, state_provider=_InMemoryStateProvider())
     await entity.run({"message": "first", "correlationId": "first"})
     prepared: Any = entity.agent
-    assert prepared.context_providers[0] is compaction
+    prepared_compaction = prepared.context_providers[0]
+    assert getattr(prepared_compaction, "__wrapped__", None) is compaction
+    assert prepared_compaction.before_strategy is compaction.before_strategy
+    assert prepared_compaction.after_strategy is compaction.after_strategy is strategy
     history = prepared.context_providers[-1]
     assert isinstance(history, DurableHistoryProvider)
     assert history.source_id == core.context_providers[-1].source_id == compaction.history_source_id == "in_memory"

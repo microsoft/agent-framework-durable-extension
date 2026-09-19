@@ -9,13 +9,14 @@ from pathlib import Path
 from typing import Any, Literal, get_args, get_origin, get_type_hints
 
 import pytest
+from _prototype_response_expectations import assert_shared_transport, expected_shared_transport
 from agent_framework import Agent, AgentResponse, Content, Message
 from jsonschema import Draft202012Validator, FormatChecker
 from test_durable_history_provider import RecordingChatClient
 from test_revision_contract import JsonStateProvider
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState, migrate_legacy_state, state_snapshot_digest
-from agent_framework_durabletask._response_utils import invocation_outcome, serialize_agent_response
+from agent_framework_durabletask._response_utils import invocation_outcome
 
 CORRELATION = "completion-under-review"
 OLD = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -264,11 +265,16 @@ def test_duplicate_record_does_not_reclassify_the_replacement_argument(outcome: 
     assert replacement._value_parsed is False
     delivered = state.try_get_agent_response(CORRELATION)
     assert delivered is not None and invocation_outcome(delivered) == outcome
-    assert [message.to_dict() for message in delivered.messages] == [
-        message.to_dict() for message in _response(outcome).messages
-    ]
-    if outcome == "succeeded":
-        assert serialize_agent_response(delivered) == serialize_agent_response(_response(outcome))
+    expected = expected_shared_transport(_response(outcome))
+    if outcome == "failed":
+        expected["messages"][0]["contents"][0]["error_code"] = "agent_error"
+        expected["additional_properties"] = {"durable_status": "error", "correlation_id": CORRELATION}
+        assert state.data.response_mailbox[CORRELATION]["error"] == {
+            "code": "agent_error",
+            "message": "original failure",
+        }
+    assert_shared_transport(delivered, expected)
+    assert state.to_json() == original
 
 
 @pytest.mark.parametrize("kind", ["tool-error", "approval", "status-error"])

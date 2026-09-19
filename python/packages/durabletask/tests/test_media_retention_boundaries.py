@@ -11,6 +11,7 @@ from copy import deepcopy
 from typing import Any
 
 import pytest
+from _prototype_response_expectations import assert_shared_transport, expected_shared_transport
 from agent_framework import GROUP_ANNOTATION_KEY, ChatResponse, CompactionProvider, Content, Message
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader, Sum
@@ -281,11 +282,15 @@ async def test_media_payloads_survive_policy_matrix_json_reload_and_next_model_c
     cold = AgentEntity(cold_agent, state_provider=cold_provider, retention=retention, max_state_bytes=budget)
     next_input = Message("user", ["next model call"], message_id="next-input", additional_properties={"json": [1]})
     duplicate = await cold.run(_request("current", current_inputs))
-    assert duplicate.to_dict() == response.to_dict()
+    assert_shared_transport(duplicate, expected_shared_transport(response))
     assert cold_client.received_messages == [] and cold_provider.writes == 0
     await cold.run(_request("next", [*inputs["seed-0"], next_input]))
     expected = [message.to_dict() for message in retained if not message.additional_properties.get("_excluded")]
     for payload in expected:
+        # Persisted reasoning stays intact, but neither Core spelling is replayed to the model.
+        payload["contents"] = [
+            content for content in payload["contents"] if content["type"] not in ("reasoning", "text_reasoning")
+        ]
         # HistoryProvider.before_run contributes source attribution to model copies only.
         payload["additional_properties"]["_attribution"] = {
             "source_id": DurableHistoryProvider.DEFAULT_SOURCE_ID,

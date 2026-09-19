@@ -24,6 +24,7 @@ from agent_framework import (
     ResponseStream,
 )
 from agent_framework_durabletask import DurableAgentState, serialize_agent_response
+from agent_framework_durabletask import _delivery_state as delivery_module
 from agent_framework_durabletask import _durable_agent_state as state_module
 from agent_framework_durabletask import _entities as entities_module
 from agent_framework_durabletask import _retention as retention_module
@@ -59,7 +60,14 @@ class Clock(datetime, metaclass=_ClockType):
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> type[Clock]:
     monkeypatch.setattr(Clock, "current", NOW)
-    for module in (state_module, entities_module, retention_module, migration_module, validation_module):
+    for module in (
+        state_module,
+        delivery_module,
+        entities_module,
+        retention_module,
+        migration_module,
+        validation_module,
+    ):
         monkeypatch.setattr(module, "datetime", Clock)
     return Clock
 

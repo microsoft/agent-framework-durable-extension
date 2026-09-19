@@ -20,12 +20,15 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from agent_framework import Agent, AgentResponse, AgentSession, Content, Message
+from clock_helpers import ClockDateTime
 from jsonschema import Draft202012Validator, FormatChecker
 from test_history_pipeline_revision import NonStreamingAgent, ToolChatClient
 from test_revision_contract import ExternalHistory, JsonStateProvider
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState
+from agent_framework_durabletask import _delivery_state as delivery_module
 from agent_framework_durabletask import _durable_agent_state as state_module
+from agent_framework_durabletask import _shared_state_validation as validation_module
 from agent_framework_durabletask._shared_state_validation import (
     validate_identifier,
     validate_shared_data,
@@ -658,7 +661,7 @@ def test_fraction_comparison_does_not_round_under_decimal_context() -> None:
 
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[datetime], None]:
-    class Clock(datetime):
+    class Clock(ClockDateTime):
         instant = NOW
 
         @classmethod
@@ -669,7 +672,8 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[datetime], None]:
     def set_time(instant: datetime) -> None:
         Clock.instant = instant
 
-    monkeypatch.setattr(state_module, "datetime", Clock)
+    for module in (state_module, delivery_module, validation_module):
+        monkeypatch.setattr(module, "datetime", Clock)
     return set_time
 
 

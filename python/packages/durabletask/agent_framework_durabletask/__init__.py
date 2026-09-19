@@ -24,6 +24,7 @@ from ._configuration import (
 from ._constants import (
     DEFAULT_MAX_POLL_RETRIES,
     DEFAULT_POLL_INTERVAL_SECONDS,
+    DELIVERY_WINDOW_SECONDS,
     LEGACY_THREAD_ID_FIELD,
     MIMETYPE_APPLICATION_JSON,
     MIMETYPE_TEXT_PLAIN,
@@ -75,7 +76,6 @@ from ._response_utils import (
 from ._retention import (
     DEFAULT_MAX_STATE_BYTES,
     DEFAULT_RETENTION,
-    DELIVERY_WINDOW_SECONDS,
     DTS_MAX_STATE_BYTES,
     HIGH_WATERMARK,
     LOW_WATERMARK,
@@ -101,7 +101,12 @@ from ._workflows.naming import (
     workflow_orchestrator_name,
 )
 from ._workflows.orchestrator import run_workflow_orchestrator
-from ._workflows.protocol import WORKFLOW_ENGINE_VERSION, unwrap_workflow_input, wrap_workflow_input
+from ._workflows.protocol import (
+    WORKFLOW_ENGINE_VERSION,
+    unwrap_workflow_input,
+    validate_workflow_start_input,
+    wrap_workflow_input,
+)
 from ._workflows.registration import WorkflowRegistrationPlan, collect_hosted_workflows, plan_workflow_registration
 from ._workflows.runner_context import CapturingRunnerContext
 from ._workflows.serialization import deserialize_workflow_output
@@ -243,6 +248,7 @@ __all__ = [
     "validate_retention",
     "validate_runtime_deployment",
     "validate_workflow_name",
+    "validate_workflow_start_input",
     "workflow_name_from_orchestrator",
     "workflow_orchestrator_name",
     "wrap_workflow_input",

@@ -103,7 +103,12 @@ def test_function_app_subprocess_opts_into_isolated_mode_on_every_start(
             hubs.add(hub)
             expected_options: dict[str, Any] = {
                 "cwd": str(sample_path),
-                "env": {**parent_env, "TASKHUB_NAME": hub, "DURABLE_AGENTS_DEPLOYMENT_MODE": "isolated_v2"},
+                "env": {
+                    **parent_env,
+                    "TASKHUB_NAME": hub,
+                    "AzureFunctionsJobHost__extensions__durableTask__hubName": hub,
+                    "DURABLE_AGENTS_DEPLOYMENT_MODE": "isolated_v2",
+                },
             }
             if platform == "win32":
                 expected_options.update(creationflags=512, shell=True)

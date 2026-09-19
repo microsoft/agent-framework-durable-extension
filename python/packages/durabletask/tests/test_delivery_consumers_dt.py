@@ -9,6 +9,7 @@ from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
+from _prototype_response_expectations import assert_shared_transport, expected_shared_transport
 from agent_framework import AgentResponse, Content, ContinuationToken, Message
 from durabletask.client import TaskHubGrpcClient
 from durabletask.task import CompletableTask
@@ -195,7 +196,8 @@ def test_client_reads_full_mailbox_response_after_cold_reload_and_transcript_pru
         "consumer", RunRequest(message="question", correlation_id=CORRELATION_ID, response_format=response_format)
     )
 
-    assert result.to_dict() == response.to_dict()
+    assert_shared_transport(result, expected_shared_transport(response))
+    assert client.get_entity.return_value.get_state.return_value == state_json
     if response_format is None:
         assert result.value == {"answer": 42}
     else:
@@ -244,7 +246,8 @@ def test_client_retains_legacy_lookup_and_does_not_reparse_legacy_errors(
 
 @pytest.mark.parametrize("value_present", [False, True])
 def test_client_projects_unknown_shared_fields_without_inventing_a_value(value_present: bool, sleep: Mock) -> None:
-    raw = json.loads(_mailbox_state(_response()))
+    original = _response()
+    raw = json.loads(_mailbox_state(original))
     stored = raw["data"]["terminalResults"][CORRELATION_ID]["response"]
     assert "value" not in stored
     if value_present:
@@ -259,8 +262,14 @@ def test_client_projects_unknown_shared_fields_without_inventing_a_value(value_p
 
     result = executor.run_durable_agent("consumer", RunRequest(message="question", correlation_id=CORRELATION_ID))
 
+    expected = expected_shared_transport(original)
+    if value_present:
+        expected["value"] = None
+    expected["messages"][1]["contents"].append(
+        Content(cast(Any, "unknown"), additional_properties={"content": deepcopy(opaque)}).to_dict()
+    )
     public = serialize_agent_response(result)
-    assert public == serialize_agent_response(load_terminal_response(stored))
+    assert_shared_transport(result, expected)
     assert ("value" in public) is value_present
     assert result.value is None
     assert "futureResponse" not in public and "futureMessage" not in public["messages"][1]
@@ -327,13 +336,18 @@ def test_task_reconstructs_snapshot_value_and_metadata(
     stored = json.loads(_mailbox_state(response))["data"]["terminalResults"][CORRELATION_ID]["response"]
     assert stored == serialize_terminal_response(response)
     payload = serialize_agent_response(load_terminal_response(stored))
+    expected = expected_shared_transport(response)
+    assert payload == expected
+    assert type(payload["_durable_value_policy"]["version"]) is int
+    before_payload = deepcopy(payload)
 
     task = _task(payload, response_format, precompleted=precompleted)
 
     assert task.is_complete and not task.is_failed
     result = task.get_result()
     assert isinstance(result, AgentResponse)
-    assert result.to_dict() == response.to_dict()
+    assert_shared_transport(result, expected)
+    assert payload == before_payload
     assert result.messages[1].author_name == "writer"
     if response_format is None:
         assert result.value == {"answer": 42}
@@ -373,7 +387,7 @@ def test_terminal_response_formats_skip_all_messages_and_status_only_results(ter
 
     assert task.is_complete and not task.is_failed
     for result in (direct, polled, task.get_result()):
-        assert result.to_dict() == response.to_dict()
+        assert serialize_agent_response(result) == snapshot
         assert result.value is None
 
 

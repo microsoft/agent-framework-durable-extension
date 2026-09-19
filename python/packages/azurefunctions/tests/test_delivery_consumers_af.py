@@ -2,10 +2,12 @@
 
 """Azure Functions delivery through real state readers, HTTP handlers, and tasks."""
 
+import importlib
 import json
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from datetime import date, datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
@@ -45,6 +47,17 @@ HttpHandler = Callable[[func.HttpRequest, Any], Awaitable[func.HttpResponse]]
 
 class Answer(BaseModel):
     answer: int
+
+
+@pytest.fixture
+def response_expectations(monkeypatch: pytest.MonkeyPatch) -> Any:
+    # Keep AF-only collection independent of whether DT tests were collected first.
+    tests = Path(__file__).resolve().parents[2] / "durabletask" / "tests"
+    monkeypatch.syspath_prepend(str(tests))
+    module = importlib.import_module("_prototype_response_expectations")
+    assert module.__file__ is not None
+    assert Path(module.__file__).resolve().parent == tests
+    return module
 
 
 def _response(*, value: Any = None, text: str = "Readable answer") -> AgentResponse[Any]:
@@ -198,10 +211,12 @@ def http_handler(app: AgentFunctionApp, monkeypatch: pytest.MonkeyPatch) -> Http
 
 @pytest.mark.parametrize("value", [None, 0, False, "", [], {}, {"answer": 42}])
 async def test_http_success_keeps_text_and_adds_full_mailbox_snapshot(
-    value: Any, http_handler: HttpHandler, sleep: AsyncMock
+    value: Any, http_handler: HttpHandler, sleep: AsyncMock, response_expectations: Any
 ) -> None:
     original = _response(value=deepcopy(value))
+    expected = response_expectations.expected_shared_transport(original)
     state = _mailbox_state(original)
+    before = deepcopy(state)
     assert state["data"]["conversationHistory"] == []
     assert state["data"]["terminalResults"][CORRELATION_ID]["response"] == serialize_terminal_response(original)
     client = _client(state)
@@ -218,14 +233,17 @@ async def test_http_success_keeps_text_and_adds_full_mailbox_snapshot(
         "status": "success",
         "correlation_id": CORRELATION_ID,
         "message_count": 0,
-        "agent_response": serialize_agent_response(original),
+        "agent_response": expected,
     }
-    delivered = AgentResponse.from_dict(payload["agent_response"])
-    assert delivered.to_dict() == original.to_dict()
+    before_payload = deepcopy(payload)
+    delivered = load_agent_response(payload["agent_response"])
+    response_expectations.assert_shared_transport(delivered, expected)
     assert delivered.value == value
     assert type(delivered.value) is type(value)
     assert delivered.messages[0].author_name == "writer"
     assert delivered.messages[0].message_id == "answer-message"
+    assert payload == before_payload
+    assert state == before and client.read_entity_state.return_value.entity_state == before
     client.signal_entity.assert_awaited_once()
     entity_id = client.signal_entity.call_args.args[0]
     assert entity_id.name == f"dafx-{AGENT_NAME}"
@@ -236,18 +254,24 @@ async def test_http_success_keeps_text_and_adds_full_mailbox_snapshot(
 
 @pytest.mark.parametrize("value_present", [False, True])
 async def test_http_projects_unknown_shared_fields_and_preserves_value_presence(
-    value_present: bool, http_handler: HttpHandler, sleep: AsyncMock
+    value_present: bool, http_handler: HttpHandler, sleep: AsyncMock, response_expectations: Any
 ) -> None:
-    state = _mailbox_state(_response())
+    original = _response()
+    expected = response_expectations.expected_shared_transport(original)
+    state = _mailbox_state(original)
     stored = state["data"]["terminalResults"][CORRELATION_ID]["response"]
     assert "value" not in stored
     if value_present:
         stored["value"] = None
+        expected["value"] = None
     stored["futureResponse"] = {"opaque": [False, 0, None]}
     stored["messages"][0]["futureMessage"] = ["preserve"]
     stored["messages"][0]["contents"][0]["futureContent"] = {"nested": True}
     opaque = {"type": "function_call", "name": "never_execute", "arguments": {"value": None}}
     stored["messages"][0]["contents"].append({"$type": "unknown", "content": deepcopy(opaque)})
+    expected["messages"][0]["contents"].append(
+        Content(cast(Any, "unknown"), additional_properties={"content": deepcopy(opaque)}).to_dict()
+    )
     before = deepcopy(state)
     client = _client(state)
 
@@ -255,13 +279,14 @@ async def test_http_projects_unknown_shared_fields_and_preserves_value_presence(
 
     assert response.status_code == 200
     payload = json.loads(response.get_body())["agent_response"]
-    assert payload == serialize_agent_response(load_terminal_response(stored))
+    assert payload == expected
     assert ("value" in payload) is value_present
     assert payload.get("value") is None
     assert "futureResponse" not in payload
     assert "futureMessage" not in payload["messages"][0]
     assert "futureContent" not in payload["messages"][0]["contents"][0]
     projected = load_agent_response(payload)
+    response_expectations.assert_shared_transport(projected, expected)
     unknown = projected.messages[0].contents[-1]
     assert unknown.type == "unknown" and unknown.additional_properties["content"] == opaque
     assert not projected.user_input_requests
@@ -285,10 +310,12 @@ async def test_http_keeps_legacy_transcript_lookup(version: str, http_handler: H
     assert payload["status"] == "success"
     assert payload["response"] == original.text
     assert payload["message_count"] == 1
-    delivered = AgentResponse.from_dict(payload["agent_response"])
+    before_payload = deepcopy(payload)
+    delivered = load_agent_response(payload["agent_response"])
     assert delivered.messages[0].author_name == "writer"
     assert delivered.messages[0].message_id == "answer-message"
     assert delivered.usage_details == original.usage_details
+    assert payload == before_payload
     assert state["schemaVersion"] == version
     assert "terminalResults" not in state["data"]
     assert "completionReceipts" not in state["data"]
@@ -313,9 +340,11 @@ async def test_http_legacy_error_entry_remains_failed_without_retained_error_con
     assert payload["status"] == "error" and payload["response"] is None
     assert payload["error"] == original.text
     assert payload["agent_response"]["additional_properties"]["durable_status"] == "error"
-    delivered = AgentResponse.from_dict(payload["agent_response"])
+    before_payload = deepcopy(payload)
+    delivered = load_agent_response(payload["agent_response"])
     assert delivered.text == original.text and delivered.value is None
     assert all(content.type != "error" for message in delivered.messages for content in message.contents)
+    assert payload == before_payload
     assert client.read_entity_state.return_value.entity_state == state
     client.read_entity_state.assert_awaited_once()
     sleep.assert_awaited_once_with(0.01)
@@ -418,9 +447,12 @@ def test_new_completion_rejects_delivery_status_even_with_known_outcome(
 
 
 async def test_http_error_without_code_or_message_is_still_a_failure(
-    http_handler: HttpHandler, sleep: AsyncMock
+    http_handler: HttpHandler, sleep: AsyncMock, response_expectations: Any
 ) -> None:
     original = AgentResponse(messages=[Message("system", [Content.from_error()])])
+    expected = response_expectations.expected_shared_transport(original)
+    expected["additional_properties"].update(durable_status="error", correlation_id=CORRELATION_ID)
+    expected["messages"][0]["contents"][0].update(error_code="agent_error", message="The agent invocation failed.")
     state = _mailbox_state(original)
     before = deepcopy(state)
     client = _client(state)
@@ -430,10 +462,11 @@ async def test_http_error_without_code_or_message_is_still_a_failure(
     assert response.status_code == 500
     payload = json.loads(response.get_body())
     assert payload["status"] == "error"
-    assert payload["error_code"] is None
-    assert payload["error"] == "Agent execution failed."
+    assert payload["error_code"] == "agent_error"
+    assert payload["error"] == "The agent invocation failed."
     assert payload["response"] is None
-    assert payload["agent_response"] == serialize_agent_response(original)
+    assert payload["agent_response"] == expected
+    response_expectations.assert_shared_transport(load_agent_response(payload["agent_response"]), expected)
     assert state["data"]["terminalResults"][CORRELATION_ID]["outcome"] == "failed"
     assert state["data"]["completionReceipts"][CORRELATION_ID]["outcome"] == "failed"
     assert client.read_entity_state.return_value.entity_state == before
@@ -445,7 +478,7 @@ async def test_http_error_without_code_or_message_is_still_a_failure(
 @pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "2.0.0"])
 @pytest.mark.parametrize("include_text", [False, True])
 async def test_http_runtime_error_is_500_not_success(
-    version: str, include_text: bool, http_handler: HttpHandler, sleep: AsyncMock
+    version: str, include_text: bool, http_handler: HttpHandler, sleep: AsyncMock, response_expectations: Any
 ) -> None:
     original = _runtime_error(include_text=include_text)
     state = _mailbox_state(original) if version == "2.0.0" else _legacy_state(original, version, failed=True)
@@ -463,15 +496,19 @@ async def test_http_runtime_error_is_500_not_success(
     assert payload["message"] == "question"
     assert payload["session_id"] == SESSION_ID
     assert payload["correlation_id"] == CORRELATION_ID
-    delivered = AgentResponse.from_dict(payload["agent_response"])
+    before_payload = deepcopy(payload)
+    delivered = load_agent_response(payload["agent_response"])
     assert delivered.messages[1].contents[0].error_details == "provider details"
     if version == "2.0.0":
-        assert payload["agent_response"] == serialize_agent_response(original)
-        assert serialize_agent_response(delivered) == serialize_agent_response(original)
+        expected = response_expectations.expected_shared_transport(original)
+        expected["additional_properties"].update(durable_status="error", correlation_id=CORRELATION_ID)
+        assert payload["agent_response"] == expected
+        response_expectations.assert_shared_transport(delivered, expected)
         assert state["data"]["terminalResults"][CORRELATION_ID]["outcome"] == "failed"
         assert state["data"]["completionReceipts"][CORRELATION_ID]["outcome"] == "failed"
         assert state["data"]["terminalResults"][CORRELATION_ID]["response"] == serialize_terminal_response(original)
         assert payload["message_count"] == 0
+    assert payload == before_payload
     assert client.read_entity_state.return_value.entity_state == before
     assert state == before
     client.read_entity_state.assert_awaited_once()
@@ -481,7 +518,7 @@ async def test_http_runtime_error_is_500_not_success(
 @pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
 @pytest.mark.parametrize("plain_text", [False, True])
 async def test_http_foreign_failed_partial_uses_record_error_without_rewriting_state(
-    cold: bool, plain_text: bool, http_handler: HttpHandler, sleep: AsyncMock
+    cold: bool, plain_text: bool, http_handler: HttpHandler, sleep: AsyncMock, response_expectations: Any
 ) -> None:
     partial = {
         "messages": [
@@ -522,7 +559,12 @@ async def test_http_foreign_failed_partial_uses_record_error_without_rewriting_s
         state = DurableAgentState.from_json(state.to_json())
     delivered = state.try_get_agent_response(CORRELATION_ID)
     assert isinstance(delivered, AgentResponse)
-    expected = serialize_agent_response(load_terminal_response(partial))
+    expected = response_expectations.expected_shared_transport(
+        AgentResponse[Any](
+            messages=[Message("assistant", ['{"answer":"not an integer"}'], message_id="partial-message")],
+            value={"answer": "not an integer"},
+        )
+    )
     expected["additional_properties"] = {"durable_status": "error", "correlation_id": CORRELATION_ID}
     expected["messages"].append(
         Message(
@@ -530,8 +572,8 @@ async def test_http_foreign_failed_partial_uses_record_error_without_rewriting_s
             [Content.from_error(message=error["message"], error_code=error["code"], error_details=error["details"])],
         ).to_dict()
     )
-    assert serialize_agent_response(first) == expected
-    assert serialize_agent_response(delivered) == expected
+    response_expectations.assert_shared_transport(first, expected)
+    response_expectations.assert_shared_transport(delivered, expected)
     assert delivered.value == partial["value"]
     assert state.to_dict() == before
     client = _client(state.to_dict())
@@ -644,9 +686,13 @@ def test_success_helper_keeps_its_existing_signature_and_payload(app: AgentFunct
 
 @pytest.mark.parametrize("value", [None, 0, False, "", [], {}, {"answer": 42}])
 @pytest.mark.parametrize("operation", ["run", "run_agent"])
-def test_entity_factory_delivers_cold_mailbox_without_rerunning_agent(value: Any, operation: str) -> None:
+def test_entity_factory_delivers_cold_mailbox_without_rerunning_agent(
+    value: Any, operation: str, response_expectations: Any
+) -> None:
     original = _response(value=deepcopy(value))
+    expected = response_expectations.expected_shared_transport(original)
     state = _mailbox_state(original)
+    before = deepcopy(state)
     agent = Mock(context_providers=None)
     agent.run = AsyncMock()
     context = _entity_context(state, operation)
@@ -657,10 +703,13 @@ def test_entity_factory_delivers_cold_mailbox_without_rerunning_agent(value: Any
     payload = json.loads(json.dumps(context.set_result.call_args.args[0], allow_nan=False))
     stored = state["data"]["terminalResults"][CORRELATION_ID]["response"]
     assert stored == serialize_terminal_response(original)
-    assert payload == serialize_agent_response(load_terminal_response(stored))
-    delivered = AgentResponse.from_dict(payload)
+    assert payload == expected
+    before_payload = deepcopy(payload)
+    delivered = load_agent_response(payload)
+    response_expectations.assert_shared_transport(delivered, expected)
     assert delivered.value == value
     assert type(delivered.value) is type(value)
+    assert payload == before_payload and state == before
     agent.run.assert_not_called()
     context.set_state.assert_not_called()
 
@@ -730,18 +779,22 @@ def test_entity_factory_and_task_keep_expired_delivery_terminal(cleanup: bool) -
 @pytest.mark.parametrize("response_format", [None, Answer])
 @pytest.mark.parametrize("precompleted", [False, True])
 def test_functions_task_keeps_snapshot_metadata_and_structured_value(
-    response_format: type[BaseModel] | None, precompleted: bool
+    response_format: type[BaseModel] | None, precompleted: bool, response_expectations: Any
 ) -> None:
     original = _response(value={"answer": 42})
     stored = _mailbox_state(original)["data"]["terminalResults"][CORRELATION_ID]["response"]
     assert stored == serialize_terminal_response(original)
     payload = serialize_agent_response(load_terminal_response(stored))
+    expected = response_expectations.expected_shared_transport(original)
+    assert payload == expected
+    before_payload = deepcopy(payload)
 
     task = _task(payload, response_format, precompleted=precompleted)
 
     assert task.state == TaskState.SUCCEEDED
     assert isinstance(task.result, AgentResponse)
-    assert task.result.to_dict() == original.to_dict()
+    response_expectations.assert_shared_transport(task.result, expected)
+    assert payload == before_payload
     if response_format is None:
         assert task.result.value == {"answer": 42}
     else:
@@ -758,15 +811,18 @@ def test_functions_task_does_not_parse_error_or_status_only_responses(
     original = _response(text=text)
     if terminal_kind == "error":
         original.messages.append(Message("system", [Content.from_error(message="Failure", error_code="RuntimeError")]))
+        original.additional_properties["durable_status"] = "error"
     else:
         original.additional_properties["durable_status"] = "already_completed"
 
     payload = json.loads(json.dumps(serialize_agent_response(original)))
+    before_payload = deepcopy(payload)
     task = _task(payload, Answer, precompleted=precompleted)
 
     assert task.state == TaskState.SUCCEEDED
     assert isinstance(task.result, AgentResponse)
-    assert task.result.to_dict() == original.to_dict()
+    assert serialize_agent_response(task.result) == before_payload
+    assert payload == before_payload
     assert task.result.value is None
 
 

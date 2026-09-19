@@ -348,7 +348,9 @@ def test_duplicate_public_ids_keep_unique_reconciliation_across_reload() -> None
         })
     ]
     provider = DurableHistoryProvider()
-    state_provider = SimpleNamespace(state=SimpleNamespace(data=SimpleNamespace(conversation_history=history)))
+    state_provider = SimpleNamespace(
+        state=SimpleNamespace(schema_version="2.0.0", data=SimpleNamespace(conversation_history=history))
+    )
     binding = DurableHistoryBinding(cast(Any, state_provider))
     positions = provider._positions(binding)
     assert len(positions) == 2
