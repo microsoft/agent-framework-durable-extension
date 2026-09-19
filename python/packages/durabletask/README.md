@@ -61,6 +61,49 @@ uses legacy `1.1.0`, and v2 execution and mutation remain rejected. A later runt
 validate its complete candidate against an independent committed baseline before storage.
 Read-only consumers reuse the same lookup rules, without transcript fallback or cleanup writes.
 
+### Private canonical history bridge
+
+The next private layer adds a typed canonical transcript and a Core history-provider bridge.
+It preserves unknown JSON, session state and original public message IDs separately from
+internal reconciliation identities. Delivery methods reuse the private staging operations
+without replacing typed history objects. History hooks stage appends and compaction annotations
+in memory. Excluded messages can be omitted from model input but are not physically deleted.
+
+The private bridge requires an exact `2.0.0` snapshot. Even `get_messages()` may repair missing
+or duplicate internal IDs, so it is not a read-only inspection path. Mutation-capable hooks reject
+legacy and unsupported versions before changing stored history or working state. Use
+`read_agent_state()` for legacy inspection instead.
+
+External primary providers, service-owned history and store-only audit sinks keep separate roles.
+On a service-owned turn, the inactive external primary's custom hooks are also suppressed because
+they may load or persist history directly. Ownership-independent work belongs in a separate context
+provider or store-only sink. Client-owned turns retain the original primary's hooks and resources.
+Compaction aimed at an inactive external history source does not run its stored-history after
+hook. Its before hook still operates on unrelated current context, as Core specifies.
+Ordinary input and response IDs are preserved. Newly generated compaction summary occurrences get
+unique IDs when a strategy reuses a candidate ID, so both summary revisions and their links survive.
+With no primary, history is injected before a matching before-compaction provider. Core runs before
+hooks forward and after hooks in reverse, so that provider's after hook sees the previously stored
+history. After-only compaction retains the existing append-then-compact order. Per-service-call
+history uses Core's middleware cadence and does not run compaction hooks per model call.
+Injection honors a single configured compaction history source. Conflicting sources require an
+explicit primary instead of silently selecting a source that cannot serve all configured hooks.
+Explicit durable and external primary providers retain the user's hook order, so place history
+before a matching before-compaction provider when that strategy must see loaded history.
+Provider namespaces must be unique, including store-only sinks, and conflicts with an injected
+history source raise an error rather than automatically reassigning a namespace.
+
+Canonical media keeps its declared content kind rather than inferring it from the URI scheme.
+New response timestamps without an offset are interpreted as UTC. Valid stored timestamps retain
+their original offset and fractional precision.
+
+These modules are not exported or connected to either host. Public `DurableAgentState` remains
+the legacy writer, and the existing v2 mutation guards remain active. There is no new supported
+deployment mode, migration operation, retention policy or workflow engine in this layer.
+Host activation, transactional session capture and the versioned workflow start boundary must
+land together in the later runtime layer. The private model alone does not enforce a committed
+storage baseline or make provider side effects transactional.
+
 ### Basic Usage Example
 
 ```python
