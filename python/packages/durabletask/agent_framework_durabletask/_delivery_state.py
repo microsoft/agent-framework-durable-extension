@@ -102,19 +102,16 @@ def stage_response(
     ):
         raise ValueError("A new completion requires a known invocation outcome, not an acknowledgement.")
 
-    # Preserve the existing Core serializer's lazy-value and by-name policy. A
-    # shared-origin response must also retain its opaque original wire snapshot.
+    # Resolve the value with the existing lazy-parsing and alias policy, but keep
+    # the instance for envelope preservation and the codec's pre-serialization audit.
     core_payload = serialize_agent_response(response)
-    if getattr(response, "_original_shared_response", None) is not None:
-        # The codec's base snapshot must not select aliases again for a typed
-        # shared value. Use the already-validated JSON value on a shallow copy,
-        # retaining the codec's original-projection comparison and wire shadow.
-        projection = copy(response)
-        projection._value = core_payload.get("value")  # pyright: ignore[reportPrivateUsage]
-        projection._value_parsed = "value" in core_payload  # pyright: ignore[reportPrivateUsage]
-        payload = serialize_terminal_response(projection)
-    else:
-        payload = serialize_terminal_response(core_payload)
+    projection = copy(response)
+    projection._value = core_payload.get("value")  # pyright: ignore[reportPrivateUsage]
+    projection._value_parsed = "value" in core_payload  # pyright: ignore[reportPrivateUsage]
+    projection._durable_value_by_name = core_payload.get("_durable_value_by_name", False)  # type: ignore[attr-defined]
+    # Keep any shared shadow and its original projection unchanged so the codec
+    # still rejects modified projections rather than silently rebasing opaque data.
+    payload = serialize_terminal_response(projection)
     snapshot = load_agent_response(core_payload)
     outcome = invocation_outcome(snapshot)
     if outcome is None:
