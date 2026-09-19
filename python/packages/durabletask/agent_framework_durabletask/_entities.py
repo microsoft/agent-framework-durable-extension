@@ -19,6 +19,7 @@ from agent_framework import (
     AgentResponse,
     AgentResponseUpdate,
     AgentSession,
+    ChatResponse,
     Content,
     HistoryProvider,
     Message,
@@ -26,6 +27,7 @@ from agent_framework import (
     SupportsAgentRun,
     register_state_type,
 )
+from agent_framework._sessions import is_local_history_conversation_id
 from durabletask.entities import DurableEntity
 
 from ._callbacks import AgentCallbackContext, AgentResponseCallbackProtocol
@@ -91,6 +93,25 @@ def _is_missing_previous_response(exc: BaseException, *, prior_error: BaseExcept
                 return details["code"] == _MISSING_PREVIOUS_RESPONSE_CODE
         current = current.__cause__ or current.__context__
     return False
+
+
+def _retry_snapshot(session: Any, run_kwargs: dict[str, Any], provider_sources: set[str]) -> str | None:
+    """Capture observable invocation state without retaining aliases to mutable continuations."""
+    try:
+        payload = deepcopy(session.to_dict())
+        state = payload.get("state")
+        if isinstance(state, dict):
+            state = cast("dict[str, Any]", state)
+            # Core lazily creates empty provider bags. Their creation alone is
+            # scaffolding, not advancement. Other empty application values remain.
+            for source in provider_sources:
+                if state.get(source) == {}:
+                    state.pop(source)
+        inputs = [message.to_dict() for message in run_kwargs["messages"]]
+        return json.dumps({"session": payload, "messages": inputs}, sort_keys=True, allow_nan=False)
+    except (AttributeError, TypeError, ValueError, RecursionError):
+        # A non-comparable custom state must never authorize a whole-run retry.
+        return None
 
 
 def _register_loaded_state_types() -> None:
@@ -407,7 +428,6 @@ class AgentEntity:
         original.prepare_for_write(delivery_window_seconds=self._response_delivery_window_seconds)
         already_answered = original.try_get_agent_response(run_request.correlation_id)
         if already_answered is not None:
-            self.expire_responses()
             return already_answered
         self._state_provider.replace_cached_state(deepcopy(original))
         try:
@@ -521,12 +541,35 @@ class AgentEntity:
             if isinstance(middleware_agent, Agent):
                 if service_owns_history:
                     invocation_agent = copy(cast(Any, middleware_agent))
-                    invocation_agent.client = DurableServiceClient(invocation_agent.client, history_binding.accept)
+
+                    def completed_service(response: ChatResponse) -> None:
+                        progress.service_completed = True
+                        continuation = response.conversation_id
+                        if (
+                            session is not None
+                            and isinstance(continuation, str)
+                            and continuation
+                            and not is_local_history_conversation_id(continuation)
+                            and not response.has_internal_conversation_id()
+                        ):
+                            session.service_session_id = deepcopy(continuation)
+
+                    invocation_agent.client = DurableServiceClient(
+                        invocation_agent.client, history_binding.accept, completed_service
+                    )
                     self.agent = invocation_agent
                 middleware = [DurableToolGuard(progress, enabled=run_request.enable_tool_calls)]
                 run_kwargs["middleware"] = middleware
                 run_kwargs["client_kwargs"] = {"middleware": middleware}
-            original_service_id = getattr(session, "service_session_id", None)
+            provider_sources: set[str] = (
+                {
+                    provider.source_id
+                    for provider in cast("Sequence[Any]", self.agent.context_providers)  # type: ignore[attr-defined]
+                }
+                if uses_context_pipeline
+                else set[str]()
+            )
+            original_snapshot = _retry_snapshot(session, run_kwargs, provider_sources) if session is not None else None
             try:
                 agent_run_response: AgentResponse = await self._invoke_agent(
                     run_kwargs=run_kwargs,
@@ -542,7 +585,9 @@ class AgentEntity:
                     or not _is_missing_previous_response(exc)
                     or progress.stream_started
                     or progress.function_started
-                    or getattr(session, "service_session_id", None) != original_service_id
+                    or progress.service_completed
+                    or original_snapshot is None
+                    or _retry_snapshot(session, run_kwargs, provider_sources) != original_snapshot
                 ):
                     raise
                 retried = await self._retry_rejected_conversation_id(
@@ -552,7 +597,8 @@ class AgentEntity:
                     request_message=message,
                     cause=exc,
                     progress=progress,
-                    original_service_id=original_service_id,
+                    original_snapshot=original_snapshot,
+                    provider_sources=provider_sources,
                 )
                 if retried is None:
                     raise
@@ -597,7 +643,7 @@ class AgentEntity:
                     unbind_durable_history(binding_token)
                 self.agent = original_agent
 
-        if not succeeded and uses_context_pipeline:
+        if uses_context_pipeline and (not succeeded or service_owns_history):
             staged_inputs = {
                 (stored.ingestion_occurrence, stored.ingestion_identity)
                 for entry in self.state.data.conversation_history
@@ -624,7 +670,12 @@ class AgentEntity:
                 DurableAgentStateResponse.from_run_response(correlation_id, agent_run_response)
             )
         self._capture_session(session)
-        return agent_run_response
+        # First completion and duplicate delivery use the same canonical result
+        # projection, including explicit approval/value transport classifications.
+        delivered = self.state.try_get_agent_response(correlation_id)
+        if delivered is None:
+            raise ValueError("A staged completion must have an authoritative delivery result.")
+        return delivered
 
     @staticmethod
     def _to_replayable_message(message: DurableAgentStateMessage) -> Message | None:
@@ -797,7 +848,8 @@ class AgentEntity:
         request_message: Any,
         cause: BaseException,
         progress: InvocationProgress,
-        original_service_id: Any,
+        original_snapshot: str,
+        provider_sources: set[str],
     ) -> AgentResponse | None:
         for attempt in range(1, _REJECTED_ID_RETRIES + 1):
             await asyncio.sleep(_REJECTED_ID_BACKOFF_SECONDS * attempt)
@@ -814,7 +866,8 @@ class AgentEntity:
                     not _is_missing_previous_response(retry_exc, prior_error=cause)
                     or progress.stream_started
                     or progress.function_started
-                    or getattr(run_kwargs.get("session"), "service_session_id", None) != original_service_id
+                    or progress.service_completed
+                    or _retry_snapshot(run_kwargs.get("session"), run_kwargs, provider_sources) != original_snapshot
                 ):
                     raise
                 logger.debug(

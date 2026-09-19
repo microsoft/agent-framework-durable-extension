@@ -305,7 +305,11 @@ async def test_parent_dispatch_wraps_typed_child_input_and_registered_child_keep
     inner = _workflow("inner", [_node("leaf", str)])
     child = Mock(spec=WorkflowExecutor)
     child.id, child.workflow, child.allow_direct_output = "child", inner, False
-    parent = _workflow("parent", [_node("source"), child, _node("sink")], [SingleEdgeGroup("child", "sink")])
+    parent = _workflow(
+        "parent",
+        [_node("source"), child, _node("sink")],
+        [SingleEdgeGroup("source", "child"), SingleEdgeGroup("child", "sink")],
+    )
     functions, starter = _register(parent)
     assert set(functions) == {"dafx-parent", "dafx-inner"}
     payload: dict[str, Any] = {"input": "nested typed input", "control": deepcopy(_CONTROL)}
@@ -406,11 +410,13 @@ async def test_v2_paused_hitl_replays_full_shared_generator_with_identical_dispa
         assert data["message"] == answer
         return {"outputs": ["done"]}
 
-    _, starter = _register(_workflow(nodes=[_node("gate"), _node("sink")]))
+    _, starter = _register(_workflow(nodes=[_node("gate"), _node("sink")], edges=[SingleEdgeGroup("gate", "sink")]))
     wire = await _start(starter, payload)
     executions = []
     for replay in (False, True):
-        functions, _ = _register(_workflow(nodes=[_node("gate"), _node("sink")]))
+        functions, _ = _register(
+            _workflow(nodes=[_node("gate"), _node("sink")], edges=[SingleEdgeGroup("gate", "sink")])
+        )
         calls: list[dict[str, Any]] = []
         host = _host(deepcopy(wire), calls, result, replay=replay)
         generator = functions["dafx-protocol"](host)

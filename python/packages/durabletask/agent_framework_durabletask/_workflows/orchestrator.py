@@ -24,7 +24,7 @@ import inspect
 import json
 import logging
 from collections import Counter, defaultdict
-from collections.abc import Generator, Mapping
+from collections.abc import Generator, Mapping, Sequence
 from copy import copy
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -126,15 +126,20 @@ class TaskType(Enum):
     SUBWORKFLOW = "subworkflow"
 
 
+# Accept the legacy singular source at helper boundaries, while routed messages
+# carry all source IDs. This metadata is replay-local, not a checkpoint schema.
+_MessageSources = str | list[str]
+
+
 @dataclass
 class TaskMetadata:
     """Metadata for a pending task."""
 
     executor_id: str
     message: Any
-    source_executor_id: str
+    source_executor_id: _MessageSources
     task_type: TaskType
-    remaining_messages: list[tuple[str, Any, str]] | None = None
+    remaining_messages: list[tuple[str, Any, _MessageSources]] | None = None
     # For SUBWORKFLOW tasks: the deterministic child orchestration instance id. The
     # parent records these in its custom status before awaiting the child so the read
     # side can reach nested pending HITL requests while the parent is suspended.
@@ -144,6 +149,11 @@ class TaskMetadata:
     invocation_ordinal: int = 0
     response_format: type[BaseModel] | None = None
     skip_dispatch: bool = False
+
+    @property
+    def source_executor_ids(self) -> list[str]:
+        """Return all sources, accepting the legacy singular constructor argument."""
+        return [self.source_executor_id] if isinstance(self.source_executor_id, str) else self.source_executor_id
 
 
 @dataclass
@@ -350,13 +360,13 @@ def _same_message_values(left: list[Message], right: list[Message]) -> bool:
 def _match_occurrences(
     selected: list[Message], originals: list[Message], ids: list[str], *, allow_positional: bool = True
 ) -> list[str | None]:
-    """Match aliases and unambiguous detached copies within one source list."""
-    aliases: dict[int, list[int]] = defaultdict(list)
-    application_ids: dict[str, list[int]] = defaultdict(list)
-    for index, original in enumerate(originals):
-        aliases[id(original)].append(index)
+    """Match unique occurrences, including one ancestor copied into several branches."""
+    aliases: dict[int, set[str]] = defaultdict(set)
+    application_ids: dict[str, set[str]] = defaultdict(set)
+    for original, occurrence in zip(originals, ids, strict=True):
+        aliases[id(original)].add(occurrence)
         if original.message_id is not None:
-            application_ids[original.message_id].append(index)
+            application_ids[original.message_id].add(occurrence)
     if allow_positional and selected and len(selected) == len(originals):
         copied_aliases: dict[int, int] = {}
         try:
@@ -368,15 +378,15 @@ def _match_occurrences(
                 return list(ids)
         except (TypeError, ValueError):
             pass
-    fingerprints: dict[str, list[int]] | None = None
-    used: set[int] = set()
+    fingerprints: dict[str, set[str]] | None = None
+    used: set[str] = set()
     matches: list[str | None] = []
     for message in selected:
-        candidates = aliases.get(id(message), [])
+        candidates: set[str] = aliases.get(id(message), set[str]())
         if not candidates and message.message_id is not None:
-            candidates = application_ids.get(message.message_id, [])
+            candidates = application_ids.get(message.message_id, set[str]())
             if len(candidates) != 1:
-                candidates = []
+                candidates = set[str]()
         if not candidates and originals:
             try:
                 fingerprint = message_identity(message)
@@ -384,19 +394,21 @@ def _match_occurrences(
                 fingerprint = None
             if fingerprint is not None:
                 if fingerprints is None:
-                    fingerprints = defaultdict(list)
-                    for i, original in enumerate(originals):
+                    fingerprints = defaultdict(set)
+                    for original, occurrence in zip(originals, ids, strict=True):
                         try:
-                            fingerprints[message_identity(original)].append(i)
+                            fingerprints[message_identity(original)].add(occurrence)
                         except (TypeError, ValueError):
                             continue
-                candidates = fingerprints.get(fingerprint, [])
+                candidates = fingerprints.get(fingerprint, set[str]())
                 if len(candidates) != 1:
-                    candidates = []
-        position = candidates[0] if len(candidates) == 1 and candidates[0] not in used else None
-        matches.append(ids[position] if position is not None else None)
-        if position is not None:
-            used.add(position)
+                    candidates = set[str]()
+        occurrence = next(iter(candidates)) if len(candidates) == 1 else None
+        # A second selection is still a separate occurrence. Only ambiguity among
+        # source copies is collapsed, not multiplicity in the selected sequence.
+        matches.append(occurrence if occurrence not in used else None)
+        if occurrence is not None:
+            used.add(occurrence)
     return matches
 
 
@@ -438,8 +450,9 @@ def route_message_through_edge_groups(
     edge_groups: list[EdgeGroup],
     source_id: str,
     message: Any,
+    target_id: str | None = None,
 ) -> list[str]:
-    """Route a message through edge groups to find target executor IDs."""
+    """Route through graph predicates, optionally restricted to an explicit target."""
     targets: list[str] = []
 
     for group in edge_groups:
@@ -450,18 +463,25 @@ def route_message_through_edge_groups(
             if group.selection_func is not None:
                 target_ids = group.target_executor_ids
                 selected = list(group.selection_func(message, list(target_ids)))
-                if not all(target_id in target_ids for target_id in selected):
+                if not all(selected_id in target_ids for selected_id in selected):
                     raise RuntimeError(
                         f"Invalid selection result: {selected}. "
                         f"Expected selections to be a subset of valid target executor IDs: {target_ids}."
                     )
-                targets.extend(selected)
             else:
-                targets.extend(group.target_executor_ids)
+                selected = list(group.target_executor_ids)
+            # Core delivers a targeted fan-out once even if the selector repeats
+            # that target. Broadcast selection retains its order and duplicates.
+            if target_id:
+                selected = [target_id] if target_id in selected else []
+            edges_by_target = {edge.target_id: edge for edge in group.edges}
+            for selected_id in selected:
+                if _evaluate_edge_condition_sync(edges_by_target[selected_id], message):
+                    targets.append(selected_id)
 
         elif isinstance(group, SingleEdgeGroup):
             edge = group.edges[0]
-            if _evaluate_edge_condition_sync(edge, message):
+            if (not target_id or target_id == edge.target_id) and _evaluate_edge_condition_sync(edge, message):
                 targets.append(edge.target_id)
 
         elif isinstance(group, FanInEdgeGroup):
@@ -469,7 +489,11 @@ def route_message_through_edge_groups(
 
         else:
             for edge in group.edges:
-                if edge.source_id == source_id and _evaluate_edge_condition_sync(edge, message):
+                if (
+                    edge.source_id == source_id
+                    and (not target_id or target_id == edge.target_id)
+                    and _evaluate_edge_condition_sync(edge, message)
+                ):
                     targets.append(edge.target_id)
 
     return targets
@@ -620,7 +644,7 @@ def _prepare_agent_task(
         )
         if isinstance(response_format, type) and issubclass(response_format, BaseModel):
             metadata.response_format = response_format
-        if metadata.source_executor_id.startswith(SOURCE_HITL_RESPONSE):
+        if any(source.startswith(SOURCE_HITL_RESPONSE) for source in metadata.source_executor_ids):
             message = _prepare_agent_hitl_message(executor_id, message, staged)
             if message is None:
                 metadata.skip_dispatch = True
@@ -700,7 +724,7 @@ def _prepare_activity_task(
     ctx: WorkflowOrchestrationContext,
     executor_id: str,
     message: Any,
-    source_executor_id: str,
+    source_executor_id: _MessageSources,
     shared_state_snapshot: dict[str, Any] | None,
     workflow_name: str,
     address: dict[str, str],
@@ -717,7 +741,9 @@ def _prepare_activity_task(
         "executor_id": executor_id,
         "message": serialize_value(staged.forwarding_input(message) if staged else message),
         "shared_state_snapshot": shared_state_snapshot,
-        "source_executor_ids": [source_executor_id],
+        "source_executor_ids": (
+            [source_executor_id] if isinstance(source_executor_id, str) else list(source_executor_id)
+        ),
         # host_context addresses the *root* (HTTP-routable) orchestration so an executor
         # can build a HITL respond URL (see CapturingRunnerContext.host_metadata):
         # instance_id / workflow_name name the top-level instance, and
@@ -1012,7 +1038,7 @@ def _process_subworkflow_result(
 def _route_result_messages(
     result: ExecutorResult,
     workflow: Workflow,
-    next_pending_messages: dict[str, list[tuple[Any, str]]],
+    next_pending_messages: dict[str, list[tuple[Any, _MessageSources]]],
     fan_in_pending: dict[str, dict[str, list[tuple[Any, str]]]],
     delivery_ledger: _WorkflowDeliveryLedger | None = None,
 ) -> None:
@@ -1038,31 +1064,28 @@ def _route_result_messages(
             for response in _upstream_responses(msg_to_route) or []:
                 delivery_ledger.identify(response, result.source_message, scope=result.child_instance_id)
 
-        if explicit_target:
-            if explicit_target not in next_pending_messages:
-                next_pending_messages[explicit_target] = []
-            next_pending_messages[explicit_target].append((msg_to_route, executor_id))
-            logger.debug("Routed message from %s to explicit target %s", executor_id, explicit_target)
-            continue
-
         for group in workflow.edge_groups:
-            if isinstance(group, FanInEdgeGroup) and executor_id in group.source_executor_ids:
+            if (
+                isinstance(group, FanInEdgeGroup)
+                and executor_id in group.source_executor_ids
+                and (not explicit_target or explicit_target in group.target_executor_ids)
+            ):
                 fan_in_pending[group.id][executor_id].append((msg_to_route, executor_id))
                 logger.debug("Accumulated message for FanIn group %s from %s", group.id, executor_id)
 
-        targets = route_message_through_edge_groups(workflow.edge_groups, executor_id, msg_to_route)
+        targets = route_message_through_edge_groups(workflow.edge_groups, executor_id, msg_to_route, explicit_target)
 
         for target_id in targets:
             logger.debug("Routing to %s", target_id)
             if target_id not in next_pending_messages:
                 next_pending_messages[target_id] = []
-            next_pending_messages[target_id].append((msg_to_route, executor_id))
+            next_pending_messages[target_id].append((msg_to_route, [executor_id]))
 
 
 def _check_fan_in_ready(
     workflow: Workflow,
     fan_in_pending: dict[str, dict[str, list[tuple[Any, str]]]],
-    next_pending_messages: dict[str, list[tuple[Any, str]]],
+    next_pending_messages: dict[str, list[tuple[Any, _MessageSources]]],
 ) -> None:
     """Check if any FanInEdgeGroups are ready and deliver their messages."""
     for group in workflow.edge_groups:
@@ -1075,11 +1098,10 @@ def _check_fan_in_ready(
             continue
 
         aggregated: list[Any] = []
-        aggregated_sources: list[str] = []
-        for src in group.source_executor_ids:
-            for msg, msg_source in pending_sources[src]:
+        source_ids = [edge.source_id for edge in group.edges]
+        for src in source_ids:
+            for msg, _ in pending_sources[src]:
                 aggregated.append(msg)
-                aggregated_sources.append(msg_source)
 
         target_id = group.target_executor_ids[0]
         logger.debug("FanIn group %s ready, delivering %d messages to %s", group.id, len(aggregated), target_id)
@@ -1087,8 +1109,8 @@ def _check_fan_in_ready(
         if target_id not in next_pending_messages:
             next_pending_messages[target_id] = []
 
-        first_source = aggregated_sources[0] if aggregated_sources else "__fan_in__"
-        next_pending_messages[target_id].append((aggregated, first_source))
+        # Core identifies contributing edges, not one source per buffered message.
+        next_pending_messages[target_id].append((aggregated, source_ids))
 
         fan_in_pending[group.id] = defaultdict(list)
 
@@ -1128,7 +1150,7 @@ def _collect_hitl_requests(
 def _route_hitl_response(
     hitl_request: PendingHITLRequest,
     raw_response: Any,
-    pending_messages: dict[str, list[tuple[Any, str]]],
+    pending_messages: dict[str, list[tuple[Any, _MessageSources]]],
 ) -> None:
     """Route a HITL response back to the source executor's @response_handler."""
     response_message = {
@@ -1143,7 +1165,7 @@ def _route_hitl_response(
         pending_messages[target_id] = []
 
     source_id = f"{SOURCE_HITL_RESPONSE}_{hitl_request.request_id}"
-    pending_messages[target_id].append((response_message, source_id))
+    pending_messages[target_id].append((response_message, [source_id]))
 
     logger.debug(
         "Routed HITL response for request %s to executor %s",
@@ -1449,12 +1471,12 @@ def _deserialize_hitl_response(response_data: Any, response_type_str: str | None
 def _prepare_all_tasks(
     ctx: WorkflowOrchestrationContext,
     workflow: Workflow,
-    pending_messages: dict[str, list[tuple[Any, str]]],
+    pending_messages: Mapping[str, Sequence[tuple[Any, _MessageSources]]],
     shared_state: dict[str, Any] | None,
     subworkflow_counter: list[int],
     address: dict[str, str],
     delivery_ledger: _WorkflowDeliveryLedger | None = None,
-) -> tuple[list[Any], list[TaskMetadata], list[tuple[str, Any, str]]]:
+) -> tuple[list[Any], list[TaskMetadata], list[tuple[str, Any, _MessageSources]]]:
     """Prepare all pending tasks for parallel execution.
 
     Groups agent messages by executor ID so that only the first message per agent
@@ -1468,7 +1490,7 @@ def _prepare_all_tasks(
             and child orchestrations.
         workflow: The workflow whose executors are being dispatched.
         pending_messages: Messages to deliver this superstep, grouped by target
-            executor id, each paired with its source executor id.
+            executor id, each paired with all source executor IDs.
         shared_state: Optional dict for cross-executor state sharing.
         subworkflow_counter: A single-element mutable counter, persistent across
             supersteps, used to derive unique deterministic child instance ids.
@@ -1486,9 +1508,9 @@ def _prepare_all_tasks(
         delivery_ledger = _WorkflowDeliveryLedger(instance_id=ctx.instance_id)
     all_tasks: list[Any] = []
     task_metadata_list: list[TaskMetadata] = []
-    remaining_agent_messages: list[tuple[str, Any, str]] = []
+    remaining_agent_messages: list[tuple[str, Any, _MessageSources]] = []
 
-    agent_messages_by_executor: dict[str, list[tuple[str, Any, str]]] = defaultdict(list)
+    agent_messages_by_executor: dict[str, list[tuple[str, Any, _MessageSources]]] = defaultdict(list)
 
     # Per-executor, per-superstep ordinal for sub-workflow dispatch. This must match the
     # read side's enumerate() index into the custom-status ``subworkflows[executorId]``
@@ -1633,8 +1655,8 @@ def run_workflow_orchestrator(
         ``{"outputs": [...], "events": [...]}`` so the parent can bubble nested
         progress.
     """
-    pending_messages: dict[str, list[tuple[Any, str]]] = {
-        workflow.start_executor_id: [(_coerce_initial_input(workflow, initial_message), SOURCE_WORKFLOW_START)]
+    pending_messages: dict[str, list[tuple[Any, _MessageSources]]] = {
+        workflow.start_executor_id: [(_coerce_initial_input(workflow, initial_message), [SOURCE_WORKFLOW_START])]
     }
     workflow_outputs: list[Any] = []
     iteration = 0
@@ -1756,7 +1778,7 @@ def run_workflow_orchestrator(
 
     while pending_messages and iteration < workflow.max_iterations:
         logger.debug("Orchestrator iteration %d", iteration)
-        next_pending_messages: dict[str, list[tuple[Any, str]]] = {}
+        next_pending_messages: dict[str, list[tuple[Any, _MessageSources]]] = {}
 
         # Phase 1: Prepare all tasks
         all_tasks, task_metadata_list, remaining_agent_messages = _prepare_all_tasks(

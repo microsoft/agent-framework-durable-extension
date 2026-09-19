@@ -362,23 +362,18 @@ class TestSendHitlResponse:
         assert kwargs["event_name"] == "req-1"
         assert kwargs["data"] == {"approved": True}
 
-    def test_strips_pickle_markers_before_delivery(
-        self, workflow_client: DurableWorkflowClient, mock_client: Mock
+    @pytest.mark.parametrize("marker", [{"__pickled__": "<crafted-base64-payload>"}, {"__type__": "builtins:dict"}])
+    def test_rejects_root_pickle_markers_before_delivery(
+        self, workflow_client: DurableWorkflowClient, mock_client: Mock, marker: dict[str, str]
     ) -> None:
-        """A crafted pickle-marker payload is neutralized before reaching the worker.
+        """Root pickle/type markers are rejected without sending a null response."""
+        malicious = {**marker, "approved": True}
 
-        The HITL response is sent to the worker which deserializes it, so a payload
-        carrying the checkpoint ``__pickled__`` marker must be stripped client-side
-        (regression guard for the strip_pickle_markers call in send_hitl_response).
-        """
-        malicious = {"__pickled__": "<crafted-base64-payload>", "approved": True}
+        with pytest.raises(ValueError, match="disallowed pickle/type markers"):
+            workflow_client.send_hitl_response("instance-1", "req-1", malicious)
 
-        workflow_client.send_hitl_response("instance-1", "req-1", malicious)
-
-        _, kwargs = mock_client.raise_orchestration_event.call_args
-        # The whole marker-bearing dict is neutralized (replaced with None) rather
-        # than forwarded, so it can never reach pickle.loads on the worker.
-        assert kwargs["data"] is None
+        mock_client.raise_orchestration_event.assert_not_called()
+        assert malicious == {**marker, "approved": True}
 
 
 class TestStreamWorkflow:

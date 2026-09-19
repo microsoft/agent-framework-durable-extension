@@ -174,7 +174,11 @@ def test_registered_child_dispatch_wraps_once_and_preserves_typed_payload() -> N
     inner = _workflow("inner", [_node("leaf", str)])
     child = Mock(spec=WorkflowExecutor)
     child.id, child.workflow, child.allow_direct_output = "child", inner, False
-    parent = _workflow("parent", [_node("source"), child, _node("sink")], [SingleEdgeGroup("child", "sink")])
+    parent = _workflow(
+        "parent",
+        [_node("source"), child, _node("sink")],
+        [SingleEdgeGroup("source", "child"), SingleEdgeGroup("child", "sink")],
+    )
     functions = _register(parent)
     payload = {"value": "nested"}
     typed = _TypedInput(value="nested")

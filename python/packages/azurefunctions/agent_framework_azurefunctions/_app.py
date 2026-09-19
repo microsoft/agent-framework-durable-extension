@@ -817,7 +817,10 @@ class AgentFunctionApp(DFAppBase):
 
             # Sanitize untrusted HTTP input before it reaches pickle.loads().
             # See strip_pickle_markers() docstring for details on the attack vector.
-            response_data = strip_pickle_markers(response_data)
+            safe_response = strip_pickle_markers(response_data)
+            if safe_response is None and response_data is not None:
+                return self._build_error_response("HITL response contained disallowed pickle/type markers.")
+            response_data = safe_response
 
             # A qualified requestId ({executorId}~{ordinal}~{requestId}) addresses a request that
             # originated in a nested sub-workflow: resolve it to the owning child
