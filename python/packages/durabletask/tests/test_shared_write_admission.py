@@ -22,6 +22,7 @@ from agent_framework_durabletask import (
     RunRequest,
 )
 from agent_framework_durabletask._entities import DurableTaskEntityStateProvider
+from agent_framework_durabletask._response_utils import load_agent_response
 from agent_framework_durabletask._shared_state_validation import validate_shared_state
 
 LEGACY_VERSIONS = ("1.0.0", "1.1.0", "1.2.0")
@@ -596,7 +597,7 @@ async def test_v2_default_writes_success_and_failure_with_canonical_delivery(
     response = (
         await entity.run(_request("new"))
         if surface == "plain"
-        else AgentResponse.from_dict(entity.run(_request("new")))
+        else load_agent_response(entity.run(_request("new")))
     )
     assert isinstance(response, AgentResponse)
     assert response.additional_properties.get("durable_status") == ("error" if scenario == "failure" else None)

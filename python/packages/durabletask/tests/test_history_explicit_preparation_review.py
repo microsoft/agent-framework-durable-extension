@@ -72,42 +72,58 @@ async def test_renamed_store_only_audit_coexists_with_injected_core_default_hist
     assert agent.context_providers == [audit]
 
 
-async def test_explicit_durable_history_after_before_compaction_preserves_user_order() -> None:
+@pytest.mark.parametrize("provider_kind", ["in-memory", "durable"])
+@pytest.mark.parametrize("history_first", [False, True])
+async def test_explicit_history_preserves_before_and_after_strategy_inputs(
+    provider_kind: str, history_first: bool
+) -> None:
     current = CurrentContext("current-context")
-    history = DurableHistoryProvider("explicit-history", prune_excluded=False)
+    history = (
+        InMemoryHistoryProvider("explicit-history")
+        if provider_kind == "in-memory"
+        else DurableHistoryProvider("explicit-history", prune_excluded=False)
+    )
     strategy = SimpleCallable()
-    compaction = CompactionProvider(before_strategy=strategy, history_source_id=history.source_id)
+    after_strategy = SimpleCallable()
+    compaction = CompactionProvider(
+        before_strategy=strategy, after_strategy=after_strategy, history_source_id=history.source_id
+    )
     client = RecordingChatClient()
-    agent = Agent(client=client, context_providers=[current, compaction, history])
+    agent = Agent(
+        client=client,
+        context_providers=[current, history, compaction] if history_first else [current, compaction, history],
+    )
+    original_providers = agent.context_providers
     original = tuple(agent.context_providers)
 
     prepared = ensure_durable_history(agent)
 
     assert isinstance(prepared, Agent)
-    assert [provider.source_id for provider in prepared.context_providers] == [
-        current.source_id,
-        compaction.source_id,
-        history.source_id,
-    ]
+    assert [provider.source_id for provider in prepared.context_providers] == [p.source_id for p in original]
     assert prepared.context_providers[0] is current
-    prepared_compaction = prepared.context_providers[1]
+    prepared_compaction = prepared.context_providers[2 if history_first else 1]
     assert isinstance(prepared_compaction, CompactionProvider)
     assert getattr(prepared_compaction, "__wrapped__", None) is compaction
     assert prepared_compaction.before_strategy is strategy
+    assert prepared_compaction.after_strategy is after_strategy
     assert prepared_compaction.history_source_id == history.source_id
-    assert prepared.context_providers[2] is history
+    prepared_history = prepared.context_providers[1 if history_first else 2]
+    assert isinstance(prepared_history, DurableHistoryProvider)
+    assert (prepared_history is history) is (provider_kind == "durable")
     assert tuple(agent.context_providers) == original
 
     provider = _CanonicalStateProvider([_request("old", _stored("seed", message_id="seed-user"))])
     session = prepared.create_session()
     with _bound(provider):
         await prepared.run("current", session=session)
+        prepared_history.flush(session.state[history.source_id])
 
     # Nonempty earlier context makes Core invoke the strategy instead of skipping it.
-    # The explicit later history provider has not loaded "seed" at that point.
-    assert strategy.seen == [["current-context"]]
+    assert strategy.seen == ([["current-context", "seed"]] if history_first else [["current-context"]])
+    assert after_strategy.seen == ([["seed"]] if history_first else [["seed", "current", "answer-1"]])
     assert [[(message.role, message.text) for message in batch] for batch in client.received_messages] == [
         [("user", "current-context"), ("user", "seed"), ("user", "current")]
     ]
     assert _history_texts(provider) == ["seed", "current", "answer-1"]
+    assert agent.context_providers is original_providers
     assert tuple(agent.context_providers) == original

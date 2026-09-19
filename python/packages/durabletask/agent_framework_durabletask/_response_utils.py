@@ -21,6 +21,44 @@ _DELIVERY_VERSION = 1
 _VALUE_BY_NAME_KEY = "_durable_value_by_name"
 _VALUE_POLICY_KEY = "_durable_value_policy"
 _VALUE_POLICY = {"profile": "agent-framework-python.shared-value", "version": 1}
+_APPROVAL_POLICY_KEY = "_durable_approval_policy"
+_APPROVAL_POLICY = {"profile": "agent-framework-python.shared-approval", "version": 1}
+
+
+def _has_pending_function_approval(response: AgentResponse[Any]) -> bool:
+    """Classify actual pending Content, never metadata or an ordinary completed value."""
+    if response._value is not None or response._value_parsed:  # pyright: ignore[reportPrivateUsage]
+        return False
+    return any(
+        isinstance(content, Content)
+        and content.type == "function_approval_request"
+        and content.user_input_request is True
+        and content.approved is None
+        and isinstance(content.id, str)
+        and bool(content.id)
+        and isinstance(content.function_call, Content)
+        and content.function_call.type == "function_call"
+        and isinstance(content.function_call.call_id, str)
+        and bool(content.function_call.call_id)
+        and isinstance(content.function_call.name, str)
+        and bool(content.function_call.name)
+        for message in response.messages
+        for content in message.contents
+    )
+
+
+def _is_shared_approval(response: AgentResponse[Any]) -> bool:
+    """Recognize shared origin or its validated transport classification, not authorization."""
+    shared = _shared_value_snapshot(response)
+    return (
+        shared is not None
+        and "value" not in shared
+        and (
+            isinstance(getattr(response, "_original_shared_response", None), dict)
+            or getattr(response, "_durable_shared_approval", False) is True
+        )
+        and _has_pending_function_approval(response)
+    )
 
 
 def _shared_value_snapshot(response: AgentResponse[Any]) -> dict[str, Any] | None:
@@ -205,6 +243,10 @@ def serialize_agent_response(response: AgentResponse[Any]) -> dict[str, Any]:
     Shared-origin values carry a versioned value-policy marker across Core JSON
     delivery. It preserves presence and lossless typed handling, not completion
     authority, a runtime type, or a duplicate of the original shared response.
+    Shared pending function approvals without a value carry a separate, restricted
+    approval-policy profile. It classifies a non-result, not permission to run a tool.
+    Private-v2 writers must deliver the retained canonical shared projection, including
+    on first completion. An original Core response remains legacy and gets no marker.
 
     Args:
         response: Agent response whose public fields and structured value to snapshot.
@@ -225,6 +267,7 @@ def serialize_agent_response(response: AgentResponse[Any]) -> dict[str, Any]:
     payload.pop("value", None)
     payload.pop(_VALUE_BY_NAME_KEY, None)
     payload.pop(_VALUE_POLICY_KEY, None)
+    payload.pop(_APPROVAL_POLICY_KEY, None)
     payload["type"] = "agent_response"
 
     # Core's lazy value getter changes its cache. Parse a copy so recording is observational.
@@ -258,6 +301,8 @@ def serialize_agent_response(response: AgentResponse[Any]) -> dict[str, Any]:
         ):
             raise ValueError("The serialized response cannot preserve the shared structured value.")
         payload[_VALUE_POLICY_KEY] = dict(_VALUE_POLICY)
+    if _is_shared_approval(source):
+        payload[_APPROVAL_POLICY_KEY] = dict(_APPROVAL_POLICY)
     return deepcopy(payload)
 
 
@@ -272,7 +317,8 @@ def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -
 
     Raises:
         ValueError: If agent_response is None, its optional delivery version is unsupported,
-            or a content envelope is malformed.
+            a content envelope is malformed, or an approval policy is invalid or does
+            not describe actual pending approval Content without a structured value.
         TypeError: If the input type or required constructor fields are invalid.
     """
     if agent_response is None:
@@ -291,6 +337,13 @@ def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -
             policy = cast(dict[str, Any], policy)
             if policy != _VALUE_POLICY or type(policy.get("version")) is not int:
                 raise ValueError("Unsupported durable structured-value policy.")
+        if _APPROVAL_POLICY_KEY in agent_response:
+            approval_policy = agent_response[_APPROVAL_POLICY_KEY]
+            if not isinstance(approval_policy, dict):
+                raise ValueError("Unsupported durable shared-approval policy.")
+            approval_policy = cast(dict[str, Any], approval_policy)
+            if approval_policy != _APPROVAL_POLICY or type(approval_policy.get("version")) is not int:
+                raise ValueError("Unsupported durable shared-approval policy.")
         if _DELIVERY_VERSION_KEY in agent_response:
             version = agent_response[_DELIVERY_VERSION_KEY]
             if type(version) is not int or version != _DELIVERY_VERSION:
@@ -323,7 +376,16 @@ def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -
             response._value_parsed = True  # pyright: ignore[reportPrivateUsage]
             if data.get(_VALUE_BY_NAME_KEY) is True:
                 setattr(response, _VALUE_BY_NAME_KEY, True)
-        if _VALUE_POLICY_KEY in data:
+        if _APPROVAL_POLICY_KEY in data:
+            if not _has_pending_function_approval(response):
+                raise ValueError(
+                    "The durable shared-approval policy requires pending function approval Content "
+                    "without a structured value."
+                )
+            # Untrusted classification only. Fixed Content constructors above never
+            # import runtime types, execute the named tool, or approve its request.
+            response._durable_shared_approval = True  # type: ignore[attr-defined]
+        if _VALUE_POLICY_KEY in data or _APPROVAL_POLICY_KEY in data:
             # The canonical Core value itself carries presence. Retain a detached
             # local comparison snapshot, not a second value in the transport.
             snapshot = {"value": deepcopy(data["value"])} if "value" in data else {}
@@ -345,7 +407,9 @@ def ensure_response_format(
     acknowledgements are left unchanged. A retained value, including null,
     takes precedence over parsing message text again. Shared response projections
     require an original value and a JSON-preserving typed round trip. Only legacy
-    responses may obtain an absent structured value from message text.
+    responses may obtain an absent structured value from message text. A shared
+    pending function approval without a value is a non-result, including after
+    delivery with its explicit approval policy. Value policy alone cannot enable it.
 
     Args:
         response_format: Optional Pydantic model class to parse the response value into
@@ -357,9 +421,11 @@ def ensure_response_format(
     """
     if response_format is not None:
         shared = _shared_value_snapshot(response)
-        if response.additional_properties.get("durable_status") in ("error", "already_completed", "accepted") or (
-            getattr(response, "_original_shared_response", None) is not None and response.user_input_requests
-        ):
+        if response.additional_properties.get("durable_status") in (
+            "error",
+            "already_completed",
+            "accepted",
+        ) or _is_shared_approval(response):
             return
 
         if shared is not None and "value" not in shared:

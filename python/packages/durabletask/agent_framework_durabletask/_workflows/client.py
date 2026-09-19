@@ -458,7 +458,8 @@ class DurableWorkflowClient:
 
         Raises:
             ValueError: If the instance does not belong to the targeted workflow, or a
-                qualified id references a sub-workflow that is not currently active.
+                qualified id references a sub-workflow that is not currently active,
+                or the response is rejected by pickle/type-marker sanitization.
 
         Note:
             The payload is sanitized with ``strip_pickle_markers`` before delivery to
@@ -475,6 +476,8 @@ class DurableWorkflowClient:
         target_instance_id, bare_request_id = self._resolve_hitl_target(instance_id, request_id)
 
         safe_response = strip_pickle_markers(response)
+        if safe_response is None and response is not None:
+            raise ValueError("HITL response contained disallowed pickle/type markers.")
         self._client.raise_orchestration_event(target_instance_id, event_name=bare_request_id, data=safe_response)
         logger.debug(
             "[DurableWorkflowClient] Sent HITL response for request %s on instance %s",
