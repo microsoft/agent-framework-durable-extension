@@ -347,6 +347,17 @@ def _start_function_app(sample_path: Path, port: int) -> subprocess.Popen[Any]:
     # use the task hub name to separate orchestration state.
     env["TASKHUB_NAME"] = f"test{uuid.uuid4().hex[:8]}"
     env["AzureFunctionsJobHost__extensions__durableTask__hubName"] = env["TASKHUB_NAME"]
+    # DTS rejects conflicting explicit host/connection hubs. Align only the child
+    # connection string so selecting that provider preserves the same isolation.
+    connection_key = "DURABLE_TASK_SCHEDULER_CONNECTION_STRING"
+    if connection_string := env.get(connection_key):
+        components = [
+            part
+            for part in connection_string.split(";")
+            if part and part.partition("=")[0].strip().casefold() != "taskhub"
+        ]
+        components.append(f"TaskHub={env['TASKHUB_NAME']}")
+        env[connection_key] = ";".join(components)
 
     # On Windows, use CREATE_NEW_PROCESS_GROUP to allow proper termination
     # shell=True only on Windows to handle PATH resolution
