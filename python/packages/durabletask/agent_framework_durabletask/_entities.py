@@ -1041,6 +1041,14 @@ class AgentEntity:
         source_session_id = cast(str, migration["sourceSessionId"])
         if migration["destinationSessionId"] != session_id or source_session_id == session_id:
             raise ValueError(message)
+        # Reset clears the local session, but does not relinquish migration ownership.
+        stored = self.state.data.session
+        if stored is not None:
+            if not isinstance(stored, dict):
+                raise ValueError(message)
+            stored_id = stored.get(_SESSION_ID_KEY)
+            if not isinstance(stored_id, str) or not stored_id.strip() or stored_id != source_session_id:
+                raise ValueError(message)
         return source_session_id
 
     def _create_session(self) -> Any:

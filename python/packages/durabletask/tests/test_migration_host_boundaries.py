@@ -251,6 +251,30 @@ def test_agent_entity_migrate_rejects_identity_mismatches_before_write(mutate: A
 
 
 @pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize("entry", [{}, {"$type": "future-entry"}], ids=["missing-type", "unknown-type"])
+def test_migration_rejects_legacy_entry_discriminator_without_repair(version: str, entry: dict[str, Any]) -> None:
+    external = _ObservedExternalHistory()
+    client = RecordingChatClient()
+    entity, provider, _ = _json_provider_entity(
+        agent=Agent(client=client, name="migration-agent", context_providers=[external])
+    )
+    source = _legacy_source(entry, version=version)
+    request = _migration_request(source, provider.core_session_id, completionEvidence=_completion_journal(source))
+    before = deepcopy((source, request, provider.raw))
+    warm = provider.state
+    state_before = warm.to_dict()
+
+    with pytest.raises(ValueError, match=r"entry\.\$type is missing or unsupported"):
+        entity.migrate(request)
+
+    assert (source, request, provider.raw) == before
+    assert provider.state is warm
+    assert warm.to_dict() == state_before
+    assert provider.attempted_writes == provider.successful_writes == 0
+    assert external.calls == client.received_messages == []
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
 @pytest.mark.parametrize(
     "marker",
     [
