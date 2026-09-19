@@ -779,7 +779,7 @@ class TestStateReaderIntegration:
     """Tests for the app's read-only durable state reader integration."""
 
     async def test_read_cached_state_preserves_legacy_1_1_reader(self) -> None:
-        """Legacy schema 1.1 state still uses DurableAgentState for compatibility."""
+        """Legacy schema 1.1 state uses LegacyDurableAgentState for compatibility."""
         mock_agent = Mock()
         mock_agent.name = "ReaderAgent"
         app = AgentFunctionApp(agents=[mock_agent], enable_health_check=False)
