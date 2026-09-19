@@ -434,6 +434,29 @@ class AgentEntity:
         original_snapshot = original.to_dict()
         existing = original.data.unknown_fields.get("migration")
         if isinstance(existing, dict) and cast("dict[str, Any]", existing).get("requestDigest") == digest:
+            expected_binding = {
+                "id": request["migrationId"],
+                "sourceDigest": request["sourceDigest"],
+                "sourceSessionId": request["sourceSessionId"],
+                "ownershipTransferId": request["ownershipTransferId"],
+                "destinationSessionId": destination,
+            }
+            for request_field, binding_field in (
+                ("deliveryEvidence", "evidenceId"),
+                ("completionEvidence", "completionEvidenceId"),
+            ):
+                evidence = request.get(request_field)
+                if evidence is not None:
+                    expected_binding[binding_field] = (
+                        cast("dict[str, Any]", evidence).get("evidenceId") if isinstance(evidence, dict) else None
+                    )
+            committed_binding = {
+                field: value
+                for field, value in cast("dict[str, Any]", existing).items()
+                if field in expected_binding or field in ("evidenceId", "completionEvidenceId")
+            }
+            if committed_binding != expected_binding:
+                raise ValueError("Committed migration binding does not match the retry request")
             return {"status": "migrated", "migrationId": request["migrationId"], "sessionId": destination}
         if original_snapshot != DurableAgentState().to_dict():
             raise ValueError(
