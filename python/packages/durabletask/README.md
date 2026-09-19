@@ -240,9 +240,12 @@ capacity failures, write attempts and observed run operations. Labels are bounde
 not agent, session, correlation or message identifiers, content or exception text.
 
 Deletion measurements describe staged local state with `commit_status="not_attempted"`.
-Write and operation observations distinguish `outcome="returned"` from `"failed"`. After a
-`set_state` attempt, `commit_status="unknown"` applies even when the call returns. Neither
-status confirms a durable commit, and staged deletions may later roll back locally.
+Write observations distinguish `stage="serialization"` from `stage="set_state"`, each with
+`outcome="returned"` or `"failed"`. Successful serialization and transition validation record
+`"returned"` with `commit_status="not_attempted"` before the host call. A serialization failure
+records only that stage. After a `set_state` attempt, write and operation observations use
+`commit_status="unknown"` even when the call returns. Neither status confirms a durable commit,
+and staged deletions may later roll back locally.
 
 Instrumentation uses only the OpenTelemetry API. The package does not configure an SDK, metric
 reader or exporter. Applications own that setup, and telemetry failures do not replace the

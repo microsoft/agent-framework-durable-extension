@@ -283,6 +283,7 @@ class AgentEntityStateProviderMixin:
             self._restore_persisted_cache(committed_snapshot)
             record_write(state, stage="serialization", outcome="failed")
             raise
+        record_write(state, stage="serialization", outcome="returned")
         try:
             self._set_state_dict(payload)
         except BaseException:

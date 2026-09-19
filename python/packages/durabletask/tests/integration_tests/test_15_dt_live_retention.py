@@ -37,7 +37,7 @@ from durabletask.entities import EntityInstanceId
 from live_retention_worker import AGENT_NAME, DELIVERY_WINDOW_SECONDS, MAX_STATE_BYTES
 
 import agent_framework_durabletask
-from agent_framework_durabletask import DurableAgentState, DurableHistoryProvider
+from agent_framework_durabletask import DurableAgentState, DurableHistoryProvider, serialize_agent_response
 from agent_framework_durabletask._shared_response import load_terminal_response
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_dts, pytest.mark.timeout(150)]
@@ -513,7 +513,9 @@ def test_live_hard_stop_before_commit_repeats_effect_but_committed_duplicate_doe
             barrier_completed = True
             _equal(
                 json.loads(barrier.serialized_output),
-                load_terminal_response(committed["data"]["terminalResults"]["target"]["response"]).to_dict(),
+                serialize_agent_response(
+                    load_terminal_response(committed["data"]["terminalResults"]["target"]["response"])
+                ),
                 "duplicate response",
             )
             snapshot = _snapshot(live_client, entity)

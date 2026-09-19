@@ -179,8 +179,16 @@ async def test_retention_unknown_acknowledgement_refreshes_before_warm_retry(
     failed = {"outcome": "failed", "commit_status": "unknown", "deletion_staged": True}
     metrics = retention_metrics._metrics(retention_reader)
     _assert_staged_metrics(metrics, removed=len(excluded), operations=1)
-    retention_metrics._counter(metrics["operations"], failed, 1)
-    retention_metrics._counter(metrics["write_attempts"], {**failed, "stage": "set_state"}, 1)
+    serialized = {
+        "stage": "serialization",
+        "outcome": "returned",
+        "commit_status": "not_attempted",
+        "deletion_staged": True,
+    }
+    retention_metrics._counter_table(metrics["operations"], [(failed, 1)])
+    retention_metrics._counter_table(
+        metrics["write_attempts"], [(serialized, 1), ({**failed, "stage": "set_state"}, 1)]
+    )
 
     # Same entity and provider must refresh the uncertain cache before duplicate detection.
     response = await entity.run(request)
@@ -202,9 +210,11 @@ async def test_retention_unknown_acknowledgement_refreshes_before_warm_retry(
 
     metrics = retention_metrics._metrics(retention_reader)
     _assert_staged_metrics(metrics, removed=len(excluded) * calls, operations=calls)
-    retention_metrics._counter(metrics["operations"], failed, 1)
-    retention_metrics._counter(metrics["write_attempts"], {**failed, "stage": "set_state"}, 1)
+    expected_operations = [(failed, 1)]
+    expected_writes = [(serialized, calls), ({**failed, "stage": "set_state"}, 1)]
     if not committed:
         returned = {"outcome": "returned", "commit_status": "unknown", "deletion_staged": True}
-        retention_metrics._counter(metrics["operations"], returned, 1)
-        retention_metrics._counter(metrics["write_attempts"], {**returned, "stage": "set_state"}, 1)
+        expected_operations.append((returned, 1))
+        expected_writes.append(({**returned, "stage": "set_state"}, 1))
+    retention_metrics._counter_table(metrics["operations"], expected_operations)
+    retention_metrics._counter_table(metrics["write_attempts"], expected_writes)

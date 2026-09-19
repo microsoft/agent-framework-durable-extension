@@ -27,7 +27,6 @@ from agent_framework_durabletask import (
     DurableAgentStateRequest,
     DurableAgentStateResponse,
     DurableAIAgentClient,
-    serialize_agent_response,
 )
 from agent_framework_durabletask._shared_response import serialize_terminal_response
 
@@ -228,7 +227,7 @@ class TestConversationCompaction:
         response = agent.run("Name a river.", session=session)
         assert response.text
         assert all(content.type != "error" for message in response.messages for content in message.contents)
-        expected = json.loads(json.dumps(serialize_terminal_response(serialize_agent_response(response))))
+        expected = json.loads(json.dumps(serialize_terminal_response(response)))
         assert expected["createdAt"], "the Foundry result timestamp was lost"
 
         state = self._read_state(session.durable_session_id)
