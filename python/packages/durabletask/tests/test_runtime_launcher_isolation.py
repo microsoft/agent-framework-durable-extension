@@ -69,6 +69,49 @@ def test_launchers_set_only_child_isolation_and_unique_hubs(monkeypatch: pytest.
     assert popen.call_count == 2
 
 
+@pytest.mark.parametrize(
+    "connection_string",
+    [
+        None,
+        "Endpoint=http://localhost:8080;Authentication=None;TaskHub=default",
+        "Endpoint=http://localhost:8080;Authentication=None",
+        "Endpoint=http://localhost:8080; tAsKhUb =parent;Authentication=None;",
+        "TaskHub=first;Endpoint=http://localhost:8080;TaskHub=second;Authentication=None",
+        "Endpoint=http://localhost:8080;Authentication=None;Extension=a=b==;TaskHub=parent;",
+    ],
+)
+def test_functions_launcher_aligns_scheduler_connection_without_mutating_parent(
+    monkeypatch: pytest.MonkeyPatch, connection_string: str | None
+) -> None:
+    key = "DURABLE_TASK_SCHEDULER_CONNECTION_STRING"
+    if connection_string is None:
+        monkeypatch.delenv(key, raising=False)
+    else:
+        monkeypatch.setenv(key, connection_string)
+    launcher = _load(monkeypatch, "azurefunctions")
+    popen = Mock()
+    monkeypatch.setattr(launcher.subprocess, "Popen", popen)
+    before = dict(os.environ)
+
+    launcher._start_function_app(Path("sample"), 7071)
+
+    child = popen.call_args.kwargs["env"]
+    assert os.environ == before
+    assert child["DURABLE_AGENTS_DEPLOYMENT_MODE"] == "isolated_v2"
+    assert child["TASKHUB_NAME"] == child["AzureFunctionsJobHost__extensions__durableTask__hubName"]
+    if connection_string is None:
+        assert key not in child
+        return
+    components = child[key].split(";")
+    hubs = [part.partition("=")[2] for part in components if part.partition("=")[0].strip().casefold() == "taskhub"]
+    assert hubs == [child["TASKHUB_NAME"]]
+    expected = [
+        part for part in connection_string.split(";") if part and part.partition("=")[0].strip().casefold() != "taskhub"
+    ]
+    actual = [part for part in components if part and part.partition("=")[0].strip().casefold() != "taskhub"]
+    assert actual == expected
+
+
 def test_mcp_sample_template_overrides_host_with_the_same_task_hub() -> None:
     sample = Path(__file__).resolve().parents[3] / "samples" / "azure_functions" / "08_mcp_server"
     values = json.loads((sample / "local.settings.json.template").read_text(encoding="utf-8"))["Values"]
