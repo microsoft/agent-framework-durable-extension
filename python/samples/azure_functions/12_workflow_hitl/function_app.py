@@ -27,6 +27,7 @@ Prerequisites:
 
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -477,7 +478,7 @@ def _create_workflow() -> Workflow:
     # Side-branch: human_review_executor -> notify_executor emails the reviewer a respond
     # link (built from WorkflowHitlContext) in the same superstep, before the pause.
     return (
-        WorkflowBuilder(name="content_moderation", start_executor=input_router)
+        WorkflowBuilder(name="content_moderation", start_executor=input_router, output_from=[publish_executor])
         .add_edge(input_router, content_analyzer_agent)
         .add_edge(content_analyzer_agent, content_analyzer_executor)
         .add_edge(content_analyzer_executor, human_review_executor)
@@ -532,14 +533,7 @@ def launch(durable: bool = True) -> AgentFunctionApp | None:
     return None
 
 
-# Default: Azure Functions mode
-# Run with `python function_app.py --maf` for pure MAF mode with DevUI
-app = launch(durable=True)
-
-
 if __name__ == "__main__":
-    import sys
-
     if "--maf" in sys.argv:
         # Run in pure MAF mode with DevUI
         launch(durable=False)
@@ -547,3 +541,6 @@ if __name__ == "__main__":
         print("Usage: python function_app.py --maf")
         print("  --maf    Run in pure MAF mode with DevUI (http://localhost:8096)")
         print("\nFor Azure Functions mode, use: func start")
+else:
+    # Azure Functions imports this module. Pure MAF mode never builds a durable host.
+    app = launch(durable=True)

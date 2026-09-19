@@ -109,8 +109,7 @@ Email sent: Hi, Thank you for the reminder about the sprint planning meeting tom
 
 ```python
 workflow = (
-    WorkflowBuilder()
-    .set_start_executor(spam_agent)
+    WorkflowBuilder(name="email_triage", start_executor=spam_agent, output_from=[spam_handler, email_sender])
     .add_switch_case_edge_group(
         spam_agent,
         [

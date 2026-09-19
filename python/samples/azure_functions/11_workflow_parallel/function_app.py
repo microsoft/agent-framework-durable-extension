@@ -28,6 +28,7 @@ Prerequisites:
 
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -348,7 +349,7 @@ def _create_workflow() -> Workflow:
 
     # Build workflow with parallel patterns
     return (
-        WorkflowBuilder(name="parallel_review", start_executor=input_router)
+        WorkflowBuilder(name="parallel_review", start_executor=input_router, output_from=[final_report_executor])
         # Pattern 1: Fan-out to two executors (run in parallel)
         .add_fan_out_edges(
             source=input_router,
@@ -422,14 +423,7 @@ def launch(durable: bool = True) -> AgentFunctionApp | None:
     return None
 
 
-# Default: Azure Functions mode
-# Run with `python function_app.py --maf` for pure MAF mode with DevUI
-app = launch(durable=True)
-
-
 if __name__ == "__main__":
-    import sys
-
     if "--maf" in sys.argv:
         # Run in pure MAF mode with DevUI
         launch(durable=False)
@@ -437,3 +431,6 @@ if __name__ == "__main__":
         print("Usage: python function_app.py --maf")
         print("  --maf    Run in pure MAF mode with DevUI (http://localhost:8095)")
         print("\nFor Azure Functions mode, use: func start")
+else:
+    # Azure Functions imports this module. Pure MAF mode never builds a durable host.
+    app = launch(durable=True)

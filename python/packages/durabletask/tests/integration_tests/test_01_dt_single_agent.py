@@ -62,21 +62,25 @@ class TestSingleAgent:
         assert len(response.text) > 0
 
     def test_conversation_continuity(self):
-        """Test that conversation context is maintained across turns."""
+        """Prior turns must reach the model, not just be recorded.
+
+        The second turn is only answerable from persisted history, so this fails if durable
+        history is not actually being loaded and delivered to the agent.
+        """
         agent = self.agent_client.get_agent("Joker")
         session = agent.create_session()
 
-        # First turn: Ask for a joke about a specific topic
-        response1 = agent.run("Tell me a joke about cats.", session=session)
+        # First turn establishes a fact that exists nowhere else.
+        response1 = agent.run("My favorite animal is the axolotl. Tell me a joke about it.", session=session)
         assert response1 is not None
         assert len(response1.text) > 0
 
-        # Second turn: Ask a follow-up that requires context
-        response2 = agent.run("Can you make it funnier?", session=session)
+        # Second turn can only be answered from the conversation history.
+        response2 = agent.run("What is my favorite animal? Reply with just the animal name.", session=session)
         assert response2 is not None
-        assert len(response2.text) > 0
-
-        # The agent should understand "it" refers to the previous joke
+        assert "axolotl" in response2.text.lower(), (
+            f"Agent lost conversation context across turns. Got: {response2.text!r}"
+        )
 
     def test_multiple_sessions(self):
         """Test that different sessions maintain separate contexts."""

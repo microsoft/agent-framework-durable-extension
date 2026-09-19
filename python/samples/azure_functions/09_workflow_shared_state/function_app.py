@@ -20,6 +20,7 @@ Prerequisites:
 
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -220,7 +221,9 @@ def _create_workflow() -> Workflow:
     #     False -> submit_to_email_assistant -> email_assistant_agent -> finalize_and_send
     #     True  -> handle_spam
     return (
-        WorkflowBuilder(name="email_triage_shared_state", start_executor=store_email)
+        WorkflowBuilder(
+            name="email_triage_shared_state", start_executor=store_email, output_from=[handle_spam, finalize_and_send]
+        )
         .add_edge(store_email, spam_detection_agent)
         .add_edge(spam_detection_agent, to_detection_result)
         .add_edge(to_detection_result, submit_to_email_assistant, condition=get_condition(False))
@@ -271,14 +274,7 @@ def launch(durable: bool = True) -> AgentFunctionApp | None:
     return None
 
 
-# Default: Azure Functions mode
-# Run with `python function_app.py --maf` for pure MAF mode with DevUI
-app = launch(durable=True)
-
-
 if __name__ == "__main__":
-    import sys
-
     if "--maf" in sys.argv:
         # Run in pure MAF mode with DevUI
         launch(durable=False)
@@ -286,3 +282,6 @@ if __name__ == "__main__":
         print("Usage: python function_app.py --maf")
         print("  --maf    Run in pure MAF mode with DevUI (http://localhost:8096)")
         print("\nFor Azure Functions mode, use: func start")
+else:
+    # Azure Functions imports this module. Pure MAF mode never builds a durable host.
+    app = launch(durable=True)

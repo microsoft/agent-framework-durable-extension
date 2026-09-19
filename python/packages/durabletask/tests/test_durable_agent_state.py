@@ -3,7 +3,7 @@
 """Unit tests for DurableAgentState and related classes."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from agent_framework import Content, Message, UsageDetails
@@ -28,7 +28,7 @@ class TestDurableAgentStateRequestOrchestrationId:
         """Test creating a request with an orchestration_id."""
         request = DurableAgentStateRequest(
             correlation_id="corr-123",
-            created_at=datetime.now(),
+            created_at=datetime.now(timezone.utc),
             messages=[
                 DurableAgentStateMessage(
                     role="user",
@@ -44,7 +44,7 @@ class TestDurableAgentStateRequestOrchestrationId:
         """Test that to_dict includes orchestrationId when set."""
         request = DurableAgentStateRequest(
             correlation_id="corr-123",
-            created_at=datetime.now(),
+            created_at=datetime.now(timezone.utc),
             messages=[
                 DurableAgentStateMessage(
                     role="user",
@@ -63,7 +63,7 @@ class TestDurableAgentStateRequestOrchestrationId:
         """Test that to_dict excludes orchestrationId when not set."""
         request = DurableAgentStateRequest(
             correlation_id="corr-123",
-            created_at=datetime.now(),
+            created_at=datetime.now(timezone.utc),
             messages=[
                 DurableAgentStateMessage(
                     role="user",
@@ -156,7 +156,7 @@ class TestDurableAgentState:
     def test_schema_version(self) -> None:
         """Test that schema version is set correctly."""
         state = DurableAgentState()
-        assert state.schema_version == "1.1.0"
+        assert state.schema_version == "2.0.0"
 
     def test_to_dict_serialization(self) -> None:
         """Test that to_dict produces correct structure."""
@@ -165,13 +165,13 @@ class TestDurableAgentState:
 
         assert "schemaVersion" in data
         assert "data" in data
-        assert data["schemaVersion"] == "1.1.0"
-        assert "conversationHistory" in data["data"]
+        assert data["schemaVersion"] == "2.0.0"
+        assert data["data"] == {"conversationHistory": [], "terminalResults": {}, "completionReceipts": {}}
 
     def test_from_dict_deserialization(self) -> None:
         """Test that from_dict restores state correctly."""
         original_data = {
-            "schemaVersion": "1.1.0",
+            "schemaVersion": "1.2.0",
             "data": {
                 "conversationHistory": [
                     {
@@ -191,7 +191,7 @@ class TestDurableAgentState:
 
         state = DurableAgentState.from_dict(original_data)
 
-        assert state.schema_version == "1.1.0"
+        assert state.schema_version == "1.2.0"
         assert len(state.data.conversation_history) == 1
         assert isinstance(state.data.conversation_history[0], DurableAgentStateRequest)
 
@@ -201,7 +201,7 @@ class TestDurableAgentState:
         state.data.conversation_history.append(
             DurableAgentStateRequest(
                 correlation_id="test-456",
-                created_at=datetime.now(),
+                created_at=datetime.now(timezone.utc),
                 messages=[
                     DurableAgentStateMessage(
                         role="user",
@@ -218,15 +218,16 @@ class TestDurableAgentState:
         assert len(restored.data.conversation_history) == len(state.data.conversation_history)
         assert restored.data.conversation_history[0].correlation_id == "test-456"
 
-    def test_function_call_round_trip_preserves_string_arguments(self) -> None:
-        """Function call arguments should remain strings across durable state replay."""
+    @pytest.mark.parametrize("arguments", ['{"location":"Chicago"}', '{\n  "location": "Chicago"\n}', '{"location":'])
+    def test_function_call_round_trip_preserves_string_arguments(self, arguments: str) -> None:
+        """Replay preserves the original argument string, including whitespace or partial JSON."""
         original = Message(
             role="assistant",
             contents=[
                 Content.from_function_call(
                     call_id="call-123",
                     name="get_weather",
-                    arguments='{"location":"Chicago"}',
+                    arguments=arguments,
                 )
             ],
         )
@@ -235,7 +236,7 @@ class TestDurableAgentState:
         restored = durable_message.to_chat_message()
 
         assert restored.contents[0].type == "function_call"
-        assert restored.contents[0].arguments == '{"location": "Chicago"}'
+        assert restored.contents[0].arguments == arguments
 
     def test_function_call_content_supports_legacy_mapping_arguments(self) -> None:
         """Existing persisted mapping arguments should still restore successfully."""
@@ -466,15 +467,23 @@ class TestDurableAgentStateUnknownContent:
 
         assert unknown.content == {"some": "data"}
 
-    def test_unknown_content_to_ai_content_fallback_on_invalid_type_dict(self) -> None:
-        """Test that to_ai_content falls back when dict has 'type' but is not valid Content."""
-        invalid = {"type": "bogus_not_a_real_content_type", "extra": "stuff"}
-        unknown = DurableAgentStateUnknownContent(content=invalid)
+    def test_unprofiled_unknown_content_keeps_type_like_fields_opaque(self) -> None:
+        """A type-shaped business object is not a recognized Python content profile."""
+        future = {
+            "type": "bogus_not_a_real_content_type",
+            "extra": "stuff",
+            "additional_properties": {"opaque": [1]},
+        }
+        unknown = DurableAgentStateUnknownContent(content=future)
 
         result = unknown.to_ai_content()
 
         assert result.type == "unknown"
-        assert result.additional_properties == {"content": invalid}
+        assert result.additional_properties == {"content": future}
+        assert not hasattr(result, "extra")
+        result.additional_properties["content"]["additional_properties"]["opaque"].append(2)
+        assert unknown.to_dict()["content"] == future
+        assert future["additional_properties"] == {"opaque": [1]}
 
     def test_from_ai_content_unknown_type_produces_serializable_state(self) -> None:
         """Test that unknown content types in message conversion produce JSON-serializable state."""
@@ -509,7 +518,7 @@ class TestDurableAgentStateUnknownContent:
         state.data.conversation_history.append(
             DurableAgentStateRequest(
                 correlation_id="test-mcp",
-                created_at=datetime.now(),
+                created_at=datetime.now(timezone.utc),
                 messages=[message],
             )
         )

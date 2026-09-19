@@ -147,7 +147,13 @@ class TestSingleAgentOrchestrationHITL:
         assert metadata.runtime_status == OrchestrationStatus.COMPLETED
 
     def test_hitl_orchestration_timeout(self):
-        """Test HITL orchestration timeout behavior."""
+        """With no approval sent, the orchestration fails on its own approval timeout.
+
+        The shared helper raises when an orchestration reaches FAILED, so this waits on the client
+        directly. Catching and ignoring that exception (as this test used to) also swallowed a
+        TimeoutError from a hung orchestration, which left no outcome that could fail the test for
+        the right reason.
+        """
         payload = {
             "topic": "Cloud computing fundamentals",
             "max_review_attempts": 1,
@@ -160,15 +166,13 @@ class TestSingleAgentOrchestrationHITL:
             input=payload,
         )
 
-        # Don't send any approval - let it timeout
-        # The orchestration should fail due to timeout
-        try:
-            metadata = self.orch_helper.wait_for_orchestration(
-                instance_id=instance_id,
-                timeout=90.0,
-            )
-            # If it completes, it should be failed status due to timeout
-            assert metadata.runtime_status == OrchestrationStatus.FAILED
-        except (RuntimeError, TimeoutError):
-            # Expected - orchestration should timeout and fail
-            pass
+        # Don't send any approval - let it hit its own approval timeout.
+        metadata = self.dts_client.wait_for_orchestration_completion(instance_id=instance_id, timeout=90)
+
+        assert metadata is not None, "orchestration never reached a terminal state"
+        assert metadata.runtime_status == OrchestrationStatus.FAILED
+
+        # Fail for the right reason: the sample raises TimeoutError("Human approval timed out ...").
+        failure = metadata.failure_details
+        details = getattr(failure, "message", None) or str(failure)
+        assert "timed out" in details.lower(), f"expected an approval timeout, got: {details}"

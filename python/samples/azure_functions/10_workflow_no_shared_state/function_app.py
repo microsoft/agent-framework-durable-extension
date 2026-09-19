@@ -18,6 +18,7 @@ Prerequisites:
 
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -182,7 +183,7 @@ def _create_workflow() -> Workflow:
 
     # Build workflow
     return (
-        WorkflowBuilder(name="email_triage", start_executor=spam_agent)
+        WorkflowBuilder(name="email_triage", start_executor=spam_agent, output_from=[spam_handler, email_sender])
         .add_switch_case_edge_group(
             spam_agent,
             [
@@ -224,14 +225,7 @@ def launch(durable: bool = True) -> AgentFunctionApp | None:
     return None
 
 
-# Default: Azure Functions mode
-# Run with `python function_app.py --maf` for pure MAF mode with DevUI
-app = launch(durable=True)
-
-
 if __name__ == "__main__":
-    import sys
-
     if "--maf" in sys.argv:
         # Run in pure MAF mode with DevUI
         launch(durable=False)
@@ -239,3 +233,6 @@ if __name__ == "__main__":
         print("Usage: python function_app.py --maf")
         print("  --maf    Run in pure MAF mode with DevUI (http://localhost:8094)")
         print("\nFor Azure Functions mode, use: func start")
+else:
+    # Azure Functions imports this module. Pure MAF mode never builds a durable host.
+    app = launch(durable=True)

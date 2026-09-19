@@ -33,6 +33,7 @@ from agent_framework_durabletask._workflows.orchestrator import (
     _try_unwrap_subworkflow_input,
     _unpack_subworkflow_result,
 )
+from agent_framework_durabletask._workflows.protocol import unwrap_workflow_input, wrap_workflow_input
 from agent_framework_durabletask._workflows.serialization import (
     SUBWORKFLOW_RESULT_KEY,
     deserialize_value,
@@ -94,7 +95,11 @@ class TestPrepareSubworkflowTask:
         _prepare_subworkflow_task(ctx, executor, "payload", "child-id", _CHILD_ADDRESS)
 
         args, _ = ctx.call_sub_orchestrator.call_args
-        child_input = args[1]
+        assert args[1] == wrap_workflow_input({
+            SUBWORKFLOW_INPUT_KEY: serialize_value("payload"),
+            SUBWORKFLOW_ADDRESS_KEY: _CHILD_ADDRESS,
+        })
+        child_input = unwrap_workflow_input(args[1])
         # The wrapped payload round-trips back to the original message.
         assert deserialize_value(child_input[SUBWORKFLOW_INPUT_KEY]) == "payload"
         # The address marker rides alongside so the child can build respond URLs.
@@ -330,7 +335,11 @@ class TestSubworkflowAddressPropagation:
         captured: list[dict[str, str]] = []
 
         def _call_sub(name: str, input_: dict[str, object], *, instance_id: str) -> str:  # noqa: ARG001
-            captured.append(cast("dict[str, str]", input_[SUBWORKFLOW_ADDRESS_KEY]))
+            child_input = unwrap_workflow_input(input_)
+            assert input_ == wrap_workflow_input(child_input)
+            assert set(child_input) == {SUBWORKFLOW_INPUT_KEY, SUBWORKFLOW_ADDRESS_KEY}
+            assert deserialize_value(child_input[SUBWORKFLOW_INPUT_KEY]) == f"msg-{len(captured)}"
+            captured.append(cast("dict[str, str]", child_input[SUBWORKFLOW_ADDRESS_KEY]))
             return f"task::{instance_id}"
 
         ctx = Mock()

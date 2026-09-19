@@ -2,13 +2,13 @@
 
 ## Overview
 
-Durable agents extend the standard Microsoft Agent Framework with **durable state management** powered by the Durable Task framework. An ordinary Agent Framework agent runs in-process: its conversation history lives in memory and is lost when the process ends. A durable agent persists conversation history and execution state in external storage so that sessions survive process restarts, failures, and scale-out events.
+Durable agents extend the standard Microsoft Agent Framework with **durable execution state** powered by the Durable Task framework. Ordinary agents can already use in-memory, external-provider or service-owned history. Durable hosting persists execution and session control so that compatible workers can continue sessions across process restarts and scale-out.
 
 | Capability | Ordinary agent | Durable agent |
 | --- | --- | --- |
-| Conversation history | In-memory only | Durably persisted |
-| Failure recovery | State lost on crash | Automatically resumed |
-| Multi-instance scale-out | Not supported | Any worker can resume a session |
+| Conversation history | Selected provider or model service | Selected owner, with durable-backed local history when configured |
+| Failure recovery | Application-owned | Persisted orchestration and entity state; uncommitted external effects can repeat |
+| Multi-instance scale-out | Application-owned coordination | Compatible workers serialize access to each entity |
 | Multi-agent orchestrations | Manual coordination | Deterministic, checkpointed workflows |
 | Human-in-the-loop | Must keep process alive | Can wait days/weeks with zero compute |
 | Hosting | Any process | Console app, Azure Functions, or any Durable Task–compatible host |
@@ -18,14 +18,19 @@ Durable agents extend the standard Microsoft Agent Framework with **durable stat
 
 ## How durable agents work
 
-Durable agents are implemented on top of [Durable Entities](https://learn.microsoft.com/azure/azure-functions/durable/durable-functions-entities) (also called "virtual actors"). Each **agent session** maps to one entity instance whose state contains the full conversation history. When you send a message to a durable agent, the following happens:
+Durable agents are implemented on top of [Durable Entities](https://learn.microsoft.com/azure/azure-functions/durable/durable-functions-entities) (also called "virtual actors"). Each **agent session** maps to one entity instance. Transcript ownership and response storage depend on the runtime version and selected history provider. When you send a message to a durable agent, the following happens:
 
 1. The message is dispatched to the entity identified by an `AgentSessionId` (a composite of the agent name and a unique session key).
-2. The entity loads its persisted `DurableAgentState`, which includes the complete conversation history.
-3. The entity invokes the underlying `AIAgent` with the full conversation history, collects the response, and appends both the request and the response to the state.
-4. The updated state is persisted back to durable storage automatically.
+2. The entity loads its persisted `DurableAgentState` and session control.
+3. The underlying agent obtains context from its configured history path and executes the request.
+4. Entity-local changes are persisted. External provider writes and tool effects are not part of a distributed transaction.
 
-Because the entity framework serializes access to each entity instance, concurrent messages to the same session are processed one at a time, eliminating race conditions.
+> [!WARNING]
+> The [Python prototype in PR #59](https://github.com/microsoft/agent-framework-durable-extension/pull/59) uses main's canonical schema `2.0.0` with `terminalResults` and `completionReceipts`. The unreleased private `2.0.0` layout and its in-flight runs are abandoned. Start fresh, isolated runs, with no private-prototype detection, conversion or resume path. The explicit `isolated_v2` gate still applies to every host, including samples and tests. Schema validation never activates writes or establishes deployment compatibility. Do not mix incompatible readers/writers or replay old workflow histories through the new Python engine. No .NET interoperability is claimed. See the [deployment constraints](../../../python/packages/durabletask/README.md#version-2-deployment-warning).
+
+The architecture in [ADR PR #88](https://github.com/microsoft/agent-framework-durable-extension/pull/88) was accepted and merged on September 15, 2026 into `feature/python-durable-thread-compaction` at `7d90e8f`. PR #59 remains an integrated prototype, not a merge-as-is implementation or production drop-in. Shared-wire adoption is available on the prototype branch at `567087f8`, not in a released package. It uses one canonical wire validator, not parallel private and shared contracts. The [validation record](../../../python/samples/README.md#prototype-validation) separates current local measurements from historical prototype evidence and remaining release gaps.
+
+The entity framework processes concurrent messages to one session one at a time. This does not serialize external effects across entities or make external providers transactional.
 
 ### Agent session identity
 
@@ -67,11 +72,33 @@ Key types:
 - **`DurableAIAgentOrchestrationContext`** – Wraps an `OrchestrationContext` for use inside orchestrations. `get_agent()` returns a `DurableAIAgent[DurableAgentTask]`.
 - **`AgentEntity`** – Platform-agnostic agent execution logic that manages state, invokes the agent, handles streaming, and calls response callbacks.
 
+Canonical `messageId` remains the public producer ID, including repeated IDs. Version-1 `pythonHistoryIdentity` uses `pythonHistoryId` for internal occurrence identity instead of rewriting public IDs. Configured `CompactionProvider` hooks temporarily see internal IDs for summary/source links, while normal model calls, other providers and audit sinks see public IDs. Arbitrary hooks that depend on public IDs or substitute different input IDs are not guaranteed transparent behavior. Reconciliation metadata is not exposed as application message metadata.
+
+Full raw JSON preservation is separate from Core projection. Canonical metadata and unknown properties stay at their original object locations, with explicit `extensionData` kept separate. Versioned Python extensions include `pythonIngestion` (profile `agent-framework-python.ingestion`, version 1) for exact message receipts, `pythonCoreFields` for the `core-fields` profile and `pythonContinuationEncoding` for JSON-dictionary/base64 continuation encoding. Foreign profiles remain inert for readers. A runtime relying on a profile must validate it or block dependent restoration and writes. `historyBinding` is optional opaque JSON, not a shared fixed-owner policy. JSON preservation and continuation encoding do not prove .NET or provider interoperability. See [shared JSON and Python profiles](../../../python/packages/durabletask/README.md#shared-json-and-python-runtime-profiles).
+
+The default durable history after-run hook calls public `save_messages()` separately for request and response batches, allowing overrides to validate, transform or reject each batch. One core hook can therefore produce two saves for provenance. Completed external-primary default save hooks and completed service-owned `ChatResponse` values affirm accepted inputs even after a later failure. Opaque custom after-run hooks, interrupted saves and store-only sinks cannot establish primary acceptance by inference. Existing core and provider APIs are unchanged. See [Python history integration](../../../python/packages/durabletask/README.md#history-and-retention-settings) for the contract and branch-isolation limits.
+
+`terminalResults` stores full immutable response envelopes independently of history. Results and `completionReceipts` require authoritative `outcome` (`succeeded` or `failed`) and `completedAt`, with matching correlation identities and optional `resultExpiresAt`. A failed result requires a canonical error as well as its inline response. Receipt `resultState` is required. `available` requires a matching result, while `unavailable` forbids one and requires `resultUnavailableAt`. Expired lookup retains the outcome without delivering the payload or reopening work, even before physical cleanup. There is no `unknown` v2 outcome. Results and receipts must commit atomically with the operation's other entity-local state. See the [delivery contract](../../../python/packages/durabletask/README.md#service-ownership-delivery-and-reset).
+
+Legacy reads are limited to exact `1.0.0`, `1.1.0` and `1.2.0` snapshots and remain read-only. Unsupported future versions are rejected. Both Python hosts implement privileged backend `migrate` with source-bound completion evidence. The request requires `source`, `sourceDigest`, `sourceSessionId`, `destinationSessionId`, `migrationId` and `ownershipTransferId`. Only `deliveryEvidence`, `completionEvidence` and the deprecated boolean `requireKnownOutcomes` are optional keys. Migration requires an empty, separately addressed destination, a quiesced old owner and authorized ownership transfer. The source digest is `state_snapshot_digest(source)` for the unmodified export, and the destination ID must match the receiving entity and differ from the source ID.
+
+`completionEvidence` has exactly `sourceDigest`, a stable nonblank `evidenceId`, `complete: true` and `results`. The matching digest binds the journal to the source. Results are original canonical `terminalResults` objects without `resultExpiresAt`, even null, with `correlationId`, a known `outcome`, authoritative original `completedAt` and full inline `response.messages`. Optional `value`, metadata and unknown JSON are preserved independently of Core projection. Failures require canonical errors, and success forbids `error`. The journal must cover every completion, including results lost from history. Any nonempty history (even request-only), nonempty session-only state, a `truncation` field, nonempty scalar `ingestedPositions` or a supplied nonempty accepted-input journal requires completion evidence. A used source with no completed requests needs an explicit complete source-bound journal with `results: []`. That assertion is rejected if any response or `errorResponse` remains. No retained responses alone does not prove no completions. Only a fresh source with none of these signs of use can omit completion evidence.
+
+`deliveryEvidence` requires matching `sourceDigest`, a stable nonblank `evidenceId`, `complete: true` and `messages`. Its only optional field is `messagePositions`, an array aligned one-for-one with `messages`. Messages remain complete, canonical, losslessly round-trippable `Message.to_dict()` accepted inputs, including `message_id`, all accepted revisions and evicted inputs.
+
+Nonempty scalar `ingestedPositions` requires both this journal and the sidecar. Each sidecar member is `null` for no cursor participation or an object with exactly `producer` (nonblank string) and `position` (nonnegative integer, never a boolean), recording independently authoritative accepted-input cursor attribution. Producer maxima from explicit attributions alone must match the legacy map. This checks consistency, not a delivered prefix. Omit the sidecar only with an empty or absent scalar map, treating every input as unpositioned. Never derive attribution from public message IDs, guessed producer names or a retained partial transcript.
+
+Every retained nonblank public request message ID must occur in a provided complete journal, regardless of `wf_` spelling. Internal reconciliation IDs do not substitute. Without an input journal, retained-ID-only compatibility markers apply equally to opaque and `wf_`-looking public IDs. These markers are not exact fingerprint evidence and cannot reconstruct evicted inputs. Journal authority and completeness are privileged operator assertions, not independently proved by `sourceDigest`. The accepted-input and completion journals remain independent.
+
+Neither partial transcript projections nor source `createdAt` supply missing original responses, outcomes or completion times. Missing, duplicate or contradictory evidence blocks migration, and `requireKnownOutcomes=False` cannot waive the requirement. The migrator preserves original journal `completedAt` strings and sets matching result and receipt `resultExpiresAt` to migration time plus configured `response_delivery_window_seconds`, never before completion. Exact request retries return the recorded migration without rewriting state, even after cold reload or later runs, so grace is not refreshed. Migration does not copy external history or move workflow histories. No generated HTTP/MCP migration endpoint is provided. See [migration requirements](../../../python/packages/durabletask/README.md#explicit-legacy-migration).
+
+Python retention defaults remain nondeleting with `keep_all` and `max_state_bytes=None`. Eager compaction pruning and pressure eviction are independent opt-ins. External/service-owned history needs no local mirror, and an invalid service conversation must not silently fall back to a new conversation or local history. External appends and uncommitted tool effects can repeat, so application-level idempotency is still required. Entity TTL/deletion also removes receipts and needs an explicit late-duplicate policy.
+
 ## Hosting models
 
 ### Azure Functions
 
-The recommended production hosting model. A single call to `ConfigureDurableAgents` (C#) or `AgentFunctionApp` (Python) automatically:
+For Azure Functions hosting, a single call to `ConfigureDurableAgents` (C#) or `AgentFunctionApp` (Python) automatically:
 
 - Registers agent entities with the Durable Task worker.
 - Generates HTTP endpoints at `/api/agents/{agentName}/run` for each registered agent.
@@ -109,8 +136,10 @@ Alternatively, `ConfigureDurableOptions` configures both from a single delegate 
 
 **Python example:**
 
+Configure a separate Functions task hub/deployment with compatible version-2 workers and clients first. The explicit deployment mode below is the operator's acknowledgement of that verified setup, not automatic isolation.
+
 ```python
-app = AgentFunctionApp(agents=[agent])
+app = AgentFunctionApp(agents=[agent], deployment_mode="isolated_v2")
 ```
 
 ### Console apps / generic hosts
@@ -133,8 +162,10 @@ IHost host = Host.CreateDefaultBuilder(args)
 
 **Python example:**
 
+Configure the endpoint and hub as a separate version-2 deployment with compatible workers and clients before acknowledging the deployment mode. A localhost address alone does not isolate the prototype.
+
 ```python
-worker = DurableAIAgentWorker(TaskHubGrpcWorker(host_address="localhost:4001"))
+worker = DurableAIAgentWorker(TaskHubGrpcWorker(host_address="localhost:4001"), deployment_mode="isolated_v2")
 worker.add_agent(agent)
 worker.start()
 ```
@@ -219,6 +250,8 @@ Durable agents do not support true end-to-end streaming because entity operation
 - The entity still returns the complete `AgentResponse` after the stream is fully consumed.
 - Clients can reconnect and resume reading from a cursor-based stream (e.g., Redis Streams) without losing messages.
 
+In Python, callbacks report execution progress, not confirmed persistence. A final callback or host write return is not confirmation that the terminal result and receipt committed. Callback delivery does not make external effects exactly once.
+
 See the **Reliable Streaming** samples for a complete implementation using Redis Streams.
 
 ## Session TTL (Time-To-Live)
@@ -229,7 +262,7 @@ Durable agent sessions support automatic cleanup via configurable TTL. See [Sess
 
 When using the [Durable Task Scheduler](https://learn.microsoft.com/azure/azure-functions/durable/durable-task-scheduler/durable-task-scheduler) as the durable backend, you get built-in observability through its dashboard:
 
-- **Conversation history** – View complete chat history for each agent session.
+- **Conversation history** – Inspect the history retained in durable state. External/service-owned history and evicted transcript content are not a complete local mirror.
 - **Orchestration visualization** – See multi-agent execution flows, including parallel branches and conditional logic.
 - **Performance metrics** – Monitor agent response times, token usage, and orchestration duration.
 - **Debugging** – Trace tool invocations and external event handling.

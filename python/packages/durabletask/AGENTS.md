@@ -28,6 +28,8 @@ Durable execution support for long-running agent workflows using Azure Durable F
 
 ## Usage
 
+For the PR #59 prototype, first configure a separate version-2 endpoint and hub with compatible workers and clients. Only then acknowledge that setup with `deployment_mode="isolated_v2"`. The gate applies to samples and tests too. Localhost does not prove isolation, and old workers and workflow histories must remain on the old engine. See the [deployment warning](README.md#version-2-deployment-warning).
+
 ```python
 from agent_framework import Agent
 from agent_framework.openai import OpenAIChatCompletionClient
@@ -42,7 +44,7 @@ durable_agent = agent_client.get_agent("assistant")
 
 # Worker side
 dt_worker = TaskHubGrpcWorker(host_address="localhost:4001")
-agent_worker = DurableAIAgentWorker(dt_worker)
+agent_worker = DurableAIAgentWorker(dt_worker, deployment_mode="isolated_v2")
 
 # Create a chat client for the agent
 chat_client = OpenAIChatCompletionClient()

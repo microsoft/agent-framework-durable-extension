@@ -39,6 +39,7 @@ Prerequisites:
 """
 
 import logging
+import sys
 from dataclasses import dataclass
 
 from agent_framework import (
@@ -237,7 +238,11 @@ def create_inner_workflow() -> Workflow:
     notify = NotifyExecutor()
     # Side-branch: review_gate -> notify builds the qualified respond URL in the same
     # superstep that raises the request, before the inner workflow pauses.
-    return WorkflowBuilder(name=INNER_WORKFLOW_NAME, start_executor=review_gate).add_edge(review_gate, notify).build()
+    return (
+        WorkflowBuilder(name=INNER_WORKFLOW_NAME, start_executor=review_gate, output_from=[review_gate])
+        .add_edge(review_gate, notify)
+        .build()
+    )
 
 
 # ============================================================================
@@ -288,7 +293,7 @@ def _create_workflow() -> Workflow:
     publish = PublishExecutor()
 
     return (
-        WorkflowBuilder(name=OUTER_WORKFLOW_NAME, start_executor=intake)
+        WorkflowBuilder(name=OUTER_WORKFLOW_NAME, start_executor=intake, output_from=[publish])
         .add_edge(intake, review_sub)
         .add_edge(review_sub, publish)
         .build()
@@ -340,13 +345,9 @@ def launch(durable: bool = True) -> AgentFunctionApp | None:
     return None
 
 
-# Default: Azure Functions mode
-# Run with `python function_app.py --maf` for pure MAF mode with DevUI
-app = launch(durable=True)
-
-
 if __name__ == "__main__":
-    import sys
-
     if "--maf" in sys.argv:
         launch(durable=False)
+else:
+    # Azure Functions imports this module. Pure MAF mode never builds a durable host.
+    app = launch(durable=True)
