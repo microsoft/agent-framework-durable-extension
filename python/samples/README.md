@@ -2,6 +2,16 @@
 
 This directory contains samples for durable agent hosting using the Durable Task Scheduler. These samples demonstrate the worker-client architecture pattern, enabling distributed agent execution with persistent conversation state.
 
+> [!WARNING]
+> **Breaking change on this branch.** The unreleased schema-v2 runtime requires
+> `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2` before a sample host starts. Set it only for a
+> **new, empty, uniquely named task hub** with upgraded clients and no old or unrelated workers.
+> Do not use `default`, an old shared hub, or upgrade a live hub in place. Existing instances
+> and recorded workflow histories must remain on their original hub and old engine.
+> This is an operator acknowledgement, not proof of isolation or production readiness. There
+> is no automatic isolation check, compatibility fallback, or history migration. Follow
+> [Environment Configuration](#environment-configuration) for standalone and Azure Functions setup.
+
 ## Import convention
 
 These samples import the durable hosting types **directly from the extension packages** —
@@ -53,17 +63,20 @@ az account show
 ## Sample Catalog
 
 ### Basic Patterns
+
 - **[01_single_agent](01_single_agent/)**: Host a single conversational agent and interact with it via a client. Demonstrates basic worker-client architecture and agent state management.
 - **[02_multi_agent](02_multi_agent/)**: Host multiple domain-specific agents (physicist and chemist) and route requests to the appropriate agent based on the question topic.
 - **[03_single_agent_streaming](03_single_agent_streaming/)**: Enable reliable, resumable streaming using Redis Streams with agent response callbacks. Demonstrates non-blocking agent execution and cursor-based resumption for disconnected clients.
 
 ### Orchestration Patterns
+
 - **[04_single_agent_orchestration_chaining](04_single_agent_orchestration_chaining/)**: Chain multiple invocations of the same agent using durable orchestration, preserving conversation context across sequential runs.
 - **[05_multi_agent_orchestration_concurrency](05_multi_agent_orchestration_concurrency/)**: Run multiple agents concurrently within an orchestration, aggregating their responses in parallel.
 - **[06_multi_agent_orchestration_conditionals](06_multi_agent_orchestration_conditionals/)**: Implement conditional branching in orchestrations with spam detection and email assistant agents. Demonstrates structured outputs with Pydantic models and activity functions for side effects.
 - **[07_single_agent_orchestration_hitl](07_single_agent_orchestration_hitl/)**: Human-in-the-loop pattern with external event handling, timeouts, and iterative refinement based on human feedback. Shows long-running workflows with external interactions.
 
 ### Workflow Hosting Patterns
+
 - **[08_workflow](08_workflow/)**: Host a MAF `Workflow` as a durable orchestration on a standalone worker via `DurableAIAgentWorker.configure_workflow`. Demonstrates conditional routing and mixing AI agents with non-agent executors.
 - **[09_workflow_hitl](09_workflow_hitl/)**: A workflow that pauses for human approval using `ctx.request_info` / `@response_handler`, with the client discovering and answering the pending request.
 - **[10_workflow_streaming](10_workflow_streaming/)**: Stream a hosted workflow's events as typed `WorkflowEvent` objects by polling the orchestration's custom status.
@@ -142,13 +155,37 @@ The DTS dashboard will be available at `http://localhost:8082`.
 
 ### Environment Configuration
 
-Each sample reads configuration from environment variables. You'll need to set the following environment variables:
+#### Required isolated-v2 acknowledgement
 
-Bash (Linux/macOS/WSL):
+Choose a new, unique alphanumeric hub name starting with a letter. The examples use
+`durablesamplev2UNIQUE` as a placeholder. Replace `UNIQUE` with your own unique alphanumeric
+suffix and use the resulting name consistently. Verify the hub is empty and reserved for this
+sample deployment. Provision the hub first when using an Azure-hosted scheduler. Do not reuse
+`default` or a hub containing old state, even if another sample guide or template uses it.
+
+Upgrade all clients that will access the new hub to match this branch's runtime. Keep old
+clients, workers, instances, and recorded histories on the old deployment. Setting the flag or
+rewrapping an old start input does not migrate history. Do not hard-code `deployment_mode` in
+sample workers or add an automatic fallback to bypass this deployment decision.
+
+#### Standalone samples
+
+Set these variables in **both the worker and client terminals**, using the same chosen hub
+name and endpoint. For combined samples, set them in the terminal running the sample.
+The endpoint below is for the local emulator.
+
+Standalone workers and clients reject a missing, blank, or case-insensitive `default`
+`TASKHUB` value before they construct a scheduler connection. This keeps a sample from
+silently attaching to a shared live hub when the environment is incomplete.
+
+POSIX shell (Linux/macOS/WSL):
 
 ```bash
 export FOUNDRY_PROJECT_ENDPOINT="https://your-project.services.ai.azure.com/api/projects/your-project"
 export FOUNDRY_MODEL="your-deployment-name"
+export ENDPOINT="http://localhost:8080"
+export TASKHUB="durablesamplev2UNIQUE"
+export DURABLE_AGENTS_DEPLOYMENT_MODE="isolated_v2"
 ```
 
 PowerShell:
@@ -156,7 +193,39 @@ PowerShell:
 ```powershell
 $env:FOUNDRY_PROJECT_ENDPOINT="https://your-project.services.ai.azure.com/api/projects/your-project"
 $env:FOUNDRY_MODEL="your-deployment-name"
+$env:ENDPOINT="http://localhost:8080"
+$env:TASKHUB="durablesamplev2UNIQUE"
+$env:DURABLE_AGENTS_DEPLOYMENT_MODE="isolated_v2"
 ```
+
+For host-generated workflows, use the upgraded `DurableWorkflowClient.start_workflow` with
+the application input and workflow name (or a constructor default). It supplies the v2 start
+envelope. Azure Functions generated workflow start routes do the same. Application-owned
+native orchestrators keep their original raw input contracts. Do not wrap their payloads.
+
+#### Azure Functions samples
+
+Copy the sample's local-settings template as described in
+[azure_functions/README.md](azure_functions/README.md), then merge these entries into its
+`Values` object before `func start`. Keep the existing storage, model, and other sample settings.
+Replace every `durablesamplev2UNIQUE` with the same new, empty hub name chosen for that function app.
+These settings supersede older instructions to leave the hub as `default`.
+
+```json
+{
+  "Values": {
+    "DURABLE_AGENTS_DEPLOYMENT_MODE": "isolated_v2",
+    "TASKHUB_NAME": "durablesamplev2UNIQUE",
+    "AzureFunctionsJobHost__extensions__durableTask__hubName": "durablesamplev2UNIQUE",
+    "DURABLE_TASK_SCHEDULER_CONNECTION_STRING": "Endpoint=http://localhost:8080;TaskHub=durablesamplev2UNIQUE;Authentication=None"
+  }
+}
+```
+
+The host setting explicitly selects the hub even for samples without a `TASKHUB_NAME` binding.
+Keep it, `TASKHUB_NAME`, and the connection string's `TaskHub` identical. The connection string
+above is for the local emulator only, not production configuration. See the Azure Functions
+[host configuration override guidance](https://learn.microsoft.com/azure/azure-functions/functions-host-json#override-hostjson-values).
 
 ### Installing Dependencies
 
@@ -173,7 +242,7 @@ If you're using `uv` for package management:
 uv pip install -r requirements.txt
 ```
 
-### Running the Samples
+### Starting Workers and Clients
 
 Each sample follows a worker-client architecture. Most samples provide separate `worker.py` and `client.py` files, though some include a combined `sample.py` for convenience.
 

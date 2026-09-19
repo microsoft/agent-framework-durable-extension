@@ -31,7 +31,7 @@ from .orchestrator import (
     execute_hitl_response_handler,
 )
 from .runner_context import CapturingRunnerContext
-from .serialization import deserialize_value, serialize_value, serialize_workflow_event
+from .serialization import deserialize_value, serialize_value, serialize_workflow_event, validate_workflow_json
 
 
 def execute_workflow_activity(executor: Executor, input_json: str, workflow: Workflow | None = None) -> str:
@@ -60,6 +60,7 @@ def execute_workflow_activity(executor: Executor, input_json: str, workflow: Wor
     data_obj = json.loads(input_json)
     if not isinstance(data_obj, dict):
         raise ValueError("Activity input must decode to a JSON object")
+    validate_workflow_json(data_obj)
     data = cast(dict[str, Any], data_obj)
 
     message_data = data.get("message")
@@ -188,4 +189,4 @@ def execute_workflow_activity(executor: Executor, input_json: str, workflow: Wor
         }
 
     result = asyncio.run(_run())
-    return json.dumps(result)
+    return json.dumps(result, allow_nan=False)

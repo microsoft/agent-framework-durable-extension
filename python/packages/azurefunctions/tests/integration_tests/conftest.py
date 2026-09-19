@@ -340,10 +340,18 @@ def _start_function_app(sample_path: Path, port: int) -> subprocess.Popen[Any]:
     Returns the subprocess.Popen object for the running process.
     """
     env = os.environ.copy()
+    env["DURABLE_AGENTS_DEPLOYMENT_MODE"] = "isolated_v2"
     # Use a unique TASKHUB_NAME for each test run to ensure test isolation.
+    # Test-only isolated mode acknowledges the per-run unique hub contract here.
     # This prevents conflicts between parallel or repeated test runs, as Durable Functions
     # use the task hub name to separate orchestration state.
     env["TASKHUB_NAME"] = f"test{uuid.uuid4().hex[:8]}"
+    env["AzureFunctionsJobHost__extensions__durableTask__hubName"] = env["TASKHUB_NAME"]
+    # DTS uses DbConnectionStringBuilder: the final duplicate key wins. Appending
+    # the child override preserves quoted semicolons/equals in every existing value.
+    connection_key = "DURABLE_TASK_SCHEDULER_CONNECTION_STRING"
+    if connection_string := env.get(connection_key):
+        env[connection_key] = f"{connection_string};TaskHub={env['TASKHUB_NAME']}"
 
     # On Windows, use CREATE_NEW_PROCESS_GROUP to allow proper termination
     # shell=True only on Windows to handle PATH resolution

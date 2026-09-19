@@ -117,7 +117,7 @@ async def test_sdk_coercible_nonobjects_are_rejected_before_cache_changes_or_wri
 
 
 @pytest.mark.parametrize("persisted", [None, "{}"], ids=["absent-state", "empty-object"])
-def test_sdk_absent_state_and_real_empty_object_remain_writable_legacy(
+def test_sdk_absent_state_and_real_empty_object_are_writable_v2(
     persisted: str | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     provider, shim = _sdk_provider(persisted)
@@ -127,8 +127,13 @@ def test_sdk_absent_state_and_real_empty_object_remain_writable_legacy(
 
     state = provider.state
 
-    assert state.schema_version == "1.1.0"
+    assert state.schema_version == "2.0.0"
     assert state.message_count == 0
+    assert state.to_dict()["data"] == {
+        "conversationHistory": [],
+        "terminalResults": {},
+        "completionReceipts": {},
+    }
     assert shim.encode_state() == persisted
     writes.assert_not_called()
     provider.persist_state()

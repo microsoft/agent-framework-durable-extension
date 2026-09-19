@@ -270,7 +270,7 @@ def test_native_failed_child_preserves_exception_identity(
     ensure.assert_not_called()
 
 
-@pytest.mark.parametrize("boundary", ["input", "read", "commit"])
+@pytest.mark.parametrize("boundary", ["input", "read", "commit", "malformed-canonical"])
 def test_real_entity_wrapper_failure_reaches_public_proxy_with_original_diagnostic(
     boundary: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -278,14 +278,16 @@ def test_real_entity_wrapper_failure_reaches_public_proxy_with_original_diagnost
     response_format: type[BaseModel] | None,
 ) -> None:
     load, ensure = _forbid_parsing(monkeypatch)
-    agent = Mock()
+    agent = Mock(spec=["name", "run"])
     agent.name = AGENT_NAME
+    completed = Mock()
 
     def run(*, stream: bool = False, **kwargs: Any) -> Any:
         if stream:
-            raise TypeError("stream unsupported by local test agent")
+            raise TypeError("streaming not supported")
 
         async def complete() -> AgentResponse:
+            completed()
             return AgentResponse(messages=[Message("assistant", ['{"answer": 42}'])])
 
         return complete()
@@ -296,10 +298,19 @@ def test_real_entity_wrapper_failure_reaches_public_proxy_with_original_diagnost
     entity_context.entity_name = f"dafx-{AGENT_NAME}"
     entity_context.entity_key = SESSION_ID
     entity_context.operation_name = "run"
-    persisted = {"schemaVersion": "1.1.0", "data": {"conversationHistory": []}}
+    persisted: dict[str, Any] = {
+        "schemaVersion": "2.0.0",
+        "data": {"conversationHistory": [], "terminalResults": {}, "completionReceipts": {}},
+    }
+    diagnostic = DIAGNOSTIC
+    if boundary == "malformed-canonical":
+        del persisted["data"]["terminalResults"]
+        diagnostic = "data requires terminalResults."
+    original = deepcopy(persisted)
     entity_context.get_state.side_effect = lambda *args: deepcopy(persisted)
-    failing_method = {"input": "get_input", "read": "get_state", "commit": "set_state"}[boundary]
-    getattr(entity_context, failing_method).side_effect = OSError(DIAGNOSTIC)
+    if boundary in ("input", "read", "commit"):
+        failing_method = {"input": "get_input", "read": "get_state", "commit": "set_state"}[boundary]
+        getattr(entity_context, failing_method).side_effect = OSError(DIAGNOSTIC)
     child = AtomicTask(7, NoOpAction())
     context = Mock(spec=df.DurableOrchestrationContext)
     context.instance_id = "operation-orchestration"
@@ -333,17 +344,25 @@ def test_real_entity_wrapper_failure_reaches_public_proxy_with_original_diagnost
     if not precompleted:
         assert task.state is TaskState.RUNNING and returned == []
         finish(*context.call_entity.call_args.args)
-    assert returned == [{"status": "error", "error": DIAGNOSTIC}]
-    _assert_operation_failure(task, child, DIAGNOSTIC)
+    assert returned == [{"status": "error", "error": diagnostic}]
+    _assert_operation_failure(task, child, diagnostic)
     load.assert_not_called()
     ensure.assert_not_called()
+    assert persisted == original
     if boundary == "commit":
-        assert entity_context.set_state.call_count >= 1
+        completed.assert_called_once()
+        entity_context.set_state.assert_called_once()
         for call in entity_context.set_state.call_args_list:
             attempted = call.args[0]
-            assert attempted["schemaVersion"] == "1.1.0"
-            assert "terminalResults" not in attempted["data"] and "completionReceipts" not in attempted["data"]
+            assert attempted["schemaVersion"] == "2.0.0"
+            result = attempted["data"]["terminalResults"][CORRELATION_ID]
+            receipt = attempted["data"]["completionReceipts"][CORRELATION_ID]
+            assert result["outcome"] == receipt["outcome"] == "succeeded"
+            assert result["response"]["messages"][0]["contents"][0]["text"] == '{"answer": 42}'
+            assert receipt["resultState"] == "available"
+            assert "responseMailbox" not in attempted["data"] and "completedCorrelations" not in attempted["data"]
     else:
         entity_context.set_state.assert_not_called()
         agent.run.assert_not_called()
-    assert DurableAgentState().schema_version == "1.1.0"
+        completed.assert_not_called()
+    assert DurableAgentState().schema_version == "2.0.0"

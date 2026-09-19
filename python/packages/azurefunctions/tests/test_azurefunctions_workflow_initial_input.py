@@ -6,11 +6,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any, TypeVar
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
+import azure.durable_functions as df
+import pytest
 from agent_framework import Executor, Workflow, WorkflowBuilder, WorkflowContext, handler
+from agent_framework_durabletask._workflows.protocol import wrap_workflow_input
 
 from agent_framework_azurefunctions import AgentFunctionApp
+from agent_framework_azurefunctions import _workflow as workflow_module
 
 FuncT = TypeVar("FuncT", bound=Callable[..., Any])
 
@@ -53,6 +57,18 @@ def _capture_run_handler(workflow: Workflow) -> Callable[..., Any]:
     return captured_routes[f"workflow/{workflow.name}/run"]
 
 
+def _capture_workflow_orchestrator(workflow: Workflow) -> Callable[..., Any]:
+    app = AgentFunctionApp(workflow=workflow, enable_health_check=False, deployment_mode="isolated_v2")
+    functions = {function.get_function_name(): function for function in app.get_functions()}
+    function = functions[f"dafx-{workflow.name}"]
+    trigger = function.get_trigger()
+    assert trigger is not None
+    assert trigger.get_dict_repr()["type"] == "orchestrationTrigger"
+    user_function: Any = function.get_user_function()
+    assert user_function is not None
+    return user_function.orchestrator_function
+
+
 async def test_workflow_run_route_neutralizes_reserved_marker_shaped_input() -> None:
     """The workflow run route schedules neutralized framework-reserved metadata."""
     executor = _Start()
@@ -71,4 +87,23 @@ async def test_workflow_run_route_neutralizes_reserved_marker_shaped_input() -> 
 
     await handler(request, client)
 
-    assert client.start_new.await_args.kwargs["client_input"] is None
+    assert client.start_new.await_args.kwargs["client_input"] == wrap_workflow_input(None)
+
+
+def test_workflow_orchestrator_rejects_legacy_recorded_start_before_actions() -> None:
+    """Old recorded starts fail before the hosted orchestrator can run revised actions."""
+    executor = _Start()
+    workflow = WorkflowBuilder(name="input_boundary", start_executor=executor, output_from=[executor]).build()
+    orchestrator = _capture_workflow_orchestrator(workflow)
+    context = Mock(spec=df.DurableOrchestrationContext)
+    context.get_input.return_value = {"input": "raw-without-version"}
+    context.is_replaying = True
+
+    with (
+        patch.object(workflow_module, "_run_workflow_orchestrator_shared") as engine,
+        pytest.raises(ValueError, match="unsupported execution protocol"),
+    ):
+        next(orchestrator(context))
+
+    engine.assert_not_called()
+    assert context.mock_calls == [call.get_input()]

@@ -65,6 +65,14 @@ logger = logging.getLogger(__name__)
 CONTENT_ANALYZER_AGENT_NAME = "ContentAnalyzerAgent"
 WORKFLOW_NAME = "content_moderation"
 
+
+def _resolve_taskhub(taskhub: str | None) -> str:
+    taskhub_name = taskhub if taskhub is not None else os.getenv("TASKHUB")
+    if not taskhub_name or taskhub_name != taskhub_name.strip() or taskhub_name.strip().casefold() == "default":
+        raise ValueError("Set TASKHUB to a non-default, non-blank hub name before starting this sample.")
+    return taskhub_name
+
+
 CONTENT_ANALYZER_INSTRUCTIONS = (
     "You are a content moderation assistant that analyzes user-submitted content for policy compliance. "
     "Evaluate appropriateness, assign a risk level ('low', 'medium', 'high'), list any concerns, and give a "
@@ -299,7 +307,7 @@ def get_worker(
     taskhub: str | None = None, endpoint: str | None = None, log_handler: logging.Handler | None = None
 ) -> DurableTaskSchedulerWorker:
     """Create a configured DurableTaskSchedulerWorker."""
-    taskhub_name = taskhub or os.getenv("TASKHUB", "default")
+    taskhub_name = _resolve_taskhub(taskhub)
     endpoint_url = endpoint or os.getenv("ENDPOINT", "http://localhost:8080")
 
     credential = None if endpoint_url == "http://localhost:8080" else AzureCliCredential()

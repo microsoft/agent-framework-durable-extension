@@ -401,6 +401,7 @@ def worker_process(
     env = os.environ.copy()
     env["ENDPOINT"] = dts_endpoint
     env["TASKHUB"] = unique_taskhub
+    env["DURABLE_AGENTS_DEPLOYMENT_MODE"] = "isolated_v2"
 
     # Start worker subprocess
     try:
