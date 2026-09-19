@@ -322,11 +322,17 @@ def _metrics(host: _Host, boot: str, removed: int, calls: int) -> None:
             "bounded deletion metric labels",
         )
     assert sum(row["value"] for row in deletions) == removed
-    for metric, extra in (
-        ("write_attempts", {"stage": "set_state"}),
-        ("operations", {}),
+    for metric, extra, commit_status in (
+        ("write_attempts", {"stage": "serialization"}, "not_attempted"),
+        ("write_attempts", {"stage": "set_state"}, "unknown"),
+        ("operations", {}, "unknown"),
     ):
-        observations = [row for row in rows if row["name"] == f"durable.retention.{metric}"]
+        observations = [
+            row
+            for row in rows
+            if row["name"] == f"durable.retention.{metric}"
+            and (not extra or row["attributes"].get("stage") == extra["stage"])
+        ]
         assert sum(row["value"] for row in observations) == calls
         for row in observations:
             attributes = row["attributes"]
@@ -336,7 +342,7 @@ def _metrics(host: _Host, boot: str, removed: int, calls: int) -> None:
                 {
                     **extra,
                     "outcome": "returned",
-                    "commit_status": "unknown",
+                    "commit_status": commit_status,
                     "deletion_staged": attributes["deletion_staged"],
                 },
                 "host write observations are not commit proof",
