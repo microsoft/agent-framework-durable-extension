@@ -81,17 +81,24 @@ class DurableServiceAcceptance(ChatMiddleware):
 
 
 class DurableServiceClient:
-    """Observe completed Core provider calls on an isolated, run-local client chain.
+    """Observe exact Core inputs when possible, otherwise only outer completion.
 
-    Supports BaseChatClient and ordinary Python wrappers delegating through stored
-    ``inner`` or ``__wrapped__`` attributes. Constructors and copy hooks are not run.
-    SDK clients and other referenced resources remain borrowed, not recursively
-    cloned. The original get_response implementation and its layers still execute.
+    Exact acceptance uses an isolated BaseChatClient chain with ordinary Python
+    wrappers delegating through stored ``inner`` or ``__wrapped__`` attributes.
+    Constructors and copy hooks are not run. SDK clients and other referenced
+    resources remain borrowed, not recursively cloned.
 
-    Opaque clients, computed delegation and non-rebindable entry points fail before
-    dispatch. There is deliberately no middleware approximation for those clients.
-    Acceptance describes prepared Core inputs, not provider wire transformations or
-    a durable remote commit. Continuation-token retrieval accepts no new inputs.
+    Generic SupportsChatGetResponse clients and unsupported layouts execute their
+    original get_response, preserving their state and options. Only a completed
+    outer ChatResponse is observed, never acceptance of opaque inputs. An outer
+    failure cannot reveal whether an internal service call already completed.
+    Invalid clients and detected delegation cycles are rejected before dispatch.
+
+    ``exact_acceptance`` describes receipt capability, not a full compatibility
+    guarantee. The parent must disable whole-agent retry when it is false, even
+    for structured refusals. Exact acceptance describes prepared Core inputs, not
+    provider wire transformations or a durable remote commit. Continuation-token
+    retrieval accepts no new inputs.
     """
 
     def __init__(
@@ -101,21 +108,96 @@ class DurableServiceClient:
         on_completed: Callable[[ChatResponse], None] | None = None,
     ) -> None:
         self.__wrapped__ = client
-        self._client = _clone_service_client(client, accept, on_completed)
+        if not callable(getattr(client, "get_response", None)):
+            raise ValueError("A service client must expose a callable get_response method.")
+        self._on_completed = on_completed
+        try:
+            self._client = _clone_service_client(client, accept, on_completed)
+        except _UnsupportedServiceClient as exc:
+            if not exc.allow_fallback:
+                raise
+            self._client = client
+            self._exact_acceptance = False
+        else:
+            self._exact_acceptance = True
+
+    @property
+    def exact_acceptance(self) -> bool:
+        """Whether a typed Core leaf was cloned for exact input acceptance.
+
+        False for generic clients or unsupported layouts. The parent must disable
+        whole-agent retry in that case, including on structured refusals, since
+        hidden service completion cannot be ruled out. This receipt capability
+        flag is not a guarantee of compatibility with arbitrary client behavior.
+        """
+        return self._exact_acceptance
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.__wrapped__, name)
 
     def get_response(self, messages: Sequence[Message], **kwargs: Any) -> Any:
-        return self._client.get_response(messages=messages, **kwargs)
+        result = self._client.get_response(messages=messages, **kwargs)
+        if self._exact_acceptance:
+            return result
+        return _observe_outer_completion(result, stream=bool(kwargs.get("stream")), on_completed=self._on_completed)
 
 
-def _unsupported_client(client: Any, reason: str) -> ValueError:
-    return ValueError(
+class _UnsupportedServiceClient(ValueError):
+    """A recognized observation limitation, distinct from arbitrary client errors."""
+
+    def __init__(self, message: str, *, allow_fallback: bool) -> None:
+        super().__init__(message)
+        self.allow_fallback = allow_fallback
+
+
+def _observe_outer_completion(result: Any, *, stream: bool, on_completed: Callable[[ChatResponse], None] | None) -> Any:
+    """Observe the original call once, without inferring receipt of opaque inputs."""
+    notified = False
+
+    def completed(response: Any) -> Any:
+        nonlocal notified
+        if isinstance(response, ChatResponse) and not notified:
+            notified = True
+            if on_completed is not None:
+                on_completed(response)
+        return response
+
+    def observe(value: Any) -> Any:
+        # ResponseStream is awaitable, but awaiting it only sets up the stream.
+        # Retain its own finalizer and hooks, and observe only its final response.
+        if isinstance(value, ResponseStream):
+            return cast("ResponseStream[ChatResponseUpdate, ChatResponse]", value).with_result_hook(completed)
+        return completed(value)
+
+    if isinstance(result, ResponseStream):
+        return observe(result)
+    if isawaitable(result):
+        pending = result
+        if stream:
+
+            async def resolve_stream() -> ResponseStream[ChatResponseUpdate, ChatResponse]:
+                resolved = await pending
+                if not isinstance(resolved, ResponseStream):
+                    raise ValueError("Streaming completion observation requires a ResponseStream from the client.")
+                return cast("ResponseStream[ChatResponseUpdate, ChatResponse]", resolved).with_result_hook(completed)
+
+            return ResponseStream[ChatResponseUpdate, ChatResponse].from_awaitable(resolve_stream())
+
+        async def resolve_response() -> Any:
+            return observe(await pending)
+
+        return resolve_response()
+    if stream:
+        raise ValueError("Streaming completion observation requires a ResponseStream from the client.")
+    return observe(result)
+
+
+def _unsupported_client(client: Any, reason: str, *, allow_fallback: bool = True) -> _UnsupportedServiceClient:
+    return _UnsupportedServiceClient(
         f"Cannot observe exact service acceptance for {type(client).__name__}: {reason}. "
-        "Use a BaseChatClient with a rebindable _inner_get_response method, optionally "
-        "behind wrappers delegating through stored inner or __wrapped__ attributes. "
-        "Opaque clients need an explicit BaseChatClient adapter."
+        "Exact acceptance requires a BaseChatClient with a rebindable _inner_get_response method, optionally "
+        "behind wrappers delegating through stored inner or __wrapped__ attributes.",
+        allow_fallback=allow_fallback,
     )
 
 
@@ -157,7 +239,7 @@ def _clone_service_client(
     current = client
     while True:
         if id(current) in seen:
-            raise _unsupported_client(client, "the delegation chain contains a cycle")
+            raise _unsupported_client(client, "the delegation chain contains a cycle", allow_fallback=False)
         seen.add(id(current))
         current_type = cast("type[Any]", type(current))
         if getattr_static(current_type, "__getattribute__") is not object.__getattribute__:

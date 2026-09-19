@@ -574,6 +574,7 @@ class AgentEntity:
         succeeded = False
         original_agent = self.agent
         progress = InvocationProgress()
+        service_observation_exact = True
 
         try:
             self.agent = prepare_history_owner(self.agent, service_owns_history)
@@ -656,6 +657,7 @@ class AgentEntity:
                     invocation_agent.client = DurableServiceClient(
                         invocation_agent.client, history_binding.accept, completed_service
                     )
+                    service_observation_exact = invocation_agent.client.exact_acceptance
                     self.agent = invocation_agent
                 middleware = [DurableToolGuard(progress, enabled=run_request.enable_tool_calls)]
                 run_kwargs["middleware"] = middleware
@@ -681,6 +683,7 @@ class AgentEntity:
                 if (
                     session is None
                     or not service_owns_history
+                    or not service_observation_exact
                     or not _is_missing_previous_response(exc)
                     or progress.stream_started
                     or progress.function_started
