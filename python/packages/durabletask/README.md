@@ -68,6 +68,12 @@ It preserves unknown JSON, session state and original public message IDs separat
 internal reconciliation identities. Delivery methods reuse the private staging operations
 without replacing typed history objects. History hooks stage appends and compaction annotations
 in memory. Excluded messages can be omitted from model input but are not physically deleted.
+
+The private bridge requires an exact `2.0.0` snapshot. Even `get_messages()` may repair missing
+or duplicate internal IDs, so it is not a read-only inspection path. Mutation-capable hooks reject
+legacy and unsupported versions before changing stored history or working state. Use
+`read_agent_state()` for legacy inspection instead.
+
 External primary providers, service-owned history and store-only audit sinks keep separate roles.
 On a service-owned turn, the inactive external primary's custom hooks are also suppressed because
 they may load or persist history directly. Ownership-independent work belongs in a separate context
