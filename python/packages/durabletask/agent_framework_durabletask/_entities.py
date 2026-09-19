@@ -68,6 +68,7 @@ from ._retention import (
 )
 from ._retention_telemetry import record_write, retention_operation
 from ._shared_state_validation import validate_completion_transition, validate_identifier, validate_timestamp
+from ._state_capacity import StateCapacityError
 from ._state_migration import migrate_legacy_state, state_snapshot_digest
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -516,7 +517,12 @@ class AgentEntity:
         if self._max_state_bytes is not None:
             size = len(json.dumps(self.state.to_dict(), allow_nan=False))
             if size > self._max_state_bytes:
-                raise ValueError("Retained delivery/control state cannot fit within max_state_bytes.")
+                raise StateCapacityError(
+                    size_bytes=size,
+                    max_state_bytes=self._max_state_bytes,
+                    floor_bytes=size,
+                    target_bytes=self._max_state_bytes,
+                )
 
     def _is_error_response(self, entry: DurableAgentStateEntry) -> bool:
         """Check if a conversation history entry records a failed turn."""
@@ -1090,6 +1096,14 @@ class AgentEntity:
         source_session_id = cast(str, migration["sourceSessionId"])
         if migration["destinationSessionId"] != session_id or source_session_id == session_id:
             raise ValueError(message)
+        # Reset clears the local session, but does not relinquish migration ownership.
+        stored = self.state.data.session
+        if stored is not None:
+            if not isinstance(stored, dict):
+                raise ValueError(message)
+            stored_id = stored.get(_SESSION_ID_KEY)
+            if not isinstance(stored_id, str) or not stored_id.strip() or stored_id != source_session_id:
+                raise ValueError(message)
         return source_session_id
 
     def _create_session(self) -> Any:
