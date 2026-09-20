@@ -18,18 +18,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from copy import deepcopy
 from typing import Any, cast
 
 from agent_framework import Executor, Workflow, WorkflowEvent
 from agent_framework._workflows._runner_context import YieldOutputEventType
 from agent_framework._workflows._state import State
 
-from .orchestrator import (
-    SOURCE_HITL_RESPONSE,
-    SOURCE_ORCHESTRATOR,
-    execute_hitl_response_handler,
-)
+from .orchestrator import SOURCE_ORCHESTRATOR, execute_hitl_response_handler
 from .runner_context import CapturingRunnerContext
 from .serialization import deserialize_value, serialize_value, serialize_workflow_event, validate_workflow_json
 
@@ -43,7 +38,8 @@ def execute_workflow_activity(executor: Executor, input_json: str, workflow: Wor
     Args:
         executor: The non-agent executor instance to run.
         input_json: JSON-encoded activity input with keys ``message``,
-            ``shared_state_snapshot``, and ``source_executor_ids``.
+            ``shared_state_snapshot``, ``source_executor_ids``, and the optional
+            boolean ``is_hitl_response`` dispatch flag (defaults to false).
         workflow: The owning workflow, used to classify the executor's
             ``yield_output`` payloads as final ``output`` vs ``intermediate``.
             When omitted, all yielded outputs are treated as final outputs.
@@ -77,8 +73,9 @@ def execute_workflow_activity(executor: Executor, input_json: str, workflow: Wor
     # objects from the encoded data (with type markers).
     message = deserialize_value(message_data)
 
-    # A HITL response is identified by a source id starting with the HITL prefix.
-    is_hitl_response = any(s.startswith(SOURCE_HITL_RESPONSE) for s in source_executor_ids)
+    # Only the orchestration dispatch envelope can mark a reply. Executor IDs
+    # and application payload fields are not control metadata.
+    is_hitl_response = data.get("is_hitl_response") is True
 
     def classify_yielded_output(executor_id: str) -> YieldOutputEventType | None:
         # Mirror the core runner's classification so intermediate executors'
@@ -99,11 +96,9 @@ def execute_workflow_activity(executor: Executor, input_json: str, workflow: Wor
 
         # Deserialize shared state values to reconstruct dataclasses / Pydantic models.
         deserialized_state: dict[str, Any] = {str(k): deserialize_value(v) for k, v in shared_state_snapshot.items()}
-        # Snapshot the deserialized (in-memory) state for diffing. State.export_state()
-        # returns the in-memory committed objects, so the snapshot must hold objects
-        # too (deepcopy) - comparing against a serialized snapshot would mark every
-        # key as changed.
-        original_snapshot = deepcopy(deserialized_state)
+        # The encoded input remains detached from the reconstructed state, even
+        # for in-place mutations. Compare encoded values, not Python equality
+        # (which conflates False/0 and 1/1.0, including inside containers).
         shared_state.import_state(deserialized_state)
 
         if is_hitl_response:
@@ -126,17 +121,22 @@ def execute_workflow_activity(executor: Executor, input_json: str, workflow: Wor
         # Commit pending state changes and compute the diff vs the original snapshot.
         shared_state.commit()
         current_state = shared_state.export_state()
-        original_keys: set[str] = set(original_snapshot.keys())
+        original_keys: set[str] = set(shared_state_snapshot.keys())
         current_keys: set[str] = set(current_state.keys())
 
         # Deleted = was in original, not in current.
         deletes: set[str] = original_keys - current_keys
 
-        # Updates = keys that are new or whose value changed.
-        updates: dict[str, Any] = {}
+        # Serialize first so custom state still uses the checkpoint codec rather
+        # than requiring the in-memory object itself to be JSON serializable.
+        # Sorted JSON ignores dictionary insertion order but preserves wire types.
+        serialized_updates: dict[str, Any] = {}
         for key in current_keys:
-            if key not in original_keys or current_state[key] != original_snapshot.get(key):
-                updates[key] = current_state[key]
+            encoded = serialize_value(current_state[key])
+            if key not in original_keys or json.dumps(encoded, sort_keys=True, allow_nan=False) != json.dumps(
+                shared_state_snapshot[key], sort_keys=True, allow_nan=False
+            ):
+                serialized_updates[key] = encoded
 
         sent_messages = await runner_context.drain_messages()
         events = await runner_context.drain_events()
@@ -176,8 +176,6 @@ def execute_workflow_activity(executor: Executor, input_json: str, workflow: Wor
                     "target_id": msg.target_id,
                     "source_id": msg.source_id,
                 })
-
-        serialized_updates = {k: serialize_value(v) for k, v in updates.items()}
 
         return {
             "sent_messages": serialized_sent_messages,

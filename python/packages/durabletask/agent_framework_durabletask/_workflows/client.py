@@ -20,6 +20,7 @@ from agent_framework import WorkflowEvent
 from durabletask.client import TaskHubGrpcClient
 
 from .naming import (
+    iter_subworkflow_instances,
     qualify_subworkflow_request_id,
     split_subworkflow_request_id,
     workflow_orchestrator_name,
@@ -389,7 +390,7 @@ class DurableWorkflowClient:
         """Collect an orchestration's pending requests plus any nested sub-workflow ones.
 
         Nested requests (discovered via the ``subworkflows`` map the parent records in
-        its custom status as ``{executorId: [childInstanceId, ...]}``) are qualified by
+        its custom status as ``{executorId: {ordinal: childInstanceId}}``) are qualified by
         ``(executorId, ordinal)`` so deeper requests accumulate a full
         ``{executorId}~{ordinal}~...~{requestId}`` path and a node with several children
         keeps each one addressable. Child instances are reached directly by id (already
@@ -419,10 +420,7 @@ class DurableWorkflowClient:
         subworkflows = status_dict.get("subworkflows")
         if isinstance(subworkflows, dict):
             for executor_id, child_ids in cast(dict[str, Any], subworkflows).items():
-                children: list[Any] = cast("list[Any]", child_ids) if isinstance(child_ids, list) else []
-                for ordinal, child_instance_id in enumerate(children):
-                    if not isinstance(child_instance_id, str):
-                        continue
+                for ordinal, child_instance_id in iter_subworkflow_instances(child_ids):
                     child_state = self._client.get_orchestration_state(child_instance_id)
                     if child_state is None or not child_state.serialized_custom_status:
                         continue
@@ -491,7 +489,7 @@ class DurableWorkflowClient:
         An unqualified id (no well-formed hop) targets ``instance_id`` directly. A
         qualified id ``{executorId}~{ordinal}~{rest}`` addresses a nested sub-workflow:
         the executor's child instance id is read from this instance's ``subworkflows``
-        custom-status map (a list selected by ``ordinal``) and the remainder is resolved
+        custom-status map (keyed by run-wide ``ordinal``) and the remainder is resolved
         recursively, so arbitrarily deep nesting lands on the leaf child orchestration
         and its bare request id.
         """
@@ -511,9 +509,10 @@ class DurableWorkflowClient:
     def _lookup_subworkflow_instance(self, instance_id: str, executor_id: str, ordinal: int) -> str | None:
         """Return the child orchestration instance id for ``(executor_id, ordinal)``, if active.
 
-        Reads the ``subworkflows`` map (``{executorId: [childInstanceId, ...]}``) the
+        Reads the ``subworkflows`` map (``{executorId: {ordinal: childInstanceId}}``) the
         parent records in its custom status while dispatching sub-workflow nodes, and
-        selects the child at ``ordinal`` (its dispatch order this superstep).
+        selects the child at its run-wide ``ordinal``. Retired paths and legacy
+        list-shaped slot maps are not routable.
         """
         state = self._client.get_orchestration_state(instance_id)
         custom_status = self._parse_custom_status(state.serialized_custom_status if state else None)
@@ -523,10 +522,4 @@ class DurableWorkflowClient:
         if not isinstance(subworkflows, dict):
             return None
         children_raw = cast(dict[str, Any], subworkflows).get(executor_id)
-        if not isinstance(children_raw, list):
-            return None
-        children = cast("list[Any]", children_raw)
-        if ordinal < 0 or ordinal >= len(children):
-            return None
-        child = children[ordinal]
-        return child if isinstance(child, str) else None
+        return dict(iter_subworkflow_instances(children_raw)).get(ordinal)
