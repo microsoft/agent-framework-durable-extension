@@ -18,7 +18,7 @@ import logging
 
 from client import get_client, run_client  # pyrefly: ignore[missing-import]
 from dotenv import load_dotenv
-from worker import get_worker, setup_worker  # pyrefly: ignore[missing-import]
+from worker import _resolve_taskhub, get_worker, setup_worker  # pyrefly: ignore[missing-import]
 
 # Configure logging (must be after imports to override their basicConfig)
 logging.basicConfig(level=logging.INFO, force=True)
@@ -29,15 +29,16 @@ def main():
     """Main entry point - runs both worker and client in single process."""
     silent_handler = logging.NullHandler()
 
-    dts_worker = get_worker(log_handler=silent_handler)
+    taskhub = _resolve_taskhub(None)
+    dts_worker = get_worker(taskhub=taskhub, log_handler=silent_handler)
     # This scope stops the worker even if setup or the client fails. Redis pools
     # close inside each history operation on its own loop, not during shutdown here.
     with dts_worker:
-        setup_worker(dts_worker)
+        setup_worker(dts_worker, taskhub=taskhub)
         dts_worker.start()
         logger.debug("Worker started and listening for requests...")
 
-        agent_client = get_client(log_handler=silent_handler)
+        agent_client = get_client(taskhub=taskhub, log_handler=silent_handler)
         try:
             run_client(agent_client)
         except Exception as e:

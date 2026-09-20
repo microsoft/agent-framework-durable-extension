@@ -1,5 +1,5 @@
 {
-  "_comment": "Required before running: replace durablesamplev2UNIQUE in TASKHUB_NAME and the connection string with the same fresh, unique hub unused by older workers. Only then set DURABLE_AGENTS_DEPLOYMENT_MODE to isolated_v2 after confirming all workers and clients use schema 2. Leave it blank until then.",
+  "_comment": "Required before running: replace TASKHUB_NAME with a fresh, unique hub unused by older workers. The shipped host uses Azure Storage via AzureWebJobsStorage, not DTS. The DTS connection string alone does not select a backend. If explicitly opting into azureManaged with a supporting host extension, replace its TaskHub with the same hub. Only then set DURABLE_AGENTS_DEPLOYMENT_MODE to isolated_v2 after confirming isolation and compatible schema 2 workers and clients. Leave it blank until then.",
   "IsEncrypted": false,
   "Values": {
     "DURABLE_AGENTS_DEPLOYMENT_MODE": "",

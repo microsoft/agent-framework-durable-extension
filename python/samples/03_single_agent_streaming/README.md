@@ -1,6 +1,12 @@
 # Single Agent with Reliable Streaming
 
-This sample demonstrates how to use Redis Streams with agent response callbacks to enable reliable, resumable streaming for durable agents. Streaming responses are persisted to Redis, allowing clients to disconnect and reconnect without losing messages.
+This sample uses Redis Streams with agent response callbacks for resumable output. Clients can
+reconnect while entries remain in Redis, subject to its configured TTL and persistence.
+
+> [!IMPORTANT]
+> Redis chunks and the completion marker are **provisional output**, not a durable commit
+> acknowledgement. The callback runs before retention checks and durable state persistence.
+> Generation can finish and publish the marker even if the operation later fails to commit.
 
 ## Key Concepts Demonstrated
 
@@ -75,7 +81,7 @@ Let me create the perfect cultural and culinary journey through Tokyo...
 (continues streaming)
 ...
 
-✓ Response complete!
+Generation complete. Durable commit pending verification.
 ```
 
 
@@ -134,6 +140,32 @@ async with await get_stream_handler() as stream_handler:
 ```
 
 **Fire-and-Forget Mode**: Use `options={"wait_for_response": False}` to enable non-blocking execution. The `run()` method signals the agent and returns immediately, allowing the client to stream from Redis without blocking.
+
+### Verify durable completion before business success
+
+The demo client only displays Redis output. It does **not** verify a committed result. An application
+that acts on the response must keep that separate from streaming:
+
+1. Keep the acceptance response from `run()` and save
+    `acceptance.additional_properties["correlation_id"]` with the agent session and deployment.
+    Acceptance means queued work, not success.
+2. Read that agent entity from the same task hub and scheduler using
+    `DurableTaskSchedulerClient.get_entity(..., include_state=True)`. Use the session's durable
+    entity identity, not a Redis cursor, to address it.
+3. Pass the stored state to `read_agent_state` from `agent_framework_durabletask`, then call
+    `try_get_agent_response(correlation_id)` for the **same request**. This checks canonical
+    `completionReceipts` and `terminalResults`, not streamed text or transcript history.
+4. Treat a missing result, read error, or polling timeout as unverified. Handle committed failures
+    and completed-but-result-unavailable outcomes explicitly. Require a committed successful outcome
+    and any needed available result before performing a business-success action.
+
+Alternatively, choose `wait_for_response=True` for the original request and use the durable
+response path, checking its outcome and errors. Do not call `run()` again just to check status,
+because that submits another request. The sample has no separate correlation-status endpoint.
+
+Redis streams here are session-scoped, not correlation-scoped. An old completion marker is not
+proof about the current turn. Interrupted execution can also leave provisional or repeated chunks.
+Neither `[DONE]` nor a retained transcript establishes that a particular request committed.
 
 ### Cursor-Based Resumption
 

@@ -54,13 +54,22 @@ def _resolve_taskhub(taskhub: str | None) -> str:
     return taskhub_name
 
 
-def create_archivist_agent() -> Agent:
+def create_archivist_agent(taskhub: str) -> Agent:
     """Create an agent whose history is stored in Redis.
+
+    Args:
+        taskhub: The same resolved task hub used to create the scheduler worker.
 
     Returns:
         Agent: The configured Archivist agent.
     """
-    history = RedisHistoryProvider(os.getenv("REDIS_CONNECTION_STRING", "redis://localhost:6379"))
+    taskhub_name = _resolve_taskhub(taskhub)
+    # Hex preserves case and keeps hub separators distinct from the session suffix.
+    # Reusing a hub name on another scheduler requires a distinct prefix or Redis store.
+    history = RedisHistoryProvider(
+        os.getenv("REDIS_CONNECTION_STRING", "redis://localhost:6379"),
+        key_prefix=f"durable_sample:history:hub:{taskhub_name.encode('utf-8').hex()}",
+    )
 
     return Agent(
         client=FoundryChatClient(
@@ -106,18 +115,19 @@ def get_worker(
     )
 
 
-def setup_worker(worker: DurableTaskSchedulerWorker) -> DurableAIAgentWorker:
+def setup_worker(worker: DurableTaskSchedulerWorker, *, taskhub: str) -> DurableAIAgentWorker:
     """Register the Redis-backed agent with the durable worker.
 
     Args:
         worker: The DurableTaskSchedulerWorker instance
+        taskhub: The same resolved task hub passed to get_worker
 
     Returns:
         DurableAIAgentWorker with agents registered
     """
     agent_worker = DurableAIAgentWorker(worker)
 
-    agent = create_archivist_agent()
+    agent = create_archivist_agent(taskhub)
     agent_worker.add_agent(agent)
 
     logger.debug(f"✓ Registered agent: {agent.name}")
@@ -127,8 +137,9 @@ def setup_worker(worker: DurableTaskSchedulerWorker) -> DurableAIAgentWorker:
 async def main():
     """Main entry point for the worker process."""
     try:
-        with get_worker() as worker:
-            setup_worker(worker)
+        taskhub = _resolve_taskhub(None)
+        with get_worker(taskhub=taskhub) as worker:
+            setup_worker(worker, taskhub=taskhub)
             logger.info("Worker is ready and listening for requests...")
             worker.start()
             while True:  # noqa: ASYNC110

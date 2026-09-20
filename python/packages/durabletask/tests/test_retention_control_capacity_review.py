@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Typed capacity failures and rollback at real maintenance operation boundaries."""
+"""Read-only duplicate delivery is independent of capacity-protected maintenance writes."""
 
 import json
 from copy import deepcopy
@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from _execution_test_support import JsonStateProvider, RecordingChatClient
-from agent_framework import Agent
+from agent_framework import Agent, AgentResponse, Content, Message
 from test_migration_host_boundaries import (
     SOURCE_SESSION_ID,
     _completion_journal,
@@ -43,12 +43,12 @@ class _Clock(datetime):
 
 
 @pytest.fixture(autouse=True)
-def maintenance_clock_and_no_pruning(monkeypatch: pytest.MonkeyPatch) -> None:
+def maintenance_clock_and_no_pruning(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     for module in (_delivery_state, _shared_state_validation, _state_migration):
         monkeypatch.setattr(module, "datetime", _Clock)
-    monkeypatch.setattr(
-        _entities, "enforce_budget", AsyncMock(side_effect=AssertionError("Maintenance must not prune state."))
-    )
+    pruning = AsyncMock(side_effect=AssertionError("Maintenance must not prune state."))
+    monkeypatch.setattr(_entities, "enforce_budget", pruning)
+    return pruning
 
 
 @pytest.fixture(params=["oversized", "exact", "unbounded"])
@@ -126,11 +126,15 @@ def _assert_capacity(error: StateCapacityError, candidate: dict[str, Any]) -> No
     assert error.max_state_bytes == error.target_bytes == SMALL_BUDGET
 
 
-def _assert_rollback(provider: JsonStateProvider, original: Any, before: dict[str, Any]) -> None:
+def _assert_unchanged(provider: JsonStateProvider, original: Any, before: dict[str, Any]) -> None:
     assert provider.state is original
     assert provider.state.to_dict() == before
     assert provider.raw == before
     assert provider._persisted_state_snapshot == before
+
+
+def _assert_rollback(provider: JsonStateProvider, original: Any, before: dict[str, Any]) -> None:
+    _assert_unchanged(provider, original, before)
     assert provider.attempted_writes == provider.successful_writes == 0
 
 
@@ -156,10 +160,7 @@ def test_reset_retains_receipt_floor_and_rolls_back_on_capacity_failure(budget_m
     assert client.received_messages == []
 
 
-@pytest.mark.parametrize("operation", ["expire", "live-duplicate"])
-async def test_expiry_retains_receipt_floor_and_rolls_back_on_capacity_failure(
-    budget_mode: str, operation: str
-) -> None:
+def test_expiry_retains_receipt_floor_and_rolls_back_on_capacity_failure(budget_mode: str) -> None:
     before = _control_state()
     candidate = _expired_candidate(before)
     assert _size({"receipt": candidate["data"]["completionReceipts"]["expired"]}) > SMALL_BUDGET
@@ -167,24 +168,99 @@ async def test_expiry_retains_receipt_floor_and_rolls_back_on_capacity_failure(
     entity, client = _entity(provider, _budget(budget_mode, candidate))
     original = provider.state
 
-    async def invoke() -> None:
-        if operation == "expire":
-            assert entity.expire_responses() == 1
-        else:
-            response = await entity.run({"message": "must not execute", "correlationId": "live"})
-            assert response.text == "live"
-
     if budget_mode == "oversized":
         with pytest.raises(StateCapacityError) as caught:
-            await invoke()
+            entity.expire_responses()
         _assert_capacity(caught.value, candidate)
         _assert_rollback(provider, original, before)
     else:
-        await invoke()
+        assert entity.expire_responses() == 1
         assert provider.raw == provider.state.to_dict() == candidate
         assert entity.expire_responses() == 0
         assert provider.attempted_writes == provider.successful_writes == 1
     assert client.received_messages == []
+
+
+@pytest.mark.parametrize("budget_mode", ["exact", "unbounded"])
+def test_expiry_backend_failure_rolls_back_without_pruning(
+    budget_mode: str, maintenance_clock_and_no_pruning: AsyncMock
+) -> None:
+    before = _control_state()
+    provider = JsonStateProvider(before)
+    provider.fail_before_write = True
+    entity, client = _entity(provider, _budget(budget_mode, _expired_candidate(before)))
+    original = provider.state
+
+    with pytest.raises(OSError, match="injected commit failure"):
+        entity.expire_responses()
+
+    _assert_unchanged(provider, original, before)
+    assert provider.attempted_writes == 1
+    assert provider.successful_writes == 0
+    assert client.received_messages == []
+    maintenance_clock_and_no_pruning.assert_not_called()
+
+
+@pytest.mark.parametrize("fail_before_write", [False, True], ids=["healthy-backend", "failing-backend"])
+async def test_live_duplicate_returns_committed_result_without_maintenance(
+    budget_mode: str, fail_before_write: bool, maintenance_clock_and_no_pruning: AsyncMock
+) -> None:
+    before = _control_state()
+    provider = JsonStateProvider(before)
+    provider.fail_before_write = fail_before_write
+    entity, client = _entity(provider, _budget(budget_mode, _expired_candidate(before)))
+    original = provider.state
+    expected = AgentResponse(messages=[Message("assistant", ["live"])])
+
+    # An unrelated expired payload must not turn delivery into a maintenance write.
+    for _ in range(2):
+        response = await entity.run({"message": "must not execute", "correlationId": "live"})
+
+        assert response.text == "live"
+        assert response.to_dict() == expected.to_dict()
+        _assert_rollback(provider, original, before)
+        assert client.received_messages == []
+        maintenance_clock_and_no_pruning.assert_not_called()
+
+
+@pytest.mark.parametrize("fail_before_write", [False, True], ids=["healthy-backend", "failing-backend"])
+@pytest.mark.parametrize("result_state", ["available", "unavailable"])
+async def test_expired_duplicate_reports_unavailability_without_maintenance(
+    budget_mode: str, fail_before_write: bool, result_state: str, maintenance_clock_and_no_pruning: AsyncMock
+) -> None:
+    before = _control_state()
+    if result_state == "unavailable":
+        before = _expired_candidate(before)
+    provider = JsonStateProvider(before)
+    provider.fail_before_write = fail_before_write
+    entity, client = _entity(provider, _budget(budget_mode, before))
+    original = provider.state
+    expected = AgentResponse(
+        messages=[
+            Message(
+                "system",
+                [
+                    Content.from_error(
+                        message="This request completed, but its response delivery window has expired.",
+                        error_code="response_expired",
+                    )
+                ],
+            )
+        ],
+        additional_properties={
+            "durable_status": "already_completed",
+            "correlation_id": "expired",
+            "durable_outcome": "succeeded",
+        },
+    )
+
+    for _ in range(2):
+        response = await entity.run({"message": "must not execute", "correlationId": "expired"})
+
+        assert response.to_dict() == expected.to_dict()
+        _assert_rollback(provider, original, before)
+        assert client.received_messages == []
+        maintenance_clock_and_no_pruning.assert_not_called()
 
 
 def test_migrate_protects_fresh_results_and_binding_and_leaves_destination_empty(budget_mode: str) -> None:

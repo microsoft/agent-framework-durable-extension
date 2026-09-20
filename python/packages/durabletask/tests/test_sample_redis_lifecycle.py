@@ -153,6 +153,7 @@ def entrypoint(redis_service, monkeypatch):
     monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://example.invalid")
     monkeypatch.setenv("FOUNDRY_MODEL", "offline")
     monkeypatch.setenv("REDIS_CONNECTION_STRING", "redis://example.invalid")
+    monkeypatch.setenv("TASKHUB", "RedisLifecycleHub")
     worker = _load("worker.py", "worker", monkeypatch)
     providers = []
     state = SimpleNamespace(fail=None)

@@ -31,6 +31,7 @@ from ._shared_agent_state import (
     DurableAgentStateEntry,
     DurableAgentStateEntryJsonType,
     DurableAgentStateMessage,
+    DurableAgentStateUnknownEntry,
 )
 from ._state_capacity import StateCapacityError
 
@@ -331,8 +332,13 @@ def _saved_group_id(stored: DurableAgentStateMessage) -> str | None:
     return None
 
 
-def _link_atomic_groups(messages: list[Message], saved_ids: list[str | None]) -> list[int]:
-    """Unite core-inferred groups with persisted atomic links, including non-contiguous spans."""
+def _link_atomic_groups(
+    messages: list[Message],
+    saved_ids: list[str | None],
+    *,
+    additional_groups: list[list[str | None]] | None = None,
+) -> list[int]:
+    """Unite physical, persisted and additional atomic groups, including non-contiguous spans."""
     parents = list(range(len(messages)))
 
     def root(index: int) -> int:
@@ -341,7 +347,9 @@ def _link_atomic_groups(messages: list[Message], saved_ids: list[str | None]) ->
             index = parents[index]
         return index
 
-    for group_ids in (saved_ids, [_group_id(message) for message in messages]):
+    groupings: list[list[str | None]] = [saved_ids, [_group_id(message) for message in messages]]
+    groupings.extend(additional_groups or [])
+    for group_ids in groupings:
         first: dict[str, int] = {}
         for index, group_id in enumerate(group_ids):
             if group_id is not None:
@@ -363,12 +371,18 @@ def _candidates(state: DurableAgentState, *, now: datetime) -> tuple[list[Messag
     messages: list[Message] = []
     origins: list[_Origin | None] = []
     saved_ids: list[str | None] = []
+    replay_messages: list[Message] = []
+    replay_indices: list[int] = []
+    excluded_indices: set[int] = set()
+    error_ids: list[str | None] = []
     held: set[int] = set()
     reserved = {stored.message_id for entry in history for stored in entry.messages if stored.message_id}
     seen: set[str] = set()
 
     for entry_index, entry in enumerate(history):
-        known = entry.json_type in _TRANSCRIPT_KINDS
+        known = not isinstance(entry, DurableAgentStateUnknownEntry) and entry.json_type in _TRANSCRIPT_KINDS
+        failed = known and entry.is_error_response
+        replayable = known and not failed
         # Unknown entries are opaque barriers, not model-conversion inputs or deletion candidates.
         for message_index, stored in enumerate(entry.messages if known else (entry.messages or [None])):
             index = len(messages)
@@ -389,9 +403,41 @@ def _candidates(state: DurableAgentState, *, now: datetime) -> tuple[list[Messag
             messages.append(message)
             origins.append((entry_index, message_index) if eligible else None)
             saved_ids.append(_saved_group_id(stored) if stored is not None else None)
+            # Removing only the error-bearing message could make the remaining
+            # diagnostics in an ordinary response replayable on the next load.
+            error_ids.append(f"error_entry_{entry_index}" if failed else None)
+            if stored is not None and (stored.extension_data or {}).get(EXCLUDED_KEY):
+                excluded_indices.add(index)
+            if replayable:
+                # Both durable-history loading and legacy replay omit failed entries and
+                # reasoning content. Filter contents, not whole mixed-content messages.
+                replay_message = deepcopy(message)
+                replay_message.contents = [
+                    content
+                    for content in replay_message.contents
+                    if content.type not in ("reasoning", "text_reasoning")
+                ]
+                if replay_message.contents:
+                    replay_messages.append(replay_message)
+                    replay_indices.append(index)
 
     annotate_message_groups(messages, force_reannotate=True, tokenizer=CharacterEstimatorTokenizer())
-    roots = _link_atomic_groups(messages, saved_ids)
+    # A diagnostic or excluded duplicate call can mask a real declaration.
+    # Union both skip_excluded replay modes by storage occurrence, retaining
+    # physical contents/token counts for byte planning, including old errors.
+    additional_groups = [error_ids]
+    for skip_excluded in (False, True):
+        replay = [
+            (index, deepcopy(message))
+            for index, message in zip(replay_indices, replay_messages)
+            if not skip_excluded or index not in excluded_indices
+        ]
+        annotate_message_groups([message for _, message in replay], force_reannotate=True)
+        replay_ids: list[str | None] = [None] * len(messages)
+        for index, message in replay:
+            replay_ids[index] = _group_id(message)
+        additional_groups.append(replay_ids)
+    roots = _link_atomic_groups(messages, saved_ids, additional_groups=additional_groups)
     protected_groups = {roots[index] for index in held}
     candidates: list[Message] = []
     candidate_origins: list[_Origin] = []

@@ -1,12 +1,13 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Reset admission follows the load-enabled primary, not a store-only durable audit."""
+"""Reset follows the primary, while registration permits only one durable transcript owner."""
 
 import json
 from collections.abc import Sequence
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from _retention_test_support import JsonStateProvider, RecordingChatClient
@@ -179,9 +180,12 @@ def _durable_audits(count: int, *, store_messages: bool = False) -> list[Durable
     ]
     for audit in audits:
         audit.load_messages = False
-    # The reset matrix isolates admission with disabled writes. Actual audit writes and
-    # final capture are exercised separately with ONE audit, not the two-audit capture path.
+    # Multiple durable adapters are only used by rejection tests, even with writes disabled.
     return audits
+
+
+def _ordinary_audits(count: int) -> list[_ExternalHistory]:
+    return [_ExternalHistory(source_id=source, load_messages=False) for source in AUDIT_SOURCES[:count]]
 
 
 def _ordered(primary: HistoryProvider, audits: Sequence[HistoryProvider], order: str) -> list[ContextProvider]:
@@ -251,14 +255,16 @@ def _assert_rejected_without_mutation(
     store: JsonStateProvider,
     client: RecordingChatClient,
     primary: _ExternalHistory | _ExternalInMemoryHistory,
+    audits: Sequence[_ExternalHistory] = (),
 ) -> dict[str, Any]:
     cached = entity.state
     cached_data = cached.data
     session = cached_data.session
     before = _wire(store.raw)
     warm_before = _wire(cached.to_dict())
-    rows = _messages(primary.rows.messages)
-    calls = list(primary.rows.calls)
+    histories = [primary, *audits]
+    rows = [_messages(provider.rows.messages) for provider in histories]
+    calls = [list(provider.rows.calls) for provider in histories]
     model_calls = [_messages(batch) for batch in client.received_messages]
     writes = store.writes
 
@@ -270,11 +276,75 @@ def _assert_rejected_without_mutation(
     assert entity.state.data.session is session
     _assert_json_equal(entity.state.to_dict(), warm_before)
     _assert_json_equal(store.raw, before)
-    _assert_json_equal(_messages(primary.rows.messages), rows)
-    _assert_json_equal(primary.rows.calls, calls)
+    _assert_json_equal([_messages(provider.rows.messages) for provider in histories], rows)
+    _assert_json_equal([provider.rows.calls for provider in histories], calls)
     _assert_json_equal([_messages(batch) for batch in client.received_messages], model_calls)
     assert store.writes == writes
     return before
+
+
+@pytest.mark.parametrize(
+    ("kind", "audit_count"),
+    [("durable", 1), ("in-memory-autoconverted", 1), ("injected", 1), ("custom", 2), ("in-memory-subclass", 2)],
+)
+@pytest.mark.parametrize("store_messages", [False, True], ids=["no-writes", "writing"])
+@pytest.mark.parametrize("order", ["primary-first", "audit-first"])
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+def test_multiple_durable_owners_reject_registration_before_writes_or_models(
+    kind: str, audit_count: int, store_messages: bool, order: str, cold: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    primary: HistoryProvider | None = None
+    if kind == "durable":
+        primary = DurableHistoryProvider(LOCAL_SOURCE, prune_excluded=False)
+    elif kind == "in-memory-autoconverted":
+        primary = InMemoryHistoryProvider(LOCAL_SOURCE)
+    elif kind == "custom":
+        primary = _ExternalHistory()
+    elif kind == "in-memory-subclass":
+        primary = _ExternalInMemoryHistory()
+    audits = _durable_audits(audit_count, store_messages=store_messages)
+    providers: list[ContextProvider] = list(audits) if primary is None else _ordered(primary, audits, order)
+    client = RecordingChatClient()
+    agent = make_agent(client, providers)
+    original_providers = agent.context_providers
+    original = tuple(original_providers)
+    histories: list[HistoryProvider] = list(audits)
+    if primary is not None:
+        histories.append(primary)
+    flags = [
+        (provider.load_messages, provider.store_inputs, provider.store_outputs, provider.store_context_messages)
+        for provider in histories
+    ]
+    before = _wire(_seed("parked-service-session").to_dict())
+    store = JsonStateProvider(before)
+    if not cold:
+        _assert_json_equal(store.state.to_dict(), before)
+    cached = store._state_cache
+    persisted = deepcopy(store._persisted_state_snapshot)
+    write = Mock(wraps=store._set_state_dict)
+    monkeypatch.setattr(store, "_set_state_dict", write)
+
+    with pytest.raises(ValueError, match="only one DurableHistoryProvider"):
+        AgentEntity(agent, state_provider=store)
+
+    write.assert_not_called()
+    assert store.writes == 0 and client.received_messages == []
+    assert store._state_cache is cached
+    if cached is not None:
+        _assert_json_equal(cached.to_dict(), before)
+    _assert_json_equal(store._persisted_state_snapshot, persisted)
+    _assert_json_equal(store.raw, before)
+    assert agent.context_providers is original_providers
+    assert tuple(agent.context_providers) == original
+    assert [
+        (provider.load_messages, provider.store_inputs, provider.store_outputs, provider.store_context_messages)
+        for provider in histories
+    ] == flags
+    if isinstance(primary, (_ExternalHistory, _ExternalInMemoryHistory)):
+        assert primary.rows.calls == []
+        _assert_json_equal(
+            _messages(primary.rows.messages), _messages([_prior_input(), *_original_response().messages])
+        )
 
 
 @pytest.mark.parametrize("order", ["primary-first", "audit-first"])
@@ -286,12 +356,13 @@ async def test_external_primary_reset_rejects_before_mutation_and_next_turn_keep
     order: str, audit_count: int, cold: bool, kind: str, service_session_id: str | None
 ) -> None:
     primary = _ExternalHistory() if kind == "custom" else _ExternalInMemoryHistory()
-    audits = _durable_audits(audit_count)
+    audits = _ordinary_audits(audit_count)
     providers = _ordered(primary, audits, order)
     client = RecordingChatClient()
     entity, store = _entity(client, providers, cold=cold, service_session_id=service_session_id)
     configured = list(getattr(entity.agent, "context_providers", []))
     assert configured == providers
+    assert not any(isinstance(provider, DurableHistoryProvider) for provider in configured)
     assert [
         provider for provider in configured if isinstance(provider, HistoryProvider) and provider.load_messages
     ] == [primary]
@@ -300,7 +371,8 @@ async def test_external_primary_reset_rejects_before_mutation_and_next_turn_keep
     assert prior_response is not None
     _assert_json_equal(prior_response.to_dict(), _original_response().to_dict())
 
-    before = _assert_rejected_without_mutation(entity, store, client, primary)
+    before = _assert_rejected_without_mutation(entity, store, client, primary, audits)
+    writes = store.writes
     response = await entity.run({
         "message": "next question",
         "correlationId": "reset-next",
@@ -321,10 +393,15 @@ async def test_external_primary_reset_rejects_before_mutation_and_next_turn_keep
     _assert_json_equal(
         _messages(primary.rows.messages[:2]), _messages([_prior_input(), *_original_response().messages])
     )
+    for audit in audits:
+        assert audit.rows.calls == ["after", "save"]
+        _assert_json_equal(_messages(audit.rows.messages), _messages(primary.rows.messages))
+    _assert_json_equal(store.raw["data"]["conversationHistory"], before["data"]["conversationHistory"])
     _assert_json_equal(store.raw["data"]["session"], before["data"]["session"])
     for field in ("terminalResults", "completionReceipts"):
         _assert_json_equal(store.raw["data"][field][PRIOR_CORRELATION], before["data"][field][PRIOR_CORRELATION])
     _assert_json_equal(store.raw["data"]["pythonIngestion"], before["data"]["pythonIngestion"])
+    assert store.writes == writes + 1
 
 
 @pytest.mark.parametrize("order", ["primary-first", "audit-first"])
@@ -372,7 +449,6 @@ async def _assert_local_reset(
     *,
     cold: bool,
     no_pipeline: bool = False,
-    run_next_turn: bool = True,
 ) -> None:
     client = RecordingChatClient()
     entity, store = _entity(
@@ -402,11 +478,6 @@ async def _assert_local_reset(
     _assert_json_equal(duplicate.to_dict(), _original_response().to_dict())
     _assert_json_equal(store.raw, expected)
     assert store.writes == writes + 1 and client.received_messages == []
-    if not run_next_turn:
-        # Reset itself and duplicate delivery must work in either registration order.
-        # A new turn with TWO durable providers would exercise the separate first-only
-        # capture limitation, not reset admission. Single-primary controls run it below.
-        return
 
     next_input = Message("user", ["next question"], message_id="reset-next-input")
     response = await entity.run({
@@ -419,6 +490,9 @@ async def _assert_local_reset(
 
     assert response.text == "reply-1"
     assert [[message.text for message in batch] for batch in client.received_messages] == [["next question"]]
+    assert [
+        message.to_chat_message().text for entry in entity.state.data.conversation_history for message in entry.messages
+    ] == ["next question", "reply-1"]
     for field in ("terminalResults", "completionReceipts"):
         _assert_json_equal(store.raw["data"][field][PRIOR_CORRELATION], before["data"][field][PRIOR_CORRELATION])
     ingestion = deepcopy(before["data"]["pythonIngestion"])
@@ -443,23 +517,30 @@ async def test_local_reset_clears_only_history_and_session_preserving_delivery_a
 
 
 @pytest.mark.parametrize("kind", ["durable", "in-memory-autoconverted"])
-@pytest.mark.parametrize("audit_kind", ["durable", "external"])
+@pytest.mark.parametrize("audit_count", [1, 2])
 @pytest.mark.parametrize("order", ["primary-first", "audit-first"])
 @pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
 async def test_store_only_audits_do_not_make_local_primary_reset_external(
-    kind: str, audit_kind: str, order: str, cold: bool
+    kind: str, audit_count: int, order: str, cold: bool
 ) -> None:
     primary = (
         DurableHistoryProvider(LOCAL_SOURCE, prune_excluded=False)
         if kind == "durable"
         else InMemoryHistoryProvider(LOCAL_SOURCE)
     )
-    audits: list[HistoryProvider] = (
-        list(_durable_audits(1))
-        if audit_kind == "durable"
-        else [_ExternalHistory(source_id=AUDIT_SOURCES[0], load_messages=False)]
-    )
-    await _assert_local_reset(_ordered(primary, audits, order), cold=cold, run_next_turn=audit_kind != "durable")
+    audits = _ordinary_audits(audit_count)
+    await _assert_local_reset(_ordered(primary, audits, order), cold=cold)
+    for audit in audits:
+        assert audit.rows.calls == ["after", "save"]
+        assert [message.text for message in audit.rows.messages] == [
+            "prior question",
+            "prior answer",
+            "next question",
+            "reply-1",
+        ]
+        _assert_json_equal(
+            _messages(audit.rows.messages[:2]), _messages([_prior_input(), *_original_response().messages])
+        )
 
 
 class _AnnotateAfterAudit(ContextProvider):

@@ -521,6 +521,9 @@ async def test_eager_then_pressure_in_one_operation_accumulates_without_double_c
 ) -> None:
     storage = _Storage(_state())
     state = storage.state
+    # Eager pruning only admits exclusions, as flush supplies in the real path.
+    for entry in state.data.conversation_history[:2]:
+        entry.messages[0].extension_data = {"_excluded": True}
     before_messages, before_entries = _counts(state)
     initial_bytes = _size(state)
     with telemetry.retention_operation(state):
@@ -528,6 +531,9 @@ async def test_eager_then_pressure_in_one_operation_accumulates_without_double_c
             DurableHistoryBinding(storage),
             [(entry, entry.messages[0]) for entry in state.data.conversation_history[:2]],
         )
+        assert _counts(state) == (before_messages - 2, before_entries - 2)
+        assert state.data.truncation is not None
+        assert state.data.truncation["evictedMessageCount"] == 2
         eager_bytes = _size(state)
         pressure_removed = await retention.enforce_budget(state, max_state_bytes=BUDGET)
         assert pressure_removed > 0

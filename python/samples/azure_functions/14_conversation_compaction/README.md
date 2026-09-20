@@ -110,12 +110,22 @@ Follow the [common setup steps](../README.md) to install tooling, configure Foun
 credentials, and install the Python dependencies for this sample. This sample uses
 `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`.
 
-Before starting the host, replace both `durablesamplev2UNIQUE` placeholders in
-[local.settings.json.template](local.settings.json.template) with the same new, empty, uniquely
-named hub. Use an alphanumeric name, not `default`. `TASKHUB_NAME` supplies the host's hub through
-[host.json](host.json), and the `TaskHub` field in `DURABLE_TASK_SCHEDULER_CONNECTION_STRING`
-must match it. Any host-level hub override and all compatible workers and clients must use that
-same hub. Provision it first when using an Azure-hosted scheduler.
+As shipped, [host.json](host.json) has no `storageProvider` selection, so this sample uses the
+**Azure Storage backend**, with local Azurite through `AzureWebJobsStorage`. The DTS connection
+string in [local.settings.json.template](local.settings.json.template) does not select DTS.
+No DTS emulator is required for this default configuration.
+
+Before starting the host, replace `TASKHUB_NAME=durablesamplev2UNIQUE` in the template with a new,
+empty, uniquely named hub in that storage account or Azurite instance. Use an alphanumeric name,
+not `default`. `TASKHUB_NAME` supplies the hub through [host.json](host.json). Any host-level hub
+override and all compatible clients must target the same hub and backend.
+
+If you choose DTS for a new deployment, follow the
+[optional backend setup](../README.md#optional-durable-task-scheduler-backend). It requires an
+explicit `storageProvider.type="azureManaged"` and a supporting host extension. Keep the connection
+string's `TaskHub` identical to `TASKHUB_NAME` and any host override. Provision the hub first for an
+Azure-hosted scheduler, or enable dynamic hubs in the local emulator. Do not switch an existing
+deployment's backend in place. The sample's default configuration remains Azure Storage.
 
 Only after verifying isolation, set `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2`.
 Its template value is deliberately blank. Leaving the acknowledgement unset or blank intentionally

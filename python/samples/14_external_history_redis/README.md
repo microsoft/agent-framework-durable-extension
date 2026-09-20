@@ -15,7 +15,9 @@ durable entity state, using the same configuration you would write for in-proces
 The agent is built with an ordinary `HistoryProvider` that happens to be backed by Redis:
 
 ```python
-history = RedisHistoryProvider("redis://localhost:6379")
+# taskhub is the resolved, case-preserved hub used to create this worker.
+key_prefix = f"durable_sample:history:hub:{taskhub.encode('utf-8').hex()}"
+history = RedisHistoryProvider("redis://localhost:6379", key_prefix=key_prefix)
 agent = Agent(
     client=...,
     name="Archivist",
@@ -33,7 +35,8 @@ Registering that agent with the durable runtime changes nothing about how you co
   hooks. Use a distinct store-only sink to audit both branches.
 - **It receives a stable session id.** The durable entity creates a fresh session per operation but
   gives it the entity's own session id, so the provider reads and writes the same key every turn.
-  Without that, an externally keyed store would start a new conversation on each turn.
+   The worker also supplies a hub-specific prefix so reusing a session id in another hub does not
+   select the same Redis transcript.
 - **The provider owns transcript writes.** Core calls it according to `store_inputs`,
   `store_outputs`, `store_context_messages`, and `store_context_from`. This sample uses the default
   input/output storage flags and `store=False` so the provider supplies model context.
@@ -53,6 +56,25 @@ pending work, rerun the request or reconstruct an original response from Redis h
 removes the result and records `resultUnavailableAt` without changing completion facts. Idle physical
 cleanup needs an application-owned schedule or backend operation. There is no `unknown` v2 outcome.
 See the [shared state contract](../../../schemas/README.md).
+
+### Deployment namespace
+
+Both sample entrypoints pass the same resolved `TASKHUB` to worker creation and agent setup.
+Redis keys use `durable_sample:history:hub:<UTF-8 hex of TASKHUB>:<session id>`. Encoding the hub
+preserves casing and keeps delimiters in a hub name from merging with the session suffix. Restarting
+with the same hub, session id, and Redis store selects the same key. This is key isolation, not a
+metric label or proof that the durable deployment is isolated.
+
+The namespace does not include the scheduler endpoint. If hub names are reused across schedulers,
+use a **distinct Redis store or an explicit deployment-specific `key_prefix`** in the agent factory.
+Do not share the sample's hub-derived prefix in that case. Keep the chosen namespace stable across
+restarts. Hex is an encoding, not a way to hide the hub name.
+
+The plain `RedisHistoryProvider` keeps its generic `durable_sample:history` default for compatibility
+and still accepts an explicit `key_prefix`. Only this sample's agent factory opts into hub scoping.
+Existing keys under the old generic prefix are not read or migrated automatically.
+
+### External write lifecycle
 
 The [Redis provider](redis_history_provider.py) is deliberately small, using a list read and a blind
 `RPUSH`. It is not an exactly-once storage implementation. If Redis accepts an append but the durable
@@ -80,7 +102,7 @@ until entity deletion. Existing local history from before an ownership change is
 1. Start the Durable Task Scheduler emulator and Redis:
 
    ```bash
-   docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 mcr.microsoft.com/dts/dts-emulator:latest
+   docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 -e DTS_USE_DYNAMIC_TASK_HUBS=true mcr.microsoft.com/dts/dts-emulator:latest
    docker run -d --name redis -p 6379:6379 redis:latest
    ```
 
@@ -88,7 +110,8 @@ until entity deletion. Existing local history from before an ownership change is
 
    Choose a **new isolated task hub** for `TASKHUB`, shared only with compatible canonical `2.0.0`
    workers and clients. Use the same hub for the worker and client. Keep old
-   workflow histories on the old engine, not on this hub.
+   workflow histories on the old engine, not on this hub. If another scheduler reuses that hub
+   name, use a separate Redis store or change the factory's prefix as described above.
 
    Only after verifying those conditions, explicitly set the following in `.env`.
    Replace the example hub name with your new hub's name.
@@ -131,5 +154,5 @@ replay a local transcript for this agent.
 To see it directly, inspect the Redis key while the sample runs:
 
 ```bash
-docker exec -it redis redis-cli KEYS 'durable_sample:history:*'
+docker exec -it redis redis-cli --scan --pattern 'durable_sample:history:hub:*'
 ```

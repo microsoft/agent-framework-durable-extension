@@ -763,13 +763,33 @@ class DurableHistoryProvider(HistoryProvider):
             for entry in history
             if binding.correlation_id is not None and entry.correlation_id == binding.correlation_id
         )
-        originals = [(entry, entry.messages[index]) for entry, index in replayable_entries(history)]
-        messages = [_detached_message(stored) for _, stored in originals]
-        annotate_message_groups(messages, force_reannotate=True)
+        replayable = {id(entry.messages[index]) for entry, index in replayable_entries(history)}
+        originals = [(entry, stored) for entry in history for stored in entry.messages]
+        # Skipped entries still own persisted group links. Keep them as opaque
+        # placeholders, never projecting hidden content or its Python profiles.
+        messages = [
+            _detached_message(stored)
+            if id(stored) in replayable
+            else Message(
+                "system",
+                [],
+                additional_properties={GROUP_ANNOTATION_KEY: {GROUP_ID_KEY: f"retention_opaque_{index}"}},
+            )
+            for index, (_, stored) in enumerate(originals)
+        ]
+        annotate_message_groups(
+            [message for message, (_, stored) in zip(messages, originals) if id(stored) in replayable],
+            force_reannotate=True,
+        )
         groups = _link_atomic_groups(messages, [_saved_group_id(stored) for _, stored in originals])
-        protected_flags = [id(entry) in protected or stored.role == "system" for entry, stored in originals]
+        protected_flags = [
+            id(stored) not in replayable or id(entry) in protected or stored.role == "system"
+            for entry, stored in originals
+        ]
         pending_calls: dict[str, set[int]] = {}
         for index, (_, stored) in enumerate(originals):
+            if id(stored) not in replayable:
+                continue
             for content in stored.contents:
                 if isinstance(content, DurableAgentStateFunctionCallContent):
                     pending_calls.setdefault(content.call_id, set()).add(index)
@@ -781,7 +801,11 @@ class DurableHistoryProvider(HistoryProvider):
         protected_groups = {group for group, held in zip(groups, protected_flags) if held}
         # Eager pruning cannot delete included partners. Defer the whole group until
         # every member is excluded, including non-contiguous persisted atomic links.
-        excluded_messages = {id(stored) for _, stored in pruned}
+        excluded_messages = {
+            id(stored)
+            for _, stored in pruned
+            if id(stored) in replayable and (stored.extension_data or {}).get(EXCLUDED_KEY)
+        }
         protected_groups.update(
             group for (_, stored), group in zip(originals, groups) if id(stored) not in excluded_messages
         )
@@ -789,7 +813,10 @@ class DurableHistoryProvider(HistoryProvider):
         eligible = [
             (entry, stored)
             for entry, stored in pruned
-            if id(entry) not in protected and stored.role != "system" and id(stored) not in protected_messages
+            if id(stored) in excluded_messages
+            and id(entry) not in protected
+            and stored.role != "system"
+            and id(stored) not in protected_messages
         ]
         before = sum(len(entry.messages) for entry in history)
         before_entries = len(history)
