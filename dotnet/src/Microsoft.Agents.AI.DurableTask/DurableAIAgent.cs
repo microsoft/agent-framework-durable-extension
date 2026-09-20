@@ -12,6 +12,11 @@ namespace Microsoft.Agents.AI.DurableTask;
 /// <summary>
 /// A durable AIAgent implementation that uses entity methods to interact with agent entities.
 /// </summary>
+/// <remarks>
+/// Keep the concrete <see cref="DurableAIAgent"/> type when invoking this agent inside an orchestration.
+/// Its invocation overloads preserve the orchestration synchronization context, unlike the
+/// non-virtual invocation methods on <see cref="AIAgent"/>.
+/// </remarks>
 public sealed class DurableAIAgent : AIAgent
 {
     private readonly TaskOrchestrationContext _context;
@@ -37,6 +42,98 @@ public sealed class DurableAIAgent : AIAgent
     {
         AgentSessionId sessionId = this._context.NewAgentSessionId(this._agentName);
         return ValueTask.FromResult<AgentSession>(new DurableAgentSession(sessionId));
+    }
+
+    /// <inheritdoc cref="AIAgent.RunAsync(AgentSession, AgentRunOptions, CancellationToken)"/>
+    public new Task<AgentResponse> RunAsync(
+        AgentSession? session = null,
+        AgentRunOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        this.RunAsync([], session, options, cancellationToken);
+
+    /// <inheritdoc cref="AIAgent.RunAsync(string, AgentSession, AgentRunOptions, CancellationToken)"/>
+    public new Task<AgentResponse> RunAsync(
+        string message,
+        AgentSession? session = null,
+        AgentRunOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        _ = Throw.IfNullOrWhitespace(message);
+
+        return this.RunAsync(new ChatMessage(ChatRole.User, message), session, options, cancellationToken);
+    }
+
+    /// <inheritdoc cref="AIAgent.RunAsync(ChatMessage, AgentSession, AgentRunOptions, CancellationToken)"/>
+    public new Task<AgentResponse> RunAsync(
+        ChatMessage message,
+        AgentSession? session = null,
+        AgentRunOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        _ = Throw.IfNull(message);
+
+        return this.RunAsync([message], session, options, cancellationToken);
+    }
+
+    /// <inheritdoc cref="AIAgent.RunAsync(IEnumerable{ChatMessage}, AgentSession, AgentRunOptions, CancellationToken)"/>
+    public new async Task<AgentResponse> RunAsync(
+        IEnumerable<ChatMessage> messages,
+        AgentSession? session = null,
+        AgentRunOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        CurrentRunContext = new(this, session, messages as IReadOnlyCollection<ChatMessage> ?? messages.ToList(), options);
+
+        // AIAgent's non-virtual wrapper uses ConfigureAwait(false). Await the core directly
+        // so completion stays on the orchestration thread and the ambient run context is restored.
+        return await this.RunCoreAsync(messages, session, options, cancellationToken);
+    }
+
+    /// <inheritdoc cref="AIAgent.RunStreamingAsync(AgentSession, AgentRunOptions, CancellationToken)"/>
+    public new IAsyncEnumerable<AgentResponseUpdate> RunStreamingAsync(
+        AgentSession? session = null,
+        AgentRunOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        this.RunStreamingAsync([], session, options, cancellationToken);
+
+    /// <inheritdoc cref="AIAgent.RunStreamingAsync(string, AgentSession, AgentRunOptions, CancellationToken)"/>
+    public new IAsyncEnumerable<AgentResponseUpdate> RunStreamingAsync(
+        string message,
+        AgentSession? session = null,
+        AgentRunOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        _ = Throw.IfNullOrWhitespace(message);
+
+        return this.RunStreamingAsync(new ChatMessage(ChatRole.User, message), session, options, cancellationToken);
+    }
+
+    /// <inheritdoc cref="AIAgent.RunStreamingAsync(ChatMessage, AgentSession, AgentRunOptions, CancellationToken)"/>
+    public new IAsyncEnumerable<AgentResponseUpdate> RunStreamingAsync(
+        ChatMessage message,
+        AgentSession? session = null,
+        AgentRunOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        _ = Throw.IfNull(message);
+
+        return this.RunStreamingAsync([message], session, options, cancellationToken);
+    }
+
+    /// <inheritdoc cref="AIAgent.RunStreamingAsync(IEnumerable{ChatMessage}, AgentSession, AgentRunOptions, CancellationToken)"/>
+    public new async IAsyncEnumerable<AgentResponseUpdate> RunStreamingAsync(
+        IEnumerable<ChatMessage> messages,
+        AgentSession? session = null,
+        AgentRunOptions? options = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        AgentRunContext context = new(this, session, messages as IReadOnlyCollection<ChatMessage> ?? messages.ToList(), options);
+        CurrentRunContext = context;
+        await foreach (AgentResponseUpdate update in this.RunCoreStreamingAsync(messages, session, options, cancellationToken))
+        {
+            yield return update;
+            CurrentRunContext = context;
+        }
     }
 
     /// <summary>
@@ -97,7 +194,7 @@ public sealed class DurableAIAgent : AIAgent
             throw new NotSupportedException("Cancellation is not supported for durable agents.");
         }
 
-        session ??= await this.CreateSessionAsync(cancellationToken).ConfigureAwait(false);
+        session ??= await this.CreateSessionAsync(cancellationToken);
         if (session is not DurableAgentSession durableSession)
         {
             throw new ArgumentException(
