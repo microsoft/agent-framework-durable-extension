@@ -386,3 +386,45 @@ def test_explicit_shared_conversion_preserves_approval_semantics(as_instance: bo
     assert response.value is None and len(response.user_input_requests) == 1
     assert serialize_terminal_response(response) == shared
     assert serialize_agent_response(response)[KEY] == POLICY
+
+
+@pytest.mark.parametrize(("consumer", "precompleted"), CONSUMERS)
+@pytest.mark.parametrize("response_format", [{"type": "object"}, None])
+def test_approval_policy_rejects_an_embedded_response_format_before_lazy_parsing(
+    consumer: str, precompleted: bool, response_format: Any
+) -> None:
+    raw = _json(serialize_agent_response(_pending()))
+    raw.update({KEY: dict(POLICY), "response_format": response_format})
+    raw["messages"][0]["contents"].append({"type": "text", "text": '{"answer":1}'})
+    before = deepcopy(raw)
+    with pytest.raises(ValueError, match="shared-approval policy.*response_format"):
+        _consume(raw, consumer, precompleted)
+    assert raw == before
+
+
+def test_plain_legacy_approval_retains_its_json_response_format_constructor_contract() -> None:
+    raw = _json(serialize_agent_response(_pending()))
+    raw["response_format"] = {"type": "object"}
+    raw["messages"][0]["contents"].append({"type": "text", "text": '{"answer":1}'})
+    before = deepcopy(raw)
+    loaded = load_agent_response(raw)
+    assert loaded.value == {"answer": 1}
+    assert len(loaded.user_input_requests) == 1
+    assert KEY not in serialize_agent_response(loaded)
+    assert raw == before
+
+
+@pytest.mark.parametrize(("consumer", "precompleted"), CONSUMERS)
+def test_approval_policy_without_embedded_format_keeps_json_text_a_non_result(
+    consumer: str, precompleted: bool
+) -> None:
+    raw = _json(serialize_agent_response(_pending()))
+    raw[KEY] = dict(POLICY)
+    raw["messages"][0]["contents"].append({"type": "text", "text": '{"answer":1}'})
+    before = deepcopy(raw)
+    loaded = _consume(raw, consumer, precompleted)
+    for _ in range(2):
+        assert loaded.value is None and len(loaded.user_input_requests) == 1
+        snapshot = serialize_agent_response(loaded)
+        assert "value" not in snapshot and snapshot[KEY] == POLICY
+    assert raw == before
