@@ -26,6 +26,8 @@ reuse an executor id cannot collide.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from typing import Any, cast
 
 __all__ = [
     "DURABLE_NAME_PREFIX",
@@ -33,6 +35,7 @@ __all__ = [
     "SUBWORKFLOW_REQUEST_SEPARATOR",
     "WORKFLOW_INPUT_EXECUTOR_ID",
     "is_auto_generated_workflow_name",
+    "iter_subworkflow_instances",
     "parse_workflow_message_id",
     "qualify_subworkflow_request_id",
     "split_subworkflow_request_id",
@@ -296,15 +299,15 @@ def qualify_subworkflow_request_id(executor_id: str, ordinal: int, inner_request
     """Prepend one sub-workflow hop to a (possibly already-qualified) request id.
 
     Produces ``{executor_id}~{ordinal}~{inner_request_id}``. ``ordinal`` selects the
-    specific child orchestration among several a single ``WorkflowExecutor`` node may
-    dispatch in one superstep, so two children of the same executor stay distinctly
-    addressable. ``inner_request_id`` is the child's bare leaf request id or its own
+    specific child orchestration using the parent's run-wide dispatch ordinal,
+    so later invocations cannot reuse retired public addresses.
+    ``inner_request_id`` is the child's bare leaf request id or its own
     already-qualified path for deeper nesting.
 
     Args:
         executor_id: The sub-workflow node's executor id (separator-free; see
             :func:`validate_executor_id`).
-        ordinal: The child's index in the parent's ``subworkflows`` status list.
+        ordinal: The child's never-reused key in the parent's ``subworkflows`` status map.
         inner_request_id: The request id (bare or qualified) within the child.
 
     Returns:
@@ -312,6 +315,25 @@ def qualify_subworkflow_request_id(executor_id: str, ordinal: int, inner_request
     """
     sep = SUBWORKFLOW_REQUEST_SEPARATOR
     return f"{executor_id}{sep}{ordinal}{sep}{inner_request_id}"
+
+
+def iter_subworkflow_instances(children: Any) -> Iterator[tuple[int, str]]:
+    """Read active children keyed by global dispatch ordinal, never legacy slots.
+
+    Old list-shaped status cannot establish a stable address and is deliberately
+    unsupported. Falling back to enumerate would reroute a retired path to a new child.
+    """
+    if not isinstance(children, dict):
+        return
+    for key, child in cast(dict[Any, Any], children).items():
+        if not isinstance(key, str) or not isinstance(child, str) or not child:
+            continue
+        try:
+            ordinal = int(key)
+        except ValueError:
+            continue
+        if ordinal >= 0 and str(ordinal) == key:
+            yield ordinal, child
 
 
 def split_subworkflow_request_id(request_id: str) -> tuple[str, int, str] | None:

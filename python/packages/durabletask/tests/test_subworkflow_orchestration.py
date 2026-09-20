@@ -310,9 +310,9 @@ class TestResolveWorkflowAddress:
 class TestSubworkflowAddressPropagation:
     """The dispatch-side request-path prefix must match the read-side qualified id.
 
-    The orchestrator builds each child's prefix from a *per-executor* ordinal; the
-    status/respond read path qualifies a nested request by ``enumerate()``-ing the
-    ``subworkflows[executorId]`` list. These two indexes must agree or an emailed
+    The orchestrator builds each child's prefix from a run-wide ordinal; the
+    status/respond read path looks up that ordinal in the active child map.
+    These two addresses must agree or an emailed
     respond URL would resolve to the wrong child (or 404). This guards that agreement
     for the tricky case: one node fanning out to several children in one superstep.
     """
@@ -350,7 +350,7 @@ class TestSubworkflowAddressPropagation:
         top = {"root_instance_id": "root", "root_workflow_name": "moderation_pipeline", "request_path_prefix": ""}
         child_inputs, child_ids, _task_metadata = self._dispatch(top, message_count=3)
 
-        # Read side: subworkflows["review_sub"] = [child0, child1, child2]; a nested
+        # Read side: subworkflows["review_sub"] = {"0": child0, "1": child1, "2": child2}; a nested
         # request from child ``ordinal`` is qualified as review_sub~{ordinal}~{bare}.
         bare = "req-xyz"
         for ordinal, child_input in enumerate(child_inputs):
@@ -362,7 +362,7 @@ class TestSubworkflowAddressPropagation:
             assert child_address["root_instance_id"] == "root"
             assert child_address["root_workflow_name"] == "moderation_pipeline"
 
-        # Child instance ids use the *global* counter (distinct from the ordinal).
+        # Child instance ids and public addresses use the same global ordinal.
         assert child_ids == ["root::review_sub::0", "root::review_sub::1", "root::review_sub::2"]
 
     def test_prefix_accumulates_when_already_nested(self) -> None:
@@ -389,8 +389,8 @@ class TestSubworkflowAddressPropagation:
         child_inputs, child_ids, task_metadata = self._dispatch(top, message_count=3)
 
         subworkflows = _index_subworkflows(task_metadata)
-        assert subworkflows == {"review_sub": child_ids}
+        assert subworkflows == {"review_sub": {str(ordinal): child for ordinal, child in enumerate(child_ids)}}
         for ordinal, (child_id, child_input) in enumerate(zip(child_ids, child_inputs, strict=True)):
             child_address = unwrap_workflow_input(child_input)[SUBWORKFLOW_ADDRESS_KEY]
             assert child_address["request_path_prefix"] == qualify_subworkflow_request_id("review_sub", ordinal, "")
-            assert subworkflows["review_sub"][ordinal] == child_id
+            assert subworkflows["review_sub"][str(ordinal)] == child_id

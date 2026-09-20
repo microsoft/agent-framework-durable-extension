@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from types import MethodType
 from typing import Any, Protocol, cast
 
 from agent_framework import (
@@ -470,6 +471,8 @@ class DurableHistoryProvider(HistoryProvider):
             finally:
                 binding.append_response = previous_response
         binding.pending_inputs.clear()
+        # Successful delivery does not require retaining the input transcript.
+        binding.accept(context.input_messages)
 
     def finalize_failed_run(self, state: dict[str, Any]) -> None:
         """Stage actual tool results left unsaved when a later service call fails."""
@@ -1001,10 +1004,18 @@ class _ObservedHistoryProvider(HistoryProvider):
         return self.__wrapped__._get_context_messages_to_store(context)
 
     async def after_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
-        if type(self.__wrapped__).after_run is HistoryProvider.after_run:
+        after_run = self.__wrapped__.after_run
+        if (
+            isinstance(after_run, MethodType)
+            and after_run.__self__ is self.__wrapped__
+            and after_run.__func__ is HistoryProvider.after_run
+        ):
             await super().after_run(agent=agent, session=session, context=context, state=state)
+            binding = current_durable_history_binding()
+            if binding is not None and not binding.service_owns_history:
+                binding.accept(context.input_messages)
         else:
-            await self.__wrapped__.after_run(agent=agent, session=session, context=context, state=state)
+            await after_run(agent=agent, session=session, context=context, state=state)
 
 
 @contextmanager

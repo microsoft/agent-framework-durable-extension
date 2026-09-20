@@ -70,6 +70,7 @@ from agent_framework_durabletask import (
 )
 from agent_framework_durabletask._workflows.naming import (
     SUBWORKFLOW_REQUEST_SEPARATOR,
+    iter_subworkflow_instances,
     split_subworkflow_request_id,
     validate_executor_id,
     validate_workflow_name,
@@ -988,7 +989,7 @@ class AgentFunctionApp(DFAppBase):
 
         ``custom_status`` is the already-fetched custom status of the instance at the
         current level. Nested sub-workflows (listed in its ``subworkflows`` map as
-        ``{executorId: [childInstanceId, ...]}``) are fetched by id and recursed into,
+        ``{executorId: {ordinal: childInstanceId}}``) are fetched by id and recursed into,
         accumulating an ``{executorId}~{ordinal}~`` prefix so a request deep in the tree
         carries its full path and a node with several children this superstep keeps each
         child distinctly addressable. Child instances come from the trusted parent
@@ -1012,10 +1013,7 @@ class AgentFunctionApp(DFAppBase):
         if isinstance(subworkflows, dict):
             sep = SUBWORKFLOW_REQUEST_SEPARATOR
             for executor_id, child_ids in cast("dict[str, Any]", subworkflows).items():
-                children: list[Any] = cast("list[Any]", child_ids) if isinstance(child_ids, list) else []
-                for ordinal, child_instance_id in enumerate(children):
-                    if not isinstance(child_instance_id, str):
-                        continue
+                for ordinal, child_instance_id in iter_subworkflow_instances(child_ids):
                     child_status = await client.get_status(child_instance_id)
                     child_custom = child_status.custom_status if child_status else None
                     if isinstance(child_custom, dict):
@@ -1040,7 +1038,7 @@ class AgentFunctionApp(DFAppBase):
         An unqualified id (no well-formed hop) targets ``instance_id`` directly. A
         qualified id ``{executorId}~{ordinal}~{rest}`` addresses a nested sub-workflow:
         the executor's child instance id is read from this instance's ``subworkflows``
-        custom-status map (a list selected by ``ordinal``) and the remainder resolved
+        custom-status map (keyed by run-wide ``ordinal``) and the remainder resolved
         recursively. Returns ``None`` when a referenced sub-workflow child is not
         currently active (so the caller can return "not found").
         """
@@ -1057,13 +1055,8 @@ class AgentFunctionApp(DFAppBase):
         if not isinstance(subworkflows, dict):
             return None
         children_raw = cast("dict[str, Any]", subworkflows).get(executor_id)
-        if not isinstance(children_raw, list):
-            return None
-        children = cast("list[Any]", children_raw)
-        if ordinal < 0 or ordinal >= len(children):
-            return None
-        child_instance_id = children[ordinal]
-        if not isinstance(child_instance_id, str):
+        child_instance_id = dict(iter_subworkflow_instances(children_raw)).get(ordinal)
+        if child_instance_id is None:
             return None
         return await self._resolve_hitl_target(client, child_instance_id, remainder)
 

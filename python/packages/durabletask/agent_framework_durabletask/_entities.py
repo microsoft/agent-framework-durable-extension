@@ -12,6 +12,7 @@ import re
 import warnings
 from collections.abc import Mapping, Sequence
 from copy import copy, deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -30,6 +31,7 @@ from agent_framework import (
 )
 from agent_framework._sessions import is_local_history_conversation_id
 from durabletask.entities import DurableEntity
+from pydantic import BaseModel, ValidationError
 
 from ._callbacks import AgentCallbackContext, AgentResponseCallbackProtocol
 from ._configuration import validate_response_delivery_window
@@ -111,7 +113,20 @@ def _is_missing_previous_response(exc: BaseException, *, prior_error: BaseExcept
     return False
 
 
-def _retry_snapshot(session: Any, run_kwargs: dict[str, Any], provider_sources: set[str]) -> str | None:
+@dataclass(frozen=True, eq=False)
+class _RetrySnapshot:
+    payload: str
+    response_format: type[BaseModel] | None
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, _RetrySnapshot)
+            and self.payload == other.payload
+            and self.response_format is other.response_format
+        )
+
+
+def _retry_snapshot(session: Any, run_kwargs: dict[str, Any], provider_sources: set[str]) -> _RetrySnapshot | None:
     """Capture observable invocation state without retaining aliases to mutable continuations."""
     try:
         payload = deepcopy(session.to_dict())
@@ -124,10 +139,25 @@ def _retry_snapshot(session: Any, run_kwargs: dict[str, Any], provider_sources: 
                 if state.get(source) == {}:
                     state.pop(source)
         inputs = [message.to_dict() for message in run_kwargs["messages"]]
-        return json.dumps({"session": payload, "messages": inputs}, sort_keys=True, allow_nan=False)
+        options = dict(run_kwargs["options"])
+        response_format = options.get("response_format")
+        schema: type[BaseModel] | None = None
+        if isinstance(response_format, type) and issubclass(response_format, BaseModel):
+            # Core accepts a model class here. Retain its identity, not a lossy
+            # string/schema conversion, while requiring JSON for every other option.
+            schema = options.pop("response_format")
+        return _RetrySnapshot(
+            json.dumps({"session": payload, "messages": inputs, "options": options}, sort_keys=True, allow_nan=False),
+            schema,
+        )
     except (AttributeError, TypeError, ValueError, RecursionError):
         # A non-comparable custom state must never authorize a whole-run retry.
         return None
+
+
+def _validation_diagnostic(exc: ValidationError) -> str:
+    # Even validator messages, locations, titles and contexts can contain input.
+    return f"Validation failed with {exc.error_count()} error(s). Input details omitted."
 
 
 def _register_loaded_state_types() -> None:
@@ -618,7 +648,7 @@ class AgentEntity:
         succeeded = False
         original_agent = self.agent
         progress = InvocationProgress()
-        service_observation_exact = True
+        service_observer: DurableServiceClient | None = None
 
         try:
             self.agent = prepare_history_owner(self.agent, service_owns_history)
@@ -698,10 +728,10 @@ class AgentEntity:
                         ):
                             session.service_session_id = deepcopy(continuation)
 
-                    invocation_agent.client = DurableServiceClient(
+                    service_observer = DurableServiceClient(
                         invocation_agent.client, history_binding.accept, completed_service
                     )
-                    service_observation_exact = invocation_agent.client.exact_acceptance
+                    invocation_agent.client = service_observer
                     self.agent = invocation_agent
                 middleware = [DurableToolGuard(progress, enabled=run_request.enable_tool_calls)]
                 run_kwargs["middleware"] = middleware
@@ -716,6 +746,8 @@ class AgentEntity:
             )
             original_snapshot = _retry_snapshot(session, run_kwargs, provider_sources) if session is not None else None
             try:
+                if service_observer is not None:
+                    service_observer.reset_observation()
                 agent_run_response: AgentResponse = await self._invoke_agent(
                     run_kwargs=run_kwargs,
                     correlation_id=correlation_id,
@@ -727,7 +759,8 @@ class AgentEntity:
                 if (
                     session is None
                     or not service_owns_history
-                    or not service_observation_exact
+                    or service_observer is None
+                    or not service_observer.observed_request
                     or not _is_missing_previous_response(exc)
                     or progress.stream_started
                     or progress.function_started
@@ -745,6 +778,7 @@ class AgentEntity:
                     progress=progress,
                     original_snapshot=original_snapshot,
                     provider_sources=provider_sources,
+                    service_observer=service_observer,
                 )
                 if retried is None:
                     raise
@@ -760,13 +794,18 @@ class AgentEntity:
 
         except Exception as exc:
             succeeded = False
-            logger.exception("[AgentEntity.run] Agent execution failed.")
-
-            detail = f"{type(exc).__name__}: {exc}"
+            if isinstance(exc, ValidationError):
+                diagnostic = _validation_diagnostic(exc)
+                detail = diagnostic
+                logger.error("[AgentEntity.run] Agent execution failed. %s", diagnostic)
+            else:
+                logger.exception("[AgentEntity.run] Agent execution failed.")
+                diagnostic = str(exc)
+                detail = f"{type(exc).__name__}: {exc}"
             error_message = Message(
                 role="assistant",
                 contents=[
-                    Content.from_error(message=str(exc), error_code=type(exc).__name__),
+                    Content.from_error(message=diagnostic, error_code=type(exc).__name__),
                     Content.from_text(detail),
                 ],
             )
@@ -789,7 +828,7 @@ class AgentEntity:
                     unbind_durable_history(binding_token)
                 self.agent = original_agent
 
-        if uses_context_pipeline and (not succeeded or service_owns_history):
+        if uses_context_pipeline:
             staged_inputs = {
                 (stored.ingestion_occurrence, stored.ingestion_identity)
                 for entry in self.state.data.conversation_history
@@ -925,19 +964,42 @@ class AgentEntity:
         await self._notify_final_response(response, callback_context)
         return response
 
+    @staticmethod
+    def _callback_snapshot(value: Any) -> Any:
+        """Copy public response data without provider-specific raw representations.
+
+        Core's deepcopy deliberately shares raw SDK objects. Strip those references
+        from every copied Core object, including objects nested in public metadata.
+        The deepcopy memo covers aliases and cycles without following raw graphs or
+        trying to copy opaque SDK objects. Live responses are never modified.
+        """
+        memo: dict[int, Any] = {}
+        snapshot = deepcopy(value, memo)
+        for original_id, cloned in memo.items():
+            if id(cloned) == original_id:
+                continue
+            if (
+                isinstance(cloned, (Content, Message, AgentResponse, AgentResponseUpdate, ChatResponse))
+                or (_SerializableStateRoot is not None and isinstance(cloned, _SerializableStateRoot))
+            ) and hasattr(cast(Any, cloned), "raw_representation"):
+                object.__setattr__(cast(Any, cloned), "raw_representation", None)
+        return snapshot
+
     async def _notify_stream_update(
         self,
         update: AgentResponseUpdate,
         context: AgentCallbackContext | None,
     ) -> None:
-        """Invoke the streaming callback if one is registered."""
+        """Invoke the callback with a public-data snapshot, excluding all Core raw representations."""
         if self.callback is None or context is None:
             return
 
         try:
-            callback_result = self.callback.on_streaming_response_update(deepcopy(update), context)
+            callback_result = self.callback.on_streaming_response_update(self._callback_snapshot(update), context)
             if inspect.isawaitable(callback_result):
                 await callback_result
+        except ValidationError as exc:
+            logger.warning("[AgentEntity] Streaming callback raised an exception: %s", _validation_diagnostic(exc))
         except Exception as exc:
             logger.warning(
                 "[AgentEntity] Streaming callback raised an exception: %s",
@@ -950,19 +1012,16 @@ class AgentEntity:
         response: AgentResponse,
         context: AgentCallbackContext | None,
     ) -> None:
-        """Invoke the final response callback if one is registered."""
+        """Invoke the callback with a public-data snapshot, excluding all Core raw representations."""
         if self.callback is None or context is None:
             return
 
         try:
-            snapshot = deepcopy(response)
-            try:
-                snapshot.raw_representation = deepcopy(response.raw_representation)
-            except Exception:
-                snapshot.raw_representation = None
-            callback_result = self.callback.on_agent_response(snapshot, context)
+            callback_result = self.callback.on_agent_response(self._callback_snapshot(response), context)
             if inspect.isawaitable(callback_result):
                 await callback_result
+        except ValidationError as exc:
+            logger.warning("[AgentEntity] Response callback raised an exception: %s", _validation_diagnostic(exc))
         except Exception as exc:
             logger.warning(
                 "[AgentEntity] Response callback raised an exception: %s",
@@ -994,11 +1053,24 @@ class AgentEntity:
         request_message: Any,
         cause: BaseException,
         progress: InvocationProgress,
-        original_snapshot: str,
+        original_snapshot: _RetrySnapshot,
         provider_sources: set[str],
+        service_observer: DurableServiceClient,
     ) -> AgentResponse | None:
+        latest_refusal = cause
         for attempt in range(1, _REJECTED_ID_RETRIES + 1):
             await asyncio.sleep(_REJECTED_ID_BACKOFF_SECONDS * attempt)
+            if (
+                not service_observer.observed_request
+                or progress.stream_started
+                or progress.function_started
+                or progress.service_completed
+                or _retry_snapshot(run_kwargs.get("session"), run_kwargs, provider_sources) != original_snapshot
+            ):
+                raise latest_refusal
+            # Outer agent middleware can fail before reaching the client. Evidence
+            # from the preceding refusal must not authorize another whole run.
+            service_observer.reset_observation()
             try:
                 response: AgentResponse = await self._invoke_agent(
                     run_kwargs=run_kwargs,
@@ -1009,13 +1081,15 @@ class AgentEntity:
                 )
             except Exception as retry_exc:
                 if (
-                    not _is_missing_previous_response(retry_exc, prior_error=cause)
+                    not service_observer.observed_request
+                    or not _is_missing_previous_response(retry_exc, prior_error=cause)
                     or progress.stream_started
                     or progress.function_started
                     or progress.service_completed
                     or _retry_snapshot(run_kwargs.get("session"), run_kwargs, provider_sources) != original_snapshot
                 ):
                     raise
+                latest_refusal = retry_exc
                 logger.debug(
                     "[AgentEntity.run] Conversation id still not accepted for session %s (attempt %d of %d).",
                     session_id,

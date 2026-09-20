@@ -52,7 +52,9 @@ from agent_framework._workflows._edge import (
     SwitchCaseEdgeGroup,
 )
 from agent_framework._workflows._message_utils import normalize_messages_input
+from agent_framework._workflows._runner_context import WorkflowMessage
 from agent_framework._workflows._state import State
+from agent_framework._workflows._typing_utils import is_instance_of
 from pydantic import BaseModel
 
 from .._message_identity import message_identity
@@ -126,9 +128,23 @@ class TaskType(Enum):
     SUBWORKFLOW = "subworkflow"
 
 
+@dataclass(frozen=True)
+class _HITLMessageSources:
+    """Mark an admitted reply independently of application executor names."""
+
+    source_executor_ids: list[str]
+
+
 # Accept the legacy singular source at helper boundaries, while routed messages
-# carry all source IDs. This metadata is replay-local, not a checkpoint schema.
-_MessageSources = str | list[str]
+# carry all source IDs. The distinct control variant stays replay-local until
+# activity preparation writes an explicit boolean into the dispatch envelope.
+_MessageSources = str | list[str] | _HITLMessageSources
+
+
+def _source_executor_ids(sources: _MessageSources) -> list[str]:
+    if isinstance(sources, _HITLMessageSources):
+        return sources.source_executor_ids
+    return [sources] if isinstance(sources, str) else sources
 
 
 @dataclass
@@ -149,11 +165,17 @@ class TaskMetadata:
     invocation_ordinal: int = 0
     response_format: type[BaseModel] | None = None
     skip_dispatch: bool = False
+    child_ordinal: int | None = None
 
     @property
     def source_executor_ids(self) -> list[str]:
         """Return all sources, accepting the legacy singular constructor argument."""
-        return [self.source_executor_id] if isinstance(self.source_executor_id, str) else self.source_executor_id
+        return _source_executor_ids(self.source_executor_id)
+
+    @property
+    def is_hitl_response(self) -> bool:
+        """Identify admitted replies, never infer control from a business name."""
+        return isinstance(self.source_executor_id, _HITLMessageSources)
 
 
 @dataclass
@@ -451,9 +473,19 @@ def route_message_through_edge_groups(
     source_id: str,
     message: Any,
     target_id: str | None = None,
+    *,
+    executors: Mapping[str, Executor] | None = None,
 ) -> list[str]:
     """Route through graph predicates, optionally restricted to an explicit target."""
     targets: list[str] = []
+
+    def can_handle(candidate: str) -> bool:
+        if executors is None:
+            return True
+        executor = executors.get(candidate)
+        return executor is not None and bool(
+            executor.can_handle(WorkflowMessage(data=message, source_id=source_id, target_id=target_id))
+        )
 
     for group in edge_groups:
         if source_id not in group.source_executor_ids:
@@ -476,12 +508,16 @@ def route_message_through_edge_groups(
                 selected = [target_id] if target_id in selected else []
             edges_by_target = {edge.target_id: edge for edge in group.edges}
             for selected_id in selected:
-                if _evaluate_edge_condition_sync(edges_by_target[selected_id], message):
+                if can_handle(selected_id) and _evaluate_edge_condition_sync(edges_by_target[selected_id], message):
                     targets.append(selected_id)
 
         elif isinstance(group, SingleEdgeGroup):
             edge = group.edges[0]
-            if (not target_id or target_id == edge.target_id) and _evaluate_edge_condition_sync(edge, message):
+            if (
+                (not target_id or target_id == edge.target_id)
+                and can_handle(edge.target_id)
+                and _evaluate_edge_condition_sync(edge, message)
+            ):
                 targets.append(edge.target_id)
 
         elif isinstance(group, FanInEdgeGroup):
@@ -492,6 +528,7 @@ def route_message_through_edge_groups(
                 if (
                     edge.source_id == source_id
                     and (not target_id or target_id == edge.target_id)
+                    and can_handle(edge.target_id)
                     and _evaluate_edge_condition_sync(edge, message)
                 ):
                     targets.append(edge.target_id)
@@ -644,7 +681,7 @@ def _prepare_agent_task(
         )
         if isinstance(response_format, type) and issubclass(response_format, BaseModel):
             metadata.response_format = response_format
-        if any(source.startswith(SOURCE_HITL_RESPONSE) for source in metadata.source_executor_ids):
+        if metadata.is_hitl_response:
             message = _prepare_agent_hitl_message(executor_id, message, staged)
             if message is None:
                 metadata.skip_dispatch = True
@@ -691,20 +728,17 @@ def _prepare_agent_task(
         message_content = selected.text[:_AGENT_TASK_MESSAGE_PREVIEW_LIMIT]
 
     if isinstance(message, str) and message and not cached_messages:
-        context_messages = None
-        context_message_ids = None
+        # Keep the original preview, but deliver the normalized input with its
+        # occurrence receipt just like every other agent input. Dropping these
+        # keys lets a cycle ingest the initial user message a second time.
         message_content = message
-        pending_keys.clear()
 
     task = None
     if not cache_only:
         scoped_id = workflow_scoped_executor_id(workflow_name, executor_id)
-        if context_message_ids is None:
-            task = ctx.prepare_agent_task(scoped_id, message_content, ctx.instance_id, context_messages)
-        else:
-            task = ctx.prepare_agent_task(
-                scoped_id, message_content, ctx.instance_id, context_messages, context_message_ids=context_message_ids
-            )
+        task = ctx.prepare_agent_task(
+            scoped_id, message_content, ctx.instance_id, context_messages, context_message_ids=context_message_ids
+        )
     if cache_only:
         staged.cached[executor_id] = (selected_context, selected_ids)
     else:
@@ -741,9 +775,8 @@ def _prepare_activity_task(
         "executor_id": executor_id,
         "message": serialize_value(staged.forwarding_input(message) if staged else message),
         "shared_state_snapshot": shared_state_snapshot,
-        "source_executor_ids": (
-            [source_executor_id] if isinstance(source_executor_id, str) else list(source_executor_id)
-        ),
+        "source_executor_ids": list(_source_executor_ids(source_executor_id)),
+        "is_hitl_response": isinstance(source_executor_id, _HITLMessageSources),
         # host_context addresses the *root* (HTTP-routable) orchestration so an executor
         # can build a HITL respond URL (see CapturingRunnerContext.host_metadata):
         # instance_id / workflow_name name the top-level instance, and
@@ -1069,11 +1102,20 @@ def _route_result_messages(
                 isinstance(group, FanInEdgeGroup)
                 and executor_id in group.source_executor_ids
                 and (not explicit_target or explicit_target in group.target_executor_ids)
+                and workflow.executors[group.target_executor_ids[0]].can_handle(
+                    WorkflowMessage(data=[msg_to_route], source_id=executor_id)
+                )
             ):
                 fan_in_pending[group.id][executor_id].append((msg_to_route, executor_id))
                 logger.debug("Accumulated message for FanIn group %s from %s", group.id, executor_id)
 
-        targets = route_message_through_edge_groups(workflow.edge_groups, executor_id, msg_to_route, explicit_target)
+        targets = route_message_through_edge_groups(
+            workflow.edge_groups, executor_id, msg_to_route, explicit_target, executors=workflow.executors
+        )
+
+        # Core flushes the whole buffer on the arrival completing the source set.
+        # Later messages, even in this result, belong to the next batch.
+        _check_fan_in_ready(workflow, fan_in_pending, next_pending_messages)
 
         for target_id in targets:
             logger.debug("Routing to %s", target_id)
@@ -1130,8 +1172,8 @@ def _collect_hitl_requests(
             request_id = req_data.get("request_id")
             if request_id:
                 existing = pending_hitl_requests.get(request_id)
-                if existing is not None and TaskType.AGENT in (existing.task_type, result.task_type):
-                    raise ValueError("Agent user input request id collides with an outstanding workflow request.")
+                if existing is not None:
+                    raise ValueError("User input request id collides with an outstanding workflow request.")
                 pending_hitl_requests[request_id] = PendingHITLRequest(
                     request_id=request_id,
                     source_executor_id=req_data.get("source_executor_id", result.executor_id),
@@ -1165,7 +1207,7 @@ def _route_hitl_response(
         pending_messages[target_id] = []
 
     source_id = f"{SOURCE_HITL_RESPONSE}_{hitl_request.request_id}"
-    pending_messages[target_id].append((response_message, [source_id]))
+    pending_messages[target_id].append((response_message, _HITLMessageSources([source_id])))
 
     logger.debug(
         "Routed HITL response for request %s to executor %s",
@@ -1431,36 +1473,27 @@ def _prepare_agent_hitl_message(executor_id: str, message: Any, ledger: _Workflo
 
 
 def _deserialize_hitl_response(response_data: Any, response_type_str: str | None) -> Any:
-    """Deserialize a HITL response to its expected type."""
-    logger.debug(
-        "Deserializing HITL response. response_type_str=%s, response_data type=%s",
-        response_type_str,
-        type(response_data).__name__,
-    )
+    """Reconstruct and validate against the recorded server-owned request type.
 
+    The type key comes from a registered executor's request, never the reply.
+    JSON strings stay strings. Structured JSON may rebuild the declared model,
+    but a broader response handler does not relax the original request contract.
+    """
     _validate_hitl_response_json(response_data)
-    if response_data is None:
-        return None
-
-    response_data = strip_pickle_markers(response_data)
-    if response_data is None:
-        return None
-
-    if not isinstance(response_data, dict):
-        logger.debug("Response data is not a dict, returning as-is: %s", type(response_data).__name__)
-        return response_data
-
-    if response_type_str:
-        response_type = resolve_type(response_type_str)
-        if response_type:
-            logger.debug("Found response type %s, attempting reconstruction", response_type)
-            result = reconstruct_to_type(response_data, response_type, encoded=False)
-            logger.debug("Reconstructed response type: %s", type(result).__name__)
-            return result
-        logger.warning("Could not resolve response type: %s", response_type_str)
-
-    logger.debug("No type hint; returning sanitized data as-is")
-    return response_data  # type: ignore[reportUnknownVariableType]
+    response = strip_pickle_markers(response_data)
+    if response is None and response_data is not None:
+        raise ValueError("HITL response contained disallowed pickle/type markers.")
+    if not response_type_str:
+        return response
+    response_type = resolve_type(response_type_str)
+    if response_type is None:
+        raise ValueError(f"Cannot resolve the recorded HITL response type {response_type_str!r}.")
+    response = reconstruct_to_type(response, response_type, encoded=False)
+    if not is_instance_of(response, response_type):
+        raise TypeError(
+            f"HITL response type mismatch: expected {response_type.__name__}, got {type(response).__name__}."
+        )
+    return response
 
 
 # ============================================================================
@@ -1512,14 +1545,6 @@ def _prepare_all_tasks(
 
     agent_messages_by_executor: dict[str, list[tuple[str, Any, _MessageSources]]] = defaultdict(list)
 
-    # Per-executor, per-superstep ordinal for sub-workflow dispatch. This must match the
-    # read side's enumerate() index into the custom-status ``subworkflows[executorId]``
-    # list (built in this same dispatch order), so a nested pending request resolves
-    # back to the right child. It is deliberately distinct from ``subworkflow_counter``
-    # (a global, cross-superstep counter that only guarantees child-instance-id
-    # uniqueness, not addressing position).
-    per_executor_sub_ordinal: dict[str, int] = defaultdict(int)
-
     for executor_id, messages_with_sources in pending_messages.items():
         executor = workflow.executors[executor_id]
 
@@ -1532,13 +1557,12 @@ def _prepare_all_tasks(
                 # persists across supersteps, so two invocations of the same node (in the
                 # same or different supersteps, e.g. fan-out) never collide, and the ids
                 # are stable across orchestration replay.
-                child_instance_id = f"{ctx.instance_id}::{executor_id}::{subworkflow_counter[0]}"
+                ordinal = subworkflow_counter[0]
+                child_instance_id = f"{ctx.instance_id}::{executor_id}::{ordinal}"
                 subworkflow_counter[0] += 1
                 # Extend this orchestration's request-path prefix by one hop
                 # (``{executor}~{ordinal}~``) so an executor inside the child builds a
                 # respond URL qualified all the way back to the root instance.
-                ordinal = per_executor_sub_ordinal[executor_id]
-                per_executor_sub_ordinal[executor_id] += 1
                 child_address = {
                     "root_instance_id": address["root_instance_id"],
                     "root_workflow_name": address["root_workflow_name"],
@@ -1557,6 +1581,7 @@ def _prepare_all_tasks(
                         source_executor_id=source_executor_id,
                         task_type=TaskType.SUBWORKFLOW,
                         child_instance_id=child_instance_id,
+                        child_ordinal=ordinal,
                     )
                 )
         else:
@@ -1598,21 +1623,18 @@ def _prepare_all_tasks(
     return all_tasks, task_metadata_list, remaining_agent_messages
 
 
-def _index_subworkflows(task_metadata_list: list[TaskMetadata]) -> dict[str, list[str]]:
-    """Group dispatched sub-workflow child instance ids by executor id, in dispatch order.
+def _index_subworkflows(task_metadata_list: list[TaskMetadata]) -> dict[str, dict[str, str]]:
+    """Publish only this batch's children, keyed by their never-reused run ordinal.
 
-    This is the read-side addressing map the parent publishes to its custom status so the
-    status/respond endpoints can resolve a nested pending request: a request qualified as
-    ``{executorId}~{ordinal}~{bare}`` maps to ``subworkflows[executorId][ordinal]``. That
-    ordinal is the child's position in this list, which must equal the write-side ordinal
-    :func:`_prepare_all_tasks` stamps into the child's request-path prefix. Both derive from
-    the same ``task_metadata_list`` order, so building the map here in one place keeps the
-    two sides from drifting (guarded by ``test_readside_index_matches_dispatch_ordinal``).
+    Completed children disappear rather than leaving addressable stale status.
+    A later invocation cannot take their path, even when it reuses a leaf request ID.
     """
-    subworkflows: dict[str, list[str]] = {}
+    subworkflows: dict[str, dict[str, str]] = {}
     for meta in task_metadata_list:
         if meta.task_type == TaskType.SUBWORKFLOW and meta.child_instance_id is not None:
-            subworkflows.setdefault(meta.executor_id, []).append(meta.child_instance_id)
+            if meta.child_ordinal is None:
+                raise ValueError("Sub-workflow dispatch is missing its run ordinal.")
+            subworkflows.setdefault(meta.executor_id, {})[str(meta.child_ordinal)] = meta.child_instance_id
     return subworkflows
 
 
@@ -1731,7 +1753,7 @@ def run_workflow_orchestrator(
     def publish_live_status(
         state: str,
         pending_requests: dict[str, Any] | None = None,
-        subworkflows: dict[str, list[str]] | None = None,
+        subworkflows: dict[str, dict[str, str]] | None = None,
     ) -> None:
         # Publish only on live execution so events are not re-emitted on replay
         # (the custom status set during the first execution already persisted).
@@ -1743,13 +1765,21 @@ def run_workflow_orchestrator(
         # compact {state, pending_requests} status those hosts expect.
         if ctx.supports_event_streaming:
             status["events"] = live_events
+        if pending_requests is None and pending_hitl_requests:
+            pending_requests = {
+                req_id: {
+                    "request_id": req.request_id,
+                    "source_executor_id": req.source_executor_id,
+                    "data": req.request_data,
+                    "request_type": req.request_type,
+                    "response_type": req.response_type,
+                }
+                for req_id, req in pending_hitl_requests.items()
+            }
         if pending_requests is not None:
             status["pending_requests"] = pending_requests
-        # Map of {executorId: [childInstanceId, ...]} for sub-workflows dispatched this
-        # superstep. A single WorkflowExecutor node can receive several messages in one
-        # superstep and dispatch one child each, so the value is a list indexed by
-        # dispatch order; the read side qualifies nested pending requests by
-        # (executorId, ordinal) so every child stays addressable behind one top-level surface.
+        # Only active children are published. Ordinal keys are global within this
+        # parent run, not positions in a per-superstep list.
         if subworkflows:
             status["subworkflows"] = subworkflows
         validate_workflow_json(status)
@@ -1760,6 +1790,9 @@ def run_workflow_orchestrator(
     }
 
     pending_hitl_requests: dict[str, PendingHITLRequest] = {}
+    # Keep the actual SDK waits across handler iterations. Recreating a losing
+    # wait can steal or strand an event, especially during history replay.
+    pending_hitl_tasks: dict[str, Any] = {}
 
     def publish_pending_status() -> None:
         publish_live_status(
@@ -1776,7 +1809,7 @@ def run_workflow_orchestrator(
             },
         )
 
-    while pending_messages and iteration < workflow.max_iterations:
+    while (pending_messages or pending_hitl_requests) and iteration < workflow.max_iterations:
         logger.debug("Orchestrator iteration %d", iteration)
         next_pending_messages: dict[str, list[tuple[Any, _MessageSources]]] = {}
 
@@ -1784,6 +1817,7 @@ def run_workflow_orchestrator(
         all_tasks, task_metadata_list, remaining_agent_messages = _prepare_all_tasks(
             ctx, workflow, pending_messages, shared_state, subworkflow_counter, workflow_address, delivery_ledger
         )
+        dispatched = bool(all_tasks)
 
         # Agents and sub-workflows bypass the per-executor activity, so synthesize their
         # invoked event here; activity executors emit their own events from inside the
@@ -1844,6 +1878,7 @@ def run_workflow_orchestrator(
             if metadata.skip_dispatch or (isinstance(message, AgentExecutorRequest) and not message.should_respond):
                 continue
             emit_event("executor_invoked", executor_id)
+            dispatched = True
             agent_response: AgentResponse | dict[str, Any] = yield task
             logger.debug("Agent %s sequential response completed", executor_id)
 
@@ -1859,9 +1894,6 @@ def run_workflow_orchestrator(
         for result in all_results:
             _route_result_messages(result, workflow, next_pending_messages, fan_in_pending, delivery_ledger)
 
-        # Phase 6: Check fan-in readiness
-        _check_fan_in_ready(workflow, fan_in_pending, next_pending_messages)
-
         pending_messages = next_pending_messages
 
         # Publish accumulated events after each superstep. When the workflow is about
@@ -1876,78 +1908,56 @@ def run_workflow_orchestrator(
 
             publish_pending_status()
 
-            for request_id, hitl_request in list(pending_hitl_requests.items()):
-                # Wait indefinitely for the human response, matching MAF core's
-                # request_info (and the .NET durable host); the durable orchestration
-                # simply stays paused until a response arrives. A payload rejected by
-                # sanitization (pickle/type markers) does not consume the request, so
-                # the caller can resubmit a corrected response.
-                while True:
-                    logger.debug("Waiting for HITL response for request: %s", request_id)
+            while not pending_messages:
+                for request_id in pending_hitl_requests:
+                    if request_id not in pending_hitl_tasks:
+                        pending_hitl_tasks[request_id] = ctx.wait_for_external_event(request_id)
 
-                    raw_response = yield ctx.wait_for_external_event(request_id)
-                    logger.debug(
-                        "Received HITL response for request %s. Type: %s, Value: %s",
-                        request_id,
-                        type(raw_response).__name__,
-                        raw_response,
-                    )
+                if len(pending_hitl_tasks) == 1:
+                    request_id, waiting = next(iter(pending_hitl_tasks.items()))
+                    raw_response = yield waiting
+                else:
+                    completed = yield ctx.task_any(list(pending_hitl_tasks.values()))
+                    request_id = next(key for key, task in pending_hitl_tasks.items() if task is completed)
+                    raw_response = ctx.get_task_result(completed)
+                # Only the completed wait is replaced on rejection. Other pending
+                # requests and their SDK tasks survive this response and handler run.
+                del pending_hitl_tasks[request_id]
+                hitl_request = pending_hitl_requests[request_id]
 
-                    if isinstance(raw_response, str):
-                        try:
-                            raw_response = json.loads(raw_response)
-                            logger.debug("Parsed JSON string response to: %s", type(raw_response).__name__)
-                        except (json.JSONDecodeError, TypeError):
-                            logger.debug("Response is not JSON, keeping as string")
-
-                    try:
-                        _validate_hitl_response_json(raw_response)
-                    except (TypeError, ValueError):
-                        logger.warning("Rejected non-JSON HITL response for request %s", request_id)
-                        continue
-
-                    # Sanitize against pickle-marker injection in case a caller bypassed
-                    # DurableWorkflowClient.send_hitl_response and raised the external
-                    # event directly (e.g. via the raw DTS client). Sanitize *before*
-                    # consuming the request so a rejected payload can be resubmitted.
+                try:
+                    _validate_hitl_response_json(raw_response)
                     sanitized_response = strip_pickle_markers(raw_response)
                     if sanitized_response is None and raw_response is not None:
-                        logger.warning(
-                            "Rejected HITL response for request %s: payload contained "
-                            "disallowed pickle/type markers. Awaiting a new response.",
-                            request_id,
-                        )
-                        continue
-
+                        raise ValueError("HITL response contained disallowed pickle/type markers.")
                     if isinstance(workflow.executors[hitl_request.source_executor_id], AgentExecutor):
                         original_request = delivery_ledger.pending_agent_requests[hitl_request.source_executor_id][
                             request_id
                         ]
-                        try:
-                            sanitized_response = _load_agent_hitl_content(
-                                request_id, original_request, sanitized_response
-                            )
-                        except (TypeError, ValueError):
-                            logger.warning("Rejected malformed agent HITL response for request %s", request_id)
-                            continue
-
-                    del pending_hitl_requests[request_id]
-                    _route_hitl_response(
-                        hitl_request,
-                        sanitized_response,
-                        pending_messages,
+                        sanitized_response = _load_agent_hitl_content(request_id, original_request, sanitized_response)
+                    else:
+                        sanitized_response = _deserialize_hitl_response(sanitized_response, hitl_request.response_type)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Rejected malformed HITL response for request %s. Awaiting a new response.", request_id
                     )
-                    if pending_hitl_requests:
-                        publish_pending_status()
-                    break
+                    continue
 
+                del pending_hitl_requests[request_id]
+                _route_hitl_response(hitl_request, sanitized_response, pending_messages)
+
+            # Run an admitted handler now, rather than waiting for unrelated human
+            # replies. Agent multi-approval turns still wait in the delivery ledger.
             publish_live_status("running")
 
-        iteration += 1
+        # Accumulating one of several approvals does not run an executor. Do not
+        # spend the convergence budget merely waiting for the remaining replies.
+        if dispatched:
+            iteration += 1
 
     # Match the core WorkflowRunner: if the loop stopped because max_iterations
     # was reached while messages are still pending, the workflow did not converge.
-    if pending_messages:
+    if pending_messages or pending_hitl_requests:
         raise WorkflowConvergenceException(f"Workflow did not converge after {workflow.max_iterations} iterations.")
 
     # A sub-workflow returns the outputs + event timeline envelope so the parent can

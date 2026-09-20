@@ -509,7 +509,7 @@ class TestSubworkflowHitl:
         self._states(
             mock_client,
             {
-                "parent": {"state": "running", "subworkflows": {"sub": ["child-1"]}},
+                "parent": {"state": "running", "subworkflows": {"sub": {"0": "child-1"}}},
                 "child-1": {
                     "state": "waiting_for_human_input",
                     "pending_requests": {"req-9": {"request_id": "req-9", "source_executor_id": "inner_node"}},
@@ -533,7 +533,7 @@ class TestSubworkflowHitl:
                 "parent": {
                     "state": "waiting_for_human_input",
                     "pending_requests": {"top-1": {"request_id": "top-1", "source_executor_id": "outer_node"}},
-                    "subworkflows": {"sub": ["child-1"]},
+                    "subworkflows": {"sub": {"0": "child-1"}},
                 },
                 "child-1": {
                     "state": "waiting_for_human_input",
@@ -553,8 +553,8 @@ class TestSubworkflowHitl:
         self._states(
             mock_client,
             {
-                "parent": {"state": "running", "subworkflows": {"mid": ["child-1"]}},
-                "child-1": {"state": "running", "subworkflows": {"leaf": ["child-2"]}},
+                "parent": {"state": "running", "subworkflows": {"mid": {"0": "child-1"}}},
+                "child-1": {"state": "running", "subworkflows": {"leaf": {"0": "child-2"}}},
                 "child-2": {
                     "state": "waiting_for_human_input",
                     "pending_requests": {"deep": {"request_id": "deep", "source_executor_id": "leaf_node"}},
@@ -572,7 +572,7 @@ class TestSubworkflowHitl:
         """A qualified id resolves to the owning child instance and bare request id."""
         self._states(
             mock_client,
-            {"parent": {"state": "running", "subworkflows": {"sub": ["child-1"]}}},
+            {"parent": {"state": "running", "subworkflows": {"sub": {"0": "child-1"}}}},
         )
 
         workflow_client.send_hitl_response("parent", "sub~0~req-9", {"approved": True})
@@ -590,8 +590,8 @@ class TestSubworkflowHitl:
         self._states(
             mock_client,
             {
-                "parent": {"state": "running", "subworkflows": {"mid": ["child-1"]}},
-                "child-1": {"state": "running", "subworkflows": {"leaf": ["child-2"]}},
+                "parent": {"state": "running", "subworkflows": {"mid": {"0": "child-1"}}},
+                "child-1": {"state": "running", "subworkflows": {"leaf": {"0": "child-2"}}},
             },
         )
 
@@ -631,7 +631,7 @@ class TestSubworkflowHitl:
         self._states(
             mock_client,
             {
-                "parent": {"state": "running", "subworkflows": {"sub": ["child-1", "child-2"]}},
+                "parent": {"state": "running", "subworkflows": {"sub": {"0": "child-1", "1": "child-2"}}},
                 "child-1": {
                     "state": "waiting_for_human_input",
                     "pending_requests": {"r1": {"request_id": "r1", "source_executor_id": "a"}},
@@ -659,7 +659,7 @@ class TestSubworkflowHitl:
         self._states(
             mock_client,
             {
-                "parent": {"state": "running", "subworkflows": {"sub": ["child-1"]}},
+                "parent": {"state": "running", "subworkflows": {"sub": {"0": "child-1"}}},
                 "child-1": {
                     "state": "waiting_for_human_input",
                     "pending_requests": {"auto::0": {"request_id": "auto::0", "source_executor_id": "fn"}},
