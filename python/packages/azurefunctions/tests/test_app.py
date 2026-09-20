@@ -2556,7 +2556,7 @@ class TestAgentFunctionAppSubworkflowHitl:
         client = self._client({"child-1": {"pending_requests": {"inner-1": {"source_executor_id": "inner"}}}})
         parent_status = {
             "pending_requests": {"top-1": {"source_executor_id": "outer"}},
-            "subworkflows": {"sub": ["child-1"]},
+            "subworkflows": {"sub": {"0": "child-1"}},
         }
 
         gathered = await app._gather_pending_hitl_requests(client, parent_status)
@@ -2567,10 +2567,10 @@ class TestAgentFunctionAppSubworkflowHitl:
     async def test_gather_accumulates_deep_path(self) -> None:
         app = self._app()
         client = self._client({
-            "child-1": {"subworkflows": {"leaf": ["child-2"]}},
+            "child-1": {"subworkflows": {"leaf": {"0": "child-2"}}},
             "child-2": {"pending_requests": {"deep": {"source_executor_id": "leaf_node"}}},
         })
-        parent_status = {"subworkflows": {"mid": ["child-1"]}}
+        parent_status = {"subworkflows": {"mid": {"0": "child-1"}}}
 
         gathered = await app._gather_pending_hitl_requests(client, parent_status)
 
@@ -2586,7 +2586,7 @@ class TestAgentFunctionAppSubworkflowHitl:
 
     async def test_resolve_qualified_targets_child_instance(self) -> None:
         app = self._app()
-        client = self._client({"parent": {"subworkflows": {"sub": ["child-1"]}}})
+        client = self._client({"parent": {"subworkflows": {"sub": {"0": "child-1"}}}})
 
         resolved = await app._resolve_hitl_target(client, "parent", "sub~0~req-9")
 
@@ -2595,8 +2595,8 @@ class TestAgentFunctionAppSubworkflowHitl:
     async def test_resolve_deeply_qualified_targets_leaf(self) -> None:
         app = self._app()
         client = self._client({
-            "parent": {"subworkflows": {"mid": ["child-1"]}},
-            "child-1": {"subworkflows": {"leaf": ["child-2"]}},
+            "parent": {"subworkflows": {"mid": {"0": "child-1"}}},
+            "child-1": {"subworkflows": {"leaf": {"0": "child-2"}}},
         })
 
         resolved = await app._resolve_hitl_target(client, "parent", "mid~0~leaf~0~deep")
@@ -2614,11 +2614,11 @@ class TestAgentFunctionAppSubworkflowHitl:
     async def test_multiple_children_of_one_executor_stay_addressable(self) -> None:
         app = self._app()
         client = self._client({
-            "parent": {"subworkflows": {"sub": ["child-1", "child-2"]}},
+            "parent": {"subworkflows": {"sub": {"0": "child-1", "1": "child-2"}}},
             "child-1": {"pending_requests": {"r1": {"source_executor_id": "a"}}},
             "child-2": {"pending_requests": {"r2": {"source_executor_id": "b"}}},
         })
-        parent_status = {"subworkflows": {"sub": ["child-1", "child-2"]}}
+        parent_status = {"subworkflows": {"sub": {"0": "child-1", "1": "child-2"}}}
 
         gathered = await app._gather_pending_hitl_requests(client, parent_status)
         assert {qid for qid, _ in gathered} == {"sub~0~r1", "sub~1~r2"}
@@ -2630,10 +2630,10 @@ class TestAgentFunctionAppSubworkflowHitl:
     async def test_nested_double_colon_leaf_round_trips(self) -> None:
         app = self._app()
         client = self._client({
-            "parent": {"subworkflows": {"sub": ["child-1"]}},
+            "parent": {"subworkflows": {"sub": {"0": "child-1"}}},
             "child-1": {"pending_requests": {"auto::0": {"request_id": "auto::0", "source_executor_id": "fn"}}},
         })
-        parent_status = {"subworkflows": {"sub": ["child-1"]}}
+        parent_status = {"subworkflows": {"sub": {"0": "child-1"}}}
 
         gathered = await app._gather_pending_hitl_requests(client, parent_status)
         assert [qid for qid, _ in gathered] == ["sub~0~auto::0"]
