@@ -595,9 +595,7 @@ async def test_v2_default_writes_success_and_failure_with_canonical_delivery(
         raw["data"]["conversationHistory"] = _legacy_state(populated=True)["data"]["conversationHistory"]
     entity, provider, backing, agent, callback = _host(monkeypatch, surface, raw, scenario)
     response = (
-        await entity.run(_request("new"))
-        if surface == "plain"
-        else load_agent_response(entity.run(_request("new")))
+        await entity.run(_request("new")) if surface == "plain" else load_agent_response(entity.run(_request("new")))
     )
     assert isinstance(response, AgentResponse)
     assert response.additional_properties.get("durable_status") == ("error" if scenario == "failure" else None)
