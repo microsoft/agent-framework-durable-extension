@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Updated the Microsoft Agent Framework dependencies to .NET 1.22.0 and the CFS-validated Python core dependency floor to 1.18.0; Python 1.19.0 remains pending availability from the required CFS feed ([#115](https://github.com/microsoft/agent-framework-durable-extension/issues/115))
+
 - Hardened durable agent executor output handling so control-shaped JSON returned by an agent remains a raw result instead of populating executor control fields ([#101](https://github.com/microsoft/agent-framework-durable-extension/pull/101))
 - Fail durable workflows with a `MaxSuperstepsExceededException` when they reach the configurable `MaxSupersteps` limit with work still queued, instead of returning a successful partial result ([#84](https://github.com/microsoft/agent-framework-durable-extension/pull/84))
 - Fixed `ConfigureDurableAgents` and `ConfigureDurableWorkflows` ignoring the `workerBuilder` or `clientBuilder` supplied to a later call when no earlier call supplied one, so the Durable Task worker and client are now registered whichever configuration call provides them. The first non-null delegate wins; later ones are still ignored so a builder passed to several calls is only applied once. Registering an agent that a workflow already referenced now promotes it to an explicitly registered agent instead of throwing, so agents and workflows can be configured in either order ([#67](https://github.com/microsoft/agent-framework-durable-extension/pull/67))
