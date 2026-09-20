@@ -15,6 +15,7 @@ from typing import Any
 from agent_framework import (
     CheckpointStorage,
     RunnerContext,
+    ToolTypes,
     WorkflowCheckpoint,
     WorkflowEvent,
     WorkflowMessage,
@@ -43,6 +44,7 @@ class CapturingRunnerContext(RunnerContext):
         self._workflow_id: str | None = None
         self._streaming: bool = False
         self._yield_output_classifier: YieldOutputClassifier = lambda _executor_id: "output"
+        self._runtime_tools: list[ToolTypes] | None = None
 
     # region Messaging
 
@@ -149,6 +151,7 @@ class CapturingRunnerContext(RunnerContext):
         self._event_queue = asyncio.Queue()
         self._pending_request_info_events.clear()
         self._streaming = False
+        self._runtime_tools = None
 
     def set_streaming(self, streaming: bool) -> None:
         """Set streaming mode (not used in activity context)."""
@@ -157,6 +160,18 @@ class CapturingRunnerContext(RunnerContext):
     def is_streaming(self) -> bool:
         """Check if streaming mode is enabled (always False in activity context)."""
         return self._streaming
+
+    def set_runtime_tools(self, tools: list[ToolTypes] | None) -> None:
+        """Set request-scoped tools for the active workflow run."""
+        self._runtime_tools = tools
+
+    def get_runtime_tools(self) -> list[ToolTypes] | None:
+        """Get request-scoped tools for the active workflow run."""
+        return self._runtime_tools
+
+    def clear_runtime_tools(self) -> None:
+        """Clear request-scoped tools after the active workflow run."""
+        self._runtime_tools = None
 
     def set_yield_output_classifier(self, classifier: YieldOutputClassifier) -> None:
         """Set the classifier used by WorkflowContext.yield_output()."""
@@ -189,5 +204,14 @@ class CapturingRunnerContext(RunnerContext):
     async def get_pending_request_info_events(self) -> dict[str, WorkflowEvent[Any]]:
         """Get the mapping of request IDs to their corresponding request_info events."""
         return dict(self._pending_request_info_events)
+
+    async def cancel_request_info_events(self, request_ids: set[str]) -> dict[str, WorkflowEvent[Any]]:
+        """Remove and return pending request-info events selected for cancellation."""
+        cancelled: dict[str, WorkflowEvent[Any]] = {}
+        for request_id in request_ids:
+            event = self._pending_request_info_events.pop(request_id, None)
+            if event is not None:
+                cancelled[request_id] = event
+        return cancelled
 
     # endregion Request Info Events

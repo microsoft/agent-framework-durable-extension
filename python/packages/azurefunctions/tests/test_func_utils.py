@@ -123,6 +123,16 @@ class TestCapturingRunnerContext:
         context.set_streaming(False)
         assert context.is_streaming() is False
 
+    def test_runtime_tools_can_be_set_and_cleared(self, context: CapturingRunnerContext) -> None:
+        """Test request-scoped runtime tools are stored and cleared."""
+        tools = [object()]
+
+        context.set_runtime_tools(tools)
+
+        assert context.get_runtime_tools() == tools
+        context.clear_runtime_tools()
+        assert context.get_runtime_tools() is None
+
     def test_set_workflow_id(self, context: CapturingRunnerContext) -> None:
         """Test setting workflow ID."""
         context.set_workflow_id("workflow-123")
@@ -156,6 +166,19 @@ class TestCapturingRunnerContext:
 
         with pytest.raises(NotImplementedError):
             await context.build_checkpoint("test_workflow", "abc123", State(), None, 1)
+
+    @pytest.mark.asyncio
+    async def test_cancel_request_info_events_removes_selected_requests(
+        self, context: CapturingRunnerContext
+    ) -> None:
+        """Test selected pending request-info events are removed and returned."""
+        event = WorkflowEvent.request_info("request-1", "executor", {"question": "approve"}, str)
+        await context.add_request_info_event(event)
+
+        cancelled = await context.cancel_request_info_events({"request-1", "missing"})
+
+        assert cancelled == {"request-1": event}
+        assert await context.get_pending_request_info_events() == {}
 
     @pytest.mark.asyncio
     async def test_load_checkpoint_raises_not_implemented(self, context: CapturingRunnerContext) -> None:

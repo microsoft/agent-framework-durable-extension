@@ -52,7 +52,7 @@
     <PackageVersion Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.9" />
     <PackageVersion Include="Microsoft.Bcl.HashCode" Version="6.0.0" />
     <PackageVersion Include="Microsoft.Bcl.Memory" Version="10.0.5" />
-    <PackageVersion Include="System.ClientModel" Version="1.14.0" />
+    <PackageVersion Include="System.ClientModel" Version="1.15.0" />
     <PackageVersion Include="System.CodeDom" Version="10.0.0" />
     <PackageVersion Include="System.Collections.Immutable" Version="10.0.1" />
     <PackageVersion Include="System.CommandLine" Version="2.0.0-rc.2.25502.107" />
@@ -92,7 +92,7 @@
     <PackageVersion Include="Microsoft.Extensions.AI.Evaluation" Version="10.10.0" />
     <PackageVersion Include="Microsoft.Extensions.AI.Evaluation.Quality" Version="10.6.0" />
     <PackageVersion Include="Microsoft.Extensions.AI.Evaluation.Safety" Version="10.6.0" />
-    <PackageVersion Include="Microsoft.Extensions.AI.OpenAI" Version="10.6.0" />
+    <PackageVersion Include="Microsoft.Extensions.AI.OpenAI" Version="10.10.0" />
     <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="10.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Compliance.Abstractions" Version="10.10.0" />
     <PackageVersion Include="Microsoft.Extensions.Configuration" Version="10.0.1" />
@@ -132,7 +132,7 @@
     <PackageVersion Include="Microsoft.ML.OnnxRuntimeGenAI" Version="0.10.0" />
     <PackageVersion Include="Microsoft.ML.Tokenizers" Version="2.0.0" />
     <PackageVersion Include="OllamaSharp" Version="5.4.8" />
-    <PackageVersion Include="OpenAI" Version="2.10.0" />
+    <PackageVersion Include="OpenAI" Version="2.13.0" />
     <!-- Identity -->
     <PackageVersion Include="Microsoft.Identity.Client.Extensions.Msal" Version="4.84.2" />
     <!-- Workflows -->
