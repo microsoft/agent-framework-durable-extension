@@ -214,13 +214,18 @@ def test_standalone_af_input_is_not_truncated_or_deduplicated() -> None:
     ledger = _WorkflowDeliveryLedger()
     prompt = "standalone input " * 1000
 
+    occurrences: list[str] = []
     for _ in range(2):
         _, wire = _dispatch(context, host, executor, prompt, ledger)
         assert wire["message"] == prompt
-        assert "contextMessages" not in wire
-        assert RunRequest.from_dict(wire).context_messages is None
+        assert wire["contextMessages"] == [Message("user", [prompt]).to_dict()]
+        assert RunRequest.from_dict(wire).context_messages == wire["contextMessages"]
+        assert len(wire["contextMessageIds"]) == 1
+        occurrences.extend(wire["contextMessageIds"])
 
-    assert ledger.sent == {}
+    # Equal raw inputs on separate invocations remain distinct occurrences.
+    assert len(set(occurrences)) == 2
+    assert {occurrence for occurrence, _ in ledger.sent["target"]} == set(occurrences)
     assert host.call_entity.call_count == 2
 
 

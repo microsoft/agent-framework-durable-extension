@@ -288,7 +288,8 @@ def test_real_sample_subworkflow_completes_through_registered_hosts(
 
     request = backend.entity_calls[0]["request"]
     assert request["message"] == review.strip()
-    assert "contextMessages" not in request
+    assert request["contextMessages"] == [Message("user", [review.strip()]).to_dict()]
+    assert len(request["contextMessageIds"]) == 1
     assert backend.sub_orchestrator_calls[0]["instance_id"] == "root-run::sentiment_sub::0"
     assert len(backend.entity_contexts) == 1
 
