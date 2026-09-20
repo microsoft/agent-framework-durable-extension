@@ -149,10 +149,11 @@ async def test_callback_omits_raw_at_every_core_depth_but_preserves_public_graph
     entity = _entity(callback)
     context = AgentCallbackContext("agent", "correlation", "session", "question")
 
+    snapshot: AgentResponse[Any] | AgentResponseUpdate
     if isinstance(payload, AgentResponseUpdate):
         await entity._notify_stream_update(payload, context)
         assert len(callback.updates) == 1 and callback.responses == []
-        snapshot: Any = callback.updates[0]
+        snapshot = callback.updates[0]
     else:
         await entity._notify_final_response(payload, context)
         assert len(callback.responses) == 1 and callback.updates == []
@@ -165,6 +166,7 @@ async def test_callback_omits_raw_at_every_core_depth_but_preserves_public_graph
     assert snapshot.raw_representation is None
     assert all(item.raw_representation is None for item in _walk(snapshot) if isinstance(item, _CORE_TYPES))
     copied_metadata = snapshot.additional_properties
+    assert copied_metadata is not None
     assert copied_metadata["tags"] == ["metadata"]
     assert copied_metadata["none"] is None and copied_metadata["false"] is False and copied_metadata["zero"] == 0
     assert copied_metadata["cycle"]["cycle"] is copied_metadata["cycle"]
@@ -174,11 +176,14 @@ async def test_callback_omits_raw_at_every_core_depth_but_preserves_public_graph
     assert copied_message.contents[0].annotations == content.annotations
     assert copied_message.contents[0].additional_properties == {"tags": ["content"]}
     if isinstance(payload, AgentResponseUpdate):
+        assert isinstance(snapshot, AgentResponseUpdate)
         assert snapshot.message_id == "message-1"
         assert snapshot.contents[0] is copied_message.contents[0]
     else:
+        assert isinstance(snapshot, AgentResponse)
         assert snapshot.messages[0] is copied_message
         assert snapshot.usage_details == {"input_token_count": 3, "output_token_count": 2}
+        assert isinstance(snapshot.value, dict)
         assert snapshot.value["key"] == "original"
         assert snapshot.value["nested"] is copied_update
 
@@ -195,6 +200,7 @@ async def test_callback_omits_raw_at_every_core_depth_but_preserves_public_graph
     assert sdk.payload == {"key": "original", "tags": ["sdk"]}
     assert sdk.copy_attempts == 0
     if isinstance(payload, AgentResponse):
+        assert isinstance(payload.value, dict)
         assert payload.value["key"] == "original"
 
 

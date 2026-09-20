@@ -342,6 +342,7 @@ def test_genuine_agent_hitl_metadata_survives_multiple_reply_queue() -> None:
         waiting = generator.send(batch.get_result())
         for index, approval in enumerate(approvals):
             assert not waiting.is_complete and len(requests) == 1
+            assert approval.id is not None
             waits[approval.id].complete(approval.to_function_approval_response(True).to_dict())
             assert waiting.is_complete
             if index == 0:

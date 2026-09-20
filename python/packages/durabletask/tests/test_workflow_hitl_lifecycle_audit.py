@@ -313,7 +313,7 @@ def test_ready_handler_runs_without_other_reply_and_old_wait_survives(first: str
         return seen
 
     oracle = asyncio.run(core_trial())
-    executions = []
+    executions: list[tuple[list[dict[str, Any]], list[str]]] = []
     for replay in (False, True):
         transport = _Transport(replay=replay)
         workflow, seen = _siblings()
