@@ -4,9 +4,10 @@
 
 import json
 from copy import deepcopy
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from agent_framework import Content, Message
 
 from agent_framework_durabletask._response_utils import load_agent_response, preserve_input_envelope
 from agent_framework_durabletask._shared_agent_state import DurableAgentStateMessage
@@ -85,10 +86,9 @@ def test_plain_core_contents_keep_canonical_nullable_defaults(
     required: dict[str, Any],
     value: Any,
 ) -> None:
-    # No attached literal envelope means Core has no absence bit for these fields.
-    message = load_agent_response({
-        "messages": [{"role": "tool", "contents": [{"type": kind, **required, core_field: deepcopy(value)}]}]
-    }).messages[0]
+    # Construct Core objects directly. The durable loader retains mapping field presence.
+    message = Message("tool", [Content(cast(Any, kind), **{**required, core_field: deepcopy(value)})])
+    assert not hasattr(message, "_durable_original_core_message")
     assert not hasattr(message.contents[0], "_durable_original_core_content")
     stored = DurableAgentStateMessage.from_chat_message(message)
     wire = stored.to_dict()["contents"][0]
@@ -101,9 +101,9 @@ def test_plain_core_contents_keep_canonical_nullable_defaults(
 def test_plain_core_omitted_nullable_field_keeps_canonical_null(
     kind: str, core_field: str, shared_kind: str, shared_field: str, required: dict[str, Any]
 ) -> None:
-    message = load_agent_response({"messages": [{"role": "tool", "contents": [{"type": kind, **required}]}]}).messages[
-        0
-    ]
+    message = Message("tool", [Content(cast(Any, kind), **required)])
+    assert not hasattr(message, "_durable_original_core_message")
+    assert not hasattr(message.contents[0], "_durable_original_core_content")
     wire = DurableAgentStateMessage.from_chat_message(message).to_dict()["contents"][0]
     assert wire["$type"] == shared_kind
     assert shared_field in wire and wire[shared_field] is None
