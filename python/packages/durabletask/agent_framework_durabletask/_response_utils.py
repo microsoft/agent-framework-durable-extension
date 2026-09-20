@@ -108,7 +108,13 @@ def _load_content(data: Any) -> Any:
     ):
         fields["outputs"] = [_load_content(item) for item in fields["outputs"]]
     # arguments, result, output, annotations and additional_properties stay opaque.
-    return Content(**fields)
+    content = Content(**fields)
+    # Core omits None on output. Retain explicit known-field presence, not unknown
+    # shared fields or provider raw representations, across subsequent Core delivery.
+    content._durable_original_core_content = deepcopy({  # type: ignore[attr-defined]
+        name: data[name] for name in fields if name != "raw_representation"
+    })
+    return content
 
 
 def _load_message(data: Any) -> Message:
@@ -116,10 +122,15 @@ def _load_message(data: Any) -> Message:
         return data
     if not isinstance(data, Mapping):
         raise TypeError("Agent response messages must be Message instances or mappings")
-    fields = _constructor_kwargs(cast(Mapping[str, Any], data), Message)
+    data = cast(Mapping[str, Any], data)
+    fields = _constructor_kwargs(data, Message)
     if fields.get("contents") is not None:
         fields["contents"] = [_load_content(content) for content in fields["contents"]]
-    return Message(**fields)
+    message = Message(**fields)
+    message._durable_original_core_message = deepcopy({  # type: ignore[attr-defined]
+        name: data[name] for name in fields if name not in ("contents", "raw_representation")
+    })
+    return message
 
 
 def preserve_input_envelope(message: Message, raw: dict[str, Any]) -> None:
@@ -148,7 +159,7 @@ def preserve_input_envelope(message: Message, raw: dict[str, Any]) -> None:
 
 def serialize_input_content(content: Content) -> dict[str, Any]:
     """Restore inert extras from the same content occurrence, retaining current fields."""
-    current = deepcopy(content.to_dict())
+    current = deepcopy(Content.to_dict(content))
     raw_value = getattr(content, "_durable_original_core_content", None)
     raw = cast("dict[str, Any]", raw_value) if isinstance(raw_value, dict) else {}
     if raw.get("type") == content.type:
@@ -174,21 +185,58 @@ def serialize_input_content(content: Content) -> dict[str, Any]:
     return current
 
 
+def serialize_input_message(message: Message) -> dict[str, Any]:
+    """Snapshot current base fields and attached Core presence, never a shared shadow."""
+    fields = _constructor_fields(Message)
+    base = Message(message.role)
+    for name in fields:
+        if name not in ("contents", "raw_representation") and hasattr(message, name):
+            # Do not normalize a consumer's field edit through constructor defaults.
+            vars(base)[name] = getattr(message, name)
+    current = Message.to_dict(message, exclude={"contents"})
+    # Subclass exclusion rules and type identifiers cannot replace public base fields.
+    for name in fields:
+        current.pop(name, None)
+    current.update(base.to_dict(exclude={"contents"}))
+    raw_value = getattr(message, "_durable_original_core_message", None)
+    if isinstance(raw_value, dict):
+        raw = cast("dict[str, Any]", raw_value)
+        retained = {
+            name: deepcopy(value)
+            for name, value in raw.items()
+            if name not in ("contents", "raw_representation")
+            and (name not in fields or getattr(message, name, object()) == value)
+        }
+        current = {**retained, **current}
+    current["contents"] = [serialize_input_content(content) for content in message.contents]
+    return deepcopy(current)
+
+
 def _serialize_model_value(value: BaseModel) -> tuple[Any, bool]:
     """Prefer alias JSON; use field-name JSON when serialization aliases are not inputs."""
     payload = value.model_dump(mode="json", by_alias=True, round_trip=True)
     field_payload = value.model_dump(mode="json", by_alias=False, round_trip=True)
+    field_json = json.dumps(field_payload, sort_keys=True, allow_nan=False)
     try:
         restored = type(value).model_validate_json(json.dumps(payload))
     except ValidationError:
         pass
     else:
-        if restored.model_dump(mode="json", by_alias=False, round_trip=True) == field_payload:
+        if (
+            json.dumps(
+                restored.model_dump(mode="json", by_alias=False, round_trip=True), sort_keys=True, allow_nan=False
+            )
+            == field_json
+        ):
             return payload, False
     # A serialization alias may be ignored in favor of a default without raising an error.
+    # Python equality also conflates False/0 and int/float, including nested values.
     # Record the input mode, not a Python model name, for the caller's declared format.
     restored = type(value).model_validate_json(json.dumps(field_payload), by_alias=False, by_name=True)
-    if restored.model_dump(mode="json", by_alias=False, round_trip=True) != field_payload:
+    if (
+        json.dumps(restored.model_dump(mode="json", by_alias=False, round_trip=True), sort_keys=True, allow_nan=False)
+        != field_json
+    ):
         raise ValueError("Structured response value cannot round-trip through its declared model")
     return field_payload, True
 
@@ -260,8 +308,9 @@ def serialize_agent_response(response: AgentResponse[Any]) -> dict[str, Any]:
         if name not in ("value", "response_format", "raw_representation") and hasattr(response, name)
     })
     # Use the base serializer, not an override that may omit or replace public response fields.
-    payload = AgentResponse.to_dict(response)
-    payload.update(base.to_dict())
+    payload = AgentResponse.to_dict(response, exclude={"messages"})
+    payload.update(base.to_dict(exclude={"messages"}))
+    payload["messages"] = [serialize_input_message(message) for message in response.messages]
     payload.pop("response_format", None)
     payload.pop("raw_representation", None)
     payload.pop("value", None)
@@ -318,7 +367,8 @@ def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -
     Raises:
         ValueError: If agent_response is None, its optional delivery version is unsupported,
             a content envelope is malformed, or an approval policy is invalid or does
-            not describe actual pending approval Content without a structured value.
+            not describe actual pending approval Content without a structured value
+            or an embedded response_format.
         TypeError: If the input type or required constructor fields are invalid.
     """
     if agent_response is None:
@@ -344,6 +394,8 @@ def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -
             approval_policy = cast(dict[str, Any], approval_policy)
             if approval_policy != _APPROVAL_POLICY or type(approval_policy.get("version")) is not int:
                 raise ValueError("Unsupported durable shared-approval policy.")
+            if "response_format" in agent_response:
+                raise ValueError("The durable shared-approval policy does not permit response_format.")
         if _DELIVERY_VERSION_KEY in agent_response:
             version = agent_response[_DELIVERY_VERSION_KEY]
             if type(version) is not int or version != _DELIVERY_VERSION:
@@ -363,8 +415,8 @@ def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -
         # may remove or change unknown fields in the raw mailbox payload.
         data = deepcopy(agent_response)
         fields = _constructor_kwargs(data, AgentResponse)
-        # A caller-supplied format remains a constructor value, never a stored type
-        # to import. Shared profiles reject this field before reaching this loader.
+        # A legacy caller-supplied format remains a constructor value, never a type
+        # to import. Approval-policy inputs must not enable Core's lazy value parser.
         messages = fields.get("messages")
         if messages is not None and not isinstance(messages, Message):
             if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes, bytearray)):
