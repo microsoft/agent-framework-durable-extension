@@ -46,6 +46,7 @@ from ._response_utils import (
     load_agent_response,
     serialize_agent_response,
     serialize_input_content,
+    serialize_input_message,
 )
 from ._shared_state_validation import validate_timestamp
 
@@ -353,21 +354,12 @@ def _content_snapshot(content: Content) -> dict[str, Any]:
 
 
 def _message_snapshot(message: Message) -> dict[str, Any]:
-    known = _constructor_fields(Message)
     for name, value in vars(message).items():
         if name.startswith("_") or name in ("contents", "raw_representation"):
             continue
         _json_copy(value)
     contents = [_content_snapshot(content) for content in message.contents]
-    result = Message.to_dict(message)
-    raw = getattr(message, "_durable_original_core_message", None)
-    if isinstance(raw, dict):
-        retained = {
-            name: value
-            for name, value in _object(raw).items()
-            if name != "raw_representation" and (name not in known or getattr(message, name, object()) == value)
-        }
-        result = {**retained, **result}
+    result = serialize_input_message(message)
     result["contents"] = contents
     return _object(_json_copy(result))
 
@@ -376,6 +368,10 @@ def _core_snapshot(response: AgentResponse) -> dict[str, Any]:
     # Use the canonical serializer on a base object with no response format. Never
     # evaluate the source's lazy value or execute its subclass serializer/getter.
     value = response._value  # pyright: ignore[reportPrivateUsage]
+    if isinstance(value, BaseModel) and getattr(response, "_durable_value_by_name", False):
+        # The existing field-name policy owns this encoding even when this model
+        # also accepts aliases. Do not invent shared provenance on the temporary base.
+        value = value.model_dump(mode="json", by_alias=False, round_trip=True)
     if not isinstance(value, BaseModel):
         _json_copy(value)
     messages = [_message_snapshot(message) for message in response.messages]
