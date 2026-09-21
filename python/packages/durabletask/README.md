@@ -46,9 +46,16 @@ Host construction now requires an explicit isolated v2 acknowledgement. Pass
 `deployment_mode="isolated_v2"` or set `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2`.
 There is no automatic probe and no other deployment mode is accepted. This is an operator
 acknowledgement that the task hub is isolated and the clients are upgraded. It is not runtime
-proof of isolation and it cannot detect peer workers. Existing workflows and historical runs
-must stay on the old engine. Do not update a live hub in place and then replay historical runs
-through the new runtime. Use new isolated hubs and upgraded clients.
+proof of isolation and it cannot detect peer workers. A new isolated hub with matching upgraded
+workers and clients is the recommended way to keep old workers and histories off this deployment.
+
+**Start fresh workflow instances after this update, including upgrades from earlier v2 builds.**
+Workflow protocol `2` is unchanged, but checkpointed HITL admission and mixed parent/child
+scheduling change the replay action graph. Existing v2 in-flight instances and recorded histories
+are not supported by this runtime and may fail. The version marker checks start-envelope admission,
+not feature or replay compatibility. Older v2 envelopes can still pass that check. There is no
+replay migration or compatibility fallback.
+If old runs must finish, keep them on their original workers and hub rather than resume them here.
 
 The current layer includes canonical transaction state, session capture, the workflow
 protocol boundary, and a privileged manual migration path. Migration is a backend entity
@@ -142,7 +149,7 @@ retain their original input contracts. Do not wrap every orchestration payload i
 There is no automatic transcript recovery for a rejected service conversation ID. A specifically
 rejected parent response can receive up to three additional identical-request retries for a
 visibility delay, but only before any output, tool execution or session advance. The saved parent
-ID is not cleared. Old recorded workflow histories must remain on the old engine.
+ID is not cleared.
 
 Retention defaults currently preserve every physical message. Response delivery availability is
 time-bounded, with a default expiry window of `60` seconds, but receipt records are retained and
@@ -201,6 +208,34 @@ the first canonical write and later cold reads. Plain Core objects without an at
 envelope keep canonical nullable defaults. Existing shared JSON retains its raw field presence.
 New response timestamps without an offset are interpreted as UTC. Valid stored timestamps retain
 their original offset and fractional precision.
+
+### Workflow HITL and Mixed Parent/Child Execution
+
+Non-agent `request_info` replies are reconstructed and validated inside the registered response
+activity against the request's recorded type. The activity result checkpoints `accepted` or
+`invalidreply`, so orchestration replay consumes that outcome instead of rerunning reply validators.
+Rejected replies leave the request pending for a correction. Handler and output-serialization
+failures remain activity failures, not invalid replies. Activity retries or redelivery can still
+rerun application code.
+
+Response-type descriptors retain declared types and generic arguments for supported `list`, `dict`,
+`tuple`, `set`, union and `Any` annotations. Coercion and type checks follow the installed Core
+version, so nested model/dataclass and tuple/set reconstruction from JSON is Core-dependent.
+Custom types must already be loaded under their recorded module and qualified name. This does not
+make every Python annotation a supported reply type.
+
+Valid replies for known fixed request IDs can arrive before their waits are published and remain
+buffered by the service. Sending a reply acknowledges event delivery, not type validation or handler
+success. Nested replies still require an active child path recorded by the parent. Pending event
+waits survive other replies and mixed waves, including valid replies already buffered for them.
+
+Parent and child HITL requests can remain active together. Ready parent handlers and downstream
+work proceed without waiting for paused children. A ready child's downstream work can answer an
+earlier paused child. Within a ready wave, results route in dispatch order and preserve each
+result's message order. Local tasks read the dispatched state snapshot, and their reported updates
+and deletes merge in dispatch order before downstream work or reply handlers run. Across waves,
+recorded readiness defines order, not original child invocation order. This preserves durable
+snapshots, not Core's in-process visibility of other executors' uncommitted writes.
 
 ### Basic Usage Example
 

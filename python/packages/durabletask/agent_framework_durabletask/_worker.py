@@ -32,6 +32,7 @@ from ._feature_usage import FeatureIndex
 from ._response_utils import serialize_agent_response
 from ._workflows.activity import execute_workflow_activity
 from ._workflows.dt_context import DurableTaskWorkflowContext
+from ._workflows.hitl_checkpoint import execute_hitl_checkpoint, workflow_hitl_checkpoint_name
 from ._workflows.naming import (
     validate_executor_id,
     validate_workflow_name,
@@ -312,6 +313,10 @@ class DurableAIAgentWorker:
                 identities, workflow_orchestrator_name(hosted.name), namespace="orchestrator-name"
             )
             plan = plan_workflow_registration(hosted)
+            if plan.agent_executors:
+                RegistrationIdentity(hosted, hosted, "hitl-checkpoint", settings, label).reserve(
+                    identities, workflow_hitl_checkpoint_name(hosted.name), namespace="activity-name"
+                )
             for agent_executor in plan.agent_executors:
                 validate_executor_id(agent_executor.id)
                 validate_agent_configuration(agent_executor.agent)
@@ -398,6 +403,9 @@ class DurableAIAgentWorker:
         for executor in plan.activity_executors:
             self._register_executor_activity(workflow, executor)
 
+        if plan.agent_executors:
+            self._register_hitl_checkpoint(workflow)
+
         # Register this workflow's orchestrator under its per-workflow name.
         self._register_workflow_orchestrator(workflow)
 
@@ -426,6 +434,17 @@ class DurableAIAgentWorker:
 
         self._worker.add_activity(executor_activity)
         logger.debug("[DurableAIAgentWorker] Registered activity: %s", activity_name)
+
+    def _register_hitl_checkpoint(self, workflow: Workflow) -> None:
+        """Register one inert rejection checkpoint for all agents in this workflow."""
+
+        def checkpoint_activity(ctx: ActivityContext, input_data: str) -> str:
+            return execute_hitl_checkpoint(input_data)
+
+        name = workflow_hitl_checkpoint_name(workflow.name)
+        checkpoint_activity.__name__ = name
+        checkpoint_activity.__qualname__ = name
+        self._worker.add_activity(checkpoint_activity)
 
     def _register_workflow_orchestrator(self, workflow: Workflow) -> None:
         """Register a workflow's orchestrator function under its per-workflow name."""

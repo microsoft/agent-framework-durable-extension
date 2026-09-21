@@ -6,8 +6,11 @@ These samples illustrate the Durable extensibility for Agent Framework running i
 > [!WARNING]
 > This branch requires `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2` before `func start`.
 > Use only a **new, empty, uniquely named task hub** with matching upgraded clients and no old
-> or unrelated workers. Keep existing instances and recorded histories on their original hub
-> and engine. This is an operator acknowledgement, not proof of isolation or production readiness.
+> or unrelated workers. Start fresh workflow instances after this update, including upgrades from
+> earlier v2 builds. Protocol `2` is unchanged, but older v2 in-flight replay is unsupported and may
+> fail under the revised HITL checkpoints and mixed parent/child scheduling. The marker checks start
+> admission, not feature or replay compatibility. Keep old runs on their original deployment if
+> they must finish. This is an operator acknowledgement, not proof of isolation or production readiness.
 > There is no automatic compatibility fallback or history migration. See the shared
 > [Environment Configuration](../README.md#environment-configuration) for the deployment requirements.
 

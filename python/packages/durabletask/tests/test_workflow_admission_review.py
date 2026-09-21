@@ -385,6 +385,9 @@ def test_public_hitl_rejection_keeps_request_pending_for_corrected_reply(
     waiting = generator.send(batch.get_result())
     assert not waiting.is_complete and len(calls) == 1
     client = Mock(spec=TaskHubGrpcClient)
+    client.get_orchestration_state.side_effect = lambda instance: Mock(
+        serialized_custom_status=json.dumps(host.statuses[-1])
+    )
     public = DurableWorkflowClient(client)
     before = deepcopy(marker)
 
@@ -394,14 +397,43 @@ def test_public_hitl_rejection_keeps_request_pending_for_corrected_reply(
     client.raise_orchestration_event.assert_not_called()
     assert marker == before and not waiting.is_complete and len(calls) == 1
     assert set(host.statuses[-1]["pending_requests"]) == {"approval"}
-    # Bypassing the public API must still leave the same request open.
+    pending = deepcopy(host.statuses[-1]["pending_requests"])
+    # Raw malformed events now checkpoint rejection before rearming the wait.
     waiting.complete(marker)
-    waiting = generator.send(waiting.get_result())
-    assert not waiting.is_complete and len(calls) == 1
+    rejected = generator.send(waiting.get_result())
+    assert rejected.is_complete and len(calls) == 2
+    assert [json.loads(value) for value in rejected.get_result()] == [
+        {
+            "hitl_admission": {"request_id": "approval", "status": "invalidreply"},
+            "sent_messages": [],
+            "outputs": [],
+            "events": [],
+            "shared_state_updates": {},
+            "shared_state_deletes": [],
+            "pending_request_info_events": [],
+        }
+    ]
+    assert calls[-1]["input"]["message"] == {
+        "request_id": "approval",
+        "original_request": "decision",
+        "response": None,
+        "response_type": "builtins:object",
+        "validation_error": True,
+    }
+    assert host.statuses[-1]["pending_requests"] == pending
+    waiting_again = generator.send(rejected.get_result())
+    assert waiting_again is not waiting and not waiting_again.is_complete
+    assert host.statuses[-1]["pending_requests"] == pending
     public.send_hitl_response("root-run", "approval", deepcopy(answer))
     client.raise_orchestration_event.assert_called_once_with("root-run", event_name="approval", data=expected)
-    waiting.complete(client.raise_orchestration_event.call_args.kwargs["data"])
-    output = deserialize_workflow_output(_drain(generator, waiting.get_result()))
+    waiting_again.complete(client.raise_orchestration_event.call_args.kwargs["data"])
+    accepted = generator.send(waiting_again.get_result())
+    assert accepted.is_complete and len(calls) == 3
+    assert [json.loads(value)["hitl_admission"] for value in accepted.get_result()] == [
+        {"request_id": "approval", "status": "accepted"}
+    ]
+    output = deserialize_workflow_output(_drain(generator, accepted.get_result()))
     assert output == [{"response": expected, "response_type": type(expected).__name__}]
-    assert len(calls) == 2
+    assert len(calls) == 3 and not host.statuses[-1].get("pending_requests")
+    assert [call.args[0] for call in host.wait_for_external_event.call_args_list] == ["approval", "approval"]
     assert calls[0]["input"]["source_executor_ids"] == [SOURCE_WORKFLOW_START]

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import inspect
 import json
 import logging
@@ -103,16 +104,24 @@ def _is_missing_previous_response(exc: BaseException, *, prior_error: BaseExcept
 class _RetrySnapshot:
     payload: str
     response_format: type[BaseModel] | None
+    default_response_format: type[BaseModel] | None
 
     def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, _RetrySnapshot)
             and self.payload == other.payload
             and self.response_format is other.response_format
+            and self.default_response_format is other.default_response_format
         )
 
 
-def _retry_snapshot(session: Any, run_kwargs: dict[str, Any], provider_sources: set[str]) -> _RetrySnapshot | None:
+def _retry_snapshot(
+    session: Any,
+    run_kwargs: dict[str, Any],
+    provider_sources: set[str],
+    *,
+    default_options: Mapping[str, Any] | None = None,
+) -> _RetrySnapshot | None:
     """Capture observable invocation state without retaining aliases to mutable continuations."""
     try:
         payload = deepcopy(session.to_dict())
@@ -132,18 +141,48 @@ def _retry_snapshot(session: Any, run_kwargs: dict[str, Any], provider_sources: 
             # Core accepts a model class here. Retain its identity, not a lossy
             # string/schema conversion, while requiring JSON for every other option.
             schema = options.pop("response_format")
+        defaults = dict(default_options or {})
+        default_format = defaults.get("response_format")
+        default_schema: type[BaseModel] | None = None
+        if isinstance(default_format, type) and issubclass(default_format, BaseModel):
+            default_schema = defaults.pop("response_format")
         return _RetrySnapshot(
-            json.dumps({"session": payload, "messages": inputs, "options": options}, sort_keys=True, allow_nan=False),
+            json.dumps(
+                {"session": payload, "messages": inputs, "options": options, "default_options": defaults},
+                sort_keys=True,
+                allow_nan=False,
+            ),
             schema,
+            default_schema,
         )
     except (AttributeError, TypeError, ValueError, RecursionError):
         # A non-comparable custom state must never authorize a whole-run retry.
         return None
 
 
-def _validation_diagnostic(exc: ValidationError) -> str:
-    # Even validator messages, locations, titles and contexts can contain input.
-    return f"Validation failed with {exc.error_count()} error(s). Input details omitted."
+def _validation_diagnostic(exc: BaseException) -> str | None:
+    """Recognize validation failures without rendering their wrappers or tracebacks."""
+    # Exception groups are built in only on Python 3.11+. Do not duck-type
+    # arbitrary exceptions' attributes as a collection of child exceptions.
+    group_type = getattr(builtins, "BaseExceptionGroup", None)
+    pending = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ValidationError):
+            # Even validator messages, locations, titles and contexts can contain input.
+            return f"Validation failed with {current.error_count()} error(s). Input details omitted."
+        if group_type is not None and isinstance(current, group_type):
+            # Read the built-in slot, not a subclass's replacement property.
+            pending.extend(group_type.exceptions.__get__(current))
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+    return None
 
 
 def _register_loaded_state_types() -> None:
@@ -700,7 +739,16 @@ class AgentEntity:
                 if uses_context_pipeline
                 else set[str]()
             )
-            original_snapshot = _retry_snapshot(session, run_kwargs, provider_sources) if session is not None else None
+            original_snapshot = (
+                _retry_snapshot(
+                    session,
+                    run_kwargs,
+                    provider_sources,
+                    default_options=getattr(self.agent, "default_options", None),
+                )
+                if session is not None
+                else None
+            )
             try:
                 if service_observer is not None:
                     service_observer.reset_observation()
@@ -722,7 +770,14 @@ class AgentEntity:
                     or progress.function_started
                     or progress.service_completed
                     or original_snapshot is None
-                    or _retry_snapshot(session, run_kwargs, provider_sources) != original_snapshot
+                    or _retry_snapshot(
+                        session,
+                        run_kwargs,
+                        provider_sources,
+                        default_options=getattr(self.agent, "default_options", None),
+                    )
+                    != original_snapshot
+                    or not service_observer._expect_retry()  # pyright: ignore[reportPrivateUsage]
                 ):
                     raise
                 retried = await self._retry_rejected_conversation_id(
@@ -741,17 +796,20 @@ class AgentEntity:
                 agent_run_response = retried
 
             succeeded = not is_terminal_agent_response(agent_run_response)
-            if (
-                succeeded
-                and not agent_run_response.user_input_requests
-                and agent_run_response.additional_properties.get("durable_status") != "accepted"
-            ):
-                _ = agent_run_response.value
+            # Staging enforces the lossless value policy, including revalidation of
+            # an already parsed model. This is part of execution failure handling,
+            # not a host failure after an otherwise successful invocation. The
+            # state writer stages atomically and the enclosing run still owns commit.
+            self.state.record_response(
+                correlation_id,
+                agent_run_response,
+                delivery_window_seconds=self._response_delivery_window_seconds,
+            )
 
         except Exception as exc:
             succeeded = False
-            if isinstance(exc, ValidationError):
-                diagnostic = _validation_diagnostic(exc)
+            diagnostic = _validation_diagnostic(exc)
+            if diagnostic is not None:
                 detail = diagnostic
                 logger.error("[AgentEntity.run] Agent execution failed. %s", diagnostic)
             else:
@@ -769,6 +827,11 @@ class AgentEntity:
                 messages=[error_message],
                 created_at=datetime.now(tz=timezone.utc).isoformat(),
                 additional_properties={"durable_status": "error", "correlation_id": correlation_id},
+            )
+            self.state.record_response(
+                correlation_id,
+                agent_run_response,
+                delivery_window_seconds=self._response_delivery_window_seconds,
             )
 
         finally:
@@ -801,11 +864,6 @@ class AgentEntity:
                         if stored.ingestion_identity not in fingerprints:
                             fingerprints.append(stored.ingestion_identity)
                         self.state.data.ingested_messages[identity] = fingerprints
-        self.state.record_response(
-            correlation_id,
-            agent_run_response,
-            delivery_window_seconds=self._response_delivery_window_seconds,
-        )
         if not uses_context_pipeline and succeeded:
             self.state.data.conversation_history.append(
                 DurableAgentStateResponse.from_run_response(correlation_id, agent_run_response)
@@ -954,14 +1012,16 @@ class AgentEntity:
             callback_result = self.callback.on_streaming_response_update(self._callback_snapshot(update), context)
             if inspect.isawaitable(callback_result):
                 await callback_result
-        except ValidationError as exc:
-            logger.warning("[AgentEntity] Streaming callback raised an exception: %s", _validation_diagnostic(exc))
         except Exception as exc:
-            logger.warning(
-                "[AgentEntity] Streaming callback raised an exception: %s",
-                exc,
-                exc_info=True,
-            )
+            diagnostic = _validation_diagnostic(exc)
+            if diagnostic is not None:
+                logger.warning("[AgentEntity] Streaming callback raised an exception: %s", diagnostic)
+            else:
+                logger.warning(
+                    "[AgentEntity] Streaming callback raised an exception: %s",
+                    exc,
+                    exc_info=True,
+                )
 
     async def _notify_final_response(
         self,
@@ -976,14 +1036,16 @@ class AgentEntity:
             callback_result = self.callback.on_agent_response(self._callback_snapshot(response), context)
             if inspect.isawaitable(callback_result):
                 await callback_result
-        except ValidationError as exc:
-            logger.warning("[AgentEntity] Response callback raised an exception: %s", _validation_diagnostic(exc))
         except Exception as exc:
-            logger.warning(
-                "[AgentEntity] Response callback raised an exception: %s",
-                exc,
-                exc_info=True,
-            )
+            diagnostic = _validation_diagnostic(exc)
+            if diagnostic is not None:
+                logger.warning("[AgentEntity] Response callback raised an exception: %s", diagnostic)
+            else:
+                logger.warning(
+                    "[AgentEntity] Response callback raised an exception: %s",
+                    exc,
+                    exc_info=True,
+                )
 
     def _build_callback_context(
         self,
@@ -1014,6 +1076,7 @@ class AgentEntity:
         service_observer: DurableServiceClient,
     ) -> AgentResponse | None:
         latest_refusal = cause
+        refusals = [cause]
         for attempt in range(1, _REJECTED_ID_RETRIES + 1):
             await asyncio.sleep(_REJECTED_ID_BACKOFF_SECONDS * attempt)
             if (
@@ -1021,11 +1084,20 @@ class AgentEntity:
                 or progress.stream_started
                 or progress.function_started
                 or progress.service_completed
-                or _retry_snapshot(run_kwargs.get("session"), run_kwargs, provider_sources) != original_snapshot
+                or _retry_snapshot(
+                    run_kwargs.get("session"),
+                    run_kwargs,
+                    provider_sources,
+                    default_options=getattr(self.agent, "default_options", None),
+                )
+                != original_snapshot
             ):
                 raise latest_refusal
             # Outer agent middleware can fail before reaching the client. Evidence
             # from the preceding refusal must not authorize another whole run.
+            # Retain the expected leaf request across reset. Providers/middleware
+            # may run again before that comparison, so their external hooks are
+            # not atomic or proven side-effect-free by these guards.
             service_observer.reset_observation()
             try:
                 response: AgentResponse = await self._invoke_agent(
@@ -1038,14 +1110,24 @@ class AgentEntity:
             except Exception as retry_exc:
                 if (
                     not service_observer.observed_request
-                    or not _is_missing_previous_response(retry_exc, prior_error=cause)
+                    # A stale cause/context from ANY earlier attempt cannot
+                    # authorize another run. A fresh top-level structured code
+                    # still takes precedence over its old exception context.
+                    or not all(_is_missing_previous_response(retry_exc, prior_error=prior) for prior in refusals)
                     or progress.stream_started
                     or progress.function_started
                     or progress.service_completed
-                    or _retry_snapshot(run_kwargs.get("session"), run_kwargs, provider_sources) != original_snapshot
+                    or _retry_snapshot(
+                        run_kwargs.get("session"),
+                        run_kwargs,
+                        provider_sources,
+                        default_options=getattr(self.agent, "default_options", None),
+                    )
+                    != original_snapshot
                 ):
                     raise
                 latest_refusal = retry_exc
+                refusals.append(retry_exc)
                 logger.debug(
                     "[AgentEntity.run] Conversation id still not accepted for session %s (attempt %d of %d).",
                     session_id,

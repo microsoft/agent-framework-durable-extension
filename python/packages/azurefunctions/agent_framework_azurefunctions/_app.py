@@ -57,6 +57,10 @@ from agent_framework_durabletask import (
     validate_workflow_start_input,
     wrap_workflow_input,
 )
+from agent_framework_durabletask._workflows.hitl_checkpoint import (
+    execute_hitl_checkpoint,
+    workflow_hitl_checkpoint_name,
+)
 from agent_framework_durabletask._workflows.naming import (
     SUBWORKFLOW_REQUEST_SEPARATOR,
     iter_subworkflow_instances,
@@ -431,6 +435,11 @@ class AgentFunctionApp(DFAppBase):
             identity.reserve(identities, orchestrator_name, namespace="orchestrator-name")
             identity.reserve(identities, orchestrator_name, namespace="function-name")
             plan = plan_workflow_registration(hosted)
+            if plan.agent_executors:
+                checkpoint = RegistrationIdentity(hosted, hosted, "hitl-checkpoint", settings, label)
+                checkpoint_name = workflow_hitl_checkpoint_name(hosted.name)
+                checkpoint.reserve(identities, checkpoint_name, namespace="activity-name")
+                checkpoint.reserve(identities, checkpoint_name, namespace="function-name")
             for agent_executor in plan.agent_executors:
                 validate_executor_id(agent_executor.id)
                 self._preflight_agent(
@@ -579,6 +588,9 @@ class AgentFunctionApp(DFAppBase):
             # separately and driven as child orchestrations.
             self._setup_executor_activity(workflow, executor.id)
 
+        if plan.agent_executors:
+            self._setup_hitl_checkpoint(workflow)
+
         self._setup_workflow_orchestration(workflow)
 
     def _setup_executor_activity(self, workflow: Workflow, executor_id: str) -> None:
@@ -615,6 +627,16 @@ class AgentFunctionApp(DFAppBase):
 
         # Ensure the function is registered (prevents garbage collection)
         _ = executor_activity
+
+    def _setup_hitl_checkpoint(self, workflow: Workflow) -> None:
+        """Register one inert rejection checkpoint for all agents in this workflow."""
+
+        @self.function_name(workflow_hitl_checkpoint_name(workflow.name))
+        @self.activity_trigger(input_name="inputData")
+        def checkpoint_activity(inputData: str) -> str:
+            return execute_hitl_checkpoint(inputData)
+
+        _ = checkpoint_activity
 
     def _setup_workflow_orchestration(self, workflow: Workflow) -> None:
         """Register a workflow's orchestrator function under its ``dafx-{name}`` name.
@@ -764,7 +786,7 @@ class AgentFunctionApp(DFAppBase):
             # respondUrl always targets this top-level instance, so the caller has a
             # single addressing surface.
             custom_status = status.custom_status
-            if isinstance(custom_status, dict):
+            if isinstance(custom_status, dict) and not self._is_terminal_hitl_state(status):
                 gathered = await self._gather_pending_hitl_requests(client, cast("dict[str, Any]", custom_status))
                 if gathered:
                     base_url, route_prefix = split_request_url(req.url)
@@ -810,6 +832,8 @@ class AgentFunctionApp(DFAppBase):
             status = await client.get_status(instance_id)
             if not self._is_owned_orchestration(status, workflow_name):
                 return self._build_error_response("Instance not found", status_code=404)
+            if self._is_terminal_hitl_state(status):
+                return self._build_error_response("Workflow instance has a terminal runtime status", status_code=409)
 
             try:
                 response_data = req.get_json()
@@ -854,6 +878,17 @@ class AgentFunctionApp(DFAppBase):
         _ = get_workflow_status
         _ = send_hitl_response
 
+    @staticmethod
+    def _is_terminal_hitl_state(status: Any) -> bool:
+        """Do not infer completion from missing status or a test-double attribute."""
+        runtime_status = getattr(status, "runtime_status", None)
+        return isinstance(runtime_status, df.OrchestrationRuntimeStatus) and runtime_status in {
+            df.OrchestrationRuntimeStatus.Completed,
+            df.OrchestrationRuntimeStatus.Failed,
+            df.OrchestrationRuntimeStatus.Canceled,
+            df.OrchestrationRuntimeStatus.Terminated,
+        }
+
     async def _gather_pending_hitl_requests(
         self,
         client: df.DurableOrchestrationClient,
@@ -891,6 +926,8 @@ class AgentFunctionApp(DFAppBase):
             for executor_id, child_ids in cast("dict[str, Any]", subworkflows).items():
                 for ordinal, child_instance_id in iter_subworkflow_instances(child_ids):
                     child_status = await client.get_status(child_instance_id)
+                    if self._is_terminal_hitl_state(child_status):
+                        continue
                     child_custom = child_status.custom_status if child_status else None
                     if isinstance(child_custom, dict):
                         gathered.extend(
@@ -911,22 +948,25 @@ class AgentFunctionApp(DFAppBase):
     ) -> tuple[str, str] | None:
         """Resolve a possibly-qualified request id to ``(owningInstanceId, bareRequestId)``.
 
-        An unqualified id (no well-formed hop) targets ``instance_id`` directly. A
+        An unqualified id (no well-formed hop) addresses ``instance_id`` even before
+        its wait is published, preserving service buffering for known fixed IDs. A
         qualified id ``{executorId}~{ordinal}~{rest}`` addresses a nested sub-workflow:
         the executor's child instance id is read from this instance's ``subworkflows``
         custom-status map (keyed by run-wide ``ordinal``) and the remainder resolved
-        recursively. Returns ``None`` when a referenced sub-workflow child is not
-        currently active (so the caller can return "not found").
+        recursively. Returns ``None`` when a referenced child is not active or an
+        addressed instance has a terminal runtime status.
         """
+        status = await client.get_status(instance_id)
+        if self._is_terminal_hitl_state(status):
+            return None
         hop = split_subworkflow_request_id(request_id)
         if hop is None:
             return instance_id, request_id
 
-        executor_id, ordinal, remainder = hop
-        status = await client.get_status(instance_id)
         custom_status = status.custom_status if status else None
         if not isinstance(custom_status, dict):
             return None
+        executor_id, ordinal, remainder = hop
         subworkflows = cast("dict[str, Any]", custom_status).get("subworkflows")
         if not isinstance(subworkflows, dict):
             return None
