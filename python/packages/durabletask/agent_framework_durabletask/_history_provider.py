@@ -32,7 +32,6 @@ from agent_framework import (
     Message,
     SessionContext,
     SupportsAgentRun,
-    annotate_message_groups,
 )
 
 from ._response_utils import is_terminal_agent_response
@@ -751,10 +750,12 @@ class DurableHistoryProvider(HistoryProvider):
             return
 
         from ._retention import (
+            _annotate_retention_groups,  # pyright: ignore[reportPrivateUsage]
             _detached_message,  # pyright: ignore[reportPrivateUsage]
             _link_atomic_groups,  # pyright: ignore[reportPrivateUsage]
             _newest_exchange,  # pyright: ignore[reportPrivateUsage]
             _saved_group_id,  # pyright: ignore[reportPrivateUsage]
+            _tool_call_links,  # pyright: ignore[reportPrivateUsage]
             record_truncation,
         )
 
@@ -780,27 +781,19 @@ class DurableHistoryProvider(HistoryProvider):
             )
             for index, (_, stored) in enumerate(originals)
         ]
-        annotate_message_groups(
+        _annotate_retention_groups(
             [message for message, (_, stored) in zip(messages, originals) if id(stored) in replayable],
-            force_reannotate=True,
         )
-        groups = _link_atomic_groups(messages, [_saved_group_id(stored) for _, stored in originals])
+        links, pending = _tool_call_links(messages)
+        groups = _link_atomic_groups(
+            messages, [_saved_group_id(stored) for _, stored in originals], additional_links=links
+        )
         protected_flags = [
             id(stored) not in replayable or id(entry) in protected or stored.role == "system"
             for entry, stored in originals
         ]
-        pending_calls: dict[str, set[int]] = {}
-        for index, (_, stored) in enumerate(originals):
-            if id(stored) not in replayable:
-                continue
-            for content in stored.contents:
-                if isinstance(content, DurableAgentStateFunctionCallContent):
-                    pending_calls.setdefault(content.call_id, set()).add(index)
-                elif isinstance(content, DurableAgentStateFunctionResultContent):
-                    pending_calls.pop(content.call_id, None)
-        for indices in pending_calls.values():
-            for index in indices:
-                protected_flags[index] = True
+        for index in pending:
+            protected_flags[index] = True
         protected_groups = {group for group, held in zip(groups, protected_flags) if held}
         # Eager pruning cannot delete included partners. Defer the whole group until
         # every member is excluded, including non-contiguous persisted atomic links.

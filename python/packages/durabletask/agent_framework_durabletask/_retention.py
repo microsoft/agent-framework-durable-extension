@@ -20,6 +20,7 @@ from agent_framework import (
     CharacterEstimatorTokenizer,
     Message,
     TokenBudgetComposedStrategy,
+    TokenizerProtocol,
     annotate_message_groups,
     included_token_count,
 )
@@ -309,7 +310,11 @@ def _serialized_size(state: DurableAgentState) -> int:
     return len(json.dumps(state.to_dict()))
 
 
-def _detached_message(stored: DurableAgentStateMessage) -> Message:
+def _detached_message(stored: DurableAgentStateMessage, *, replayable: bool = True) -> Message:
+    if not replayable:
+        # A non-replayable diagnostic is an opaque grouping barrier, not Core
+        # content. Its persisted payload still supplies the exact byte cost.
+        return Message("user", [], message_id=stored.message_id)
     message: Message = deepcopy(stored).to_chat_message()
     # Retention groups use unique internal keys, never aliases exposed to applications.
     message.message_id = stored.message_id
@@ -332,11 +337,76 @@ def _saved_group_id(stored: DurableAgentStateMessage) -> str | None:
     return None
 
 
+def _annotate_retention_groups(messages: list[Message], *, tokenizer: TokenizerProtocol | None = None) -> None:
+    """Keep Core physical/reasoning groups without its role-filtered function links.
+
+    Tool occurrence links come from ``_tool_call_links`` for every replay role.
+    Give each function content a unique ID only on annotation copies so Core
+    cannot connect completed, sequential reuse across roles it skips. Preserve
+    real contents and count their tokens before replacing the grouping metadata.
+    """
+    grouped = deepcopy(messages)
+    if tokenizer is not None:
+        annotate_message_groups(grouped, force_reannotate=True, tokenizer=tokenizer)
+    for message_index, message in enumerate(grouped):
+        for content_index, content in enumerate(message.contents):
+            if content.type in ("function_call", "function_result"):
+                content.call_id = f"retention_content_{message_index}_{content_index}"
+    annotate_message_groups(grouped, force_reannotate=True)
+    for message, annotated in zip(messages, grouped):
+        message.additional_properties[GROUP_ANNOTATION_KEY] = annotated.additional_properties[GROUP_ANNOTATION_KEY]
+
+
+def _tool_call_links(messages: list[Message]) -> tuple[list[tuple[int, int]], set[int]]:
+    """Link replayable tool occurrences and hold declarations without a unique completion.
+
+    A call ID is not an occurrence ID. Once declarations overlap, a result cannot
+    establish which one completed. Keep all candidates and their results together,
+    even when multiple declarations occupy the same message. Repeated results stay
+    linked to the last completed declaration until the next same-ID declaration.
+    Completed sequential reuse remains independent. Both function and hosted-MCP
+    replay project these contents independently of message role. System-message
+    protection is a separate retention floor.
+    """
+    result_kinds = {"function_result": "function_call", "mcp_server_tool_result": "mcp_server_tool_call"}
+    call_kinds = set(result_kinds.values())
+    pending: dict[tuple[str, str], list[int]] = {}
+    completed: dict[tuple[str, str], int] = {}
+    links: list[tuple[int, int]] = []
+    held: set[int] = set()
+    for index, message in enumerate(messages):
+        for content in message.contents:
+            if content.type in call_kinds:
+                if content.call_id:
+                    key = (content.type, content.call_id)
+                    completed.pop(key, None)
+                    declarations = pending.setdefault(key, [])
+                    if declarations:
+                        links.append((declarations[0], index))
+                    declarations.append(index)
+                else:
+                    held.add(index)
+            elif (call_kind := result_kinds.get(content.type)) is not None and content.call_id:
+                key = (call_kind, content.call_id)
+                declarations = pending.get(key, [])
+                if declarations:
+                    # Overlapping declarations are already linked. One edge per
+                    # result avoids a quadratic set of ambiguous pairings.
+                    links.append((declarations[0], index))
+                elif key in completed:
+                    links.append((completed[key], index))
+                if len(declarations) == 1:
+                    completed[key] = declarations.pop()
+    held.update(index for declarations in pending.values() for index in declarations)
+    return links, held
+
+
 def _link_atomic_groups(
     messages: list[Message],
     saved_ids: list[str | None],
     *,
     additional_groups: list[list[str | None]] | None = None,
+    additional_links: list[tuple[int, int]] | None = None,
 ) -> list[int]:
     """Unite physical, persisted and additional atomic groups, including non-contiguous spans."""
     parents = list(range(len(messages)))
@@ -355,6 +425,10 @@ def _link_atomic_groups(
             if group_id is not None:
                 left, right = root(first.setdefault(group_id, index)), root(index)
                 parents[max(left, right)] = min(left, right)
+
+    for declaration, result in additional_links or []:
+        left, right = root(declaration), root(result)
+        parents[max(left, right)] = min(left, right)
 
     roots = [root(index) for index in range(len(messages))]
     for message, group in zip(messages, roots):
@@ -383,12 +457,17 @@ def _candidates(state: DurableAgentState, *, now: datetime) -> tuple[list[Messag
         known = not isinstance(entry, DurableAgentStateUnknownEntry) and entry.json_type in _TRANSCRIPT_KINDS
         failed = known and entry.is_error_response
         replayable = known and not failed
-        # Unknown entries are opaque barriers, not model-conversion inputs or deletion candidates.
+        # Unknown entries and failed diagnostics are opaque barriers, never
+        # model-conversion inputs. Only known diagnostic payloads may be evicted.
         for message_index, stored in enumerate(entry.messages if known else (entry.messages or [None])):
             index = len(messages)
             eligible = known and stored is not None and bool(stored.contents)
-            message = _detached_message(stored) if known and stored is not None else Message(_SYSTEM_ROLE, [])
-            if not eligible or id(entry) in protected or message.role == _SYSTEM_ROLE:
+            message = (
+                _detached_message(stored, replayable=replayable)
+                if known and stored is not None
+                else Message(_SYSTEM_ROLE, [])
+            )
+            if not eligible or id(entry) in protected or (stored is not None and stored.role == _SYSTEM_ROLE):
                 held.add(index)
             message_id = message.message_id
             if not message_id or message_id in seen:
@@ -421,23 +500,28 @@ def _candidates(state: DurableAgentState, *, now: datetime) -> tuple[list[Messag
                     replay_messages.append(replay_message)
                     replay_indices.append(index)
 
-    annotate_message_groups(messages, force_reannotate=True, tokenizer=CharacterEstimatorTokenizer())
+    _annotate_retention_groups(messages, tokenizer=CharacterEstimatorTokenizer())
     # A diagnostic or excluded duplicate call can mask a real declaration.
     # Union both skip_excluded replay modes by storage occurrence, retaining
-    # physical contents/token counts for byte planning, including old errors.
+    # replayable contents for token planning. Old errors use opaque placeholders,
+    # with their actual stored bytes measured by the eviction plan.
     additional_groups = [error_ids]
+    tool_links: list[tuple[int, int]] = []
     for skip_excluded in (False, True):
         replay = [
             (index, deepcopy(message))
             for index, message in zip(replay_indices, replay_messages)
             if not skip_excluded or index not in excluded_indices
         ]
-        annotate_message_groups([message for _, message in replay], force_reannotate=True)
+        _annotate_retention_groups([message for _, message in replay])
+        links, pending = _tool_call_links([message for _, message in replay])
+        tool_links.extend((replay[left][0], replay[right][0]) for left, right in links)
+        held.update(replay[index][0] for index in pending)
         replay_ids: list[str | None] = [None] * len(messages)
         for index, message in replay:
             replay_ids[index] = _group_id(message)
         additional_groups.append(replay_ids)
-    roots = _link_atomic_groups(messages, saved_ids, additional_groups=additional_groups)
+    roots = _link_atomic_groups(messages, saved_ids, additional_groups=additional_groups, additional_links=tool_links)
     protected_groups = {roots[index] for index in held}
     candidates: list[Message] = []
     candidate_origins: list[_Origin] = []
@@ -586,7 +670,15 @@ def _token_budget(
         floor_bytes = max(serialized_size - evictable_bytes, 0)
     allowed_bytes = max(target_bytes - floor_bytes, 0)
     if evictable_tokens is None:
-        messages = [_detached_message(stored) for _, stored in origins]
-        annotate_message_groups(messages, tokenizer=CharacterEstimatorTokenizer())
+        messages = [
+            _detached_message(
+                stored,
+                replayable=not isinstance(entry, DurableAgentStateUnknownEntry)
+                and entry.json_type in _TRANSCRIPT_KINDS
+                and not entry.is_error_response,
+            )
+            for entry, stored in origins
+        ]
+        _annotate_retention_groups(messages, tokenizer=CharacterEstimatorTokenizer())
         evictable_tokens = included_token_count(messages)
     return max(allowed_bytes * evictable_tokens // evictable_bytes, 1)

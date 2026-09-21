@@ -247,21 +247,21 @@ async def test_old_replay_and_physical_reasoning_links_evict_together_across_a_g
     gap = Message("user", ["gap"], message_id="gap")
     await _assert_replay(state, [_call("needed-call"), gap, _result("latest-result"), current])
     raw = state.to_dict()
-    expected = _expected_removal(raw, {"reasoning", "needed-call", "diagnostic-call", "latest-result"})
+    expected = _expected_removal(raw, {"reasoning", "needed-call", "latest-result"})
 
-    # With no protected member, the union is evictable. The intervening user
-    # message is not part of the tool group and need not be sacrificed with it.
+    # With no protected member, the replay union is evictable. Neither the
+    # intervening user nor the opaque diagnostic belongs to that tool group.
     removed = await retention.enforce_budget(
         state, max_state_bytes=len(json.dumps(raw)) - 1, high_watermark=1, low_watermark=0.99
     )
 
-    assert removed == 4
+    assert removed == 3
     assert _snapshot(state.to_dict()) == _snapshot(expected)
     await _assert_replay(state, [gap, current])
 
 
 @pytest.mark.parametrize("protection", ["system", "current"])
-async def test_saved_links_propagate_protection_through_physical_and_replay_groups(protection: str) -> None:
+async def test_saved_diagnostic_links_protect_only_their_persisted_group(protection: str) -> None:
     history = _pair_history(mixed=True)
     history[1].messages[0].extension_data = {"_group": {"id": "saved-guard", "future": [False, 0, 0.0]}}
     prose = Message("user", ["p" * 10_000], message_id="eligible")
@@ -270,22 +270,23 @@ async def test_saved_links_propagate_protection_through_physical_and_replay_grou
     held = _stored(guard)
     held.extension_data = {"_group": {"id": "saved-guard", "future": [False, 0, 0.0]}}
     history.append(DurableAgentStateRequest("guard", OLD, [held]))
-    expected_replay = [_call("needed-call"), _result("latest-result"), guard]
+    expected_replay = [prose, guard]
     if protection == "system":
         current = Message("user", ["current"], message_id="current")
         history.append(DurableAgentStateRequest("current", OLD, [_stored(current)]))
         expected_replay.append(current)
     state = _state(history)
-    await _assert_replay(state, [*expected_replay[:2], prose, *expected_replay[2:]])
+    await _assert_replay(state, [_call("needed-call"), _result("latest-result"), *expected_replay])
     raw = state.to_dict()
-    expected = _expected_removal(raw, {"eligible"})
+    expected = _expected_removal(raw, {"needed-call", "latest-result"})
     assert len(json.dumps(raw)) > 14_000
     assert len(json.dumps(expected)) < 12_600
 
     removed = await retention.enforce_budget(state, max_state_bytes=14_000, high_watermark=1, low_watermark=0.9)
 
-    # Guard --saved--> diagnostic --physical--> result --replay--> declaration.
-    assert removed == 1
+    # The guard retains the persisted diagnostic link. Hidden diagnostic
+    # content must not create a physical link to the unrelated replay pair.
+    assert removed == 2
     assert _snapshot(state.to_dict()) == _snapshot(expected)
     await _assert_replay(state, expected_replay)
 
@@ -347,24 +348,14 @@ async def test_excluded_duplicate_call_cannot_hide_the_default_replay_link(prote
     raw = state.to_dict()
     before = _snapshot(raw)
 
-    # Physical and skip_excluded=False grouping see A, B, C. Default replay
-    # sees only A, C, so protecting C must also protect A's large declaration.
-    if protected_result:
-        with pytest.raises(retention.StateCapacityError) as error:
-            await retention.enforce_budget(state, max_state_bytes=3_000, high_watermark=1, low_watermark=0.9)
-        assert error.value.floor_bytes > 8_000
-        assert _snapshot(state.to_dict()) == before
-        await _assert_replay(state, expected, included=included)
-    else:
-        # The union is atomic, not permanently held once the result is old.
-        removed = await retention.enforce_budget(
-            state, max_state_bytes=len(json.dumps(raw)) - 1, high_watermark=1, low_watermark=0.99
-        )
-        assert removed == 3
-        assert _snapshot(state.to_dict()) == _snapshot(
-            _expected_removal(raw, {"needed-call", "excluded-call", "latest-result"})
-        )
-        await _assert_replay(state, [current])
+    # Default replay sees A, C, but full replay sees two overlapping declarations
+    # A, B before C. C cannot establish which declaration completed. Even after
+    # the result ages out, ambiguous pending declarations remain a floor.
+    with pytest.raises(retention.StateCapacityError) as error:
+        await retention.enforce_budget(state, max_state_bytes=3_000, high_watermark=1, low_watermark=0.9)
+    assert error.value.floor_bytes > 8_000
+    assert _snapshot(state.to_dict()) == before
+    await _assert_replay(state, expected, included=included)
     assert _snapshot(raw) == before
 
 
@@ -474,9 +465,9 @@ async def test_eager_prune_saved_group_includes_nonreplayable_physical_partners(
     visible.append(current)
     included.append(current)
     await _assert_replay(owner.state, visible, included=included)
-    if partner_kind == "opaque":
-        # Pressure must also treat the runtime-opaque same-kind entry as a
-        # barrier, not project its malformed profile based on its $type alone.
+    if partner_kind in ("error", "opaque"):
+        # Pressure must not project hidden profiles in either known diagnostics
+        # or runtime-opaque entries based on the stored discriminator alone.
         with pytest.raises(retention.StateCapacityError):
             await retention.enforce_budget(owner.state, max_state_bytes=1, high_watermark=1, low_watermark=0.9)
         assert _snapshot(owner.state.to_dict()) == before
@@ -508,6 +499,167 @@ async def test_eager_prune_saved_group_includes_nonreplayable_physical_partners(
         await _assert_replay(owner.state, [gap, current])
     else:
         await _assert_replay(owner.state, visible, included=included)
+
+
+@pytest.mark.parametrize("diagnostic_kind", ["error_response", "flagged_response", "error_content"])
+@pytest.mark.parametrize("profile_version", [None, 1, 999])
+@pytest.mark.parametrize("protected", [False, True])
+async def test_pressure_treats_hidden_diagnostic_profiles_as_opaque_payloads(
+    diagnostic_kind: str, profile_version: int | None, protected: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failure = _stored(Message("assistant", [Content.from_error(message="failed")], message_id="failure"))
+    diagnostic = _stored(Message("assistant", ["d" * 8_000], message_id="diagnostic"))
+    profile: dict[str, Any] | None = None
+    if profile_version is not None:
+        profile = {
+            "profile": "agent-framework-python.core-fields",
+            "version": profile_version,
+            "fields": None,
+            "futureProfile": [None, False, 0, 0.0],
+        }
+    diagnostic.contents[0].unknown_fields = {"pythonCoreFields": profile}
+    if protected:
+        diagnostic.extension_data = {"_group": {"id": "diagnostic-guard", "future": [False, 0, 0.0]}}
+    failed = (
+        DurableAgentStateErrorResponse("failed", OLD, [failure, diagnostic])
+        if diagnostic_kind == "error_response"
+        else DurableAgentStateResponse("failed", OLD, [failure, diagnostic])
+    )
+    if diagnostic_kind != "error_content":
+        # Isolate envelope/status classification from content classification.
+        failure.contents = _stored(Message("assistant", ["failed"])).contents
+    if diagnostic_kind == "flagged_response":
+        failed.extension_data = {"durable_status": "error"}
+    failed.unknown_fields = {"futureEnvelope": [None, False, 0, 0.0]}
+    prose = Message("user", ["p" * 10_000], message_id="old-prose")
+    current = Message("user", ["current"], message_id="current")
+    if protected:
+        current.additional_properties["_group"] = {"id": "diagnostic-guard"}
+    state = _state([
+        failed,
+        DurableAgentStateRequest("old-prose", OLD, [_stored(prose)]),
+        DurableAgentStateRequest("current", OLD, [_stored(current)]),
+    ])
+    raw = state.to_dict()
+    before = _snapshot(raw)
+    assert state.data.conversation_history[0].is_error_response
+    project = DurableAgentStateMessage.to_chat_message
+
+    def project_replayable(stored: DurableAgentStateMessage) -> Message:
+        # Future profiles need the same guarantee even if Core would silently
+        # accept them. Keep the real projection for all replayable messages.
+        assert stored.message_id not in ("failure", "diagnostic")
+        return project(stored)
+
+    monkeypatch.setattr(DurableAgentStateMessage, "to_chat_message", project_replayable)
+    await _assert_replay(state, [prose, current])
+    diagnostic_entry = state.data.conversation_history[0]
+    assert (
+        retention._token_budget(
+            [(diagnostic_entry, stored) for stored in diagnostic_entry.messages],
+            serialized_size=len(json.dumps(raw)),
+            evictable_bytes=sum(len(json.dumps(stored.to_dict())) for stored in diagnostic_entry.messages),
+            target_bytes=len(json.dumps(raw)),
+        )
+        > 0
+    )
+
+    # Independent JSON floor. The diagnostic envelope is retained even after
+    # its entire message batch is evicted because it owns unknown metadata.
+    floor = deepcopy(raw)
+    floor["data"]["conversationHistory"].pop(1)
+    if not protected:
+        floor["data"]["conversationHistory"][0]["messages"] = []
+    floor["data"]["truncation"] = {
+        "evictedMessageCount": 1 if protected else 3,
+        "firstEvictedAt": NOW.isoformat(),
+        "lastEvictedAt": NOW.isoformat(),
+    }
+    with pytest.raises(retention.StateCapacityError) as error:
+        await retention.enforce_budget(state, max_state_bytes=1, high_watermark=1, low_watermark=0.9)
+    assert error.value.floor_bytes == len(json.dumps(floor))
+    assert _snapshot(state.to_dict()) == before
+
+    # This target fits either the protected diagnostic or the remaining prose,
+    # not both. The budget is unchanged between the two policy cases.
+    expected = deepcopy(raw)
+    if protected:
+        expected["data"]["conversationHistory"].pop(1)
+    else:
+        expected["data"]["conversationHistory"][0]["messages"] = []
+    expected["data"]["truncation"] = {
+        "evictedMessageCount": 1 if protected else 2,
+        "firstEvictedAt": NOW.isoformat(),
+        "lastEvictedAt": NOW.isoformat(),
+    }
+    assert len(json.dumps(raw)) > 14_000
+    assert len(json.dumps(expected)) < 12_600
+    removed = await retention.enforce_budget(state, max_state_bytes=14_000, high_watermark=1, low_watermark=0.9)
+
+    assert removed == (1 if protected else 2)
+    assert _snapshot(state.to_dict()) == _snapshot(expected)
+    assert _snapshot(raw) == before
+    await _assert_replay(state, [current] if protected else [prose, current])
+    if protected:
+        restored = DurableAgentState.from_json(state.to_json())
+        assert restored.data.conversation_history[0].is_error_response
+        assert _snapshot(restored.data.conversation_history[0].to_dict()) == _snapshot(
+            raw["data"]["conversationHistory"][0]
+        )
+    after = state.to_json()
+    assert await retention.enforce_budget(state, max_state_bytes=14_000, high_watermark=1, low_watermark=0.9) == 0
+    assert state.to_json() == after
+
+
+@pytest.mark.parametrize("entry_kind", ["request", "response"])
+async def test_pressure_does_not_hide_invalid_replayable_profiles(entry_kind: str) -> None:
+    role = "user" if entry_kind == "request" else "assistant"
+    invalid = _stored(Message(role, ["p" * 8_000], message_id="invalid"))
+    invalid.contents[0].unknown_fields = {
+        "pythonCoreFields": {
+            "profile": "agent-framework-python.core-fields",
+            "version": 1,
+            "fields": None,
+        }
+    }
+    entry = (
+        DurableAgentStateRequest("invalid", OLD, [invalid])
+        if entry_kind == "request"
+        else DurableAgentStateResponse("invalid", OLD, [invalid])
+    )
+    current = Message("user", ["current"], message_id="current")
+    state = _state([entry, DurableAgentStateRequest("current", OLD, [_stored(current)])])
+    raw = state.to_dict()
+    before = _snapshot(raw)
+    history = state.data.conversation_history
+    assert not history[0].is_error_response
+    owner = JsonStateProvider(json.loads(state.to_json()))
+    entity = AgentEntity(NonStreamingAgent(client=RecordingChatClient(), name="invalid-replay"), state_provider=owner)
+    expected_error = "The Python core-fields profile requires a fields object"
+    # Only entries that replay already excludes are opaque. Invalid visible
+    # content must still fail at both real readers and the pressure planner.
+    with pytest.raises(ValueError, match=expected_error):
+        entity._replay_all_messages()
+    token = bind_durable_history(DurableHistoryBinding(state_provider=owner))
+    try:
+        for skip_excluded in (False, True):
+            with pytest.raises(ValueError, match=expected_error):
+                await DurableHistoryProvider(skip_excluded=skip_excluded).get_messages("invalid-replay")
+    finally:
+        unbind_durable_history(token)
+    with pytest.raises(ValueError, match=expected_error):
+        await retention.enforce_budget(state, max_state_bytes=3_000, high_watermark=1, low_watermark=0.9)
+    with pytest.raises(ValueError, match=expected_error):
+        retention._token_budget(
+            [(history[0], history[0].messages[0])],
+            serialized_size=len(json.dumps(raw)),
+            evictable_bytes=len(json.dumps(history[0].messages[0].to_dict())),
+            target_bytes=3_000,
+        )
+    assert state.data.conversation_history is history
+    assert _snapshot(state.to_dict()) == before
+    assert _snapshot(owner.state.to_dict()) == before
+    assert _snapshot(raw) == before
 
 
 @pytest.mark.parametrize("excluded", [False, True])

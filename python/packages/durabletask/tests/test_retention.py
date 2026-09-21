@@ -435,10 +435,9 @@ def _tool_state(turns: int, *, chars: int = 400) -> DurableAgentState:
             "arguments": json.dumps({"query": "q" * chars}),
         }
         result: dict[str, Any] = {
-            "type": "function_call",
+            "type": "function_result",
             "call_id": f"call{index}",
-            "name": "lookup",
-            "arguments": json.dumps({"result": "r" * chars}),
+            "result": {"result": "r" * chars},
         }
         state.data.conversation_history.extend([
             DurableAgentStateRequest(
@@ -446,7 +445,7 @@ def _tool_state(turns: int, *, chars: int = 400) -> DurableAgentState:
                 created_at=occurred_at,
                 messages=[
                     DurableAgentStateMessage.from_chat_message(
-                        Message(role="user", contents=[call], message_id=f"u{index}")
+                        Message(role="assistant", contents=[call], message_id=f"u{index}")
                     )
                 ],
             ),
@@ -455,7 +454,7 @@ def _tool_state(turns: int, *, chars: int = 400) -> DurableAgentState:
                 created_at=occurred_at,
                 messages=[
                     DurableAgentStateMessage.from_chat_message(
-                        Message(role="assistant", contents=[result], message_id=f"a{index}")
+                        Message(role="tool", contents=[result], message_id=f"a{index}")
                     )
                 ],
             ),
