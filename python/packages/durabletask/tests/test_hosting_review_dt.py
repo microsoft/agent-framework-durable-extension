@@ -190,7 +190,11 @@ def test_repeated_identical_workflow_is_benign_and_names_are_unchanged() -> None
     workflow = _workflow("Orders", "review", agent=_agent())
     host.configure_workflow(workflow)
     host.configure_workflow(workflow)
-    assert native.calls == [("entity", "dafx-Orders-review"), ("orchestration", "dafx-Orders")]
+    assert native.calls == [
+        ("entity", "dafx-Orders-review"),
+        ("activity", "dafx__hitl-Orders"),
+        ("orchestration", "dafx-Orders"),
+    ]
 
 
 class UncopyableAgent:

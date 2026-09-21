@@ -785,10 +785,13 @@ async def test_tool_pair_in_every_schema_role_is_atomic_at_real_openai_leaf(
                 {**expected_call, "output": "later output"},
                 *expected_survivors,
             ]
-            assert client._prepare_messages_for_openai(
-                [message for message in before if message.message_id != "first-result"],
-                request_uses_service_side_storage=False,
-            ) == expected_repeated
+            assert (
+                client._prepare_messages_for_openai(
+                    [message for message in before if message.message_id != "first-result"],
+                    request_uses_service_side_storage=False,
+                )
+                == expected_repeated
+            )
             assert client._prepare_messages_for_openai(
                 [message for message in after if message.message_id != "first-result"],
                 request_uses_service_side_storage=False,
