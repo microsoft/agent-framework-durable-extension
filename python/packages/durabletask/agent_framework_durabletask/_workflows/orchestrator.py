@@ -58,7 +58,7 @@ from agent_framework._workflows._typing_utils import is_instance_of, try_coerce_
 from pydantic import BaseModel
 
 from .._message_identity import message_identity
-from .._response_utils import ensure_response_format, load_agent_response
+from .._response_utils import ensure_response_format, load_agent_response, serialize_input_message
 from .context import WorkflowOrchestrationContext
 from .hitl_checkpoint import workflow_hitl_checkpoint_name
 from .naming import (
@@ -775,7 +775,8 @@ def _prepare_agent_task(
         key = (occurrence, message_identity(selected))
         if key in sent or key in pending_keys:
             continue
-        context_messages.append(selected.to_dict())
+        # Deliver the same public-field presence and inert extras that were hashed.
+        context_messages.append(serialize_input_message(selected))
         context_message_ids.append(occurrence)
         pending_keys.add(key)
         message_content = selected.text[:_AGENT_TASK_MESSAGE_PREVIEW_LIMIT]

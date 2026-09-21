@@ -8,17 +8,176 @@ Wraps ``azure.durable_functions.DurableOrchestrationContext`` to satisfy the
 
 from __future__ import annotations
 
+import json
 import logging
-from collections import deque
+from collections import defaultdict, deque
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, cast
 
 from agent_framework_durabletask import WorkflowOrchestrationContext, build_agent_task
 from azure.durable_functions import DurableOrchestrationContext
-from azure.durable_functions.models.Task import TaskState
+from azure.durable_functions.models.entities.ResponseMessage import ResponseMessage
+from azure.durable_functions.models.history.HistoryEventType import HistoryEventType
+from azure.durable_functions.models.Task import AtomicTask, TaskState
 
 logger = logging.getLogger(__name__)
+
+
+class _OpaqueEventInput(str):
+    """Mark an already-projected history field within this SDK context only."""
+
+    original: str
+    entity: bool
+
+    def __new__(cls, original: str, *, entity: bool = False) -> _OpaqueEventInput:
+        wire = json.dumps([original])
+        if entity:
+            # Both SDK decoding stages see only strings and a fixed dictionary.
+            # Keep the entire original envelope opaque, including unknown fields.
+            wire = json.dumps({"result": wire})
+        value = super().__new__(cls, wire)
+        value.original = original
+        value.entity = entity
+        return value
+
+
+class _JsonEventTask(AtomicTask):
+    """Restore plain reply JSON before the native task propagates completion."""
+
+    def __init__(self, task: Any) -> None:
+        # wait_for_external_event creates an unscheduled AtomicTask. Reuse its
+        # exact identity/action, leaving SDK registration, FIFO and task_any intact.
+        super().__init__(task.id, task.action_repr)
+
+    def set_value(self, is_error: bool, value: Any) -> None:
+        """Decode the projected payload without invoking SDK object hooks."""
+        if not is_error and isinstance(value, list):
+            # Every structured Input for this wait was projected to [raw_json].
+            # Strings were not projected, even strings that happen to contain JSON.
+            # No object_hook, imports or user-selected constructors are allowed.
+            value = json.loads(cast(list[str], value)[0])
+        super().set_value(is_error, value)
+
+
+class _JsonEntityTask(AtomicTask):
+    """Restore a workflow entity's JSON envelope after both native decode stages."""
+
+    def __init__(self, task: Any) -> None:
+        super().__init__(task.id, task.action_repr)
+
+    def set_value(self, is_error: bool, value: Any) -> None:
+        """Apply native envelope/error semantics without class-directed decoding."""
+        if not is_error:
+            envelope = ResponseMessage.from_dict(json.loads(cast(list[str], value)[0]))
+            value = json.loads(envelope.result)
+            if envelope.is_exception:
+                is_error = True
+                value = Exception(value)
+        super().set_value(is_error, value)
+
+
+def _protect_event_inputs(context: DurableOrchestrationContext, name: str, *, entity: bool = False) -> bool:
+    """Shield framework reply waits and entity results from SDK custom objects.
+
+    The SDK keeps EventRaised.Input raw until it finds the matching task,
+    including in deferred callbacks. Rewrite those same history objects before
+    SDK decoding, not just HTTP submissions. An array holding opaque JSON text
+    cannot invoke the SDK object_hook and distinguishes objects/arrays from real
+    string replies without adding a reserved field to application data. The
+    private str subtype makes repeated adapter/wait creation idempotent.
+
+    For entity calls, project the whole original envelope into a synthetic
+    result string containing that same array. The native CallEntityAction path
+    still decodes its two JSON layers, then _JsonEntityTask restores the original
+    envelope and result with plain JSON. No application keys are reserved or
+    discarded. EventSent correlation records and scheduled actions are untouched.
+    """
+    histories: Any = getattr(context, "histories", None)
+    if not isinstance(histories, list):
+        # Non-SDK context doubles have no history decoder to protect.
+        return False
+    for event in cast(list[Any], histories):
+        if event.event_type != HistoryEventType.EVENT_RAISED or event.Name != name:
+            continue
+        raw: Any = event.Input
+        if not isinstance(raw, str):
+            continue
+        if isinstance(raw, _OpaqueEventInput):
+            if raw.entity == entity:
+                continue
+            raw = raw.original
+        if entity:
+            event.Input = _OpaqueEventInput(raw, entity=True)
+            continue
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            # Even a valid object prefix followed by invalid JSON can invoke
+            # object_hook before the SDK raises. Deliver it opaquely too, then
+            # let the hook-free task parser raise at event delivery as before.
+            event.Input = _OpaqueEventInput(raw)
+            continue
+        if isinstance(value, (dict, list)):
+            event.Input = _OpaqueEventInput(raw)
+        else:
+            event.Input = raw
+    return True
+
+
+class _WorkflowOpenTasks(defaultdict[int | str, Any]):
+    """Shield a reply at the SDK's task lookup, before either entity decoder.
+
+    The native executor pops the target before decoding EventRaised.Input. Its
+    EventSent handling also pops the numeric task ID before remapping it to the
+    service-generated correlation. Preserve both operations and native task/list
+    identities. Only framework JSON tasks opt in, so unrelated native tasks keep
+    their decoder. This relies on the SDK's pop-before-decode private contract.
+    """
+
+    def __init__(self, context: DurableOrchestrationContext, tasks: defaultdict[int | str, Any]) -> None:
+        super().__init__(list, tasks)
+        self._context = context
+
+    def pop(self, key: int | str, /, *args: Any) -> Any:
+        """Preserve native lookup while projecting only the selected JSON task."""
+        value: Any = super().pop(key, *args)
+        # Native duplicate-name wait lists are consumed from their last entry.
+        task: Any = cast(list[Any], value)[-1] if isinstance(value, list) and value else cast(Any, value)
+        if isinstance(key, str) and isinstance(task, (_JsonEventTask, _JsonEntityTask)):
+            _protect_event_inputs(self._context, key, entity=isinstance(task, _JsonEntityTask))
+        elif isinstance(key, str):
+            # A name may later belong to an unrelated native task. Undo only
+            # our replay-local projection, preserving its original SDK semantics.
+            histories: Any = self._context.histories
+            for event in cast(list[Any], histories):
+                if (
+                    event.event_type == HistoryEventType.EVENT_RAISED
+                    and event.Name == key
+                    and isinstance(event.Input, _OpaqueEventInput)
+                ):
+                    event.Input = event.Input.original
+        return cast(Any, value)
+
+
+class _JsonEntityContext:
+    """Delegate agent scheduling unchanged, opting only workflow calls into JSON."""
+
+    def __init__(self, context: DurableOrchestrationContext) -> None:
+        self._context = context
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._context, name)
+
+    def call_entity(self, entity_id: Any, operation: str, input_: Any = None) -> Any:
+        """Keep the SDK action but restore its result as JSON before Core loading."""
+        context: Any = self._context
+        if not isinstance(getattr(context, "histories", None), list):
+            return context.call_entity(entity_id, operation, input_)
+        if not isinstance(context.open_tasks, _WorkflowOpenTasks):
+            # Do not silently re-enable arbitrary construction on an unknown SDK.
+            raise RuntimeError("Unsupported Durable Functions workflow entity task registry")
+        return _JsonEntityTask(context.call_entity(entity_id, operation, input_))
 
 
 class _DeferredEventCallbacks(dict[int | str, Any]):
@@ -70,6 +229,10 @@ class AzureFunctionsWorkflowContext:
 
     def __init__(self, context: DurableOrchestrationContext) -> None:
         self._context = context
+        tasks: Any = getattr(context, "open_tasks", None)
+        if type(tasks) is defaultdict and tasks.default_factory is list:
+            orchestration_context: Any = context
+            orchestration_context.open_tasks = _WorkflowOpenTasks(context, cast(defaultdict[int | str, Any], tasks))
         # Only adapt the known plain-dict/callback layout. Leave absent or
         # different SDK buffer implementations alone, including test doubles.
         # Reusing an adapter on the same context must not reset queued events.
@@ -77,7 +240,7 @@ class AzureFunctionsWorkflowContext:
         if type(deferred) is dict:
             callbacks = cast(dict[int | str, Any], deferred)
             if all(callable(callback) for callback in callbacks.values()):
-                orchestration_context: Any = context
+                orchestration_context = context
                 orchestration_context.deferred_tasks = _DeferredEventCallbacks(callbacks)
 
     # -- Properties -----------------------------------------------------------
@@ -121,7 +284,7 @@ class AzureFunctionsWorkflowContext:
         from ._orchestration import AzureFunctionsAgentExecutor
 
         return build_agent_task(
-            AzureFunctionsAgentExecutor(self._context),
+            AzureFunctionsAgentExecutor(cast(Any, _JsonEntityContext(self._context))),
             executor_id,
             message,
             orchestration_instance_id,
@@ -148,7 +311,10 @@ class AzureFunctionsWorkflowContext:
     # -- External events / timers ---------------------------------------------
 
     def wait_for_external_event(self, name: str) -> Any:
+        protected = _protect_event_inputs(self._context, name)
         task = self._context.wait_for_external_event(name)
+        if protected:
+            task = _JsonEventTask(task)
         deferred = getattr(self._context, "deferred_tasks", None)
         if isinstance(deferred, _DeferredEventCallbacks):
             deferred.event_names.add(name)
