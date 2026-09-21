@@ -6,8 +6,12 @@ This directory contains samples for durable agent hosting using the Durable Task
 > **Breaking change on this branch.** The unreleased schema-v2 runtime requires
 > `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2` before a sample host starts. Set it only for a
 > **new, empty, uniquely named task hub** with upgraded clients and no old or unrelated workers.
-> Do not use `default`, an old shared hub, or upgrade a live hub in place. Existing instances
-> and recorded workflow histories must remain on their original hub and old engine.
+> Do not use `default`, an old shared hub, or upgrade a live hub in place. Start fresh workflow
+> instances after this update, even when upgrading from an earlier v2 build. Protocol `2` is
+> unchanged, but older v2 in-flight instances and recorded histories are unsupported and may fail
+> under the revised HITL checkpoints and mixed parent/child scheduling. The marker checks start
+> admission, not feature or replay compatibility. Keep old runs on their original deployment if
+> they must finish.
 > This is an operator acknowledgement, not proof of isolation or production readiness. There
 > is no automatic isolation check, compatibility fallback, or history migration. Follow
 > [Environment Configuration](#environment-configuration) for standalone and Azure Functions setup.
@@ -190,10 +194,11 @@ suffix and use the resulting name consistently. Verify the hub is empty and rese
 sample deployment. Provision the hub first when using an Azure-hosted scheduler. Do not reuse
 `default` or a hub containing old state, even if another sample guide or template uses it.
 
-Upgrade all clients that will access the new hub to match this branch's runtime. Keep old
-clients, workers, instances, and recorded histories on the old deployment. Setting the flag or
-rewrapping an old start input does not migrate history. Do not hard-code `deployment_mode` in
-sample workers or add an automatic fallback to bypass this deployment decision.
+Upgrade all clients that will access the new hub to match this branch's runtime. Keep old workers
+and clients off the new hub and start new workflow instances. If old runs must finish, retain their
+original deployment. Setting the flag, retaining protocol `2`, or rewrapping an old start input does
+not migrate history. Do not hard-code `deployment_mode` in sample workers or add an automatic
+fallback to bypass this deployment decision.
 
 #### Standalone samples
 

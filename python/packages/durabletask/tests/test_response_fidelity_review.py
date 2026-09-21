@@ -4,12 +4,13 @@
 
 import json
 from copy import deepcopy
-from typing import Any
+from typing import Any, ClassVar
+from unittest.mock import Mock
 
 import pytest
 from agent_framework import AgentResponse, Content, Message
 from durabletask.task import CompletableTask
-from pydantic import BaseModel, Field, RootModel, field_validator
+from pydantic import BaseModel, Field, RootModel, ValidationError, field_validator
 
 from agent_framework_durabletask import (
     ensure_response_format,
@@ -18,6 +19,11 @@ from agent_framework_durabletask import (
     serialize_agent_response,
 )
 from agent_framework_durabletask._executors import DurableAgentTask
+from agent_framework_durabletask._response_utils import (
+    preserve_input_envelope,
+    serialize_input_content,
+    serialize_input_message,
+)
 from agent_framework_durabletask._shared_response import load_terminal_response, serialize_terminal_response
 
 CORRELATION = "response-fidelity"
@@ -376,3 +382,325 @@ def test_current_base_fields_win_over_subclass_serializers() -> None:
     raw = serialize_agent_response(response)["messages"][0]
     assert raw["type"] == "message" and raw["author_name"] == "current"
     assert raw["contents"] == [{"type": "function_result", "call_id": "call", "result": 0, "additional_properties": {}}]
+
+
+class HiddenResult(Content):
+    DEFAULT_EXCLUDE = {"type", "result", "additional_properties"}
+    INJECTABLE = {"result"}
+
+    def to_dict(self, **kwargs: Any) -> dict[str, Any]:
+        return Content.to_dict(self, exclude={"result"})
+
+
+class HiddenArguments(Content):
+    DEFAULT_EXCLUDE = {"type", "arguments", "additional_properties"}
+    INJECTABLE = {"arguments"}
+
+    def to_dict(self, **kwargs: Any) -> dict[str, Any]:
+        return Content.to_dict(self, exclude={"arguments"})
+
+
+@pytest.mark.parametrize(
+    ("cls", "kind", "field", "value"),
+    [
+        (HiddenResult, "function_result", "result", {"answer": False}),
+        (HiddenResult, "function_result", "result", 0),
+        (HiddenArguments, "function_call", "arguments", {"answer": 0}),
+        (HiddenArguments, "function_call", "arguments", ' {"answer":0} '),
+    ],
+)
+def test_direct_hidden_fields_survive_reader_codecs(
+    cls: type[Content], kind: Any, field: str, value: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Direct overrides are already bypassed on Core 1.13/1.16. These are controls,
+    # not evidence that this reader caused the separate history-writer loss.
+    content = cls(kind, call_id="call", name="tool", **{field: deepcopy(value)})
+    assert field not in content.to_dict()
+    forbidden = Mock(side_effect=AssertionError("Do not use polymorphic loading"))
+    for base in (AgentResponse, Message, Content):
+        monkeypatch.setattr(base, "from_dict", forbidden)
+    response = AgentResponse(messages=[Message("tool", [content])])
+    inline = json.loads(_json(serialize_agent_response(response)))
+    assert _json(inline["messages"][0]["contents"][0][field]) == _json(value)
+    wire = json.loads(_json(serialize_terminal_response(response)))
+    assert _json(wire["messages"][0]["contents"][0][field]) == _json(value)
+    for loaded in (load_agent_response(inline), load_terminal_response(wire), _cold_lookup(wire)):
+        restored = loaded.messages[0].contents[0]
+        assert type(restored) is Content
+        assert _json(getattr(restored, field)) == _json(value)
+    assert _json(getattr(content, field)) == _json(value)
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("present", [False, True], ids=["absent", "explicit-null"])
+@pytest.mark.parametrize("edited", [False, True], ids=["unchanged", "live-edit"])
+@pytest.mark.parametrize(
+    ("cls", "kind", "field"),
+    [(HiddenResult, "function_result", "result"), (HiddenArguments, "function_call", "arguments")],
+)
+def test_hidden_base_fields_keep_attached_presence_without_overriding_live_edits(
+    cls: type[Content], kind: Any, field: str, present: bool, edited: bool
+) -> None:
+    raw: dict[str, Any] = {
+        "type": kind,
+        "call_id": "call",
+        "name": "tool",
+        "future": {"type": "business"},
+        "raw_representation": {"sdk": "not delivery data"},
+    }
+    if present:
+        raw[field] = None
+    kwargs: dict[str, Any] = {field: None}
+    content = cls(kind, call_id="call", name="tool", **kwargs)
+    message = Message("tool", [content])
+    envelope = {"role": "tool", "contents": [deepcopy(raw)]}
+    before = _json(envelope)
+    preserve_input_envelope(message, envelope)
+    if edited:
+        setattr(content, field, {"answer": False})
+    snapshot = serialize_input_content(content)
+    assert (field in snapshot) is (present or edited)
+    assert "raw_representation" not in snapshot
+    if field in snapshot:
+        assert _json(snapshot[field]) == _json({"answer": False} if edited else None)
+    assert snapshot["future"] == {"type": "business"}
+    snapshot["future"]["type"] = "detached"
+    assert serialize_input_content(content)["future"] == {"type": "business"}
+    assert _json(envelope) == before
+
+
+def test_content_base_snapshot_does_not_normalize_cleared_fields_or_invent_null_presence() -> None:
+    content = HiddenResult("function_result", call_id="call", result=None)
+    vars(content)["additional_properties"] = None
+    assert serialize_input_content(content) == {"type": "function_result", "call_id": "call"}
+    assert content.result is None and content.additional_properties is None
+
+
+class UnserializableRaw:
+    def to_dict(self, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("Raw SDK serialization must not run")
+
+    @classmethod
+    def from_dict(cls, value: Any, **kwargs: Any) -> Any:
+        # Core's structural serialization protocol requires both methods.
+        raise AssertionError("Raw SDK loading must not run")
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Any:
+        raise AssertionError("Raw SDK objects must not be copied")
+
+
+class ExposedRawMessage(Message):
+    DEFAULT_EXCLUDE: ClassVar[set[str]] = set()
+
+
+class ExposedRawResponse(AgentResponse[Any]):
+    DEFAULT_EXCLUDE: ClassVar[set[str]] = set()
+
+
+@pytest.mark.parametrize("message_cls", [Message, ExposedRawMessage], ids=["base", "subclass"])
+def test_message_raw_is_excluded_before_any_core_traversal(message_cls: type[Message]) -> None:
+    sdk = UnserializableRaw()
+    message = message_cls("assistant", [Content.from_text("answer")], message_id="message", raw_representation=sdk)
+    if message_cls is ExposedRawMessage:
+        # Positive control proves this sentinel reaches Core's protocol dispatch.
+        with pytest.raises(AssertionError, match="Raw SDK serialization"):
+            Message.to_dict(message, exclude={"contents"})
+    expected = {
+        "type": "message",
+        "role": "assistant",
+        "message_id": "message",
+        "additional_properties": {},
+        "contents": [{"type": "text", "text": "answer", "additional_properties": {}}],
+    }
+    assert serialize_input_message(message) == expected
+    response = AgentResponse(messages=[message])
+    inline = json.loads(_json(serialize_agent_response(response)))
+    assert inline["messages"] == [expected]
+    shared = json.loads(_json(serialize_terminal_response(response)))
+    assert "raw_representation" not in _json(shared)
+    assert load_terminal_response(shared).messages[0].text == "answer"
+    assert message.raw_representation is sdk
+
+
+@pytest.mark.parametrize("response_cls", [AgentResponse, ExposedRawResponse], ids=["base", "subclass"])
+def test_response_raw_is_excluded_before_any_core_traversal(response_cls: type[AgentResponse[Any]]) -> None:
+    sdk = UnserializableRaw()
+    response = response_cls(
+        messages=[Message("assistant", [Content.from_text("answer")])],
+        response_id="response",
+        raw_representation=sdk,
+        value={"answer": False},
+    )
+    if response_cls is ExposedRawResponse:
+        with pytest.raises(AssertionError, match="Raw SDK serialization"):
+            AgentResponse.to_dict(response, exclude={"messages"})
+    inline = json.loads(_json(serialize_agent_response(response)))
+    assert inline["type"] == "agent_response"
+    assert inline["response_id"] == "response" and inline["value"] == {"answer": False}
+    assert "raw_representation" not in inline
+    shared = json.loads(_json(serialize_terminal_response(response)))
+    assert "raw_representation" not in _json(shared)
+    assert load_terminal_response(shared).value == {"answer": False}
+    assert response.raw_representation is sdk
+
+
+@pytest.mark.parametrize("public_format", [False, True], ids=["core-private-format", "subclass-public-format"])
+def test_response_format_class_is_not_traversed_but_still_parses_the_value(public_format: bool) -> None:
+    class AnswerFormat(BaseModel):
+        answer: bool
+
+        @classmethod
+        def to_dict(cls, **kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("Response format serialization must not run")
+
+        @classmethod
+        def from_dict(cls, value: Any, **kwargs: Any) -> Any:
+            raise AssertionError("Response format loading must not run")
+
+    response = ExposedRawResponse(messages=[Message("assistant", ['{"answer": false}'])], response_format=AnswerFormat)
+    if public_format:
+        # Core currently stores the declared format privately. A subclass can
+        # also expose it publicly, where stripping after traversal is too late.
+        vars(response)["response_format"] = AnswerFormat
+        with pytest.raises(AssertionError, match="Response format serialization"):
+            AgentResponse.to_dict(response, exclude={"messages"})
+    inline = json.loads(_json(serialize_agent_response(response)))
+    assert inline["value"] == {"answer": False}
+    assert "response_format" not in inline
+    assert response._value is None and response._value_parsed is False
+
+
+class ExplosiveContent(Content):
+    DEFAULT_EXCLUDE = {"type", "arguments", "function_call", "approved", "user_input_request"}
+    INJECTABLE = {"id", "call_id", "name"}
+
+    def to_dict(self, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("Nested subclass serialization must not run")
+
+
+@pytest.mark.parametrize(
+    ("kind", "edge", "as_tuple"),
+    [
+        (None, "function_call", False),
+        ("function_result", "items", False),
+        ("function_result", "items", True),
+        ("code_interpreter_tool_call", "inputs", False),
+        ("code_interpreter_tool_call", "inputs", True),
+        ("code_interpreter_tool_result", "outputs", False),
+        ("code_interpreter_tool_result", "outputs", True),
+        ("shell_tool_result", "outputs", False),
+        ("shell_tool_result", "outputs", True),
+    ],
+)
+@pytest.mark.parametrize("approved", [None, False], ids=["request", "rejected-response"])
+def test_nested_approval_base_fields_never_invoke_subclass_or_raw_serializers(
+    kind: Any, edge: str, as_tuple: bool, approved: bool | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    business = {
+        "type": "untrusted.Business",
+        "$runtimeType": "untrusted.Type",
+        "function_call": {"not": "a Content envelope"},
+        "answer": False,
+    }
+    call = ExplosiveContent(
+        "function_call",
+        call_id="call",
+        name="tool",
+        arguments=deepcopy(business),
+        raw_representation=UnserializableRaw(),
+    )
+    approval = ExplosiveContent(
+        "function_approval_request" if approved is None else "function_approval_response",
+        id="approval",
+        function_call=call,
+        user_input_request=True if approved is None else None,
+        approved=approved,
+        raw_representation=UnserializableRaw(),
+    )
+    content: Content = approval
+    if kind is not None:
+        kwargs: dict[str, Any] = {edge: (approval,) if as_tuple else [approval]}
+        content = Content(kind, call_id="outer", raw_representation=UnserializableRaw(), **kwargs)
+    forbidden = Mock(side_effect=AssertionError("Do not use polymorphic loading"))
+    for base in (AgentResponse, Message, Content):
+        monkeypatch.setattr(base, "from_dict", forbidden)
+    response = AgentResponse(messages=[Message("assistant", [content])])
+    inline = json.loads(_json(serialize_agent_response(response)))
+    outer = inline["messages"][0]["contents"][0]
+    nested = outer if kind is None else outer[edge][0]
+    assert nested["id"] == "approval"
+    assert ("approved" in nested) is (approved is not None)
+    if approved is None:
+        assert nested["user_input_request"] is True
+    else:
+        assert nested["approved"] is False
+    assert nested["function_call"] == {
+        "type": "function_call",
+        "call_id": "call",
+        "name": "tool",
+        "arguments": business,
+        "additional_properties": {},
+    }
+    assert all("raw_representation" not in item for item in (outer, nested, nested["function_call"]))
+    wire = json.loads(_json(serialize_terminal_response(response)))
+    for loaded in (load_agent_response(inline), load_terminal_response(wire)):
+        restored = loaded.messages[0].contents[0]
+        restored_approval = restored if kind is None else getattr(restored, edge)[0]
+        assert type(restored_approval) is Content
+        assert type(restored_approval.function_call) is Content
+        assert restored_approval.function_call.arguments == business
+        assert restored_approval.approved is approved
+    assert call.arguments == business and approval.function_call is call
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("field", ["result", "arguments", "output", "outputs", "annotations", "additional_properties"])
+def test_content_business_json_is_not_a_nested_content_edge(field: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    business = {
+        "type": "untrusted.Business",
+        "function_call": {"not": "a Content envelope"},
+        "items": [{"no_type": False}],
+        "$runtimeType": "untrusted.Type",
+    }
+    value = [business] if field in ("outputs", "annotations") else business
+    # Image outputs, unlike code/shell outputs, are application data.
+    kwargs: dict[str, Any] = {field: deepcopy(value)}
+    content = Content("image_generation_tool_result", **kwargs)
+    forbidden = Mock(side_effect=AssertionError("Do not use polymorphic loading"))
+    monkeypatch.setattr(Content, "from_dict", forbidden)
+    response = AgentResponse(messages=[Message("assistant", [content])])
+    payload = json.loads(_json(serialize_agent_response(response)))
+    loaded = load_agent_response(payload).messages[0].contents[0]
+    assert _json(getattr(loaded, field)) == _json(value)
+    assert _json(payload["messages"][0]["contents"][0][field]) == _json(value)
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("require_prefix", [False, True], ids=["idempotent", "non-idempotent"])
+def test_valid_normalizing_model_still_requires_lossless_json_transport(require_prefix: bool) -> None:
+    class NormalizingAnswer(BaseModel):
+        answer: str
+
+        @field_validator("answer")
+        @classmethod
+        def normalize(cls, incoming: str) -> str:
+            if require_prefix and not incoming.startswith("prefix:"):
+                raise ValueError("expected prefixed input")
+            return incoming.removeprefix("prefix:")
+
+    original = NormalizingAnswer(answer="prefix:answer")
+    assert original.answer == "answer"
+    response = AgentResponse[Any](value=original)
+    if require_prefix:
+        # Valid input does not imply its normalized output is valid input again.
+        with pytest.raises(ValidationError, match="expected prefixed input"):
+            NormalizingAnswer.model_validate_json('{"answer":"answer"}')
+        with pytest.raises(ValidationError, match="expected prefixed input"):
+            serialize_agent_response(response)
+    else:
+        raw = serialize_agent_response(response)
+        assert raw["value"] == {"answer": "answer"}
+        loaded = load_terminal_response(serialize_terminal_response(raw))
+        ensure_response_format(NormalizingAnswer, CORRELATION, loaded)
+        assert loaded.value == original
+    assert response.value is original and original.answer == "answer"

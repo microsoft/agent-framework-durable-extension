@@ -40,9 +40,9 @@ class WorkflowOrchestrationContext(Protocol):
     def is_replaying(self) -> bool:
         """Whether the orchestrator is replaying previously-recorded history.
 
-        Side effects intended to be observed live exactly once (for example,
-        publishing streaming status to the custom status) must be skipped while
-        this is ``True`` so they are not re-emitted on replay.
+        External side effects such as logging should be skipped while this is
+        ``True``. Replacement custom-status snapshots must instead be rebuilt
+        from replay-local state, including the accumulated event timeline.
         """
         ...
 

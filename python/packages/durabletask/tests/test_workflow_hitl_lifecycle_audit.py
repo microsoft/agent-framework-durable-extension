@@ -79,9 +79,16 @@ class _Transport:
         self.names: dict[str, str] = {}
         self.events: dict[str, dict[str, list[Any]]] = {}
         self.child_ids: list[str] = []
+        self.activity_results: list[dict[str, Any]] = []
 
     def host(self, calls: Any, result: Any, *, functions: Any, instance_id: str = "root-run") -> Any:
-        host = _host(calls, result, functions=functions, instance_id=instance_id, replay=self.replay)
+        def activity(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+            # Observe the real registered activity, without fabricating admission.
+            outcome = result(name, payload)
+            self.activity_results.append(deepcopy(outcome))
+            return outcome
+
+        host = _host(calls, activity, functions=functions, instance_id=instance_id, replay=self.replay)
         self.hosts[instance_id] = host
         events = self.events.setdefault(instance_id, {})
 
@@ -182,24 +189,30 @@ def _typed_workflow(requested: type) -> tuple[Workflow, list[Any]]:
 def test_recorded_type_controls_admission_before_broad_handler(
     requested: type, answer: Any, valid: bool, correction: Any
 ) -> None:
-    async def core_trial() -> list[Any]:
+    async def core_trial() -> tuple[list[Any], list[Any]]:
         workflow, seen = _typed_workflow(requested)
         start = await workflow.run("go")
         assert start.get_request_info_events()[0].response_type is requested
         if valid:
             await workflow.run(responses={"approval": deepcopy(answer)})
-        else:
-            with pytest.raises((TypeError, ValueError), match="Response type mismatch"):
-                await workflow.run(responses={"approval": deepcopy(answer)})
-        return seen
+            return seen, seen
+        with pytest.raises((TypeError, ValueError), match="Response type mismatch"):
+            await workflow.run(responses={"approval": deepcopy(answer)})
+        assert not seen
+        assert set(await workflow._runner.context.get_pending_request_info_events()) == {"approval"}
+        rejected = list(seen)
+        await workflow.run(responses={"approval": deepcopy(correction)})
+        return rejected, seen
 
-    oracle = asyncio.run(core_trial())
+    oracle, final_oracle = asyncio.run(core_trial())
     assert oracle == ([answer] if valid else [])
     workflow, seen = _typed_workflow(requested)
     transport = _Transport()
     try:
         run = transport.start(workflow)
+        pending = deepcopy(run.host.statuses[-1]["pending_requests"])
         native = Mock(spec=TaskHubGrpcClient)
+        native.get_orchestration_state.side_effect = transport.state
         DurableWorkflowClient(native).send_hitl_response("root-run", "approval", deepcopy(answer))
         wire = native.raise_orchestration_event.call_args.kwargs["data"]
         assert wire == answer and type(wire) is type(answer)
@@ -207,12 +220,29 @@ def test_recorded_type_controls_admission_before_broad_handler(
         transport.event("approval", wire)
         assert seen == oracle
         if not valid:
-            assert not run.done and len(run.calls) == 1
-            assert set(run.host.statuses[-1]["pending_requests"]) == {"approval"}
+            # Rejection is checkpointed by the registered response activity,
+            # not decided synchronously by the event-wait generator.
+            assert not run.done and len(run.calls) == len(transport.activity_results) == 2
+            assert transport.activity_results[-1] == {
+                "hitl_admission": {"request_id": "approval", "status": "invalidreply"},
+                "sent_messages": [],
+                "outputs": [],
+                "events": [],
+                "shared_state_updates": {},
+                "shared_state_deletes": [],
+                "pending_request_info_events": [],
+            }
+            assert run.host.statuses[-1]["pending_requests"] == pending
             transport.event("approval", correction)
             assert seen == [correction]
             assert len(transport.events["root-run"]["approval"]) == 2
-        assert run.done and len(run.calls) == 2
+        assert run.done and len(run.calls) == len(transport.activity_results) == (2 if valid else 3)
+        assert transport.activity_results[-1]["hitl_admission"] == {
+            "request_id": "approval",
+            "status": "accepted",
+        }
+        assert not run.host.statuses[-1].get("pending_requests")
+        assert seen == final_oracle
         expected = answer if valid else correction
         assert type(seen[0]) is type(expected)
         assert deserialize_workflow_output(run.output) == [{"value": expected, "type": type(expected).__name__}]
@@ -240,12 +270,31 @@ def test_declared_model_reconstructs_but_invalid_mapping_keeps_request() -> None
     transport = _Transport()
     try:
         run = transport.start(workflow)
-        for invalid in ({"approved": True}, {"__type__": "os:system"}, {"approved": True, "note": None}):
+        pending = deepcopy(run.host.statuses[-1]["pending_requests"])
+        for invalid, activity_count in (
+            ({"approved": True}, 2),
+            ({"__type__": "os:system"}, 3),  # Raw malformed envelopes also checkpoint rejection.
+            ({"approved": True, "note": None}, 4),
+        ):
             transport.event("approval", invalid)
-            assert not run.done and not seen and len(run.calls) == 1
-            assert "approval" in run.host.statuses[-1]["pending_requests"]
+            assert not run.done and not seen
+            assert len(run.calls) == len(transport.activity_results) == activity_count
+            assert transport.activity_results[-1] == {
+                "hitl_admission": {"request_id": "approval", "status": "invalidreply"},
+                "sent_messages": [],
+                "outputs": [],
+                "events": [],
+                "shared_state_updates": {},
+                "shared_state_deletes": [],
+                "pending_request_info_events": [],
+            }
+            assert run.host.statuses[-1]["pending_requests"] == pending
         transport.event("approval", {"approved": True, "note": "123"})
         assert run.done and seen == oracle == [_Decision(approved=True, note="123")]
+        assert len(run.calls) == len(transport.activity_results) == 5
+        assert len(transport.events["root-run"]["approval"]) == 4
+        assert transport.activity_results[-1]["hitl_admission"]["status"] == "accepted"
+        assert not run.host.statuses[-1].get("pending_requests")
         assert type(seen[0]) is _Decision
     finally:
         transport.close()
@@ -313,7 +362,7 @@ def test_ready_handler_runs_without_other_reply_and_old_wait_survives(first: str
         return seen
 
     oracle = asyncio.run(core_trial())
-    executions: list[tuple[list[dict[str, Any]], list[str]]] = []
+    executions: list[tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]] = []
     for replay in (False, True):
         transport = _Transport(replay=replay)
         workflow, seen = _siblings()
@@ -324,22 +373,22 @@ def test_ready_handler_runs_without_other_reply_and_old_wait_survives(first: str
             transport.event(first, "one")
             assert seen == [(first, "one")] and not run.done
             if first == "qA":
-                if not replay:
-                    assert set(run.host.statuses[-1]["pending_requests"]) == {"qB", "qC"}
-                    outputs = [event.get("data") for event in run.host.statuses[-1]["events"]]
-                    assert {"answer_for_qB": "derived-one"} in outputs
+                assert set(run.host.statuses[-1]["pending_requests"]) == {"qB", "qC"}
+                outputs = [event.get("data") for event in run.host.statuses[-1]["events"]]
+                assert {"answer_for_qB": "derived-one"} in outputs
                 transport.event("qC", "follow-up")
                 assert not run.done and transport.events["root-run"]["qB"] == [older]
-                if not replay:
-                    assert set(run.host.statuses[-1]["pending_requests"]) == {"qB"}
+                assert set(run.host.statuses[-1]["pending_requests"]) == {"qB"}
                 transport.event("qB", "derived-one")
             else:
                 transport.event("qA", "one")
                 transport.event("qC", "follow-up")
             assert run.done and seen == oracle
-            if replay:
-                run.host.set_custom_status.assert_not_called()
-            executions.append((run.calls, [call.args[0] for call in run.host.wait_for_external_event.call_args_list]))
+            executions.append((
+                run.calls,
+                [call.args[0] for call in run.host.wait_for_external_event.call_args_list],
+                deepcopy(run.host.statuses),
+            ))
         finally:
             transport.close()
     assert executions[0] == executions[1]
@@ -763,6 +812,7 @@ def test_af_http_schedules_opaque_json_and_worker_validates_recorded_type(answer
         batch = next(generator)
         assert batch.is_completed
         waiting = generator.send(batch.result)
+        pending = deepcopy(run.statuses[-1]["pending_requests"])
         request = func.HttpRequest(
             method="POST",
             url=f"https://example.test/api/workflow/{workflow.name}/respond/root-run/approval",
@@ -777,15 +827,36 @@ def test_af_http_schedules_opaque_json_and_worker_validates_recorded_type(answer
         assert wire == answer and type(wire) is type(answer)
         waiting.set_value(is_error=False, value=wire)
         task = generator.send(waiting.result)
+        # The real registered activity has completed, but its admission outcome
+        # has not been consumed by the orchestration yet.
+        assert task.is_completed and len(run.calls) == 2
+        assert len(task.result) == 1
+        admission_result = json.loads(task.result[0])
         if not isinstance(answer, str):
+            assert admission_result == {
+                "hitl_admission": {"request_id": "approval", "status": "invalidreply"},
+                "sent_messages": [],
+                "outputs": [],
+                "events": [],
+                "shared_state_updates": {},
+                "shared_state_deletes": [],
+                "pending_request_info_events": [],
+            }
+            task = generator.send(task.result)
             assert not task.is_completed and not seen
-            assert "approval" in run.statuses[-1]["pending_requests"]
+            assert run.statuses[-1]["pending_requests"] == pending
             task.set_value(is_error=False, value="corrected")
             task = generator.send(task.result)
         assert task.is_completed
-        with pytest.raises(StopIteration):
+        assert json.loads(task.result[0])["hitl_admission"] == {"request_id": "approval", "status": "accepted"}
+        with pytest.raises(StopIteration) as completed:
             generator.send(task.result)
-        assert seen == [answer if isinstance(answer, str) else "corrected"]
+        expected = answer if isinstance(answer, str) else "corrected"
+        assert seen == [expected]
+        assert deserialize_workflow_output(completed.value.value) == [{"value": expected, "type": "str"}]
+        assert len(run.calls) == (2 if isinstance(answer, str) else 3)
+        assert len(run.events["approval"]) == (1 if isinstance(answer, str) else 2)
+        assert not run.statuses[-1].get("pending_requests")
     finally:
         generator.close()
 
@@ -819,17 +890,18 @@ def test_af_any_reply_preserves_older_wait_through_new_request_and_replay() -> N
             assert waiting.is_completed
             assert not advance(waiting.result)
             assert seen == [("qA", "one")] and run.events["qB"] == [older]
-            if not replay:
-                assert set(run.statuses[-1]["pending_requests"]) == {"qB", "qC"}
+            assert set(run.statuses[-1]["pending_requests"]) == {"qB", "qC"}
             run.events["qC"][-1].set_value(is_error=False, value="follow-up")
             assert not advance(waiting.result)
             assert run.events["qB"] == [older] and waiting is older
             older.set_value(is_error=False, value="derived-one")
             assert advance(waiting.result)
             assert seen == [("qA", "one"), ("qC", "follow-up"), ("qB", "derived-one")]
-            if replay:
-                run.host.set_custom_status.assert_not_called()
-            executions.append((run.calls, [call.args[0] for call in run.host.wait_for_external_event.call_args_list]))
+            executions.append((
+                run.calls,
+                [call.args[0] for call in run.host.wait_for_external_event.call_args_list],
+                deepcopy(run.statuses),
+            ))
         finally:
             run.generator.close()
     assert executions[0] == executions[1]

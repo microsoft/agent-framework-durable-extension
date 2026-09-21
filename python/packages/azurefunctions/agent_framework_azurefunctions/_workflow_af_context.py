@@ -9,13 +9,60 @@ Wraps ``azure.durable_functions.DurableOrchestrationContext`` to satisfy the
 from __future__ import annotations
 
 import logging
+from collections import deque
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from agent_framework_durabletask import WorkflowOrchestrationContext, build_agent_task
 from azure.durable_functions import DurableOrchestrationContext
+from azure.durable_functions.models.Task import TaskState
 
 logger = logging.getLogger(__name__)
+
+
+class _DeferredEventCallbacks(dict[int | str, Any]):
+    """Consume SDK-buffered events once, in arrival order for each event name.
+
+    azure-functions-durable 1.6.0 stores a callback in ``deferred_tasks`` when
+    an event arrives before a wait is registered. Its ``_add_to_open_tasks``
+    reads and invokes that callback without removing it, and a second early
+    event overwrites the first. There is no public buffer-consumption API.
+
+    Install this per-context mapping before external events are processed. Preserve
+    callbacks on assignment, then remove exactly one on the SDK's lookup for
+    a declared adapter event wait. Creating a wait does not register it, so
+    consuming at wait creation would be premature. No SDK methods or task
+    scheduling are replaced. Other task IDs retain normal dictionary reads.
+    This private SDK contract is covered by real SDK history tests, not a
+    promise of compatibility with a different future buffer representation.
+    """
+
+    def __init__(self, callbacks: dict[int | str, Any]) -> None:
+        super().__init__()
+        self.event_names: set[str] = set()
+        self._queues: dict[str, deque[Callable[[], Any]]] = {}
+        for key, callback in callbacks.items():
+            self[key] = callback
+
+    def __setitem__(self, key: int | str, callback: Any) -> None:
+        super().__setitem__(key, callback)
+        if isinstance(key, str):
+            if callable(callback):
+                self._queues.setdefault(key, deque()).append(callback)
+            else:
+                self._queues.pop(key, None)
+
+    def __getitem__(self, key: int | str) -> Any:
+        if isinstance(key, str) and key in self.event_names:
+            callbacks = self._queues.get(key)
+            if callbacks:
+                callback = callbacks.popleft()
+                if not callbacks:
+                    del self._queues[key]
+                    super().__delitem__(key)
+                return callback
+        return super().__getitem__(key)
 
 
 class AzureFunctionsWorkflowContext:
@@ -23,6 +70,15 @@ class AzureFunctionsWorkflowContext:
 
     def __init__(self, context: DurableOrchestrationContext) -> None:
         self._context = context
+        # Only adapt the known plain-dict/callback layout. Leave absent or
+        # different SDK buffer implementations alone, including test doubles.
+        # Reusing an adapter on the same context must not reset queued events.
+        deferred: Any = getattr(context, "deferred_tasks", None)
+        if type(deferred) is dict:
+            callbacks = cast(dict[int | str, Any], deferred)
+            if all(callable(callback) for callback in callbacks.values()):
+                orchestration_context: Any = context
+                orchestration_context.deferred_tasks = _DeferredEventCallbacks(callbacks)
 
     # -- Properties -----------------------------------------------------------
 
@@ -92,7 +148,11 @@ class AzureFunctionsWorkflowContext:
     # -- External events / timers ---------------------------------------------
 
     def wait_for_external_event(self, name: str) -> Any:
-        return self._context.wait_for_external_event(name)
+        task = self._context.wait_for_external_event(name)
+        deferred = getattr(self._context, "deferred_tasks", None)
+        if isinstance(deferred, _DeferredEventCallbacks):
+            deferred.event_names.add(name)
+        return task
 
     def create_timer(self, fire_at: datetime) -> Any:
         return self._context.create_timer(fire_at)
@@ -112,6 +172,10 @@ class AzureFunctionsWorkflowContext:
             cancel_fn()
 
     def get_task_result(self, task: Any) -> Any:
+        # task_any succeeds with the winning task even when that task failed.
+        # Match yielding the task itself (and the standalone SDK's get_result).
+        if getattr(task, "state", None) is TaskState.FAILED:
+            raise task.result
         return getattr(task, "result", None)
 
 

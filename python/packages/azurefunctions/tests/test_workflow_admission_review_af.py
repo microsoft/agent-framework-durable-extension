@@ -97,6 +97,7 @@ def test_http_hitl_rejects_root_marker_before_event_and_accepts_corrected_reply(
     client = AsyncMock(spec=df.DurableOrchestrationClient)
     client.get_status.return_value = Mock(name="status")
     client.get_status.return_value.name = f"dafx-{workflow.name}"
+    client.get_status.return_value.custom_status = deepcopy(host.statuses[-1])
 
     def submit(payload: Any) -> Any:
         request = func.HttpRequest(

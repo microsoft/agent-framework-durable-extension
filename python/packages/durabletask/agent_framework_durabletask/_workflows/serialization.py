@@ -31,13 +31,14 @@ Contents:
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 import math
+import sys
 from contextlib import suppress
 from dataclasses import is_dataclass
-from typing import Any, cast
+from types import ModuleType, UnionType
+from typing import Any, Union, cast, get_args, get_origin
 
 from agent_framework import AgentResponse, Content, Message, WorkflowEvent
 from agent_framework._workflows._checkpoint_encoding import (
@@ -49,6 +50,7 @@ from agent_framework._workflows._checkpoint_encoding import (
     encode_checkpoint_value,
 )
 from agent_framework._workflows._events import WorkflowEventType
+from agent_framework._workflows._typing_utils import try_coerce_to_type
 from pydantic import BaseModel
 
 from .._response_utils import load_agent_response, serialize_agent_response
@@ -60,25 +62,161 @@ _WORKFLOW_AGENT_RESPONSE_KEY = "_durable_agent_response"
 _WORKFLOW_AGENT_RESPONSE_VERSION = 1
 _RESERVED_VALUE_DICT_KEYS = _RESERVED_DICT_KEYS | {_WORKFLOW_AGENT_RESPONSE_KEY}
 
+_RESPONSE_TYPE_VERSION_KEY = "_durable_response_type"
+_RESPONSE_TYPE_VERSION = 1
+_RESPONSE_TYPE_MAX_DEPTH = 64
+_RESPONSE_TYPE_MAX_NODES = 1024
+_RESPONSE_TYPE_ORIGINS: dict[str, Any] = {"list": list, "dict": dict, "tuple": tuple, "set": set}
 
-def resolve_type(type_key: str) -> type | None:
-    """Resolve a 'module:class' type key to its Python type.
+
+def _resolve_loaded_type(type_key: str) -> Any:
+    """Read an exact type identity from loaded namespaces, without invoking hooks."""
+    if type_key == "builtins:NoneType":
+        return type(None)
+    if type_key == "typing:Any":
+        return Any
+    module_name, separator, qualname = type_key.partition(":")
+    parts = qualname.split(".")
+    if not separator or not all(part.isidentifier() for part in parts):
+        raise ValueError("Malformed HITL response type identifier.")
+    module = sys.modules.get(module_name)
+    if not isinstance(module, ModuleType):
+        raise ValueError("Unknown HITL response type identifier. Its module must already be loaded.")
+    namespace = ModuleType.__getattribute__(module, "__dict__")
+    resolved: Any = None
+    for index, part in enumerate(parts):
+        resolved = namespace.get(part)
+        if not isinstance(resolved, type):
+            raise ValueError("Unknown HITL response type identifier. Only concrete types can be resolved.")
+        if index < len(parts) - 1:
+            namespace = type.__getattribute__(resolved, "__dict__")
+    identity = f"{type.__getattribute__(resolved, '__module__')}:{type.__getattribute__(resolved, '__qualname__')}"
+    if identity != type_key:
+        raise ValueError("HITL response type identifier does not match the loaded type.")
+    return resolved
+
+
+def serialize_response_type(annotation: Any) -> str | dict[str, Any] | None:
+    """Encode a trusted request's annotation without erasing generic arguments.
+
+    Concrete types retain the legacy module:qualname string representation. New
+    generic requests use a closed, versioned JSON profile, never pickle or Python
+    expressions. Core's HITL assignability supports list, dict, tuple, set, unions
+    and Any. Literal/Annotated/forward references are deliberately rejected here:
+    Core 1.13/1.16 cannot admit them through is_instance_of. Literal fields inside
+    a declared Pydantic model remain the model's responsibility.
+
+    Only registered executor request-info events may supply this annotation.
+    Readers require custom types to be loaded by the application's registration,
+    under their exact module/qualname identity. Local function classes are not
+    recoverable in another worker and fail before a pending request is emitted.
+
+    This profile uses workflow protocol v2, not a new start-envelope version.
+    Old concrete records keep their meaning, including bare list records whose
+    element type was already lost.
+    They cannot be strengthened retroactively. Deploy all workers/readers together
+    in an isolated new-runtime hub, leaving existing histories on their original
+    deployment. Older readers do not understand the new descriptor profile.
+    """
+    if annotation is None:
+        return None
+    remaining = [_RESPONSE_TYPE_MAX_NODES]
+
+    def encode(value: Any, depth: int) -> Any:
+        remaining[0] -= 1
+        if depth > _RESPONSE_TYPE_MAX_DEPTH or remaining[0] < 0:
+            raise ValueError("HITL response annotation exceeds the descriptor complexity limit.")
+        if value is Any:
+            return "typing:Any"
+        origin = get_origin(value)
+        if origin is None and isinstance(value, type):
+            key = f"{value.__module__}:{value.__qualname__}"
+            if _resolve_loaded_type(key) is not value:
+                raise ValueError("HITL response annotation must identify the registered type exactly.")
+            return key
+        args = get_args(value)
+        if origin in (Union, UnionType):
+            kind = "union"
+        else:
+            kind = next((name for name, candidate in _RESPONSE_TYPE_ORIGINS.items() if candidate is origin), "")
+        if not kind:
+            raise ValueError(f"Unsupported HITL response annotation: {value!r}.")
+        if not args and kind != "union":
+            return f"builtins:{kind}"
+        children = [encode(arg, depth + 1) if arg is not Ellipsis else {"kind": "ellipsis"} for arg in args]
+        return {_RESPONSE_TYPE_VERSION_KEY: _RESPONSE_TYPE_VERSION, "kind": kind, "args": children}
+
+    encoded = encode(annotation, 0)
+    # Validate arity and tuple ellipsis placement with the same closed wire grammar.
+    deserialize_response_type(encoded)
+    return cast("str | dict[str, Any]", encoded)
+
+
+def deserialize_response_type(descriptor: Any) -> Any:
+    """Decode a server-owned annotation, rejecting unknown or malformed profiles.
+
+    This is not a validator for caller-chosen expected types. The authoritative
+    descriptor is the one recorded by the registered request producer, not a field
+    in the external reply. No module import, eval or checkpoint decode is performed.
+    """
+    remaining = [_RESPONSE_TYPE_MAX_NODES]
+
+    def decode(value: Any, depth: int) -> Any:
+        remaining[0] -= 1
+        if depth > _RESPONSE_TYPE_MAX_DEPTH or remaining[0] < 0:
+            raise ValueError("HITL response descriptor exceeds the complexity limit.")
+        if isinstance(value, str):
+            return _resolve_loaded_type(value)
+        if not isinstance(value, dict):
+            raise ValueError("Malformed HITL response descriptor.")
+        node = cast(dict[str, Any], value)
+        if (
+            set(node) != {_RESPONSE_TYPE_VERSION_KEY, "kind", "args"}
+            or type(node[_RESPONSE_TYPE_VERSION_KEY]) is not int
+            or node[_RESPONSE_TYPE_VERSION_KEY] != _RESPONSE_TYPE_VERSION
+            or not isinstance(node["kind"], str)
+            or not isinstance(node["args"], list)
+        ):
+            raise ValueError("Malformed or unsupported HITL response descriptor version.")
+        kind: str = node["kind"]
+        raw_args = cast(list[Any], node["args"])
+        if kind not in (*_RESPONSE_TYPE_ORIGINS, "union"):
+            raise ValueError("Unknown HITL response descriptor kind.")
+        if (
+            (kind in ("list", "set") and len(raw_args) != 1)
+            or (kind == "dict" and len(raw_args) != 2)
+            or (kind == "union" and len(raw_args) < 2)
+        ):
+            raise ValueError("Malformed HITL response descriptor arguments.")
+        args: list[Any] = []
+        for index, child in enumerate(raw_args):
+            if child == {"kind": "ellipsis"}:
+                if kind != "tuple" or index != len(raw_args) - 1 or len(raw_args) not in (1, 2):
+                    raise ValueError("Malformed HITL tuple ellipsis descriptor.")
+                args.append(Ellipsis)
+            else:
+                args.append(decode(child, depth + 1))
+        if kind == "union":
+            union_type: Any = Union
+            return union_type[tuple(args)]
+        return _RESPONSE_TYPE_ORIGINS[kind][tuple(args)]
+
+    return decode(descriptor, 0)
+
+
+def resolve_type(type_key: str | dict[str, Any]) -> Any:
+    """Resolve a recorded type key or annotation using already-loaded types only.
 
     Args:
-        type_key: Fully qualified type reference in 'module_name:class_name' format.
+        type_key: Legacy module:qualname string or versioned response descriptor.
 
     Returns:
-        The resolved type, or None if resolution fails.
+        The resolved type or annotation, or None if resolution fails.
     """
     try:
-        module_name, class_name = type_key.split(":", 1)
-        module = importlib.import_module(module_name)
-        resolved = getattr(module, class_name, None)
-        # Only return actual classes. A non-type attribute (function, module member,
-        # etc.) would raise TypeError in issubclass() inside reconstruct_to_type().
-        return resolved if isinstance(resolved, type) else None
-    except Exception:
-        logger.debug("Could not resolve type %s", type_key)
+        return deserialize_response_type(type_key)
+    except (TypeError, ValueError):
+        logger.debug("Could not resolve recorded HITL response type.")
         return None
 
 
@@ -319,13 +457,6 @@ def deserialize_workflow_output(output: Any) -> Any:
 # ============================================================================
 
 
-def _type_key(value_type: type[Any] | None) -> str | None:
-    """Format a type as a ``'module:qualname'`` key for :func:`resolve_type`."""
-    if value_type is None:
-        return None
-    return f"{value_type.__module__}:{value_type.__name__}"
-
-
 def serialize_workflow_event(event: WorkflowEvent[Any]) -> dict[str, Any]:
     """Serialize a :class:`WorkflowEvent` to a JSON-compatible dict.
 
@@ -352,7 +483,7 @@ def serialize_workflow_event(event: WorkflowEvent[Any]) -> dict[str, Any]:
         # WorkflowEvent.request_info, which derives it from the data payload.
         serialized["request_id"] = event.request_id
         serialized["source_executor_id"] = event.source_executor_id
-        serialized["response_type"] = _type_key(event.response_type)
+        serialized["response_type"] = serialize_response_type(event.response_type)
     return serialized
 
 
@@ -375,12 +506,12 @@ def deserialize_workflow_event(serialized: dict[str, Any]) -> WorkflowEvent[Any]
 
     if event_type == "request_info":
         response_key = serialized.get("response_type")
-        response_type = resolve_type(response_key) if response_key else None
+        response_type = deserialize_response_type(response_key) if response_key is not None else object
         event: WorkflowEvent[Any] = WorkflowEvent.request_info(
             request_id=cast(str, serialized["request_id"]),
             source_executor_id=cast(str, serialized["source_executor_id"]),
             request_data=payload,
-            response_type=response_type or object,
+            response_type=response_type,
         )
     else:
         event = WorkflowEvent(event_type, data=payload, executor_id=serialized.get("executor_id"))
@@ -396,7 +527,7 @@ def deserialize_workflow_event(serialized: dict[str, Any]) -> WorkflowEvent[Any]
 # ============================================================================
 
 
-def reconstruct_to_type(value: Any, target_type: type, *, encoded: bool = True) -> Any:
+def reconstruct_to_type(value: Any, target_type: Any, *, encoded: bool = True) -> Any:
     """Reconstruct a value to a known target type.
 
     Raw initial input and HITL replies must use ``encoded=False``. That path
@@ -404,12 +535,11 @@ def reconstruct_to_type(value: Any, target_type: type, *, encoded: bool = True) 
     including literal durable-response markers and application ``type`` fields.
     Only the trusted declared target type selects a constructor.
 
-    Tries strategies in order:
-    1. Decode an internal mapping once, or sanitize raw application input
-    2. Return as-is if already the correct type
-    3. Safe base Content/Message construction (for those exact declared types)
-    4. Pydantic model_validate (for Pydantic models)
-    5. Dataclass constructor (for dataclasses)
+    Generic annotations delegate to Core's coercer. Concrete reconstruction here
+    preserves the existing initial-input behavior. HITL admission uses Core's
+    coercer for both concrete and generic types, retaining only these fixed
+    Content/Message constructors. User constructors/validators must run inside
+    the response activity, never in the HITL event-wait loop.
 
     Args:
         value: The value to reconstruct (typically a dict from JSON)
@@ -430,6 +560,9 @@ def reconstruct_to_type(value: Any, target_type: type, *, encoded: bool = True) 
         value = strip_pickle_markers(value)
     elif isinstance(value, dict):
         value = deserialize_value(value)
+
+    if get_origin(target_type) is not None:
+        return try_coerce_to_type(value, target_type)
 
     if value is None or target_type is Any:
         return value
@@ -453,7 +586,6 @@ def reconstruct_to_type(value: Any, target_type: type, *, encoded: bool = True) 
             logger.debug("Could not validate Pydantic model %s", target_type)
             return value  # type: ignore[return-value]
 
-    # Try dataclass construction (for unmarked dicts, e.g., external HITL data)
     if is_dataclass(target_type) and isinstance(target_type, type):  # type: ignore
         try:
             return target_type(**value)

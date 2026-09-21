@@ -341,6 +341,23 @@ def test_v2_paused_hitl_replays_full_shared_generator_with_identical_dispatch_an
             }
         if name == "dafx-protocol-gate":
             assert data["shared_state_snapshot"] == {"pending": payload}
+            if data["message"].get("validation_error") is True:
+                assert deserialize_value(data["message"]) == {
+                    "request_id": "approval",
+                    "original_request": payload,
+                    "response": None,
+                    "response_type": "builtins:dict",
+                    "validation_error": True,
+                }
+                return {
+                    "hitl_admission": {"request_id": "approval", "status": "invalidreply"},
+                    "sent_messages": [],
+                    "outputs": [],
+                    "events": [],
+                    "shared_state_updates": {},
+                    "shared_state_deletes": [],
+                    "pending_request_info_events": [],
+                }
             assert deserialize_value(data["message"]) == {
                 "request_id": "approval",
                 "original_request": payload,
@@ -348,6 +365,7 @@ def test_v2_paused_hitl_replays_full_shared_generator_with_identical_dispatch_an
                 "response_type": "builtins:dict",
             }
             return {
+                "hitl_admission": {"request_id": "approval", "status": "accepted"},
                 "shared_state_deletes": ["pending"],
                 "shared_state_updates": {"decision": answer},
                 "sent_messages": [{"message": answer, "target_id": "sink"}],
@@ -368,20 +386,33 @@ def test_v2_paused_hitl_replays_full_shared_generator_with_identical_dispatch_an
         assert batch.is_complete
         waiting = generator.send(batch.get_result())
         assert not waiting.is_complete and len(calls) == 1
-        if not replay:
-            assert host.statuses[-1]["state"] == "waiting_for_human_input"
-            assert host.statuses[-1]["pending_requests"]["approval"]["data"] == payload
+        assert host.statuses[-1]["state"] == "waiting_for_human_input"
+        assert host.statuses[-1]["pending_requests"]["approval"]["data"] == payload
+        pending = deepcopy(host.statuses[-1]["pending_requests"])
         waiting.complete(deepcopy(_UNTRUSTED))
-        waiting_again = generator.send(waiting.get_result())
-        assert not waiting_again.is_complete and len(calls) == 1
+        rejected = generator.send(waiting.get_result())
+        assert rejected.is_complete and len(calls) == 2
+        assert [json.loads(value)["hitl_admission"] for value in rejected.get_result()] == [
+            {"request_id": "approval", "status": "invalidreply"}
+        ]
+        assert host.statuses[-1]["pending_requests"] == pending
+        waiting_again = generator.send(rejected.get_result())
+        assert waiting_again is not waiting and not waiting_again.is_complete and len(calls) == 2
+        assert host.statuses[-1]["pending_requests"] == pending
         waiting_again.complete(deepcopy(answer))
-        assert _drain(generator, waiting_again.get_result()) == ["done"]
+        accepted = generator.send(waiting_again.get_result())
+        assert accepted.is_complete and len(calls) == 3
+        assert [json.loads(value)["hitl_admission"] for value in accepted.get_result()] == [
+            {"request_id": "approval", "status": "accepted"}
+        ]
+        assert _drain(generator, accepted.get_result()) == ["done"]
         assert [call.args[0] for call in host.wait_for_external_event.call_args_list] == ["approval", "approval"]
-        assert len(calls) == 3
-        assert calls[1]["input"]["source_executor_ids"] == [f"{SOURCE_HITL_RESPONSE}_approval"]
-        assert calls[2]["input"]["source_executor_ids"] == ["gate"]
-        if replay:
-            host.set_custom_status.assert_not_called()
-        executions.append(calls)
+        assert len(calls) == 4 and not host.statuses[-1].get("pending_requests")
+        assert [item["input"]["source_executor_ids"] for item in calls[1:3]] == [
+            [f"{SOURCE_HITL_RESPONSE}_approval"],
+            [f"{SOURCE_HITL_RESPONSE}_approval"],
+        ]
+        assert calls[3]["input"]["source_executor_ids"] == ["gate"]
+        executions.append((calls, deepcopy(host.statuses)))
     assert executions[0] == executions[1]
     assert wire == {_VERSION: 2, "input": payload}

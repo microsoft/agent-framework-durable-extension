@@ -178,6 +178,7 @@ class TestOwnershipValidation:
         client = DurableWorkflowClient(mock_client, workflow_name="orders")
         state = Mock()
         state.name = workflow_orchestrator_name("orders")
+        state.serialized_custom_status = json.dumps({"pending_requests": {"req-1": {"source_executor_id": "gate"}}})
         mock_client.get_orchestration_state.return_value = state
 
         client.send_hitl_response("instance-1", "req-1", {"approved": True})
@@ -355,6 +356,9 @@ class TestSendHitlResponse:
         self, workflow_client: DurableWorkflowClient, mock_client: Mock
     ) -> None:
         """The response is delivered as an external event named by request id."""
+        mock_client.get_orchestration_state.return_value.serialized_custom_status = json.dumps({
+            "pending_requests": {"req-1": {"source_executor_id": "gate"}}
+        })
         workflow_client.send_hitl_response("instance-1", "req-1", {"approved": True})
 
         mock_client.raise_orchestration_event.assert_called_once()
@@ -367,6 +371,9 @@ class TestSendHitlResponse:
         self, workflow_client: DurableWorkflowClient, mock_client: Mock, marker: dict[str, str]
     ) -> None:
         """Root pickle/type markers are rejected without sending a null response."""
+        mock_client.get_orchestration_state.return_value.serialized_custom_status = json.dumps({
+            "pending_requests": {"req-1": {"source_executor_id": "gate"}}
+        })
         malicious = {**marker, "approved": True}
 
         with pytest.raises(ValueError, match="disallowed pickle/type markers"):
@@ -572,7 +579,10 @@ class TestSubworkflowHitl:
         """A qualified id resolves to the owning child instance and bare request id."""
         self._states(
             mock_client,
-            {"parent": {"state": "running", "subworkflows": {"sub": {"0": "child-1"}}}},
+            {
+                "parent": {"state": "running", "subworkflows": {"sub": {"0": "child-1"}}},
+                "child-1": {"pending_requests": {"req-9": {"source_executor_id": "inner_node"}}},
+            },
         )
 
         workflow_client.send_hitl_response("parent", "sub~0~req-9", {"approved": True})
@@ -592,6 +602,7 @@ class TestSubworkflowHitl:
             {
                 "parent": {"state": "running", "subworkflows": {"mid": {"0": "child-1"}}},
                 "child-1": {"state": "running", "subworkflows": {"leaf": {"0": "child-2"}}},
+                "child-2": {"pending_requests": {"deep": {"source_executor_id": "leaf_node"}}},
             },
         )
 
@@ -616,7 +627,15 @@ class TestSubworkflowHitl:
         self, workflow_client: DurableWorkflowClient, mock_client: Mock
     ) -> None:
         """A plain (unqualified) request id targets the given instance directly."""
-        self._states(mock_client, {"parent": {"state": "waiting_for_human_input"}})
+        self._states(
+            mock_client,
+            {
+                "parent": {
+                    "state": "waiting_for_human_input",
+                    "pending_requests": {"req-1": {"source_executor_id": "gate"}},
+                }
+            },
+        )
 
         workflow_client.send_hitl_response("parent", "req-1", {"approved": True})
 
@@ -679,7 +698,15 @@ class TestSubworkflowHitl:
         self, workflow_client: DurableWorkflowClient, mock_client: Mock
     ) -> None:
         """A top-level ``auto::N`` id (contains ``::`` but no ``~``) routes to the instance itself."""
-        self._states(mock_client, {"parent": {"state": "waiting_for_human_input"}})
+        self._states(
+            mock_client,
+            {
+                "parent": {
+                    "state": "waiting_for_human_input",
+                    "pending_requests": {"auto::0": {"source_executor_id": "fn"}},
+                }
+            },
+        )
 
         workflow_client.send_hitl_response("parent", "auto::0", {"approved": True})
 

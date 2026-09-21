@@ -34,6 +34,7 @@ from agent_framework_durabletask import (
     validate_retention,
     validate_runtime_deployment,
 )
+from agent_framework_durabletask._entities import _validation_diagnostic  # pyright: ignore[reportPrivateUsage]
 
 logger = logging.getLogger("agent_framework.azurefunctions")
 
@@ -151,8 +152,13 @@ def create_agent_entity(
             logger.info("[entity_function] Operation %s completed successfully", operation)
 
         except Exception as exc:
-            logger.exception("[entity_function] Error executing entity operation %s", exc)
-            context.set_result({"error": str(exc), "status": "error"})
+            diagnostic = _validation_diagnostic(exc)
+            if diagnostic is not None:
+                logger.error("[entity_function] Error executing entity operation. %s", diagnostic)
+            else:
+                logger.exception("[entity_function] Error executing entity operation %s", exc)
+                diagnostic = str(exc)
+            context.set_result({"error": diagnostic, "status": "error"})
 
     def entity_function(context: df.DurableEntityContext) -> None:
         """Synchronous wrapper invoked by the Durable Functions runtime.
@@ -166,7 +172,12 @@ def create_agent_entity(
         try:
             run_agent_coroutine(_entity_coroutine(context))
         except Exception as exc:  # pragma: no cover - defensive logging
-            logger.error("[entity_function] Unexpected error executing entity: %s", exc, exc_info=True)
-            context.set_result({"error": str(exc), "status": "error"})
+            diagnostic = _validation_diagnostic(exc)
+            if diagnostic is not None:
+                logger.error("[entity_function] Unexpected error executing entity: %s", diagnostic)
+            else:
+                logger.error("[entity_function] Unexpected error executing entity: %s", exc, exc_info=True)
+                diagnostic = str(exc)
+            context.set_result({"error": diagnostic, "status": "error"})
 
     return entity_function

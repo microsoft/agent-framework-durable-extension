@@ -757,6 +757,36 @@ gaps in delivery evidence. If evidence is missing, reject or defer migration rat
 delivered prefix. A matching `2.x` version does not certify mixed-format compatibility. These are
 prototype deployment constraints, not a mandate for its private APIs or exact final common schema.
 
+#### Python runtime implementation note, 2026-09-21
+
+The current Python runtime update deliberately retains workflow protocol `2` while changing the
+HITL activity checkpoints and mixed parent/child replay action graph. Users must start fresh
+workflow instances, including when upgrading from an earlier v2 build. Existing v2 in-flight
+instances and recorded histories are unsupported and may fail on the new runtime. The unchanged
+marker checks start-envelope admission only, not feature or replay compatibility. Older v2
+envelopes can still pass that check. There is no replay migration or fallback. A new isolated hub
+with matching workers and clients is recommended.
+Keep the original deployment only if old runs need to finish there. The `isolated_v2` acknowledgement
+does not prove isolation or detect incompatible peers.
+
+Non-agent HITL reconstruction and validation run in the response activity. Its checkpointed
+`accepted` or `invalidreply` outcome lets orchestration replay avoid rerunning reply validators.
+Invalid replies leave the request pending, while handler and output-serialization failures remain
+activity failures. Activity retry or redelivery can still repeat application code. Recorded
+response types retain supported generic arguments, with JSON reconstruction and type checks
+following the installed Core version. Early valid replies for known fixed IDs and pending event
+waits are preserved. Delivery acknowledgement is not validation or handler completion, and nested
+replies still require a recorded active child path.
+
+Parent and child requests may be active together. Ready handlers and downstream work proceed
+without joining paused children, including when a later child's output enables an earlier child
+to continue. Local reported state updates and deletes merge in dispatch order. Ready results
+preserve dispatch order and each result's message order within a wave. Across waves, recorded
+readiness determines order, not original child invocation order. This retains durable snapshots,
+not Core's shared visibility of uncommitted writes. These are implementation notes, not evidence of
+passing tests, live-host validation or release readiness. Historical prototype evidence below does
+not validate this update.
+
 ```mermaid
 flowchart TB
   MODE{"Deployment mode?"}

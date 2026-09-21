@@ -158,31 +158,47 @@ def preserve_input_envelope(message: Message, raw: dict[str, Any]) -> None:
 
 
 def serialize_input_content(content: Content) -> dict[str, Any]:
-    """Restore inert extras from the same content occurrence, retaining current fields."""
-    current = deepcopy(Content.to_dict(content))
+    """Snapshot public base fields and same-occurrence presence, not subclass serializers."""
+    fields = _constructor_fields(Content)
+    base = Content(cast(Any, content.type))
+    for name in fields:
+        if name != "raw_representation" and hasattr(content, name):
+            # Preserve field edits without applying constructor normalization again.
+            vars(base)[name] = getattr(content, name)
+
+    # Serialize only known Content edges ourselves. Letting Core visit these first
+    # would invoke nested subclass serializers even if their output is overwritten.
+    nested: dict[str, Any] = {}
+    if isinstance(content.function_call, Content):
+        nested["function_call"] = serialize_input_content(content.function_call)
+    names = ["items", "inputs"]
+    if content.type in ("code_interpreter_tool_result", "shell_tool_result"):
+        names.append("outputs")
+    for name in names:
+        values = getattr(content, name, None)
+        if isinstance(values, (list, tuple)):
+            nested[name] = [
+                serialize_input_content(value) if isinstance(value, Content) else deepcopy(value)
+                for value in cast("Sequence[Any]", values)
+            ]
+
+    # Match the Message snapshot: extras may follow Core serialization, but subclass
+    # exclusion metadata cannot suppress explicit base fields or expose raw SDK data.
+    current = Content.to_dict(content, exclude=set(fields))
+    for name in fields:
+        current.pop(name, None)
+    current.update(base.to_dict(exclude=set(nested) | {"raw_representation"}))
     raw_value = getattr(content, "_durable_original_core_content", None)
     raw = cast("dict[str, Any]", raw_value) if isinstance(raw_value, dict) else {}
     if raw.get("type") == content.type:
-        fields = set(_constructor_fields(Content))
         defaults = {
             key: deepcopy(value)
             for key, value in raw.items()
             if key not in fields or (key != "raw_representation" and getattr(content, key, object()) == value)
         }
         current = {**defaults, **current}
-    if isinstance(content.function_call, Content):
-        current["function_call"] = serialize_input_content(content.function_call)
-    names = ["items", "inputs"]
-    if content.type in ("code_interpreter_tool_result", "shell_tool_result"):
-        names.append("outputs")
-    for name in names:
-        values = getattr(content, name, None)
-        if isinstance(values, list):
-            current[name] = [
-                serialize_input_content(value) if isinstance(value, Content) else deepcopy(value)
-                for value in cast("list[Any]", values)
-            ]
-    return current
+    current.update(nested)
+    return deepcopy(current)
 
 
 def serialize_input_message(message: Message) -> dict[str, Any]:
@@ -193,7 +209,8 @@ def serialize_input_message(message: Message) -> dict[str, Any]:
         if name not in ("contents", "raw_representation") and hasattr(message, name):
             # Do not normalize a consumer's field edit through constructor defaults.
             vars(base)[name] = getattr(message, name)
-    current = Message.to_dict(message, exclude={"contents"})
+    # Exclude raw SDK objects before traversal, even when a subclass clears Core's defaults.
+    current = Message.to_dict(message, exclude={"contents", "raw_representation"})
     # Subclass exclusion rules and type identifiers cannot replace public base fields.
     for name in fields:
         current.pop(name, None)
@@ -213,7 +230,11 @@ def serialize_input_message(message: Message) -> dict[str, Any]:
 
 
 def _serialize_model_value(value: BaseModel) -> tuple[Any, bool]:
-    """Prefer alias JSON; use field-name JSON when serialization aliases are not inputs."""
+    """Choose alias or field-name JSON only when the declared model restores it losslessly.
+
+    A valid model instance is not sufficient: validators must also accept its dumped
+    JSON without changing that JSON. Non-idempotent normalization may therefore fail.
+    """
     payload = value.model_dump(mode="json", by_alias=True, round_trip=True)
     field_payload = value.model_dump(mode="json", by_alias=False, round_trip=True)
     field_json = json.dumps(field_payload, sort_keys=True, allow_nan=False)
@@ -308,7 +329,8 @@ def serialize_agent_response(response: AgentResponse[Any]) -> dict[str, Any]:
         if name not in ("value", "response_format", "raw_representation") and hasattr(response, name)
     })
     # Use the base serializer, not an override that may omit or replace public response fields.
-    payload = AgentResponse.to_dict(response, exclude={"messages"})
+    # Stripping runtime-only fields afterward would still execute their serializers.
+    payload = AgentResponse.to_dict(response, exclude={"messages", "raw_representation", "response_format"})
     payload.update(base.to_dict(exclude={"messages"}))
     payload["messages"] = [serialize_input_message(message) for message in response.messages]
     payload.pop("response_format", None)

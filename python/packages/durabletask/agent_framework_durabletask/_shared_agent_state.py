@@ -30,6 +30,7 @@ from ._response_utils import (
     load_agent_response,
     preserve_input_envelope,
     serialize_input_content,
+    serialize_input_message,
 )
 from ._shared_state_validation import (
     validate_shared_data,
@@ -367,13 +368,20 @@ class DurableAgentStateContent:
             result[DurableStateFields.EXTENSION_DATA] = self.extensionData
         return self._raw_shadow.merge(result) if self._raw_shadow is not None else _json_snapshot(result)
 
-    def core_projection(self) -> dict[str, Any]:
+    def _core_field_names(self) -> dict[str, str]:
+        """Map all typed fields, independently of their current persisted presence."""
         aliases = {"details": "error_details", "usage": "usage_details"}
-        fields = {
-            aliases.get(key, re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower()): value
-            for key, value in self.to_dict().items()
+        return {
+            key: aliases.get(key, re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower())
+            for key in self.to_dict()
             if key != DurableStateFields.TYPE_DISCRIMINATOR
         }
+
+    def core_projection(self) -> dict[str, Any]:
+        # The raw shadow preserves absence and explicit null separately. Project
+        # only mapped fields actually present after applying current typed edits.
+        persisted = self.to_persisted_dict()
+        fields = {core: persisted[wire] for wire, core in self._core_field_names().items() if wire in persisted}
         if isinstance(self, DurableAgentStateUsageContent):
             fields["usage_details"] = self.usage.to_usage_details()
         fields["type"] = (
@@ -384,21 +392,21 @@ class DurableAgentStateContent:
         return fields
 
     def to_core_content(self) -> Content:
+        payload = self.core_projection()
         profile = (self.unknown_fields or {}).get("pythonCoreFields")
-        if not _has_python_profile(profile, _CORE_FIELDS_PROFILE):
-            content = self.to_ai_content()
-            if isinstance(self.extensionData, dict):
-                content.additional_properties = deepcopy(self.extensionData)
-            return content
-        profile = cast(dict[str, Any], profile)
-        extra = profile.get("fields")
-        if not isinstance(extra, dict):
-            raise ValueError("The Python core-fields profile requires a fields object.")
-        if extra.keys() & (self.core_projection().keys() | {"raw_representation", "response_format"}):
-            raise ValueError("Python core-fields metadata cannot replace known content fields.")
-        payload = {**deepcopy(cast(dict[str, Any], extra)), **self.core_projection()}
-        if "additional_properties" not in extra and isinstance(self.extensionData, dict):
+        if _has_python_profile(profile, _CORE_FIELDS_PROFILE):
+            profile = cast(dict[str, Any], profile)
+            extra = profile.get("fields")
+            if not isinstance(extra, dict):
+                raise ValueError("The Python core-fields profile requires a fields object.")
+            known = {"type", "raw_representation", "response_format", *self._core_field_names().values()}
+            if extra.keys() & known:
+                raise ValueError("Python core-fields metadata cannot replace known content fields.")
+            payload = {**deepcopy(cast(dict[str, Any], extra)), **payload}
+        if "additional_properties" not in payload and isinstance(self.extensionData, dict):
             payload["additional_properties"] = deepcopy(self.extensionData)
+        # The fixed loader attaches presence for every mapped field, including
+        # unprofiled shared content, without serializing dict arguments to strings.
         return (
             load_agent_response({"messages": [{"role": "assistant", "contents": [deepcopy(payload)]}]})
             .messages[0]
@@ -419,7 +427,7 @@ class DurableAgentStateContent:
             if isinstance(stored, DurableAgentStateUnknownContent):
                 stored.content = payload
             else:
-                mapped = stored.core_projection()
+                mapped = {"type", *stored._core_field_names().values()}
                 stored.unknown_fields = {
                     "pythonCoreFields": {
                         **_CORE_FIELDS_PROFILE,
@@ -1168,22 +1176,6 @@ class DurableAgentStateMessage:
         message = load_agent_response({"messages": [raw]}).messages[0]
         preserve_input_envelope(message, raw)
         stored = DurableAgentStateMessage.from_chat_message(message)
-        for content, original in zip(stored.contents, raw.get("contents", []), strict=True):
-            if not isinstance(original, dict):
-                raise ValueError("Core contents must contain content objects.")
-            original = cast(dict[str, Any], original)
-            if isinstance(content, DurableAgentStateUnknownContent):
-                content.content = original
-            else:
-                mapped = content.core_projection()
-                content.unknown_fields = {
-                    "pythonCoreFields": {
-                        **_CORE_FIELDS_PROFILE,
-                        "fields": {key: value for key, value in original.items() if key not in mapped},
-                    }
-                }
-        known = {"type", "role", "contents", "author_name", "message_id", "additional_properties"}
-        stored.unknown_fields = {key: value for key, value in raw.items() if key not in known}
         stored._original_core_message = raw
         return stored
 
@@ -1202,20 +1194,9 @@ class DurableAgentStateMessage:
         )
         stored.ingestion_identity = message_identity(chat_message)
         known = {"type", "role", "contents", "author_name", "message_id", "additional_properties"}
-        current_payload = _json_snapshot(chat_message.to_dict())
+        current_payload = _json_snapshot(serialize_input_message(chat_message))
         _validate_core_message_keys(current_payload)
         stored.unknown_fields = {key: value for key, value in current_payload.items() if key not in known}
-        original = getattr(chat_message, "_durable_original_core_message", None)
-        if isinstance(original, dict):
-            from ._response_utils import _constructor_fields  # pyright: ignore[reportPrivateUsage]
-
-            raw = _json_snapshot(original)
-            _validate_core_message_keys(raw)
-            message_fields = {*_constructor_fields(Message), "type"}
-            stored.unknown_fields = {
-                **{key: value for key, value in raw.items() if key not in message_fields},
-                **stored.unknown_fields,
-            }
         return stored
 
     def to_chat_message(self) -> Any:
@@ -1324,7 +1305,9 @@ class DurableAgentStateFunctionCallContent(DurableAgentStateContent):
         if content.name is None:
             raise ValueError("name is required for function call content")
         return DurableAgentStateFunctionCallContent(
-            call_id=content.call_id, name=content.name, arguments=_json_snapshot(content.to_dict().get("arguments"))
+            call_id=content.call_id,
+            name=content.name,
+            arguments=_json_snapshot(serialize_input_content(content).get("arguments")),
         )
 
     def to_ai_content(self) -> Content:
@@ -1355,7 +1338,7 @@ class DurableAgentStateFunctionResultContent(DurableAgentStateContent):
         if content.call_id is None:
             raise ValueError("call_id is required for function result content")
         return DurableAgentStateFunctionResultContent(
-            call_id=content.call_id, result=_json_snapshot(content.to_dict().get("result"))
+            call_id=content.call_id, result=_json_snapshot(serialize_input_content(content).get("result"))
         )
 
     def to_ai_content(self) -> Content:
@@ -1600,7 +1583,7 @@ class DurableAgentStateUnknownContent(DurableAgentStateContent):
     @staticmethod
     def from_unknown_content(content: Any) -> DurableAgentStateUnknownContent:
         if isinstance(content, Content):
-            stored = DurableAgentStateUnknownContent(content=_json_snapshot(content.to_dict()))
+            stored = DurableAgentStateUnknownContent(content=_json_snapshot(serialize_input_content(content)))
             stored.unknown_fields = {"pythonContentEncoding": deepcopy(_CONTENT_ENCODING_PROFILE)}
             return stored
         return DurableAgentStateUnknownContent(content=content)
