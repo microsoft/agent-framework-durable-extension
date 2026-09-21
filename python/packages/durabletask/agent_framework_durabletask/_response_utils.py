@@ -229,6 +229,16 @@ def serialize_input_message(message: Message) -> dict[str, Any]:
     return deepcopy(current)
 
 
+def _structured_value_json(value: Any, *, sort_keys: bool = False) -> str:
+    """Reject encoding failures before validation without exposing the input in diagnostics."""
+    # Keep model validation outside this catch. Its ValidationError also derives
+    # from ValueError and must retain the existing validation/fallback semantics.
+    try:
+        return json.dumps(value, sort_keys=sort_keys, allow_nan=False)
+    except (TypeError, ValueError):
+        raise ValueError("Structured response value must be JSON serializable with finite numbers.") from None
+
+
 def _serialize_model_value(value: BaseModel) -> tuple[Any, bool]:
     """Choose alias or field-name JSON only when the declared model restores it losslessly.
 
@@ -237,25 +247,26 @@ def _serialize_model_value(value: BaseModel) -> tuple[Any, bool]:
     """
     payload = value.model_dump(mode="json", by_alias=True, round_trip=True)
     field_payload = value.model_dump(mode="json", by_alias=False, round_trip=True)
-    field_json = json.dumps(field_payload, sort_keys=True, allow_nan=False)
+    field_json = _structured_value_json(field_payload, sort_keys=True)
+    # An invalid encoding is not an alias mismatch. Reject it before validators can
+    # ignore/normalize non-JSON numbers, rather than succeeding via the field fallback.
+    alias_json = _structured_value_json(payload)
     try:
-        restored = type(value).model_validate_json(json.dumps(payload))
+        restored = type(value).model_validate_json(alias_json)
     except ValidationError:
         pass
     else:
         if (
-            json.dumps(
-                restored.model_dump(mode="json", by_alias=False, round_trip=True), sort_keys=True, allow_nan=False
-            )
+            _structured_value_json(restored.model_dump(mode="json", by_alias=False, round_trip=True), sort_keys=True)
             == field_json
         ):
             return payload, False
     # A serialization alias may be ignored in favor of a default without raising an error.
     # Python equality also conflates False/0 and int/float, including nested values.
     # Record the input mode, not a Python model name, for the caller's declared format.
-    restored = type(value).model_validate_json(json.dumps(field_payload), by_alias=False, by_name=True)
+    restored = type(value).model_validate_json(_structured_value_json(field_payload), by_alias=False, by_name=True)
     if (
-        json.dumps(restored.model_dump(mode="json", by_alias=False, round_trip=True), sort_keys=True, allow_nan=False)
+        _structured_value_json(restored.model_dump(mode="json", by_alias=False, round_trip=True), sort_keys=True)
         != field_json
     ):
         raise ValueError("Structured response value cannot round-trip through its declared model")
@@ -492,10 +503,11 @@ def ensure_response_format(
                 # Retained values crossed a JSON boundary, just like structured message text.
                 if isinstance(value, BaseModel):
                     value, by_name = _serialize_model_value(value)
+                value_json = _structured_value_json(value)
                 if by_name:
-                    value = response_format.model_validate_json(json.dumps(value), by_alias=False, by_name=True)
+                    value = response_format.model_validate_json(value_json, by_alias=False, by_name=True)
                 else:
-                    value = response_format.model_validate_json(json.dumps(value))
+                    value = response_format.model_validate_json(value_json)
             if shared is not None:
                 projected = value.model_dump(mode="json", by_alias=not by_name, round_trip=True)
                 if json.dumps(projected, sort_keys=True, allow_nan=False) != json.dumps(
