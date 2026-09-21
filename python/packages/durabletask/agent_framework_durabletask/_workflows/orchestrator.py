@@ -28,7 +28,7 @@ from collections.abc import Generator, Mapping, Sequence
 from copy import copy
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from agent_framework import (
     AgentExecutor,
@@ -54,12 +54,13 @@ from agent_framework._workflows._edge import (
 from agent_framework._workflows._message_utils import normalize_messages_input
 from agent_framework._workflows._runner_context import WorkflowMessage
 from agent_framework._workflows._state import State
-from agent_framework._workflows._typing_utils import is_instance_of
+from agent_framework._workflows._typing_utils import is_instance_of, try_coerce_to_type
 from pydantic import BaseModel
 
 from .._message_identity import message_identity
 from .._response_utils import ensure_response_format, load_agent_response
 from .context import WorkflowOrchestrationContext
+from .hitl_checkpoint import workflow_hitl_checkpoint_name
 from .naming import (
     WORKFLOW_INPUT_EXECUTOR_ID,
     qualify_subworkflow_request_id,
@@ -78,6 +79,7 @@ from .serialization import (
     SUBWORKFLOW_ADDRESS_KEY,
     SUBWORKFLOW_INPUT_KEY,
     SUBWORKFLOW_RESULT_KEY,
+    deserialize_response_type,
     deserialize_value,
     reconstruct_to_type,
     resolve_type,
@@ -198,7 +200,7 @@ class PendingHITLRequest:
     source_executor_id: str
     request_data: Any
     request_type: str | None
-    response_type: str | None
+    response_type: str | dict[str, Any] | None
     task_type: TaskType = TaskType.ACTIVITY
 
 
@@ -219,6 +221,7 @@ class _WorkflowDeliveryLedger:
         default_factory=lambda: dict[int, tuple[AgentExecutorResponse, list[str], list[str]]]()
     )
     aliases: dict[int, tuple[Message, set[str]]] = field(default_factory=lambda: dict[int, tuple[Message, set[str]]]())
+    selection_copies: dict[tuple[str, str, int], str] = field(default_factory=lambda: dict[tuple[str, str, int], str]())
     cached: dict[str, tuple[list[Message], list[str]]] = field(
         default_factory=lambda: dict[str, tuple[list[Message], list[str]]]()
     )
@@ -240,6 +243,7 @@ class _WorkflowDeliveryLedger:
             handoffs=dict(self.handoffs),
             envelopes=dict(self.envelopes),
             aliases=dict(self.aliases),
+            selection_copies=dict(self.selection_copies),
             cached=dict(self.cached),
             pending_agent_requests={key: dict(value) for key, value in self.pending_agent_requests.items()},
             pending_agent_responses={key: list(value) for key, value in self.pending_agent_responses.items()},
@@ -380,7 +384,12 @@ def _same_message_values(left: list[Message], right: list[Message]) -> bool:
 
 
 def _match_occurrences(
-    selected: list[Message], originals: list[Message], ids: list[str], *, allow_positional: bool = True
+    selected: list[Message],
+    originals: list[Message],
+    ids: list[str],
+    *,
+    allow_positional: bool = True,
+    preserve_repeated_matches: bool = False,
 ) -> list[str | None]:
     """Match unique occurrences, including one ancestor copied into several branches."""
     aliases: dict[int, set[str]] = defaultdict(set)
@@ -426,9 +435,9 @@ def _match_occurrences(
                 if len(candidates) != 1:
                     candidates = set[str]()
         occurrence = next(iter(candidates)) if len(candidates) == 1 else None
-        # A second selection is still a separate occurrence. Only ambiguity among
-        # source copies is collapsed, not multiplicity in the selected sequence.
-        matches.append(occurrence if occurrence not in used else None)
+        # By default a second selection is unmatched. Projection can retain the
+        # source match to assign a separate, stable identity to each repetition.
+        matches.append(occurrence if preserve_repeated_matches or occurrence not in used else None)
         if occurrence is not None:
             used.add(occurrence)
     return matches
@@ -644,10 +653,54 @@ def _identify_context_messages(
         latest_matches = _match_occurrences(selected, combined_messages, combined_ids, allow_positional=False)
         for index in unmatched:
             matches[index] = latest_matches[index]
-    return [
-        occurrence or ledger.occurrence("selection", target, handoff, response_ordinal, index)
-        for index, occurrence in enumerate(matches)
-    ]
+        repeated_matches = _match_occurrences(
+            selected, combined_messages, combined_ids, allow_positional=False, preserve_repeated_matches=True
+        )
+    else:
+        repeated_matches = matches
+    # Distinct branch aliases can carry one inherited occurrence. Selecting each
+    # original slot once must not manufacture repetitions just because a filter
+    # also repeats another slot (and thereby disables positional matching).
+    # Only use slot multiplicity when that source's selections have direct,
+    # unambiguous provenance. Other sources cannot change its ranks. Value-equal
+    # copies without that witness retain the fallback for their source.
+    alias_sources: dict[int, set[str]] = defaultdict(set)
+    alias_slots: Counter[tuple[int, str]] = Counter()
+    for message, occurrence_id in zip(prior.full_conversation, ids, strict=True):
+        alias_sources[id(message)].add(occurrence_id)
+        alias_slots[id(message), occurrence_id] += 1
+    sources = [occurrence or repeated_matches[index] for index, occurrence in enumerate(matches)]
+    indirect_sources = {
+        source
+        for message, source in zip(selected, sources, strict=True)
+        if source is not None and alias_sources.get(id(message)) != {source}
+    }
+    alias_selections: Counter[tuple[int, str]] = Counter()
+    repetitions: dict[str, int] = defaultdict(int)
+    selected_ids: list[str] = []
+    for index, occurrence in enumerate(matches):
+        source = sources[index]
+        if source is None:
+            selected_ids.append(ledger.occurrence("selection", target, handoff, response_ordinal, index))
+            continue
+        rank = repetitions[source]
+        repetitions[source] += 1
+        if source not in indirect_sources:
+            alias = (id(selected[index]), source)
+            rank = alias_selections[alias] // alias_slots[alias]
+            alias_selections[alias] += 1
+            if rank == 0:
+                occurrence = source
+        # Repeating a known source is a distinct selection occurrence, but not a
+        # new occurrence on every handoff. Filtering an earlier, equal-valued
+        # source must not renumber this source's repeated selections.
+        if occurrence is None:
+            occurrence = ledger.selection_copies.setdefault(
+                (target, source, rank),
+                ledger.occurrence("selection", target, handoff, response_ordinal, index),
+            )
+        selected_ids.append(occurrence)
+    return selected_ids
 
 
 _AGENT_TASK_MESSAGE_PREVIEW_LIMIT = 1024
@@ -1166,7 +1219,29 @@ def _collect_hitl_requests(
     result: ExecutorResult,
     pending_hitl_requests: dict[str, PendingHITLRequest],
 ) -> None:
-    """Collect pending HITL requests from executor results without losing agent requests."""
+    """Apply checkpointed admission before collecting any new activity requests."""
+    if result.activity_result and "hitl_admission" in result.activity_result:
+        outcome = result.activity_result["hitl_admission"]
+        if not isinstance(outcome, dict):
+            raise ValueError("Malformed checkpointed HITL admission outcome.")
+        outcome = cast(dict[str, Any], outcome)
+        request_id = outcome.get("request_id")
+        status = outcome.get("status")
+        if (
+            set(outcome) != {"request_id", "status"}
+            or not isinstance(request_id, str)
+            or status not in ("accepted", "invalidreply")
+        ):
+            raise ValueError("Malformed checkpointed HITL admission outcome.")
+        pending = pending_hitl_requests.get(request_id)
+        if pending is None or pending.source_executor_id != result.executor_id:
+            raise ValueError("Checkpointed HITL admission does not match an outstanding request.")
+        if status == "invalidreply":
+            # The activity rejected before invoking the handler. Retain the
+            # original request, not a descriptor or request supplied by the reply.
+            return
+        del pending_hitl_requests[request_id]
+
     if result.activity_result and result.activity_result.get("pending_request_info_events"):
         for req_data in result.activity_result["pending_request_info_events"]:
             request_id = req_data.get("request_id")
@@ -1174,12 +1249,17 @@ def _collect_hitl_requests(
                 existing = pending_hitl_requests.get(request_id)
                 if existing is not None:
                     raise ValueError("User input request id collides with an outstanding workflow request.")
+                response_type = req_data.get("response_type")
+                if response_type is not None:
+                    # Invalid producer metadata is not a retryable human reply.
+                    # Fail before publishing a request that nobody can answer.
+                    deserialize_response_type(response_type)
                 pending_hitl_requests[request_id] = PendingHITLRequest(
                     request_id=request_id,
                     source_executor_id=req_data.get("source_executor_id", result.executor_id),
                     request_data=req_data.get("data"),
                     request_type=req_data.get("request_type"),
-                    response_type=req_data.get("response_type"),
+                    response_type=response_type,
                     task_type=result.task_type,
                 )
                 logger.debug(
@@ -1193,6 +1273,8 @@ def _route_hitl_response(
     hitl_request: PendingHITLRequest,
     raw_response: Any,
     pending_messages: dict[str, list[tuple[Any, _MessageSources]]],
+    *,
+    validation_error: bool = False,
 ) -> None:
     """Route a HITL response back to the source executor's @response_handler."""
     response_message = {
@@ -1201,6 +1283,10 @@ def _route_hitl_response(
         "response": raw_response,
         "response_type": hitl_request.response_type,
     }
+    if validation_error:
+        # Only admission sets this field on the internal dispatch envelope.
+        # Identically named fields inside a user's response remain opaque data.
+        response_message["validation_error"] = True
 
     target_id = hitl_request.source_executor_id
     if target_id not in pending_messages:
@@ -1370,8 +1456,14 @@ async def execute_hitl_response_handler(
     hitl_message: dict[str, Any],
     shared_state: State,
     runner_context: Any,
-) -> None:
-    """Execute a HITL response handler on an executor.
+) -> Literal["accepted", "invalidreply"]:
+    """Validate in the activity, then execute the response handler.
+
+    Only pre-handler input rejection returns ``invalidreply``. Handler lookup,
+    handler execution, and output serialization failures remain activity failures.
+    The orchestrator checkpoints this outcome, not a typed external reply that
+    would need to be revalidated on every replay.
+    Activity retry/redelivery may still execute application code again.
 
     Args:
         executor: The executor instance that has a @response_handler.
@@ -1381,12 +1473,27 @@ async def execute_hitl_response_handler(
     """
     from agent_framework._workflows._workflow_context import WorkflowContext
 
+    if "response" not in hitl_message:
+        raise ValueError("HITL response payload is required.")
     original_request_data = hitl_message.get("original_request")
-    response_data = hitl_message.get("response")
+    response_data = hitl_message["response"]
     response_type_str = hitl_message.get("response_type")
 
     original_request = deserialize_value(original_request_data)
-    response = _deserialize_hitl_response(response_data, response_type_str)
+    # Broken producer metadata is a programming/deployment failure, not a human
+    # response to retry forever. Resolve it outside the reply-rejection boundary.
+    if response_type_str is not None:
+        deserialize_response_type(response_type_str)
+    if hitl_message.get("validation_error") is True:
+        # A malformed external envelope was discarded before dispatch. Do not
+        # reinterpret its null placeholder as a valid nullable response or run
+        # user validators. Checkpoint the same rejection as typed admission.
+        return "invalidreply"
+    try:
+        response = _deserialize_hitl_response(response_data, response_type_str)
+    except (TypeError, ValueError, OverflowError):
+        # Never render validation exceptions or payloads into durable results.
+        return "invalidreply"
 
     handler = executor._find_response_handler(original_request, response)
 
@@ -1409,6 +1516,7 @@ async def execute_hitl_response_handler(
         executor.id,
     )
     await handler(response, ctx)
+    return "accepted"
 
 
 def _validate_hitl_response_json(response: Any) -> None:
@@ -1472,7 +1580,7 @@ def _prepare_agent_hitl_message(executor_id: str, message: Any, ledger: _Workflo
     return combined
 
 
-def _deserialize_hitl_response(response_data: Any, response_type_str: str | None) -> Any:
+def _deserialize_hitl_response(response_data: Any, response_type_str: str | dict[str, Any] | None) -> Any:
     """Reconstruct and validate against the recorded server-owned request type.
 
     The type key comes from a registered executor's request, never the reply.
@@ -1483,16 +1591,21 @@ def _deserialize_hitl_response(response_data: Any, response_type_str: str | None
     response = strip_pickle_markers(response_data)
     if response is None and response_data is not None:
         raise ValueError("HITL response contained disallowed pickle/type markers.")
-    if not response_type_str:
+    if response_type_str is None:
         return response
     response_type = resolve_type(response_type_str)
     if response_type is None:
         raise ValueError(f"Cannot resolve the recorded HITL response type {response_type_str!r}.")
-    response = reconstruct_to_type(response, response_type, encoded=False)
+    # Core owns both concrete and generic coercion, including int-to-float.
+    # Keep only the fixed safe Content/Message constructors. This function runs
+    # in the registered response activity, not the replaying event-wait loop.
+    response = (
+        reconstruct_to_type(response, response_type, encoded=False)
+        if response_type is Content or response_type is Message
+        else try_coerce_to_type(response, response_type)
+    )
     if not is_instance_of(response, response_type):
-        raise TypeError(
-            f"HITL response type mismatch: expected {response_type.__name__}, got {type(response).__name__}."
-        )
+        raise TypeError(f"HITL response type mismatch: expected {response_type!r}, got {type(response).__name__}.")
     return response
 
 
@@ -1662,6 +1775,18 @@ def run_workflow_orchestrator(
     - SharedState: Cross-executor state sharing (local to orchestration)
     - HITL: Human-in-the-loop via request_info / @response_handler
 
+    Mixed child/parent scheduling uses ready waves. All local tasks in a wave
+    read the dispatched state snapshot, then their reported updates/deletes
+    merge in dispatch order before any downstream wave or reply handler runs.
+    Child tasks have independent state and can remain pending across waves.
+    Results ready in the same wave route in dispatch order, preserving each
+    result's message order. Across waves, readiness recorded in SDK history
+    defines order, not a global join or original child invocation order.
+    Ordinary ready messages drain before further local replies are admitted.
+    This preserves durable snapshot semantics, not Core's in-process visibility
+    of other executors' uncommitted writes. It changes the action graph and is
+    not a claim of compatibility with histories written by the join scheduler.
+
     Args:
         ctx: Host-specific orchestration context adapter.
         workflow: The MAF Workflow instance to execute.
@@ -1737,14 +1862,16 @@ def run_workflow_orchestrator(
             enriched["iteration"] = iteration
             live_events.append(enriched)
 
-    def record_agent_result(result: ExecutorResult) -> None:
+    def record_agent_result(result: ExecutorResult, outputs: list[Any] | None = None) -> None:
+        if outputs is None:
+            outputs = workflow_outputs
         append_activity_events(result.activity_result)
         if result.output_message is not None:
             event_type = _classify_workflow_output(workflow, result.executor_id)
             if event_type == "output" or (event_type == "intermediate" and ctx.supports_event_streaming):
                 encoded = serialize_workflow_agent_response(result.output_message.agent_response)
                 if event_type == "output":
-                    workflow_outputs.append(encoded)
+                    outputs.append(encoded)
                 append_activity_events({
                     "events": [{"type": event_type, "executor_id": result.executor_id, "data": encoded}]
                 })
@@ -1755,10 +1882,9 @@ def run_workflow_orchestrator(
         pending_requests: dict[str, Any] | None = None,
         subworkflows: dict[str, dict[str, str]] | None = None,
     ) -> None:
-        # Publish only on live execution so events are not re-emitted on replay
-        # (the custom status set during the first execution already persisted).
-        if ctx.is_replaying:
-            return
+        # This is a replacement snapshot, not an external emission. A fresh SDK
+        # context must rebuild it even when the last suspension is in old history.
+        # live_events is replay-local and each result contributes exactly once.
         status: dict[str, Any] = {"state": state}
         # Hosts that don't stream the event timeline (e.g. Azure Functions, whose
         # custom status is 16 KB-capped) omit the events key entirely, preserving the
@@ -1794,6 +1920,13 @@ def run_workflow_orchestrator(
     # wait can steal or strand an event, especially during history replay.
     pending_hitl_tasks: dict[str, Any] = {}
 
+    # A durable child stays pending at HITL, unlike Core's WorkflowExecutor,
+    # which returns at idle-with-pending-requests. Keep those SDK tasks across
+    # parent waves rather than making them a barrier to ordinary edge routing.
+    # Children have their own state. Parent writes still commit in dispatch
+    # order after ALL local work in a wave, independent of completion order.
+    held_children: list[tuple[Any, TaskMetadata]] = []
+
     def publish_pending_status() -> None:
         publish_live_status(
             "waiting_for_human_input",
@@ -1809,7 +1942,56 @@ def run_workflow_orchestrator(
             },
         )
 
-    while (pending_messages or pending_hitl_requests) and iteration < workflow.max_iterations:
+    def admit_hitl_response(
+        request_id: str, raw_response: Any, messages: dict[str, list[tuple[Any, _MessageSources]]]
+    ) -> Generator[Any, Any, None]:
+        # Replace only the completed wait on rejection. Losing SDK waits must
+        # survive both a mixed batch and subsequent handler supersteps.
+        del pending_hitl_tasks[request_id]
+        hitl_request = pending_hitl_requests[request_id]
+        is_agent = isinstance(workflow.executors[hitl_request.source_executor_id], AgentExecutor)
+        try:
+            _validate_hitl_response_json(raw_response)
+            sanitized_response = strip_pickle_markers(raw_response)
+            if sanitized_response is None and raw_response is not None:
+                raise ValueError("HITL response contained disallowed pickle/type markers.")
+            if is_agent:
+                original_request = delivery_ledger.pending_agent_requests[hitl_request.source_executor_id][request_id]
+                sanitized_response = _load_agent_hitl_content(request_id, original_request, sanitized_response)
+        except (TypeError, ValueError):
+            logger.warning("Rejected malformed HITL response for request %s. Awaiting a new response.", request_id)
+            if is_agent:
+                # Agent nodes register entities, not executor activities. Await
+                # a private workflow checkpoint before creating a replacement
+                # wait: buffered AF waits otherwise resume recursively. Neither
+                # the untrusted reply nor the approval ledger crosses this
+                # boundary. Keep the request and all losing waits untouched.
+                acknowledgement = yield ctx.prepare_activity_task(
+                    workflow_hitl_checkpoint_name(workflow.name),
+                    json.dumps({"request_id": request_id, "status": "invalidreply"}),
+                )
+                if acknowledgement != "null":
+                    raise ValueError("Malformed internal HITL checkpoint acknowledgement.") from None
+            else:
+                # Yield the existing admission activity, not another immediately
+                # completed buffered wait. The AF SDK recursively resumes those
+                # waits, so synchronous rejection can exhaust its call stack.
+                # Drop untrusted data before serialization and retain only the
+                # server-owned pending request plus a private rejection flag.
+                _route_hitl_response(hitl_request, None, messages, validation_error=True)
+            return
+        if is_agent:
+            del pending_hitl_requests[request_id]
+        # Non-agent reconstruction can execute user validators. Only the existing
+        # registered response activity may do that. Keep its request outstanding
+        # until _collect_hitl_requests consumes the checkpointed admission outcome.
+        _route_hitl_response(hitl_request, sanitized_response, messages)
+
+    while pending_messages or pending_hitl_requests or held_children:
+        # A previously dispatched child may finish at the budget boundary.
+        # Waiting does not execute another superstep, dispatching new work does.
+        if pending_messages and iteration >= workflow.max_iterations:
+            raise WorkflowConvergenceException(f"Workflow did not converge after {workflow.max_iterations} iterations.")
         logger.debug("Orchestrator iteration %d", iteration)
         next_pending_messages: dict[str, list[tuple[Any, _MessageSources]]] = {}
 
@@ -1817,7 +1999,10 @@ def run_workflow_orchestrator(
         all_tasks, task_metadata_list, remaining_agent_messages = _prepare_all_tasks(
             ctx, workflow, pending_messages, shared_state, subworkflow_counter, workflow_address, delivery_ledger
         )
-        dispatched = bool(all_tasks)
+        # A newly started child spends one wave now, not again on completion.
+        # Local response activities may only validate/reject without invoking
+        # a handler. Their checkpointed outcome decides whether to spend a wave.
+        dispatched = any(meta.task_type == TaskType.SUBWORKFLOW for meta in task_metadata_list)
 
         # Agents and sub-workflows bypass the per-executor activity, so synthesize their
         # invoked event here; activity executors emit their own events from inside the
@@ -1826,24 +2011,158 @@ def run_workflow_orchestrator(
             if task_meta.task_type in (TaskType.AGENT, TaskType.SUBWORKFLOW):
                 emit_event("executor_invoked", task_meta.executor_id)
 
+        # Older children retain their dispatch position among ready results.
+        # A missing child result is not a hole that blocks unrelated routing.
+        all_tasks = [task for task, _ in held_children] + all_tasks
+        task_metadata_list = [meta for _, meta in held_children] + task_metadata_list
+        held_children = []
+
         # Phase 2: Execute all tasks in parallel
         all_results: list[ExecutorResult] = []
+        collected_result_count = 0
         if all_tasks:
             logger.debug("Executing %d tasks in parallel (agents + activities)", len(all_tasks))
-            # Record dispatched sub-workflow child instance ids before suspending in
-            # task_all. While a nested sub-workflow waits for human input, this parent
-            # stays suspended here, so its custom status must already carry the child ids
-            # for the read side to discover and qualify nested pending requests (see
-            # _index_subworkflows for the dispatch-order / ordinal addressing contract).
             active_subworkflows = _index_subworkflows(task_metadata_list)
-            if active_subworkflows:
-                publish_live_status("running", subworkflows=active_subworkflows)
-            raw_results = yield ctx.task_all(all_tasks)
-            logger.debug("All %d tasks completed", len(all_tasks))
+            mixed_batch = bool(active_subworkflows)
+            prepared_results: dict[int, ExecutorResult] = {}
+            prepared_outputs: dict[int, list[Any]] = {}
+            if mixed_batch:
+                # Children cannot update parent shared state. Collect local requests
+                # as activities finish, but commit ALL local writes in dispatch
+                # order before routing or admitting a reply. Then run the next
+                # ready wave, even if one or more children still need that work.
+                outstanding = dict(enumerate(all_tasks))
+                raw_by_index: dict[int, Any] = {}
+                local_indices = [
+                    index for index, meta in enumerate(task_metadata_list) if meta.task_type != TaskType.SUBWORKFLOW
+                ]
+                local_committed = False
 
-            for idx, raw_result in enumerate(raw_results):
+                while True:
+                    if not local_committed and all(index in raw_by_index for index in local_indices):
+                        for index in local_indices:
+                            if index in prepared_results:
+                                continue
+                            meta = task_metadata_list[index]
+                            output_buffer: list[Any] = []
+                            if meta.task_type == TaskType.AGENT:
+                                result = _process_agent_response(
+                                    raw_by_index[index], meta.executor_id, meta.message, delivery_ledger, meta
+                                )
+                                record_agent_result(result, output_buffer)
+                                _collect_hitl_requests(result, pending_hitl_requests)
+                            else:
+                                result = _process_activity_result(
+                                    raw_by_index[index], meta.executor_id, shared_state, output_buffer
+                                )
+                                append_activity_events(result.activity_result)
+                            result.source_message = meta.message
+                            prepared_results[index] = result
+                            prepared_outputs[index] = output_buffer
+                        local_committed = True
+
+                    # Sequential messages to the same agent belong to this
+                    # superstep too. Do not strand their approval requests behind
+                    # the child join, or run a reply ahead of their original work.
+                    while local_committed and remaining_agent_messages:
+                        executor_id, message, sources = remaining_agent_messages.pop(0)
+                        meta = TaskMetadata(executor_id, message, sources, TaskType.AGENT)
+                        task = _prepare_agent_task(
+                            ctx,
+                            cast(AgentExecutor, workflow.executors[executor_id]),
+                            executor_id,
+                            message,
+                            workflow.name,
+                            delivery_ledger,
+                            meta,
+                        )
+                        if meta.skip_dispatch or (
+                            isinstance(message, AgentExecutorRequest) and not message.should_respond
+                        ):
+                            continue
+                        emit_event("executor_invoked", executor_id)
+                        index = len(all_tasks)
+                        all_tasks.append(task)
+                        task_metadata_list.append(meta)
+                        outstanding[index] = task
+                        local_indices.append(index)
+                        local_committed = False
+                        # Preserve same-agent sequencing, including ledger updates,
+                        # before preparing its next message.
+                        break
+                    if local_committed and (local_indices or raw_by_index or next_pending_messages):
+                        break
+                    if not outstanding:
+                        break
+
+                    active_subworkflows = _index_subworkflows([task_metadata_list[index] for index in outstanding])
+                    publish_live_status(
+                        "waiting_for_human_input" if pending_hitl_requests else "running",
+                        subworkflows=active_subworkflows,
+                    )
+                    # Only an idle parent admits replies. Ready ordinary messages
+                    # and all local writes in this wave take precedence. Retain
+                    # losing waits across waves, including already-ready events.
+                    can_reply = local_committed and not remaining_agent_messages
+                    if can_reply:
+                        for request_id in pending_hitl_requests:
+                            if request_id not in pending_hitl_tasks:
+                                pending_hitl_tasks[request_id] = ctx.wait_for_external_event(request_id)
+                    waiting_tasks = list(outstanding.values())
+                    if can_reply:
+                        waiting_tasks.extend(pending_hitl_tasks.values())
+                    try:
+                        if len(waiting_tasks) == 1:
+                            completed = waiting_tasks[0]
+                            raw_result = yield completed
+                        else:
+                            completed = yield ctx.task_any(waiting_tasks)
+                            raw_result = ctx.get_task_result(completed)
+                    except Exception:
+                        # Do not advertise actionable requests after a failed
+                        # wait. Host termination and already-dispatched work
+                        # retain the SDK's cancellation semantics. GeneratorExit
+                        # also occurs on normal cold-episode disposal, not only
+                        # cancellation, so it must not mutate the snapshot.
+                        publish_live_status("failed", pending_requests={})
+                        raise
+
+                    index = next((key for key, task in outstanding.items() if task is completed), None)
+                    if index is not None:
+                        del outstanding[index]
+                        meta = task_metadata_list[index]
+                        raw_by_index[index] = raw_result
+                        if meta.task_type == TaskType.ACTIVITY:
+                            # Discovery is independent of the shared-state commit.
+                            preview = _process_activity_result(raw_result, meta.executor_id, None, [])
+                            _collect_hitl_requests(preview, pending_hitl_requests)
+                    else:
+                        request_id = next(key for key, task in pending_hitl_tasks.items() if task is completed)
+                        yield from admit_hitl_response(request_id, raw_result, next_pending_messages)
+
+                if any(task_metadata_list[index].task_type != TaskType.SUBWORKFLOW for index in outstanding):
+                    raise RuntimeError("Only subworkflow tasks may remain outstanding after local work is committed.")
+                held_children = [(task, task_metadata_list[index]) for index, task in outstanding.items()]
+                # Preserve each result's send order and dispatch order among
+                # this wave's ready results. Across waves, history readiness
+                # defines order. Holding a ready child behind an earlier pending
+                # invocation would deadlock if its downstream work answers that
+                # invocation. Core's per-edge send order is not invocation order
+                # across independently paused/resumed children.
+                ready_indices = sorted(raw_by_index)
+                raw_results = [raw_by_index[index] for index in ready_indices]
+            else:
+                raw_results = yield ctx.task_all(all_tasks)
+                ready_indices = list(range(len(all_tasks)))
+            logger.debug("Completed %d tasks, holding %d children", len(raw_results), len(held_children))
+
+            for idx, raw_result in zip(ready_indices, raw_results):
                 metadata = task_metadata_list[idx]
-                if metadata.task_type == TaskType.AGENT:
+                prepared = prepared_results.get(idx)
+                if prepared is not None:
+                    result = prepared
+                    workflow_outputs.extend(prepared_outputs[idx])
+                elif metadata.task_type == TaskType.AGENT:
                     result = _process_agent_response(
                         raw_result, metadata.executor_id, metadata.message, delivery_ledger, metadata
                     )
@@ -1861,6 +2180,20 @@ def run_workflow_orchestrator(
                 result.source_message = metadata.message
                 result.child_instance_id = metadata.child_instance_id
                 all_results.append(result)
+                if metadata.task_type != TaskType.SUBWORKFLOW:
+                    admission = result.activity_result.get("hitl_admission") if result.activity_result else None
+                    if (
+                        not isinstance(admission, dict)
+                        or cast(dict[str, Any], admission).get("status") != "invalidreply"
+                    ):
+                        dispatched = True
+                if mixed_batch and prepared is None and metadata.task_type == TaskType.AGENT:
+                    # Original activity requests were previewed, agent requests
+                    # were collected on commit. Child results have none of their own.
+                    _collect_hitl_requests(result, pending_hitl_requests)
+
+            if mixed_batch:
+                collected_result_count = len(all_results)
 
         # Phase 3: Process sequential agent messages
         for executor_id, message, source_executor_id in remaining_agent_messages:
@@ -1887,7 +2220,7 @@ def run_workflow_orchestrator(
             record_agent_result(result)
 
         # Phase 4: Collect HITL requests
-        for result in all_results:
+        for result in all_results[collected_result_count:]:
             _collect_hitl_requests(result, pending_hitl_requests)
 
         # Phase 5: Route results
@@ -1900,10 +2233,10 @@ def run_workflow_orchestrator(
         # to pause for human input, the HITL block below publishes the waiting status
         # with the pending requests instead.
         if pending_messages or not pending_hitl_requests:
-            publish_live_status("running")
+            publish_live_status("running", subworkflows=_index_subworkflows([meta for _, meta in held_children]))
 
         # Phase 7: HITL wait
-        if not pending_messages and pending_hitl_requests:
+        if not pending_messages and pending_hitl_requests and not held_children:
             logger.debug("Workflow paused for HITL - %d pending requests", len(pending_hitl_requests))
 
             publish_pending_status()
@@ -1920,45 +2253,16 @@ def run_workflow_orchestrator(
                     completed = yield ctx.task_any(list(pending_hitl_tasks.values()))
                     request_id = next(key for key, task in pending_hitl_tasks.items() if task is completed)
                     raw_response = ctx.get_task_result(completed)
-                # Only the completed wait is replaced on rejection. Other pending
-                # requests and their SDK tasks survive this response and handler run.
-                del pending_hitl_tasks[request_id]
-                hitl_request = pending_hitl_requests[request_id]
-
-                try:
-                    _validate_hitl_response_json(raw_response)
-                    sanitized_response = strip_pickle_markers(raw_response)
-                    if sanitized_response is None and raw_response is not None:
-                        raise ValueError("HITL response contained disallowed pickle/type markers.")
-                    if isinstance(workflow.executors[hitl_request.source_executor_id], AgentExecutor):
-                        original_request = delivery_ledger.pending_agent_requests[hitl_request.source_executor_id][
-                            request_id
-                        ]
-                        sanitized_response = _load_agent_hitl_content(request_id, original_request, sanitized_response)
-                    else:
-                        sanitized_response = _deserialize_hitl_response(sanitized_response, hitl_request.response_type)
-                except (TypeError, ValueError):
-                    logger.warning(
-                        "Rejected malformed HITL response for request %s. Awaiting a new response.", request_id
-                    )
-                    continue
-
-                del pending_hitl_requests[request_id]
-                _route_hitl_response(hitl_request, sanitized_response, pending_messages)
+                yield from admit_hitl_response(request_id, raw_response, pending_messages)
 
             # Run an admitted handler now, rather than waiting for unrelated human
             # replies. Agent multi-approval turns still wait in the delivery ledger.
             publish_live_status("running")
 
-        # Accumulating one of several approvals does not run an executor. Do not
-        # spend the convergence budget merely waiting for the remaining replies.
+        # Accumulating approvals or rejecting an invalid response does not run
+        # an executor handler. Neither spends the convergence budget.
         if dispatched:
             iteration += 1
-
-    # Match the core WorkflowRunner: if the loop stopped because max_iterations
-    # was reached while messages are still pending, the workflow did not converge.
-    if pending_messages or pending_hitl_requests:
-        raise WorkflowConvergenceException(f"Workflow did not converge after {workflow.max_iterations} iterations.")
 
     # A sub-workflow returns the outputs + event timeline envelope so the parent can
     # bubble nested progress; a top-level run returns the bare outputs list.

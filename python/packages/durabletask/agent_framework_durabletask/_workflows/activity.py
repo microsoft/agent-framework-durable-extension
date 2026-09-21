@@ -6,7 +6,7 @@ When a MAF :class:`Workflow` runs as a durable orchestration, each non-agent
 executor is dispatched as a durable *activity*. The activity body is identical
 regardless of host (Azure Functions or a standalone durabletask worker): it
 deserializes the activity input, runs the executor (or a human-in-the-loop
-response handler), diffs the shared state, and serializes the executor's
+response handler), captures shared-state writes, and serializes the executor's
 outputs, sent messages, shared-state changes, and any pending HITL requests back
 to the orchestrator.
 
@@ -26,7 +26,67 @@ from agent_framework._workflows._state import State
 
 from .orchestrator import SOURCE_ORCHESTRATOR, execute_hitl_response_handler
 from .runner_context import CapturingRunnerContext
-from .serialization import deserialize_value, serialize_value, serialize_workflow_event, validate_workflow_json
+from .serialization import (
+    deserialize_value,
+    serialize_response_type,
+    serialize_value,
+    serialize_workflow_event,
+    validate_workflow_json,
+)
+
+
+class _ActivityState(State):
+    """Journal explicit operations without changing Core's buffered state semantics.
+
+    Equal-value assignments are writes, not inherited snapshot values. Keep
+    pending intent separate so discard() cancels it, while commit(), import_state()
+    and clear() retain their effects. Leave value ownership to the installed
+    Core State: newer versions deep-copy get/export results, older ones expose
+    nested references. Only mutations visible in committed state participate in
+    the detached encoded snapshot comparison below.
+    """
+
+    def __init__(self, initial_state: dict[str, Any]) -> None:
+        """Load an inherited snapshot without marking its keys as writes."""
+        super().__init__()
+        # Loading the activity snapshot is not an executor write.
+        super().import_state(initial_state)
+        self.written_keys: set[str] = set()
+        self._pending_keys: set[str] = set()
+
+    def set(self, key: str, value: Any) -> None:
+        """Stage a write even when its value equals the inherited value."""
+        # Delegate ownership/copying to Core and journal only a successful set.
+        super().set(key, value)
+        self._pending_keys.add(key)
+
+    def delete(self, key: str) -> None:
+        """Record only successful deletions, including newly staged keys."""
+        super().delete(key)
+        self._pending_keys.add(key)
+
+    def commit(self) -> None:
+        """Retain intent across commits within one activity invocation."""
+        super().commit()
+        self.written_keys.update(self._pending_keys)
+        self._pending_keys.clear()
+
+    def discard(self) -> None:
+        """Cancel pending intent along with Core's pending values."""
+        super().discard()
+        self._pending_keys.clear()
+
+    def clear(self) -> None:
+        """Immediately clear known keys without deleting unseen sibling writes."""
+        keys = set(self.export_state()) | self._pending_keys
+        super().clear()
+        self.written_keys.update(keys)
+        self._pending_keys.clear()
+
+    def import_state(self, state: dict[str, Any]) -> None:
+        """Track explicit imports, which Core applies immediately."""
+        super().import_state(state)
+        self.written_keys.update(state)
 
 
 def execute_workflow_activity(executor: Executor, input_json: str, workflow: Workflow | None = None) -> str:
@@ -92,24 +152,37 @@ def execute_workflow_activity(executor: Executor, input_json: str, workflow: Wor
         runner_context = CapturingRunnerContext()
         runner_context.set_yield_output_classifier(classify_yielded_output)
         runner_context.set_host_metadata(host_context)
-        shared_state = State()
 
         # Deserialize shared state values to reconstruct dataclasses / Pydantic models.
         deserialized_state: dict[str, Any] = {str(k): deserialize_value(v) for k, v in shared_state_snapshot.items()}
         # The encoded input remains detached from the reconstructed state, even
         # for in-place mutations. Compare encoded values, not Python equality
         # (which conflates False/0 and 1/1.0, including inside containers).
-        shared_state.import_state(deserialized_state)
+        shared_state = _ActivityState(deserialized_state)
 
+        hitl_message: dict[str, Any] | None = None
         if is_hitl_response:
             if not isinstance(message, dict):
                 raise ValueError("HITL message payload must be a JSON object")
-            await execute_hitl_response_handler(
+            hitl_message = cast(dict[str, Any], message)
+            admission = await execute_hitl_response_handler(
                 executor=executor,
-                hitl_message=cast(dict[str, Any], message),
+                hitl_message=hitl_message,
                 shared_state=shared_state,
                 runner_context=runner_context,
             )
+            if admission == "invalidreply":
+                # This result is a framework control record, not user data or an
+                # exception string. No handler or shared-state commit has run.
+                return {
+                    "hitl_admission": {"request_id": hitl_message.get("request_id"), "status": admission},
+                    "sent_messages": [],
+                    "outputs": [],
+                    "events": [],
+                    "shared_state_updates": {},
+                    "shared_state_deletes": [],
+                    "pending_request_info_events": [],
+                }
         else:
             await executor.execute(
                 message=message,
@@ -118,23 +191,27 @@ def execute_workflow_activity(executor: Executor, input_json: str, workflow: Wor
                 runner_context=runner_context,
             )
 
-        # Commit pending state changes and compute the diff vs the original snapshot.
+        # Commit explicit operations, then include unjournaled in-place changes.
         shared_state.commit()
         current_state = shared_state.export_state()
         original_keys: set[str] = set(shared_state_snapshot.keys())
         current_keys: set[str] = set(current_state.keys())
 
-        # Deleted = was in original, not in current.
-        deletes: set[str] = original_keys - current_keys
+        # A successful set-then-delete also deletes a sibling's earlier write,
+        # even if this key was absent from this activity's original snapshot.
+        deletes = (original_keys | shared_state.written_keys) - current_keys
 
         # Serialize first so custom state still uses the checkpoint codec rather
         # than requiring the in-memory object itself to be JSON serializable.
         # Sorted JSON ignores dictionary insertion order but preserves wire types.
         serialized_updates: dict[str, Any] = {}
-        for key in current_keys:
+        for key in sorted(current_keys):
             encoded = serialize_value(current_state[key])
-            if key not in original_keys or json.dumps(encoded, sort_keys=True, allow_nan=False) != json.dumps(
-                shared_state_snapshot[key], sort_keys=True, allow_nan=False
+            if (
+                key in shared_state.written_keys
+                or key not in original_keys
+                or json.dumps(encoded, sort_keys=True, allow_nan=False)
+                != json.dumps(shared_state_snapshot[key], sort_keys=True, allow_nan=False)
             ):
                 serialized_updates[key] = encoded
 
@@ -162,9 +239,7 @@ def execute_workflow_activity(executor: Executor, input_json: str, workflow: Wor
                 "source_executor_id": event.source_executor_id,
                 "data": serialize_value(event.data),
                 "request_type": f"{type(event.data).__module__}:{type(event.data).__name__}",
-                "response_type": f"{event.response_type.__module__}:{event.response_type.__name__}"
-                if event.response_type
-                else None,
+                "response_type": serialize_response_type(event.response_type),
             })
 
         # Serialize sent messages for JSON compatibility.
@@ -177,14 +252,17 @@ def execute_workflow_activity(executor: Executor, input_json: str, workflow: Wor
                     "source_id": msg.source_id,
                 })
 
-        return {
+        result: dict[str, Any] = {
             "sent_messages": serialized_sent_messages,
             "outputs": outputs,
             "events": serialized_events,
             "shared_state_updates": serialized_updates,
-            "shared_state_deletes": list(deletes),
+            "shared_state_deletes": sorted(deletes),
             "pending_request_info_events": serialized_pending_requests,
         }
+        if hitl_message is not None and "request_id" in hitl_message:
+            result["hitl_admission"] = {"request_id": hitl_message["request_id"], "status": "accepted"}
+        return result
 
     result = asyncio.run(_run())
     return json.dumps(result, allow_nan=False)

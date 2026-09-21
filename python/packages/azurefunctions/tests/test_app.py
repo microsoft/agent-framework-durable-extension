@@ -2578,7 +2578,7 @@ class TestAgentFunctionAppSubworkflowHitl:
 
     async def test_resolve_unqualified_targets_same_instance(self) -> None:
         app = self._app()
-        client = self._client({})
+        client = self._client({"parent": {"pending_requests": {"req-1": {"source_executor_id": "gate"}}}})
 
         resolved = await app._resolve_hitl_target(client, "parent", "req-1")
 
@@ -2586,7 +2586,10 @@ class TestAgentFunctionAppSubworkflowHitl:
 
     async def test_resolve_qualified_targets_child_instance(self) -> None:
         app = self._app()
-        client = self._client({"parent": {"subworkflows": {"sub": {"0": "child-1"}}}})
+        client = self._client({
+            "parent": {"subworkflows": {"sub": {"0": "child-1"}}},
+            "child-1": {"pending_requests": {"req-9": {"source_executor_id": "inner_node"}}},
+        })
 
         resolved = await app._resolve_hitl_target(client, "parent", "sub~0~req-9")
 
@@ -2597,6 +2600,7 @@ class TestAgentFunctionAppSubworkflowHitl:
         client = self._client({
             "parent": {"subworkflows": {"mid": {"0": "child-1"}}},
             "child-1": {"subworkflows": {"leaf": {"0": "child-2"}}},
+            "child-2": {"pending_requests": {"deep": {"source_executor_id": "leaf_node"}}},
         })
 
         resolved = await app._resolve_hitl_target(client, "parent", "mid~0~leaf~0~deep")
@@ -2643,7 +2647,7 @@ class TestAgentFunctionAppSubworkflowHitl:
 
     async def test_top_level_double_colon_leaf_is_not_nested(self) -> None:
         app = self._app()
-        client = self._client({})
+        client = self._client({"parent": {"pending_requests": {"auto::0": {"source_executor_id": "fn"}}}})
 
         resolved = await app._resolve_hitl_target(client, "parent", "auto::0")
 

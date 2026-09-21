@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from typing import Any, cast
 
 from agent_framework import WorkflowEvent
-from durabletask.client import TaskHubGrpcClient
+from durabletask.client import OrchestrationStatus, TaskHubGrpcClient
 
 from .naming import (
     iter_subworkflow_instances,
@@ -367,8 +367,20 @@ class DurableWorkflowClient:
             return []
         if not self._is_owned_orchestration(state, workflow_name):
             return []
+        if self._is_terminal_hitl_state(state):
+            return []
 
         return self._collect_pending_hitl_requests(state.serialized_custom_status)
+
+    @staticmethod
+    def _is_terminal_hitl_state(state: Any) -> bool:
+        """Use an actual SDK terminal status, not absent or synthetic state."""
+        runtime_status = getattr(state, "runtime_status", None)
+        return isinstance(runtime_status, OrchestrationStatus) and runtime_status in {
+            OrchestrationStatus.COMPLETED,
+            OrchestrationStatus.FAILED,
+            OrchestrationStatus.TERMINATED,
+        }
 
     @staticmethod
     def _parse_custom_status(serialized_custom_status: str | None) -> dict[str, Any] | None:
@@ -424,6 +436,8 @@ class DurableWorkflowClient:
                     child_state = self._client.get_orchestration_state(child_instance_id)
                     if child_state is None or not child_state.serialized_custom_status:
                         continue
+                    if self._is_terminal_hitl_state(child_state):
+                        continue
                     for child_req in self._collect_pending_hitl_requests(child_state.serialized_custom_status):
                         qualified = dict(child_req)
                         qualified["request_id"] = qualify_subworkflow_request_id(
@@ -457,11 +471,16 @@ class DurableWorkflowClient:
         Raises:
             ValueError: If the instance does not belong to the targeted workflow, or a
                 qualified id references a sub-workflow that is not currently active,
+                or an addressed instance has a terminal runtime status,
                 or the response is rejected by pickle/type-marker sanitization.
 
         Note:
             The payload is sanitized with ``strip_pickle_markers`` before delivery to
             neutralize pickle-marker injection, since the worker deserializes it.
+            Delivery does not acknowledge admission. Known fixed IDs may be sent
+            before their waits are published and buffered by the service. The
+            response activity validates non-agent replies against the recorded
+            request type and keeps invalid replies pending.
         """
         # Validate ownership before raising the event when a target is resolvable.
         if workflow_name or self._default_workflow_name:
@@ -486,13 +505,17 @@ class DurableWorkflowClient:
     def _resolve_hitl_target(self, instance_id: str, request_id: str) -> tuple[str, str]:
         """Resolve a possibly-qualified request id to ``(owning_instance_id, bare_request_id)``.
 
-        An unqualified id (no well-formed hop) targets ``instance_id`` directly. A
+        An unqualified id (no well-formed hop) addresses ``instance_id``, including
+        an early event for a known fixed ID whose wait is not yet published. A
         qualified id ``{executorId}~{ordinal}~{rest}`` addresses a nested sub-workflow:
         the executor's child instance id is read from this instance's ``subworkflows``
         custom-status map (keyed by run-wide ``ordinal``) and the remainder is resolved
         recursively, so arbitrarily deep nesting lands on the leaf child orchestration
         and its bare request id.
         """
+        state = self._client.get_orchestration_state(instance_id)
+        if self._is_terminal_hitl_state(state):
+            raise ValueError(f"Instance '{instance_id}' has a terminal runtime status.")
         hop = split_subworkflow_request_id(request_id)
         if hop is None:
             return instance_id, request_id
@@ -515,6 +538,8 @@ class DurableWorkflowClient:
         list-shaped slot maps are not routable.
         """
         state = self._client.get_orchestration_state(instance_id)
+        if self._is_terminal_hitl_state(state):
+            return None
         custom_status = self._parse_custom_status(state.serialized_custom_status if state else None)
         if custom_status is None:
             return None

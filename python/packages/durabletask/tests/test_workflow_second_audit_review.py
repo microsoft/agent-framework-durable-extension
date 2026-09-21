@@ -424,7 +424,11 @@ def test_registered_state_diff_preserves_wire_types_across_later_dispatch(
     # First exercise the registered activity itself, not the diff implementation.
     activity = _registered_activity(_StateWriter(after, mutate=mutate))
     result = activity({"message": "go", "shared_state_snapshot": {"value": encoded_before}})
-    expected_updates = {"value": serialize_value(after)} if changed else {}
+    # All cases explicitly call set_state. Wire equality is a separate property,
+    # not evidence that no write occurred (including the four equal-value cases).
+    encoded_after = serialize_value(after)
+    assert (json.dumps(encoded_before, sort_keys=True) != json.dumps(encoded_after, sort_keys=True)) is changed
+    expected_updates = {"value": encoded_after}
     assert json.dumps(result["shared_state_updates"], sort_keys=True) == json.dumps(expected_updates, sort_keys=True)
     assert result["shared_state_deletes"] == []
 

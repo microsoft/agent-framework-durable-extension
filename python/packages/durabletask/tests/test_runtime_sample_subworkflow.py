@@ -236,6 +236,7 @@ def test_real_sample_subworkflow_completes_through_registered_hosts(
         "dafx-review_pipeline-intake",
         "dafx-review_pipeline-reporter",
         "dafx-sentiment_analysis-sentiment_formatter",
+        "dafx__hitl-sentiment_analysis",
     ]
     assert backend.orchestrator_registrations == ["dafx-review_pipeline", "dafx-sentiment_analysis"]
 
