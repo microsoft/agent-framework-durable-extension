@@ -9,7 +9,7 @@ from collections.abc import Callable, Generator
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import AsyncMock, Mock, call
+from unittest.mock import AsyncMock, Mock
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -132,11 +132,14 @@ def _host(
     *,
     functions: dict[str, Callable[..., Any]] | None = None,
     instance_id: str = "root-run",
+    parent_instance_id: str | None = None,
     replay: bool = False,
 ) -> Mock:
     host = Mock(spec=df.DurableOrchestrationContext)
-    host.get_input.return_value = wire
+    host._input = json.dumps(wire)
+    host.get_input.side_effect = AssertionError("Generated workflow starts must not use SDK custom decoding")
     host.instance_id = instance_id
+    host.parent_instance_id = parent_instance_id
     host.is_replaying = replay
 
     def activity(name: str, input: str) -> AtomicTask:
@@ -149,7 +152,15 @@ def _host(
         assert functions is not None
         child_wire = json.loads(json.dumps(input_))
         calls.append({"kind": "child", "instance": instance_id, "name": name, "input": deepcopy(child_wire)})
-        context = _host(child_wire, calls, result, functions=functions, instance_id=instance_id, replay=replay)
+        context = _host(
+            child_wire,
+            calls,
+            result,
+            functions=functions,
+            instance_id=instance_id,
+            parent_instance_id=host.instance_id,
+            replay=replay,
+        )
         child_result = _drain(functions[name](context))
         assert child_result[SUBWORKFLOW_RESULT_KEY] is True
         return _complete(child_result)
@@ -197,7 +208,8 @@ def test_recorded_unsupported_start_fails_before_shared_engine_or_actions(
         next(functions["dafx-protocol"](host))
 
     engine.assert_not_called()
-    assert host.mock_calls == [call.get_input()]
+    host.get_input.assert_not_called()
+    assert host.mock_calls == []
     assert host.statuses == []
     assert workflow.executors == before_nodes
     for node in workflow.executors.values():
@@ -301,7 +313,18 @@ async def test_route_envelope_is_data_and_cannot_authorize_child_deserialization
     assert payload == original
 
 
-async def test_parent_dispatch_wraps_typed_child_input_and_registered_child_keeps_root_route() -> None:
+async def test_parent_dispatch_wraps_typed_child_input_and_registered_child_keeps_root_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import Path
+
+    # Reuse the local SDK-history harness even when this test is selected alone.
+    tests = Path(__file__).resolve().parent  # noqa: ASYNC240 - Synchronous test fixture import.
+    monkeypatch.syspath_prepend(str(tests.parents[1] / "durabletask" / "tests"))
+    monkeypatch.syspath_prepend(str(tests))
+    import test_workflow_child_provenance_af as sdk_history
+
+    assert Path(sdk_history.__file__).resolve() == tests / "test_workflow_child_provenance_af.py"  # noqa: ASYNC240
     inner = _workflow("inner", [_node("leaf", str)])
     child = Mock(spec=WorkflowExecutor)
     child.id, child.workflow, child.allow_direct_output = "child", inner, False
@@ -310,8 +333,14 @@ async def test_parent_dispatch_wraps_typed_child_input_and_registered_child_keep
         [_node("source"), child, _node("sink")],
         [SingleEdgeGroup("source", "child"), SingleEdgeGroup("child", "sink")],
     )
-    functions, starter = _register(parent)
+    host = sdk_history._AFStarts(parent)
+    functions = {
+        name: function
+        for name, function in host.functions.items()
+        if hasattr(function, "orchestrator_function") and name not in ("native-input", "native-parent")
+    }
     assert set(functions) == {"dafx-parent", "dafx-inner"}
+    starter = host.functions["dafx-parent-start"].client_function
     payload: dict[str, Any] = {"input": "nested typed input", "control": deepcopy(_CONTROL)}
     typed = _TypedInput(input=payload["input"], control=deepcopy(payload["control"]))
 
@@ -331,8 +360,47 @@ async def test_parent_dispatch_wraps_typed_child_input_and_registered_child_keep
         return {"outputs": ["done"]}
 
     calls: list[dict[str, Any]] = []
-    host = _host(await _start(starter, payload, "parent"), calls, result, functions=functions)
-    assert _drain(functions["dafx-parent"](host)) == ["done"]
+
+    def complete_activity(instance: str, state: dict[str, Any], task_id: int) -> dict[str, Any]:
+        action = sdk_history._last_action(state, 0)
+        name = action["functionName"]
+
+        def activity(input_data: str) -> str:
+            data = json.loads(input_data)
+            calls.append({"kind": "activity", "instance": instance, "name": name, "input": deepcopy(data)})
+            return json.dumps(result(name, data))
+
+        # Only leaf business execution is substituted. The harness preserves the
+        # SDK action input and both activity-result JSON layers in native history.
+        host.functions[name] = activity
+        return host.complete_activity(instance, action, task_id)
+
+    state = host.start("dafx-parent", "root-run", await _start(starter, payload, "parent"))
+    state = complete_activity("root-run", state, 0)
+    action = sdk_history._last_action(state, 2)
+    calls.append({
+        "kind": "child",
+        "instance": action["instanceId"],
+        "name": action["functionName"],
+        "input": json.loads(action["input"]),
+    })
+    # The parent SDK action supplies the child's name, instance ID and wire input.
+    # Each replay invokes the registered SDK wrapper with a fresh native context.
+    child_instance, child_state = host.child("root-run", action, 1)
+    assert host.starts[child_instance]["parentInstanceId"] == "root-run"
+    assert host.starts[child_instance]["history"][1]["Name"] == action["functionName"]
+    assert json.loads(host.starts[child_instance]["input"]) == calls[1]["input"]
+    child_state = complete_activity(child_instance, child_state, 0)
+    assert child_state["isDone"] is True and not child_state.get("error")
+    assert child_state["output"][SUBWORKFLOW_RESULT_KEY] is True
+    state = host.complete_child("root-run", 1, child_state["output"])
+    state = complete_activity("root-run", state, 2)
+    assert state["isDone"] is True and not state.get("error")
+    assert state["output"] == ["done"]
+    recorded_calls = deepcopy(calls)
+    assert host.replay(child_instance) == child_state
+    assert host.replay("root-run") == state
+    assert calls == recorded_calls
     assert [item["name"] for item in calls] == [
         "dafx-parent-source",
         "dafx-inner",

@@ -256,7 +256,9 @@ def test_genuine_typed_hitl_keeps_registered_root_and_child_routing(nested: bool
 
         def start_child(name: str, *, input: Any, instance_id: str) -> Any:
             calls.append({"kind": "child", "instance": instance_id, "name": name, "input": deepcopy(input)})
-            child_host = _host(calls, result, functions=functions, instance_id=instance_id)
+            child_host = _host(
+                calls, result, functions=functions, instance_id=instance_id, parent_instance_id=host.instance_id
+            )
             generator = functions[name](child_host, json.loads(json.dumps(input)))
             batch = next(generator)
             assert batch.is_complete

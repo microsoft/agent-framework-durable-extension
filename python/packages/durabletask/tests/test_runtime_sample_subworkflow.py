@@ -107,9 +107,10 @@ class _RecordingBackend:
 
 
 class _MockSDKContext:
-    def __init__(self, backend: _RecordingBackend, *, instance_id: str) -> None:
+    def __init__(self, backend: _RecordingBackend, *, instance_id: str, parent_instance_id: str | None = None) -> None:
         self._backend = backend
         self.instance_id = instance_id
+        self.parent_instance_id = parent_instance_id
         self.is_replaying = False
         self.current_utc_datetime = datetime.now(timezone.utc)
         self.statuses: list[Any] = []
@@ -168,7 +169,7 @@ class _MockSDKContext:
         input = json.loads(json.dumps(input, allow_nan=False))
         child_id = instance_id or f"{self.instance_id}:child"
         self._backend.sub_orchestrator_calls.append({"name": name, "input": deepcopy(input), "instance_id": child_id})
-        child = _MockSDKContext(self._backend, instance_id=child_id)
+        child = _MockSDKContext(self._backend, instance_id=child_id, parent_instance_id=self.instance_id)
         task: CompletableTask[Any] = CompletableTask()
         result = _run_orchestrator(self._backend.orchestrators[name], child, input)
         wire_result = json.loads(json.dumps(result, allow_nan=False))

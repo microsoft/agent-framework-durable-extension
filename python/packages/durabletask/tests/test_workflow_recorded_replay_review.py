@@ -12,6 +12,12 @@ old in-flight protocol-2 runs. Fresh starts are required despite the same marker
 New histories below are constructed from real registered producer results,
 not relabeled historical captures. No network worker is started.
 
+The historical child also lacks ExecutionStarted.parentInstance and is legacy
+incompatible with the parent-provenance guard. Positive child replay controls
+explicitly transform a copy using its matching recorded parent dispatch. That
+service-shaped metadata is not part of the original capture or a compatibility
+claim. No parent is inferred from child input markers or an instance ID shape.
+
 Mixed local/child assertions are unconditional. They require a reconstructed
 snapshot with local requests and only unfinished child ordinals. Live backend
 status retention/replacement remains a separate integration check.
@@ -90,6 +96,37 @@ def _graph(*, mixed: bool = False) -> tuple[Workflow, tuple[_Gate, _Gate]]:
 def _history(name: str) -> list[Any]:
     rows = json.loads((_FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
     return [ParseDict(row, pb.HistoryEvent()) for row in rows]
+
+
+def _child_history_with_recorded_parent(parent: list[Any], child: list[Any]) -> list[Any]:
+    """Transform a legacy copy using its recorded dispatch, not its input markers."""
+    parent_starts = [event.executionStarted for event in parent if event.HasField("executionStarted")]
+    child_starts = [event.executionStarted for event in child if event.HasField("executionStarted")]
+    assert len(parent_starts) == len(child_starts) == 1
+    parent_start, child_start = parent_starts[0], child_starts[0]
+    parent_id = parent_start.orchestrationInstance.instanceId
+    assert parent_id and not child_start.HasField("parentInstance")
+    dispatches = [
+        event
+        for event in parent
+        if event.HasField("subOrchestrationInstanceCreated")
+        and event.subOrchestrationInstanceCreated.instanceId == child_start.orchestrationInstance.instanceId
+    ]
+    assert len(dispatches) == 1
+    dispatch = dispatches[0]
+    assert dispatch.subOrchestrationInstanceCreated.name == child_start.name
+    assert dispatch.subOrchestrationInstanceCreated.input == child_start.input
+    transformed = deepcopy(child)
+    started = next(event.executionStarted for event in transformed if event.HasField("executionStarted"))
+    started.parentInstance.CopyFrom(
+        pb.ParentInstanceInfo(
+            taskScheduledId=dispatch.eventId,
+            name=helpers.get_string_value(parent_start.name),
+            orchestrationInstance=parent_start.orchestrationInstance,
+        )
+    )
+    assert not child_start.HasField("parentInstance")
+    return transformed
 
 
 def _worker(workflow: Workflow) -> Any:
@@ -301,11 +338,11 @@ def test_constructed_sibling_histories_replay_exact_registered_results(host: str
         assert [gate.seen for gate in gates] == [[11], [22]]
 
 
-def test_replay_rebuilds_local_and_active_child_status_snapshot() -> None:
+def test_service_shaped_replay_rebuilds_local_and_active_child_status_snapshot() -> None:
     workflow, _ = _graph(mixed=True)
     native = _worker(workflow)
     parent = _history("mixed-parent-paused")
-    child = _history("mixed-child-paused")
+    child = _child_history_with_recorded_parent(parent, _history("mixed-child-paused"))
     assert len(parent) == 9 and len(child) == 5
     # The local gate has completed, the child has not. Discovery must precede
     # the child join, including a cold replay with no new completion event.
@@ -348,10 +385,11 @@ def test_public_discovery_includes_local_request_before_child_completion() -> No
         transport.close()
 
 
-def test_recorded_all_completed_transition_retires_child_address() -> None:
+def test_service_shaped_all_completed_transition_retires_child_address() -> None:
     workflow, gates = _graph(mixed=True)
     native = _worker(workflow)
-    child = _history("mixed-child-paused")
+    parent = _history("mixed-parent-paused")
+    child = _child_history_with_recorded_parent(parent, _history("mixed-child-paused"))
     reply = ParseDict({"eventId": -1, "eventRaised": {"name": "b", "input": "22"}}, pb.HistoryEvent())
     new = [helpers.new_orchestrator_started_event(), reply]
     resumed = _replay(native, "audit-mixed::sub::0", child, new)
@@ -381,7 +419,7 @@ def test_recorded_all_completed_transition_retires_child_address() -> None:
     parent_result = _replay(
         native,
         "audit-mixed",
-        _history("mixed-parent-paused"),
+        parent,
         [
             helpers.new_orchestrator_started_event(),
             ParseDict(
@@ -474,6 +512,14 @@ def _af_replay(history: list[Any], workflow: Workflow, *, instance: str = "audit
     from azure.durable_functions.models.TaskOrchestrationExecutor import TaskOrchestrationExecutor
     from google.protobuf.json_format import MessageToDict
 
+    started = next(event.executionStarted for event in history if event.HasField("executionStarted"))
+    assert started.orchestrationInstance.instanceId == instance
+    # Preserve only service-shaped parent metadata already in the source event.
+    # Missing metadata stays missing, even when the input claims to be a child.
+    parent_instance_id = None
+    if started.HasField("parentInstance") and started.parentInstance.HasField("orchestrationInstance"):
+        parent_instance_id = started.parentInstance.orchestrationInstance.instanceId
+
     kinds = {
         "orchestratorStarted": 12,
         "executionStarted": 0,
@@ -512,16 +558,18 @@ def _af_replay(history: list[Any], workflow: Workflow, *, instance: str = "audit
     function = next(
         item.get_user_function().orchestrator_function
         for item in app.get_functions()
-        if item.get_function_name() == f"dafx-{workflow.name}"
+        if item.get_function_name() == started.name
     )
     context = DurableOrchestrationContext(
         rows,
         instanceId=instance,
         isReplaying=True,
-        parentInstanceId=None,
-        input=json.dumps(wrap_workflow_input("go")),
+        parentInstanceId=parent_instance_id,
+        input=started.input.value if started.HasField("input") else None,
         upperSchemaVersion=ReplaySchema.V3.value,
     )
+    # Verify the SDK-owned raw field without replacing it or invoking custom decoding.
+    assert vars(context)["_input"] == (started.input.value if started.HasField("input") else None)
     return json.loads(TaskOrchestrationExecutor().execute(context, context.histories, function))
 
 

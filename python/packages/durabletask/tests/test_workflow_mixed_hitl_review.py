@@ -59,7 +59,20 @@ class _Episodes:
         assert instance_id not in self.histories
         self.histories[instance_id] = []
         self.names[instance_id] = name
-        self.episode(instance_id, helpers.new_execution_started_event(name, instance_id, json.dumps(input)))
+        started = helpers.new_execution_started_event(name, instance_id, json.dumps(input))
+        if instance_id in self.parents:
+            # Only createSubOrchestration actions populate this dispatch map.
+            # Model service metadata absent from the SDK's test event helper,
+            # never infer parentage from input markers or an instance ID shape.
+            parent, task_id = self.parents[instance_id]
+            started.executionStarted.parentInstance.CopyFrom(
+                pb.ParentInstanceInfo(
+                    taskScheduledId=task_id,
+                    name=helpers.get_string_value(self.names[parent]),
+                    orchestrationInstance=pb.OrchestrationInstance(instanceId=parent),
+                )
+            )
+        self.episode(instance_id, started)
         return instance_id
 
     def episode(self, instance: str, *events: Any) -> Any:
@@ -284,6 +297,10 @@ def test_real_downstream_signaler_advances_two_waves_before_child_join_and_cold_
     transport = _Episodes(workflow)
     controls["client"] = transport.client
     transport.client.start_workflow("go", instance_id="root")
+    root_start = next(
+        event.executionStarted for event in transport.histories["root"] if event.HasField("executionStarted")
+    )
+    assert not root_start.HasField("parentInstance")
     if early:
         # Real SDK event buffering, before the activity even publishes request a.
         transport.signal("root", event_name="a", data=10)
@@ -291,8 +308,22 @@ def test_real_downstream_signaler_advances_two_waves_before_child_join_and_cold_
     transport.complete_named("root", "seed")
     children = ["root::sub::0", "root::sub::1"]
     owners = [f"{child}::leaf::0" if nested else child for child in children]
+    expected_parents = {child: "root" for child in children}
+    if nested:
+        expected_parents.update(zip(owners, children, strict=True))
+    for child, parent in expected_parents.items():
+        started = next(
+            event.executionStarted for event in transport.histories[child] if event.HasField("executionStarted")
+        )
+        assert started.parentInstance.orchestrationInstance.instanceId == parent
     for owner in owners:
         transport.complete_named(owner, "child")
+        transport.cold(owner)
+        child_replay = _af_replay(transport.histories[owner], workflow, instance=owner)
+        assert not child_replay["isDone"]
+        assert child_replay["customStatus"] == {
+            key: value for key, value in transport.statuses[owner].items() if key != "events"
+        }
     local_order = ["parent", "writer"] if early else ["writer", "parent"]
     transport.complete_named("root", local_order[0])
     assert controls["seen"] == []

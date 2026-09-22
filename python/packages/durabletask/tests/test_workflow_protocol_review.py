@@ -107,10 +107,12 @@ def _host(
     *,
     functions: dict[str, Callable[..., Any]] | None = None,
     instance_id: str = "root-run",
+    parent_instance_id: str | None = None,
     replay: bool = False,
 ) -> Mock:
     host = Mock(spec=OrchestrationContext)
     host.instance_id = instance_id
+    host.parent_instance_id = parent_instance_id
     host.is_replaying = replay
 
     def activity(name: str, *, input: str) -> CompletableTask[Any]:
@@ -123,7 +125,14 @@ def _host(
         assert functions is not None
         wire = json.loads(json.dumps(input))
         calls.append({"kind": "child", "instance": instance_id, "name": name, "input": deepcopy(wire)})
-        context = _host(calls, result, functions=functions, instance_id=instance_id, replay=replay)
+        context = _host(
+            calls,
+            result,
+            functions=functions,
+            instance_id=instance_id,
+            parent_instance_id=host.instance_id,
+            replay=replay,
+        )
         child_result = _drain(functions[name](context, wire))
         assert child_result[SUBWORKFLOW_RESULT_KEY] is True
         return _complete(child_result)

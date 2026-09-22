@@ -24,6 +24,26 @@ from azure.durable_functions.models.Task import AtomicTask, TaskState
 logger = logging.getLogger(__name__)
 
 
+def get_workflow_start_input(context: DurableOrchestrationContext) -> Any:
+    """Read generated workflow starts without the SDK's custom-object hooks.
+
+    Durable Functions stores the original JSON string in ``_input`` and defers
+    decoding until ``get_input``. That public method can construct payload-selected
+    objects before our provenance gate. Read only the verified raw-field contract,
+    failing closed on an unknown SDK representation. Do not change native
+    orchestrators, agent bindings, SDK methods or global decoder configuration.
+    """
+    fields = vars(context)
+    if "_input" not in fields:
+        raise RuntimeError("Unsupported Durable Functions workflow start input representation.")
+    raw: Any = fields["_input"]
+    if raw is None:
+        return None
+    if type(raw) is not str:
+        raise RuntimeError("Unsupported Durable Functions workflow start input representation.")
+    return json.loads(raw)
+
+
 class _OpaqueEventInput(str):
     """Mark an already-projected history field within this SDK context only."""
 
@@ -77,6 +97,69 @@ class _JsonEntityTask(AtomicTask):
         super().set_value(is_error, value)
 
 
+class _OpaqueChildResult(str):
+    """Keep a child completion's original JSON opaque in this replay only."""
+
+    original: str
+
+    def __new__(cls, original: str) -> _OpaqueChildResult:
+        value = super().__new__(cls, json.dumps([original]))
+        value.original = original
+        return value
+
+
+class _JsonChildTask(AtomicTask):
+    """Restore child JSON before native completion propagates to any composite."""
+
+    def __init__(self, task: Any) -> None:
+        # The native task is still unscheduled. Preserve its action object and
+        # id (normally None), letting the SDK assign the same sequence number.
+        super().__init__(task.id, task.action_repr)
+
+    def set_value(self, is_error: bool, value: Any) -> None:
+        """Decode only our opaque success payload, preserving SDK errors as-is."""
+        if not is_error and value is not None:
+            if not isinstance(value, list):
+                raise RuntimeError("Unsupported Durable Functions workflow child completion representation")
+            items = cast(list[Any], value)
+            if len(items) != 1 or not isinstance(items[0], str):
+                raise RuntimeError("Unsupported Durable Functions workflow child completion representation")
+            value = json.loads(items[0])
+        super().set_value(is_error, value)
+
+
+class _ChildResultBucket:
+    """Project only successful child Result fields for one numeric task ID."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+        self.mode: Literal["native", "child"] | None = None
+        self.processed = 0
+
+    def project(self, mode: Literal["native", "child"]) -> None:
+        """Retain native decoding unless the popped task is a framework child."""
+        if self.mode != mode:
+            self.mode = mode
+            self.processed = 0
+        while self.processed < len(self.events):
+            event = self.events[self.processed]
+            raw: Any = event.Result
+            if isinstance(raw, _OpaqueChildResult):
+                if mode == "child":
+                    self.processed += 1
+                    continue
+                raw = raw.original
+            if mode == "native":
+                event.Result = raw
+            elif isinstance(raw, str):
+                # Wrap scalars too. A JSON-looking string and a single-element
+                # application list must each survive exactly one plain decode.
+                event.Result = _OpaqueChildResult(raw)
+            elif raw is not None:
+                raise RuntimeError("Unsupported Durable Functions workflow child Result representation")
+            self.processed += 1
+
+
 class _EventInputBucket:
     """Keep history references and the extent projected for one selected task kind."""
 
@@ -123,17 +206,19 @@ class _EventInputIndex:
     Also accept appended history in fixtures. Replacement or an observed shrink
     rebuilds the index conservatively, including any existing opaque markers.
     Arbitrary in-place edits at the same length (or shrink/regrow between calls)
-    are not supported. Only this adapter mutates Input during SDK execution.
+    are not supported. Only this adapter mutates Input/Result during execution.
 
     Stable modes cost one history visit and one projection per occurrence, plus
-    constant work per wait/pop. A decoder change revisits only its name's bucket.
-    Absent queried names never allocate buckets or retain original payload copies.
+    constant work per wait/pop. Event names and child completion task IDs have
+    separate buckets, filled in the same pass. A decoder change revisits only
+    its bucket. Absent names/IDs never allocate buckets or copy payloads.
     """
 
     def __init__(self) -> None:
         self.histories: list[Any] | None = None
         self.indexed = 0
         self.buckets: dict[str, _EventInputBucket] = {}
+        self.child_results: dict[int, _ChildResultBucket] = {}
 
     def update(self, histories: list[Any]) -> None:
         """Index the entire available episode, not just SDK-consumed history."""
@@ -141,20 +226,35 @@ class _EventInputIndex:
             self.histories = histories
             self.indexed = 0
             self.buckets.clear()
+            self.child_results.clear()
         while self.indexed < len(histories):
             event = histories[self.indexed]
-            if event.event_type == HistoryEventType.EVENT_RAISED:
+            kind = event.event_type
+            if kind == HistoryEventType.EVENT_RAISED:
                 name: Any = event.Name
                 if isinstance(name, str):
                     bucket = self.buckets.get(name)
                     if bucket is None:
                         bucket = self.buckets[name] = _EventInputBucket()
                     bucket.events.append(event)
+            elif kind == HistoryEventType.SUB_ORCHESTRATION_INSTANCE_COMPLETED:
+                task_id: Any = event.TaskScheduledId
+                if type(task_id) is int:
+                    child_bucket = self.child_results.get(task_id)
+                    if child_bucket is None:
+                        child_bucket = self.child_results[task_id] = _ChildResultBucket()
+                    child_bucket.events.append(event)
             self.indexed += 1
 
     def project(self, name: str, mode: Literal["native", "event", "entity"]) -> None:
         """Project matching occurrences without remembering absent names."""
         bucket = self.buckets.get(name)
+        if bucket is not None:
+            bucket.project(mode)
+
+    def project_child(self, task_id: int, mode: Literal["native", "child"]) -> None:
+        """Project successful completions for exactly the SDK-selected child ID."""
+        bucket = self.child_results.get(task_id)
         if bucket is not None:
             bucket.project(mode)
 
@@ -202,13 +302,15 @@ def _protect_event_inputs(context: DurableOrchestrationContext, name: str, *, en
 
 
 class _WorkflowOpenTasks(defaultdict[int | str, Any]):
-    """Shield a reply at the SDK's task lookup, before either entity decoder.
+    """Shield replies and child results at the SDK's pop-before-decode lookup.
 
     The native executor pops the target before decoding EventRaised.Input. Its
     EventSent handling also pops the numeric task ID before remapping it to the
     service-generated correlation. Preserve both operations and native task/list
     identities. Only framework JSON tasks opt in, so unrelated native tasks keep
-    their decoder. This relies on the SDK's pop-before-decode private contract.
+    their decoder. Integer child IDs select only SubOrchestrationInstanceCompleted
+    Result fields, never activity results, failures or EventSent inputs. This
+    relies on the SDK's pop-before-decode private contract.
     """
 
     def __init__(self, context: DurableOrchestrationContext, tasks: defaultdict[int | str, Any]) -> None:
@@ -220,7 +322,14 @@ class _WorkflowOpenTasks(defaultdict[int | str, Any]):
         value: Any = super().pop(key, *args)
         # Native duplicate-name wait lists are consumed from their last entry.
         task: Any = cast(list[Any], value)[-1] if isinstance(value, list) and value else cast(Any, value)
-        if isinstance(key, str) and isinstance(task, (_JsonEventTask, _JsonEntityTask)):
+        if isinstance(task, _JsonChildTask):
+            if type(key) is not int:
+                raise RuntimeError("Unsupported Durable Functions workflow child task ID representation")
+            index = _event_input_index(self._context)
+            if index is None:
+                raise RuntimeError("Unsupported Durable Functions workflow child history representation")
+            index.project_child(key, "child")
+        elif isinstance(key, str) and isinstance(task, (_JsonEventTask, _JsonEntityTask)):
             _protect_event_inputs(self._context, key, entity=isinstance(task, _JsonEntityTask))
         elif isinstance(key, str):
             # A name may later belong to an unrelated native task. Undo only
@@ -228,6 +337,12 @@ class _WorkflowOpenTasks(defaultdict[int | str, Any]):
             index = _event_input_index(self._context)
             if index is not None:
                 index.project(key, "native")
+        elif type(key) is int and isinstance(getattr(self._context, "_workflow_event_inputs", None), _EventInputIndex):
+            # Usually IDs are unique. If a native task selects a previously
+            # projected bucket, restore it just as for native named waits.
+            index = _event_input_index(self._context)
+            if index is not None:
+                index.project_child(key, "native")
         return cast(Any, value)
 
 
@@ -369,7 +484,27 @@ class AzureFunctionsWorkflowContext:
 
     def call_sub_orchestrator(self, name: str, input: Any, instance_id: str | None = None) -> Any:
         orchestration_context: Any = self._context
-        return orchestration_context.call_sub_orchestrator(name, input_=input, instance_id=instance_id)
+        if not isinstance(getattr(orchestration_context, "histories", None), list):
+            # Invalidate a prior extent too, even if a fixture later restores
+            # the same list with different entries at the same length.
+            _event_input_index(self._context)
+            raise RuntimeError("Unsupported Durable Functions workflow child history representation")
+        if not isinstance(getattr(orchestration_context, "open_tasks", None), _WorkflowOpenTasks):
+            raise RuntimeError("Unsupported Durable Functions workflow child task registry")
+        task = orchestration_context.call_sub_orchestrator(name, input_=input, instance_id=instance_id)
+        # The SDK annotates id as int | str but returns None before registration.
+        # Keep the runtime contract guard rather than trusting that annotation.
+        task_id: Any = getattr(task, "id", None)
+        if (
+            type(task) is not AtomicTask
+            or task_id is not None
+            or task.state is not TaskState.RUNNING
+            or task.parent is not None
+            or getattr(task, "_is_scheduled", True)
+            or getattr(task, "_api_name", None) != "CallSubOrchestratorAction"
+        ):
+            raise RuntimeError("Unsupported Durable Functions workflow child task representation")
+        return _JsonChildTask(task)
 
     # -- Composite tasks ------------------------------------------------------
 
