@@ -162,17 +162,22 @@ jobs:
         env:
           UV_INDEX_URL: $(PIP_INDEX_URL)
 
-      - pwsh: uv run ruff check packages/durabletask
+      - pwsh: uv run ruff check packages/durabletask packages/azurefunctions
         workingDirectory: python
         displayName: 'Run Python lint'
 
+      # Type checking covers only packages/durabletask. The azurefunctions package is
+      # type checked with pyright instead (see .github/workflows/python-merge-tests.yml),
+      # because mypy cannot analyze it: azure.durable_functions ships no py.typed marker,
+      # so every import of it raises import-untyped. Do not add azurefunctions here
+      # without switching this step to pyright.
       - pwsh: uv run mypy --config-file packages/durabletask/pyproject.toml packages/durabletask/agent_framework_durabletask
         workingDirectory: python
         displayName: 'Run Python type check'
 
       - pwsh: |
           New-Item -ItemType Directory -Force -Path ../artifacts/test-results | Out-Null
-          uv run pytest -m "not integration" packages/durabletask/tests --junitxml ../artifacts/test-results/python-unit.xml
+          uv run pytest -m "not integration" packages/durabletask/tests packages/azurefunctions/tests --junitxml ../artifacts/test-results/python-unit.xml
         workingDirectory: python
         displayName: 'Run Python unit tests'
 
