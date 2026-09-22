@@ -225,8 +225,9 @@ def _messages(value: Any, *, v2: bool) -> None:
 def _conversation(value: Any, *, v2: bool) -> None:
     for item in _array(value, "conversationHistory"):
         entry = _object(item, "conversation entry")
-        # Historical entries need not have a discriminator, and unrecognized
-        # siblings such as request/response-specific fields are not reinterpreted.
+        # Legacy 1.x validates common fields without interpreting a discriminator
+        # or kind-specific siblings. V2 requires a known discriminator and checks
+        # that kind's declared fields below.
         kind = _enum(entry.get("$type"), _ENTRY_TYPES, "entry.$type") if v2 else None
         if "correlationId" in entry:
             if kind == "compaction":
