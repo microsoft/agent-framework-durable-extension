@@ -962,6 +962,9 @@ staging fails. Earlier successful saves and flushes, including the preliminary f
 `save_messages()`, remain intact. This does not commit to the backend or roll back external
 provider writes.
 
+Requests and responses are checked as stored transcript JSON before publication. Failed-run
+finalization retains pending tool results if filtering or staging fails, allowing a retry.
+
 ### 2. Append, lifecycle and snapshot capabilities
 
 `save_messages()` receives new messages rather than a replacement transcript. In the evaluated Redis
