@@ -2,6 +2,7 @@
 
 """Exercise workflow and HTTP streaming sample contracts offline."""
 
+import ast
 import asyncio
 import importlib.util
 import json
@@ -16,12 +17,29 @@ from unittest.mock import Mock
 import pytest
 from _execution_test_support import RecordingChatClient
 from agent_framework import WorkflowEvent
+from packaging.requirements import Requirement
 
 from agent_framework_durabletask._workflows.naming import validate_workflow_name, workflow_orchestrator_name
 from agent_framework_durabletask._workflows.protocol import wrap_workflow_input
 from agent_framework_durabletask._workflows.serialization import serialize_workflow_event
 
 SAMPLES = Path(__file__).resolve().parents[3] / "samples"
+
+
+def test_external_history_sample_declares_its_direct_authentication_dependency():
+    sample = SAMPLES / "14_external_history_redis"
+    for name in ("worker.py", "client.py"):
+        tree = ast.parse((sample / name).read_text(encoding="utf-8"))
+        assert any(
+            isinstance(node, ast.ImportFrom) and node.module in ("azure.identity", "azure.identity.aio")
+            for node in ast.walk(tree)
+        )
+    requirements = {
+        Requirement(line.split("#", 1)[0].strip()).name
+        for line in (sample / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", "-e"))
+    }
+    assert "azure-identity" in requirements
 
 
 def test_reliable_streaming_http_demo_uses_accepted_session_id():

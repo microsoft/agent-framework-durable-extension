@@ -13,7 +13,15 @@ from agent_framework import SupportsAgentRun
 
 from ._callbacks import AgentResponseCallbackProtocol
 from ._history_provider import ensure_durable_history
-from ._retention import DEFAULT_RETENTION, RetentionMode, StateBudget, resolve_state_budget, validate_retention
+from ._retention import (
+    DEFAULT_RETENTION,
+    HIGH_WATERMARK,
+    LOW_WATERMARK,
+    RetentionMode,
+    StateBudget,
+    resolve_state_budget,
+    validate_retention,
+)
 
 __all__ = [
     "INHERIT",
@@ -88,12 +96,13 @@ def validate_agent_configuration(agent: SupportsAgentRun, *, retention: Retentio
 class AgentRegistrationSettings:
     """Resolved values and callback identity for a reusable hosted registration."""
 
-    retention: RetentionMode
-    max_state_bytes: int | None
-    high_watermark: float
-    low_watermark: float
+    # Keep the original positional constructor before the additive settings.
     response_delivery_window_seconds: int
     callback: AgentResponseCallbackProtocol | None = field(default=None, compare=False)
+    retention: RetentionMode = field(default=DEFAULT_RETENTION, kw_only=True)
+    max_state_bytes: int | None = field(default=None, kw_only=True)
+    high_watermark: float = field(default=HIGH_WATERMARK, kw_only=True)
+    low_watermark: float = field(default=LOW_WATERMARK, kw_only=True)
 
     def matches(self, other: AgentRegistrationSettings) -> bool:
         """Require value equality and the same callback instance."""

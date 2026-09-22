@@ -9,5 +9,8 @@
 agent-framework-foundry>=1.10.1,<2  # Foundry support from PyPI
 -e ../../packages/durabletask  # Local Durable Task package under development
 
+# Azure authentication
+azure-identity
+
 # External history store used by this sample
 redis
