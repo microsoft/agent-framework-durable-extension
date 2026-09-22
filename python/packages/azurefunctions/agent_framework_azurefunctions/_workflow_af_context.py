@@ -13,7 +13,7 @@ import logging
 from collections import defaultdict, deque
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from agent_framework_durabletask import WorkflowOrchestrationContext, build_agent_task
 from azure.durable_functions import DurableOrchestrationContext
@@ -77,6 +77,107 @@ class _JsonEntityTask(AtomicTask):
         super().set_value(is_error, value)
 
 
+class _EventInputBucket:
+    """Keep history references and the extent projected for one selected task kind."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+        self.mode: Literal["native", "event", "entity"] | None = None
+        self.processed = 0
+
+    def project(self, mode: Literal["native", "event", "entity"]) -> None:
+        """Visit only new occurrences unless the selected decoder has changed."""
+        if self.mode != mode:
+            self.mode = mode
+            self.processed = 0
+        while self.processed < len(self.events):
+            event = self.events[self.processed]
+            raw: Any = event.Input
+            if isinstance(raw, _OpaqueEventInput):
+                if mode != "native" and raw.entity == (mode == "entity"):
+                    self.processed += 1
+                    continue
+                raw = raw.original
+            if mode == "native":
+                event.Input = raw
+            elif isinstance(raw, str):
+                if mode == "entity":
+                    event.Input = _OpaqueEventInput(raw, entity=True)
+                else:
+                    try:
+                        value = json.loads(raw)
+                    except ValueError:
+                        # A valid object prefix followed by invalid JSON can
+                        # invoke the SDK hook before its parser raises too.
+                        event.Input = _OpaqueEventInput(raw)
+                    else:
+                        event.Input = _OpaqueEventInput(raw) if isinstance(value, (dict, list)) else raw
+            self.processed += 1
+
+
+class _EventInputIndex:
+    """Index this context's episode once, without copying or comparing payloads.
+
+    The SDK supplies a fixed list of history objects for each execute call. Keep
+    references to those objects so deferred callbacks see the same projection.
+    Also accept appended history in fixtures. Replacement or an observed shrink
+    rebuilds the index conservatively, including any existing opaque markers.
+    Arbitrary in-place edits at the same length (or shrink/regrow between calls)
+    are not supported. Only this adapter mutates Input during SDK execution.
+
+    Stable modes cost one history visit and one projection per occurrence, plus
+    constant work per wait/pop. A decoder change revisits only its name's bucket.
+    Absent queried names never allocate buckets or retain original payload copies.
+    """
+
+    def __init__(self) -> None:
+        self.histories: list[Any] | None = None
+        self.indexed = 0
+        self.buckets: dict[str, _EventInputBucket] = {}
+
+    def update(self, histories: list[Any]) -> None:
+        """Index the entire available episode, not just SDK-consumed history."""
+        if histories is not self.histories or len(histories) < self.indexed:
+            self.histories = histories
+            self.indexed = 0
+            self.buckets.clear()
+        while self.indexed < len(histories):
+            event = histories[self.indexed]
+            if event.event_type == HistoryEventType.EVENT_RAISED:
+                name: Any = event.Name
+                if isinstance(name, str):
+                    bucket = self.buckets.get(name)
+                    if bucket is None:
+                        bucket = self.buckets[name] = _EventInputBucket()
+                    bucket.events.append(event)
+            self.indexed += 1
+
+    def project(self, name: str, mode: Literal["native", "event", "entity"]) -> None:
+        """Project matching occurrences without remembering absent names."""
+        bucket = self.buckets.get(name)
+        if bucket is not None:
+            bucket.project(mode)
+
+
+def _event_input_index(context: DurableOrchestrationContext) -> _EventInputIndex | None:
+    histories: Any = getattr(context, "histories", None)
+    if not isinstance(histories, list):
+        # Non-SDK context doubles have no history decoder to protect. Invalidate
+        # a prior index if such a fixture temporarily replaces its history.
+        if isinstance(getattr(context, "_workflow_event_inputs", None), _EventInputIndex):
+            orchestration_context: Any = context
+            orchestration_context._workflow_event_inputs = None
+        return None
+    index: Any = getattr(context, "_workflow_event_inputs", None)
+    if not isinstance(index, _EventInputIndex):
+        index = _EventInputIndex()
+        orchestration_context = context
+        orchestration_context._workflow_event_inputs = index
+    result: _EventInputIndex = index
+    result.update(cast(list[Any], histories))
+    return result
+
+
 def _protect_event_inputs(context: DurableOrchestrationContext, name: str, *, entity: bool = False) -> bool:
     """Shield framework reply waits and entity results from SDK custom objects.
 
@@ -93,35 +194,10 @@ def _protect_event_inputs(context: DurableOrchestrationContext, name: str, *, en
     envelope and result with plain JSON. No application keys are reserved or
     discarded. EventSent correlation records and scheduled actions are untouched.
     """
-    histories: Any = getattr(context, "histories", None)
-    if not isinstance(histories, list):
-        # Non-SDK context doubles have no history decoder to protect.
+    index = _event_input_index(context)
+    if index is None:
         return False
-    for event in cast(list[Any], histories):
-        if event.event_type != HistoryEventType.EVENT_RAISED or event.Name != name:
-            continue
-        raw: Any = event.Input
-        if not isinstance(raw, str):
-            continue
-        if isinstance(raw, _OpaqueEventInput):
-            if raw.entity == entity:
-                continue
-            raw = raw.original
-        if entity:
-            event.Input = _OpaqueEventInput(raw, entity=True)
-            continue
-        try:
-            value = json.loads(raw)
-        except ValueError:
-            # Even a valid object prefix followed by invalid JSON can invoke
-            # object_hook before the SDK raises. Deliver it opaquely too, then
-            # let the hook-free task parser raise at event delivery as before.
-            event.Input = _OpaqueEventInput(raw)
-            continue
-        if isinstance(value, (dict, list)):
-            event.Input = _OpaqueEventInput(raw)
-        else:
-            event.Input = raw
+    index.project(name, "entity" if entity else "event")
     return True
 
 
@@ -149,14 +225,9 @@ class _WorkflowOpenTasks(defaultdict[int | str, Any]):
         elif isinstance(key, str):
             # A name may later belong to an unrelated native task. Undo only
             # our replay-local projection, preserving its original SDK semantics.
-            histories: Any = self._context.histories
-            for event in cast(list[Any], histories):
-                if (
-                    event.event_type == HistoryEventType.EVENT_RAISED
-                    and event.Name == key
-                    and isinstance(event.Input, _OpaqueEventInput)
-                ):
-                    event.Input = event.Input.original
+            index = _event_input_index(self._context)
+            if index is not None:
+                index.project(key, "native")
         return cast(Any, value)
 
 
