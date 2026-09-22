@@ -216,7 +216,12 @@ class DurableAIAgentWorker:
         validate_agent_configuration(agent, retention=effective_retention)
         effective_callback = self._callback if callback is None else callback
         settings = AgentRegistrationSettings(
-            effective_retention, effective_budget, effective_high, effective_low, effective_window, effective_callback
+            retention=effective_retention,
+            max_state_bytes=effective_budget,
+            high_watermark=effective_high,
+            low_watermark=effective_low,
+            response_delivery_window_seconds=effective_window,
+            callback=effective_callback,
         )
         identities = dict(self._registration_identities)
         RegistrationIdentity(agent, agent, "entity", settings, f"agent '{registration_name}'").reserve(
@@ -370,12 +375,12 @@ class DurableAIAgentWorker:
         validate_retention(effective_retention, effective_high, effective_low)
         validate_response_delivery_window(effective_window)
         settings = AgentRegistrationSettings(
-            effective_retention,
-            effective_budget,
-            effective_high,
-            effective_low,
-            effective_window,
-            self._callback if callback is None else callback,
+            retention=effective_retention,
+            max_state_bytes=effective_budget,
+            high_watermark=effective_high,
+            low_watermark=effective_low,
+            response_delivery_window_seconds=effective_window,
+            callback=self._callback if callback is None else callback,
         )
 
         # Reserve the actual derived identities for the entire composition before any SDK calls.

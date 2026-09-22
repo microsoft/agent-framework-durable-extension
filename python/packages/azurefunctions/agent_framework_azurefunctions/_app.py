@@ -438,20 +438,20 @@ class AgentFunctionApp(DFAppBase):
         self._workflow_response_delivery_window_seconds = resolved_workflow_window
 
         agent_settings = AgentRegistrationSettings(
-            retention,
-            resolved_budget,
-            high_watermark,
-            low_watermark,
-            response_delivery_window_seconds,
-            default_callback,
+            retention=retention,
+            max_state_bytes=resolved_budget,
+            high_watermark=high_watermark,
+            low_watermark=low_watermark,
+            response_delivery_window_seconds=response_delivery_window_seconds,
+            callback=default_callback,
         )
         workflow_settings = AgentRegistrationSettings(
-            resolved_workflow_retention,
-            resolved_workflow_budget,
-            resolved_workflow_high,
-            resolved_workflow_low,
-            resolved_workflow_window,
-            default_callback,
+            retention=resolved_workflow_retention,
+            max_state_bytes=resolved_workflow_budget,
+            high_watermark=resolved_workflow_high,
+            low_watermark=resolved_workflow_low,
+            response_delivery_window_seconds=resolved_workflow_window,
+            callback=default_callback,
         )
         if enable_health_check:
             RegistrationIdentity(self, self, "health", agent_settings, "health check").reserve(
@@ -695,12 +695,12 @@ class AgentFunctionApp(DFAppBase):
         validate_response_delivery_window(effective_window)
 
         settings = AgentRegistrationSettings(
-            effective_retention,
-            effective_budget,
-            effective_high,
-            effective_low,
-            effective_window,
-            self.default_callback,
+            retention=effective_retention,
+            max_state_bytes=effective_budget,
+            high_watermark=effective_high,
+            low_watermark=effective_low,
+            response_delivery_window_seconds=effective_window,
+            callback=self.default_callback,
         )
         identities = dict(self._registration_identities)
         hosted_workflows = self._preflight_workflow(workflow, settings, identities)
@@ -1257,7 +1257,12 @@ class AgentFunctionApp(DFAppBase):
 
         effective_callback = self.default_callback if callback is None else callback
         settings = AgentRegistrationSettings(
-            effective_retention, effective_budget, effective_high, effective_low, effective_window, effective_callback
+            retention=effective_retention,
+            max_state_bytes=effective_budget,
+            high_watermark=effective_high,
+            low_watermark=effective_low,
+            response_delivery_window_seconds=effective_window,
+            callback=effective_callback,
         )
         identities = dict(self._registration_identities)
         self._preflight_agent(

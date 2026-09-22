@@ -107,7 +107,7 @@ These samples host workflows and agents on Azure Durable Functions (`func start`
 - **[azure_functions/10_workflow_no_shared_state](azure_functions/10_workflow_no_shared_state/)**: Run a MAF `Workflow` on Azure Durable Functions without SharedState.
 - **[azure_functions/11_workflow_parallel](azure_functions/11_workflow_parallel/)**: Parallel execution of executors and agents in an Azure Durable Functions workflow.
 - **[azure_functions/12_workflow_hitl](azure_functions/12_workflow_hitl/)**: The workflow human-in-the-loop pattern on Azure Durable Functions, with the reviewer notified from inside the workflow via `WorkflowHitlContext`.
-- **[azure_functions/13_subworkflow_hitl](azure_functions/13_subworkflow_hitl/)**: A human-in-the-loop pause inside a sub-workflow on Azure Durable Functions, exposed through a single top-level respond surface.
+- **[azure_functions/13_subworkflow_hitl](azure_functions/13_subworkflow_hitl/)**: A human-in-the-loop pause inside a sub-workflow on Azure Durable Functions, exposed through a single top-level `respond` endpoint.
 - **[azure_functions/14_conversation_compaction](azure_functions/14_conversation_compaction/)** shows durable compaction on Functions with independent eager pruning and explicit local byte budgets.
 
 ## Retention Defaults
