@@ -757,17 +757,40 @@ gaps in delivery evidence. If evidence is missing, reject or defer migration rat
 delivered prefix. A matching `2.x` version does not certify mixed-format compatibility. These are
 prototype deployment constraints, not a mandate for its private APIs or exact final common schema.
 
-#### Python runtime implementation note, 2026-09-21
+#### Python runtime implementation note, 2026-09-22
 
-The current Python runtime update deliberately retains workflow protocol `2` while changing the
-HITL activity checkpoints and mixed parent/child replay action graph. Users must start fresh
-workflow instances, including when upgrading from an earlier v2 build. Existing v2 in-flight
-instances and recorded histories are unsupported and may fail on the new runtime. The unchanged
-marker checks start-envelope admission only, not feature or replay compatibility. Older v2
-envelopes can still pass that check. There is no replay migration or fallback. A new isolated hub
-with matching workers and clients is recommended.
+The current Python runtime update deliberately retains workflow protocol `2` while tightening start
+admission and changing the HITL activity checkpoints and mixed parent/child replay action graph.
+Users must start fresh workflow instances, including when upgrading from an earlier v2 build.
+Existing v2 in-flight instances and recorded histories are unsupported and may fail on the new
+runtime. The unchanged marker checks start-envelope admission only, not feature or replay
+compatibility. Older v2 envelopes can still pass that check. There is no replay migration or
+fallback. A new isolated hub with matching workers and clients is recommended.
 Keep the original deployment only if old runs need to finish there. The `isolated_v2` acknowledgement
 does not prove isolation or detect incompatible peers.
+
+Generated root workflow starts take public application JSON, not internal checkpoint data. The
+workflow client and generated HTTP routes remove reserved child markers. Application input is
+sanitized before typed reconstruction. Generated Functions entries read start input as plain JSON
+without the SDK's custom-object decoder before checking provenance. Generated Functions parents
+also receive child results as plain JSON, without SDK custom-object construction or global decoder
+changes. Native orchestration input contracts are unchanged.
+Internal `__subworkflow_input__` and `__subworkflow_address__` markers require an actual SDK-reported
+parent and a child address consistent with both SDK parent and current instance IDs. Generated
+entries reject missing or mismatched provenance before checkpoint decoding. A native application
+parent may still call a generated workflow with ordinary application JSON inside the protocol-2
+start wrapper. With no internal child markers, that input remains on the application-JSON path.
+
+SDK parent metadata authenticates only the immediate parent/child relationship. It does not
+authenticate full ancestry or the claimed root's authority, or protect against a malicious
+application parent supplying an otherwise consistent envelope. Trusted worker and application
+deployments remain required. Internal checkpoint decoding still uses pickle and is not safe for
+arbitrary untrusted input.
+
+The standalone Durable Task SDK minimum is now `durabletask>=1.7.1,<2` for parent-instance metadata.
+The existing lock already selects `1.7.2`, so this raises the supported minimum without changing
+the locked SDK version. Functions uses its own SDK's parent metadata. This is a Python runtime
+requirement, not proof of shared-deployment or cross-runtime compatibility.
 
 Non-agent HITL reconstruction and validation run in the response activity. Its checkpointed
 `accepted` or `invalidreply` outcome lets orchestration replay avoid rerunning reply validators.

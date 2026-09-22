@@ -4,9 +4,10 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any, TypeVar
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import azure.durable_functions as df
 import pytest
@@ -96,7 +97,8 @@ def test_workflow_orchestrator_rejects_legacy_recorded_start_before_actions() ->
     workflow = WorkflowBuilder(name="input_boundary", start_executor=executor, output_from=[executor]).build()
     orchestrator = _capture_workflow_orchestrator(workflow)
     context = Mock(spec=df.DurableOrchestrationContext)
-    context.get_input.return_value = {"input": "raw-without-version"}
+    context._input = json.dumps({"input": "raw-without-version"})
+    context.get_input.side_effect = AssertionError("Generated workflow starts must not use SDK custom decoding")
     context.is_replaying = True
 
     with (
@@ -106,4 +108,5 @@ def test_workflow_orchestrator_rejects_legacy_recorded_start_before_actions() ->
         next(orchestrator(context))
 
     engine.assert_not_called()
-    assert context.mock_calls == [call.get_input()]
+    context.get_input.assert_not_called()
+    assert context.mock_calls == []
