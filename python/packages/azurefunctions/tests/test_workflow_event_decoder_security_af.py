@@ -21,11 +21,13 @@ import pytest
 from agent_framework import AgentResponse, Message
 from agent_framework_durabletask import RunRequest, load_agent_response, wrap_workflow_input
 from agent_framework_durabletask._workflows.serialization import deserialize_workflow_output
+from azure.durable_functions.models.history.HistoryEvent import HistoryEvent
 from azure.durable_functions.models.ReplaySchema import ReplaySchema
-from azure.durable_functions.models.Task import TaskState
+from azure.durable_functions.models.Task import AtomicTask, TaskState
+from azure.durable_functions.models.TaskOrchestrationExecutor import TaskOrchestrationExecutor
 from azure.functions import _durable_functions as sdk_codec
 from test_workflow_agent_rejection_backlog_review import _History, _workflow
-from test_workflow_buffered_events_review_af import _event, _execute, _prefix
+from test_workflow_buffered_events_review_af import _context, _event, _execute, _prefix
 from test_workflow_generic_hitl_review import (
     _VALIDATOR_CALLS,
     _complete_generic_activity,
@@ -682,3 +684,119 @@ def test_standalone_dt_reply_preserves_metadata_without_sdk_construction(import_
         assert len(cold.actions) == 1 and cold.actions[0].HasField("completeOrchestration")
         assert json.loads(cold.actions[0].completeOrchestration.result.value) == [{"value": payload}]
         assert seen == [payload] and _DECODER_CALLS == [] and import_attempts == []
+
+
+@pytest.mark.parametrize("change", ["append", "replacement", "shrink", "non-list"])
+def test_event_index_tracks_references_and_rebuilds_conservatively(change: str, import_attempts: list[str]) -> None:
+    payload = {"items": [_metadata(), _metadata(_UNLOADED_MODULE)], "keep": [None, False]}
+    wire = json.dumps(payload)
+    context = _context([*_prefix()[:2], _event(15, 100, Name="a", Input=wire), _event(15, 101, Name="a", Input=wire)])
+    adapter = AzureFunctionsWorkflowContext(context)
+    adapter.wait_for_external_event("a")
+    original_list = context.histories
+    original_event = original_list[2]
+    index = context._workflow_event_inputs
+    assert index.buckets["a"].events[0] is original_event
+    assert json.loads(original_event.Input) == [wire]
+    new_event = HistoryEvent(**_event(15, 102, Name="a", Input=wire))
+    if change == "append":
+        original_list.append(new_event)
+    elif change == "replacement":
+        # Same length, different list, retaining one already-projected object.
+        context._histories = [*original_list[:2], original_event, new_event]
+    elif change == "shrink":
+        del original_list[3:]
+        new_event = original_event
+    else:
+        context._histories = None
+        native = adapter.wait_for_external_event("a")
+        assert type(native) is AtomicTask
+        # A temporarily unsupported fixture invalidates the old extent, even
+        # if it subsequently restores the very same list object and length.
+        original_list[-1] = new_event
+        context._histories = original_list
+    task = AzureFunctionsWorkflowContext(context).wait_for_external_event("a")
+    assert json.loads(new_event.Input) == [wire]
+    executor = TaskOrchestrationExecutor()
+    executor.context = context
+    context._add_to_open_tasks(task)
+    executor.set_task_value(new_event, True, "Name")
+    assert task.state is TaskState.SUCCEEDED and task.result == payload
+    assert context._workflow_event_inputs.buckets["a"].events[-1] is new_event
+    assert _DECODER_CALLS == [] and import_attempts == []
+
+
+def test_absent_name_queries_do_not_grow_index_and_adapter_reuse_keeps_projection() -> None:
+    context = _context([*_prefix()[:2], _event(15, 100, Name="a", Input='{"keep":true}')])
+    # A look-alike cache must not claim unguarded history is already processed.
+    context._workflow_event_inputs = SimpleNamespace(histories=context.histories, indexed=3, buckets={})
+    adapter = AzureFunctionsWorkflowContext(context)
+    adapter.wait_for_external_event("a")
+    index = context._workflow_event_inputs
+    event = context.histories[-1]
+    projected = event.Input
+    for number in range(100):
+        adapter.wait_for_external_event(f"absent-{number}")
+        native = context.wait_for_external_event(f"native-absent-{number}")
+        context._add_to_open_tasks(native)
+        assert context.open_tasks.pop(native.id)[-1] is native
+        AzureFunctionsWorkflowContext(context).wait_for_external_event("a")
+    assert context._workflow_event_inputs is index
+    assert set(index.buckets) == {"a"}
+    assert len(index.buckets["a"].events) == 1 and index.buckets["a"].events[0] is event
+    assert event.Input is projected
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("event", "entity"),
+        ("entity", "event"),
+        ("event", "native"),
+        ("native", "event"),
+        ("entity", "native"),
+        ("native", "entity"),
+    ],
+)
+def test_pop_selected_decoder_overrides_speculative_wait_projection(
+    first: str, second: str, import_attempts: list[str]
+) -> None:
+    correlation = "same-name"
+    result = {"keep": [None, False]}
+    payload = {"result": json.dumps(result), "ignored": _metadata()}
+    wire = json.dumps(payload)
+    context = _context([*_prefix()[:2], *(_event(15, 100 + i, Name=correlation, Input=wire) for i in range(3))])
+    executor = TaskOrchestrationExecutor()
+    executor.context = context
+    adapter = AzureFunctionsWorkflowContext(context)
+    for offset, mode in enumerate((first, second, "event")):
+        if mode == "entity":
+            task = _JsonEntityContext(context).call_entity(df.EntityId("native", "root"), "run")
+            context._add_to_open_tasks(task)
+            # Use actual EventSent remapping, including its numeric-ID pop.
+            sent = HistoryEvent(**_event(14, task.id, Name="op", Input=json.dumps({"id": correlation})))
+            executor.process_event(sent)
+        else:
+            task = (context if mode == "native" else adapter).wait_for_external_event(correlation)
+            context._add_to_open_tasks(task)
+        # Wait creation is not ownership. This projects all events as public
+        # JSON even when a native/entity task will actually consume the next one.
+        speculative = AzureFunctionsWorkflowContext(context).wait_for_external_event(correlation)
+        if offset == 1:
+            # SDK duplicate-name lists choose their last entry. Do not infer
+            # the decoder from the list itself or its first (unselected) task.
+            context.open_tasks[correlation] = [speculative, task]
+        executor.set_task_value(context.histories[2 + offset], True, "Name")
+        assert task.state is TaskState.SUCCEEDED
+        if mode == "native":
+            assert task.result == {"result": payload["result"], "ignored": {"unexpected_constructor": {"value": 7}}}
+            assert all(event.Input == wire for event in context.histories[2:])
+        else:
+            assert task.result == (result if mode == "entity" else payload)
+        if offset == 1:
+            assert context.open_tasks[correlation] == [speculative]
+            assert speculative.state is TaskState.RUNNING
+            del context.open_tasks[correlation]
+    expected_calls = [{"value": 7}] if "native" in (first, second) else []
+    assert expected_calls == _DECODER_CALLS
+    assert import_attempts == ([__name__] if expected_calls else [])
