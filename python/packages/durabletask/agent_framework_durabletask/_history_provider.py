@@ -48,6 +48,7 @@ from ._shared_agent_state import (
     DurableAgentStateResponse,
     DurableAgentStateUnknownEntry,
     DurableAgentStateUsage,
+    _json_snapshot,  # pyright: ignore[reportPrivateUsage]
 )
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -118,6 +119,76 @@ def unbind_durable_history(token: Token[DurableHistoryBinding | None]) -> None:
 def current_durable_history_binding() -> DurableHistoryBinding | None:
     """Return the binding for the current durable operation, if any."""
     return _current_binding.get()
+
+
+class _HistoryFlushSnapshot:
+    """Shallow undo journal for the original objects a flush can mutate.
+
+    Snapshot only object attributes and known mutable container boundaries, not
+    arbitrary content, raw SDK objects, raw shadows or delivery/session payloads.
+    Restoring the original containers also restores aliases retained by callers.
+    """
+
+    def __init__(self, binding: DurableHistoryBinding, state: dict[str, Any], buffer: list[Message]) -> None:
+        self._dictionaries: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
+        self._lists: dict[int, tuple[list[Any], list[Any]]] = {}
+        canonical = binding.state_provider.state
+        self._dictionary(vars(binding))
+        self._dictionary(vars(canonical))
+        self._dictionary(vars(canonical.data))
+        self._dictionary(state)
+        positions = state.get(POSITIONS_KEY)
+        if isinstance(positions, dict):
+            self._dictionary(cast("dict[str, Any]", positions))
+        # Downstream eager pruning mutates entry message lists and replaces the
+        # truncation record. Keep that entire extension inside the flush boundary.
+        if canonical.data.truncation is not None:
+            self._dictionary(canonical.data.truncation)
+        history = canonical.data.conversation_history
+        self._sequence(history)
+        for entry in history:
+            self._dictionary(vars(entry))
+            self._sequence(entry.messages)
+            for stored in entry.messages:
+                # set_history_id changes attributes (including the original-ID
+                # flag), not the private profile or the immutable raw shadow.
+                # Stored metadata is replaced, not edited in place. Its original
+                # reference is sufficient, including opaque skipped-entry data.
+                self._dictionary(vars(stored))
+        self._sequence(buffer)
+        for message in buffer:
+            self._dictionary(vars(message))
+            self._annotations(message.additional_properties)
+
+    def _dictionary(self, value: dict[str, Any]) -> None:
+        if id(value) not in self._dictionaries:
+            self._dictionaries[id(value)] = (value, dict[str, Any].copy(value))
+
+    def _sequence(self, value: list[Any]) -> None:
+        if id(value) not in self._lists:
+            self._lists[id(value)] = (value, list[Any].copy(value))
+
+    def _annotations(self, value: dict[str, Any] | None) -> None:
+        if value is not None:
+            self._dictionary(value)
+            group = value.get(GROUP_ANNOTATION_KEY)
+            if isinstance(group, dict):
+                self._dictionary(cast("dict[str, Any]", group))
+
+    def restore(self) -> None:
+        """Restore references and values without invoking payload copy/serialization hooks."""
+        for dictionary, original in self._dictionaries.values():
+            dict[str, Any].clear(dictionary)
+            dict[str, Any].update(dictionary, original)
+        for sequence, original_items in self._lists.values():
+            list[Any].__setitem__(sequence, slice(None), original_items)
+
+
+def _copy_history_annotations(properties: dict[str, Any]) -> dict[str, Any]:
+    """Detach and admit only annotations being written, not the whole canonical state."""
+    annotations = copy.deepcopy(properties)
+    _json_snapshot(annotations)
+    return annotations
 
 
 class DurableHistoryProvider(HistoryProvider):
@@ -503,11 +574,14 @@ class DurableHistoryProvider(HistoryProvider):
         self._append_messages(binding, messages, state=state)
 
     def flush(self, state: dict[str, Any]) -> None:
-        """Apply compaction results to canonical durable state.
+        """Atomically apply compaction results to the bound in-memory state.
 
         Reconciliation is by ``message_id`` rather than position, so strategies that insert
         messages are handled as well as ones that only annotate. Messages removed from the
         working buffer become excluded, not physically deleted.
+
+        Failure restores this flush's entry state, including retained public references.
+        Earlier successful saves are not undone and no backend write is performed here.
         """
         binding = current_durable_history_binding()
         if binding is None or binding.service_owns_history:
@@ -515,10 +589,19 @@ class DurableHistoryProvider(HistoryProvider):
         self._require_writable_history(binding)
 
         raw_buffer = state.get(WORKING_BUFFER_KEY)
-        raw_positions = state.get(POSITIONS_KEY)
         if not isinstance(raw_buffer, list):
             return
         buffer = cast("list[Message]", raw_buffer)
+        snapshot = _HistoryFlushSnapshot(binding, state, buffer)
+        try:
+            self._flush(binding, state, buffer)
+        except BaseException:
+            snapshot.restore()
+            raise
+
+    def _flush(self, binding: DurableHistoryBinding, state: dict[str, Any], buffer: list[Message]) -> None:
+        """Reconcile within the caller's undo boundary, including downstream pruning."""
+        raw_positions = state.get(POSITIONS_KEY)
         previous_ids: set[str] = set()
         if isinstance(raw_positions, dict):
             previous_ids.update(cast("dict[str, Any]", raw_positions))
@@ -559,6 +642,8 @@ class DurableHistoryProvider(HistoryProvider):
             history_id = _history_message_id(message)
             position = stored_by_id.get(history_id) if history_id and loaded_occurrence else None
             summary_ids = self._summary_original_ids(message)
+            if summary_ids is not None and any(not isinstance(source_id, str) for source_id in summary_ids):
+                raise ValueError("Summary links must contain only string message IDs.")
             summary_revision = False
             if position is not None and summary_ids is not None:
                 owner, index = position
@@ -613,7 +698,7 @@ class DurableHistoryProvider(HistoryProvider):
                         if source.additional_properties.get(SUMMARIZED_BY_SUMMARY_ID_KEY) == original_id:
                             source.additional_properties[SUMMARIZED_BY_SUMMARY_ID_KEY] = message.message_id
                         if stored_source is not None:
-                            stored_source.extension_data = copy.deepcopy(source.additional_properties)
+                            stored_source.extension_data = _copy_history_annotations(source.additional_properties)
                         source_history_id = _history_message_id(source)
                         if source_history_id is not None:
                             buffer_by_history_id[source_history_id] = source
@@ -628,7 +713,7 @@ class DurableHistoryProvider(HistoryProvider):
             stored = entry.messages[index]
             if message.additional_properties or stored.extension_data:
                 stored.extension_data = (
-                    copy.deepcopy(message.additional_properties) if message.additional_properties else None
+                    _copy_history_annotations(message.additional_properties) if message.additional_properties else None
                 )
 
         remaining_ids = {_history_message_id(message) for message in buffer if _history_message_id(message)}
@@ -639,7 +724,9 @@ class DurableHistoryProvider(HistoryProvider):
                 stored = entry.messages[index]
                 if self._to_message(stored) is None:
                     continue
-                stored.extension_data = {**(stored.extension_data or {}), EXCLUDED_KEY: True}
+                annotations = {**(stored.extension_data or {}), EXCLUDED_KEY: True}
+                _json_snapshot(annotations)
+                stored.extension_data = annotations
 
         # Synchronize transient references if the owner replaced its staged history.
         # This removes no stored messages and prevents a later flush from resurrecting
@@ -681,6 +768,9 @@ class DurableHistoryProvider(HistoryProvider):
             created_at,
             used_ids=used_ids,
         )
+        # Core can omit opaque metadata while serializing its own envelope. Admit
+        # the actual converted durable message before assigning it or its IDs.
+        stored[0].to_dict()
         message.message_id = stored[0].public_message_id
         setattr(message, _HISTORY_ID_ATTRIBUTE, stored[0].message_id)
         entry = DurableAgentStateCompaction(created_at=created_at, messages=stored)
