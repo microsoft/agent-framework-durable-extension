@@ -117,6 +117,17 @@ def _load_content(data: Any) -> Any:
     return content
 
 
+def _message_contents(contents: Any) -> Sequence[Any]:
+    """Check the container without narrowing Core's legacy string/tuple inputs."""
+    if contents is None:
+        return ()
+    # Core treats a scalar string as character contents. Keep that existing
+    # constructor behavior here, although serialized Core messages emit arrays.
+    if not isinstance(contents, Sequence) or isinstance(contents, (bytes, bytearray)):
+        raise TypeError("Message contents must be a sequence of content items")
+    return cast("Sequence[Any]", contents)
+
+
 def _load_message(data: Any) -> Message:
     if isinstance(data, Message):
         return data
@@ -125,7 +136,7 @@ def _load_message(data: Any) -> Message:
     data = cast(Mapping[str, Any], data)
     fields = _constructor_kwargs(data, Message)
     if fields.get("contents") is not None:
-        fields["contents"] = [_load_content(content) for content in fields["contents"]]
+        fields["contents"] = [_load_content(content) for content in _message_contents(fields["contents"])]
     message = Message(**fields)
     message._durable_original_core_message = deepcopy({  # type: ignore[attr-defined]
         name: data[name] for name in fields if name not in ("contents", "raw_representation")
@@ -135,6 +146,8 @@ def _load_message(data: Any) -> Message:
 
 def preserve_input_envelope(message: Message, raw: dict[str, Any]) -> None:
     """Attach inert input extras to their original objects, not their list positions."""
+    # Reject invalid containers before replacing any previously attached envelope.
+    originals = _message_contents(raw.get("contents"))
     message._durable_original_core_message = deepcopy(raw)  # type: ignore[attr-defined]
 
     def attach(content: Content, payload: dict[str, Any]) -> None:
@@ -152,7 +165,7 @@ def preserve_input_envelope(message: Message, raw: dict[str, Any]) -> None:
                     if isinstance(value, Content) and isinstance(original, dict):
                         attach(value, cast("dict[str, Any]", original))
 
-    for content, payload in zip(message.contents, raw.get("contents", [])):
+    for content, payload in zip(message.contents, originals):
         if isinstance(payload, dict):
             attach(content, cast("dict[str, Any]", payload))
 
@@ -379,7 +392,8 @@ def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -
             a content envelope is malformed, or an approval policy is invalid or does
             not describe actual pending approval Content without a structured value
             or an embedded response_format.
-        TypeError: If the input type or required constructor fields are invalid.
+        TypeError: If the input type, a message contents container, or required
+            constructor fields are invalid.
     """
     if agent_response is None:
         raise ValueError("agent_response cannot be None")
