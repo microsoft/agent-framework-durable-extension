@@ -162,17 +162,22 @@ jobs:
         env:
           UV_INDEX_URL: $(PIP_INDEX_URL)
 
-      - pwsh: uv run ruff check packages/durabletask
+      - pwsh: uv run ruff check packages/durabletask packages/azurefunctions
         workingDirectory: python
         displayName: 'Run Python lint'
 
+      # Type checking covers only packages/durabletask. The azurefunctions package is
+      # type checked with pyright instead (see .github/workflows/python-merge-tests.yml),
+      # because mypy cannot analyze it: azure.durable_functions ships no py.typed marker,
+      # so every import of it raises import-untyped. Do not add azurefunctions here
+      # without switching this step to pyright.
       - pwsh: uv run mypy --config-file packages/durabletask/pyproject.toml packages/durabletask/agent_framework_durabletask
         workingDirectory: python
         displayName: 'Run Python type check'
 
       - pwsh: |
           New-Item -ItemType Directory -Force -Path ../artifacts/test-results | Out-Null
-          uv run pytest -m "not integration" packages/durabletask/tests --junitxml ../artifacts/test-results/python-unit.xml
+          uv run pytest -m "not integration" packages/durabletask/tests packages/azurefunctions/tests --junitxml ../artifacts/test-results/python-unit.xml
         workingDirectory: python
         displayName: 'Run Python unit tests'
 
@@ -188,8 +193,9 @@ jobs:
       - pwsh: |
           New-Item -ItemType Directory -Force -Path "$(Build.ArtifactStagingDirectory)/packages/python" | Out-Null
           uv build packages/durabletask --out-dir "$(Build.ArtifactStagingDirectory)/packages/python"
+          uv build packages/azurefunctions --out-dir "$(Build.ArtifactStagingDirectory)/packages/python"
         workingDirectory: python
-        displayName: 'Build Python package'
+        displayName: 'Build Python packages'
         env:
           # uv build resolves the build backend (flit-core) in an isolated environment.
           # The governed pool blocks PyPI, so point uv at the authenticated internal feed.
@@ -207,6 +213,15 @@ jobs:
             Where-Object { $_.Name.EndsWith(".whl") -or $_.Name.EndsWith(".tar.gz") })
           if ($dists.Count -eq 0) {
             throw "No Python distributions were produced in $pythonDir."
+          }
+
+          # Assert every shipping workspace package produced a distribution. The publish
+          # job hands ESRP this whole folder, so a package missing here is silently not
+          # released rather than failing loudly.
+          foreach ($expected in @('agent_framework_durabletask', 'agent_framework_azurefunctions')) {
+            if (-not ($dists | Where-Object { $_.Name.StartsWith("$expected-") })) {
+              throw "No distribution was produced for '$expected' in $pythonDir."
+            }
           }
           python -m twine check @($dists.FullName)
         displayName: 'Validate Python package (twine check)'
