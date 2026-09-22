@@ -50,11 +50,11 @@ proof of isolation and it cannot detect peer workers. A new isolated hub with ma
 workers and clients is the recommended way to keep old workers and histories off this deployment.
 
 **Start fresh workflow instances after this update, including upgrades from earlier v2 builds.**
-Workflow protocol `2` is unchanged, but checkpointed HITL admission and mixed parent/child
-scheduling change the replay action graph. Existing v2 in-flight instances and recorded histories
-are not supported by this runtime and may fail. The version marker checks start-envelope admission,
-not feature or replay compatibility. Older v2 envelopes can still pass that check. There is no
-replay migration or compatibility fallback.
+Workflow protocol `2` is unchanged, but start admission is stricter and checkpointed HITL admission
+and mixed parent/child scheduling change the replay action graph. Existing v2 in-flight instances
+and recorded histories are not supported by this runtime and may fail. The version marker checks
+start-envelope admission, not feature or replay compatibility. Older v2 envelopes can still pass
+that check. There is no replay migration or compatibility fallback.
 If old runs must finish, keep them on their original workers and hub rather than resume them here.
 
 The current layer includes canonical transaction state, session capture, the workflow
@@ -146,6 +146,22 @@ Workflow start input wrapping is not universal. `DurableWorkflowClient` and gene
 start routes wrap new inputs for host-generated workflows. Application-owned native orchestrators
 retain their original input contracts. Do not wrap every orchestration payload in this envelope.
 
+Generated root starts take public application JSON, not internal checkpoint data. The workflow
+client and generated HTTP routes remove reserved child markers. Application input is sanitized
+before typed reconstruction.
+At generated workflow entries, internal `__subworkflow_input__` and `__subworkflow_address__`
+markers require an actual SDK-reported parent and a child address consistent with both SDK parent
+and current instance IDs. Missing or mismatched provenance is rejected before checkpoint decoding.
+A native application parent may still call a generated workflow with ordinary application JSON
+inside `wrap_workflow_input(...)`. Without internal child markers, that payload remains application
+input, even though the SDK reports a parent.
+
+SDK parent metadata authenticates only the immediate parent/child relationship, not the full
+ancestry or claimed root's authority. It does not protect against a malicious application parent
+supplying an otherwise consistent envelope. Trusted worker and application deployments remain
+required. The internal checkpoint codec still uses pickle and is not safe for arbitrary untrusted
+input.
+
 There is no automatic transcript recovery for a rejected service conversation ID. A specifically
 rejected parent response can receive up to three additional identical-request retries for a
 visibility delay, but only before any output, tool execution or session advance. The saved parent
@@ -156,8 +172,10 @@ pressure policy. If the fully staged destination exceeds that bound, migration f
 `StateCapacityError`. It does not prune transcript, receipts, session state, or unknown JSON to
 fit. Runtime transcript retention is configured separately below.
 
-The Core requirement remains `agent-framework-core>=1.13.0,<2`. This package directly requires
-`pydantic>=2.11,<3` for structured response handling.
+The Durable Task SDK requirement is now `durabletask>=1.7.1,<2` for SDK parent-instance metadata.
+The existing lock already selects `1.7.2`, so this raises the supported minimum without changing
+the locked SDK version. The Core requirement remains `agent-framework-core>=1.13.0,<2`.
+This package directly requires `pydantic>=2.11,<3` for structured response handling.
 
 The history bridge requires an exact `2.0.0` snapshot. Even `get_messages()` may repair missing
 or duplicate internal IDs, so it is not a read-only inspection path. Mutation-capable hooks reject

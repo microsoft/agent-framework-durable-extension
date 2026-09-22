@@ -1373,7 +1373,9 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = Fa
             replacement.after_run_once_per_turn = existing.after_run_once_per_turn
         updated = [replacement if provider is existing else provider for provider in provider_list]
     else:
-        return agent
+        # Keep the external primary untouched, but still adapt compaction for an
+        # explicitly configured canonical audit below.
+        updated = list(provider_list)
 
     durable_sources = {provider.source_id for provider in updated if isinstance(provider, DurableHistoryProvider)}
     updated = [

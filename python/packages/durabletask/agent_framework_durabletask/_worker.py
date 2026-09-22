@@ -56,7 +56,7 @@ from ._workflows.naming import (
     workflow_scoped_executor_id,
 )
 from ._workflows.orchestrator import run_workflow_orchestrator
-from ._workflows.protocol import unwrap_workflow_input
+from ._workflows.protocol import unwrap_workflow_input, validate_workflow_start_provenance
 from ._workflows.registration import collect_hosted_workflows, plan_workflow_registration
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -547,6 +547,11 @@ class DurableAIAgentWorker:
         def workflow_orchestrator(context: OrchestrationContext, input_data: Any) -> Any:
             # Reject legacy recorded starts before entering the changed engine.
             initial_message = unwrap_workflow_input(input_data)
+            validate_workflow_start_provenance(
+                initial_message,
+                instance_id=context.instance_id,
+                parent_instance_id=context.parent_instance_id,
+            )
             shared_state: dict[str, Any] = {}
 
             dt_ctx = DurableTaskWorkflowContext(context)

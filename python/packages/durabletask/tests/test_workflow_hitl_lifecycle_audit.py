@@ -81,14 +81,29 @@ class _Transport:
         self.child_ids: list[str] = []
         self.activity_results: list[dict[str, Any]] = []
 
-    def host(self, calls: Any, result: Any, *, functions: Any, instance_id: str = "root-run") -> Any:
+    def host(
+        self,
+        calls: Any,
+        result: Any,
+        *,
+        functions: Any,
+        instance_id: str = "root-run",
+        parent_instance_id: str | None = None,
+    ) -> Any:
         def activity(name: str, payload: dict[str, Any]) -> dict[str, Any]:
             # Observe the real registered activity, without fabricating admission.
             outcome = result(name, payload)
             self.activity_results.append(deepcopy(outcome))
             return outcome
 
-        host = _host(calls, activity, functions=functions, instance_id=instance_id, replay=self.replay)
+        host = _host(
+            calls,
+            activity,
+            functions=functions,
+            instance_id=instance_id,
+            parent_instance_id=parent_instance_id,
+            replay=self.replay,
+        )
         self.hosts[instance_id] = host
         events = self.events.setdefault(instance_id, {})
 
@@ -101,7 +116,9 @@ class _Transport:
             assert instance_id not in self.runs and name in functions
             wire = json.loads(json.dumps(input, allow_nan=False))
             calls.append({"kind": "child", "instance": instance_id, "name": name, "input": deepcopy(wire)})
-            child_host = self.host(calls, result, functions=functions, instance_id=instance_id)
+            child_host = self.host(
+                calls, result, functions=functions, instance_id=instance_id, parent_instance_id=host.instance_id
+            )
             completion: CompletableTask[Any] = CompletableTask()
             run = _Run(functions[name](child_host, wire), child_host, calls, completion)
             self.runs[instance_id], self.names[instance_id] = run, name
@@ -764,7 +781,9 @@ def _af_run(workflow: Workflow, *, replay: bool = False) -> Any:
     assert generator_function is not None and respond is not None
     host = Mock(spec=df.DurableOrchestrationContext)
     host.instance_id, host.is_replaying = "root-run", replay
-    host.get_input.return_value = wrap_workflow_input("go")
+    host.parent_instance_id = None
+    host._input = json.dumps(wrap_workflow_input("go"))
+    host.get_input.side_effect = AssertionError("Generated workflow starts must not use SDK custom decoding")
     host.task_all.side_effect = lambda tasks: WhenAllTask(tasks, ReplaySchema.V1)
     host.task_any.side_effect = lambda tasks: WhenAnyTask(tasks, ReplaySchema.V1)
     events: dict[str, list[Any]] = {}

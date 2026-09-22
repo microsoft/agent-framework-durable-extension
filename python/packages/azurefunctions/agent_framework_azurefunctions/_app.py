@@ -84,6 +84,7 @@ from agent_framework_durabletask._workflows.naming import (
     workflow_orchestrator_name,
     workflow_scoped_executor_id,
 )
+from agent_framework_durabletask._workflows.protocol import validate_workflow_start_provenance
 from agent_framework_durabletask._workflows.registration import collect_hosted_workflows
 from agent_framework_durabletask._workflows.serialization import strip_pickle_markers, strip_subworkflow_markers
 from azure.durable_functions.models.utils.http_utils import post_async_request as _sdk_post_async_request
@@ -95,6 +96,7 @@ from ._feature_usage import FeatureIndex
 from ._orchestration import AgentOrchestrationContextType, AgentTask, AzureFunctionsAgentExecutor
 from ._routes import build_workflow_respond_url, build_workflow_status_url, split_request_url
 from ._workflow import run_workflow_orchestrator
+from ._workflow_af_context import get_workflow_start_input
 
 _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS = 10
 _MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS = 200
@@ -833,10 +835,15 @@ class AgentFunctionApp(DFAppBase):
         @self.orchestration_trigger(context_name="context")
         def workflow_orchestrator(context: df.DurableOrchestrationContext) -> Any:
             """Generic orchestrator for running the configured workflow."""
-            input_data = context.get_input()
+            input_data = get_workflow_start_input(context)
 
             # Reject legacy recorded starts before entering the changed engine.
             initial_message = unwrap_workflow_input(input_data)
+            validate_workflow_start_provenance(
+                initial_message,
+                instance_id=context.instance_id,
+                parent_instance_id=context.parent_instance_id,
+            )
 
             # Create local shared state dict for cross-executor state sharing
             shared_state: dict[str, Any] = {}
