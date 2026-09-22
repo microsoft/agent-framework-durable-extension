@@ -413,7 +413,7 @@ class ClientAgentExecutor(DurableAgentExecutor[AgentResponse]):
             correlation_id: Correlation ID to search for
 
         Returns:
-            Response AgentResponse, None otherwise
+            A response or terminal state-read error, None if pending or the SDK read failed
         """
         try:
             entity_metadata = self._client.get_entity(entity_id, include_state=True)
@@ -422,20 +422,40 @@ class ClientAgentExecutor(DurableAgentExecutor[AgentResponse]):
                 return None
 
             state_json = entity_metadata.get_state()
-            if not state_json:
-                return None
-
-            state = read_agent_state(state_json)
-
-            # Use the helper method to get response by correlation ID
-            return state.try_get_agent_response(correlation_id)
-
         except Exception as e:
+            # SDK retrieval failures remain retryable, including ValueError while
+            # constructing EntityMetadata. Classify by boundary, not exception type.
             logger.warning(
                 "[ClientAgentExecutor] Error reading entity state: %s",
                 e,
             )
             return None
+
+        if not state_json:
+            return None
+
+        try:
+            state = read_agent_state(state_json)
+            return state.try_get_agent_response(correlation_id)
+        except Exception:
+            # Like the AF reader, fail fast on stored-state decode/projection errors.
+            # Do not render exceptions or tracebacks that may contain stored payloads.
+            logger.warning("[ClientAgentExecutor] Failed to decode or project stored agent state")
+            return AgentResponse(
+                messages=[
+                    Message(
+                        role="system",
+                        contents=[
+                            Content.from_error(
+                                message="Failed to read the stored agent response.",
+                                error_code="state_read_error",
+                            )
+                        ],
+                    )
+                ],
+                created_at=datetime.now(timezone.utc).isoformat(),
+                additional_properties={"durable_status": "error", "correlation_id": correlation_id},
+            )
 
 
 class OrchestrationAgentExecutor(DurableAgentExecutor[DurableAgentTask]):
