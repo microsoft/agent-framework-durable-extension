@@ -69,6 +69,11 @@ internal reconciliation identities. Delivery methods reuse the private staging o
 without replacing typed history objects. History hooks stage appends and compaction annotations
 in memory. Excluded messages can be omitted from model input but are not physically deleted.
 
+Append staging is atomic in memory, undoing lazy internal-ID repairs and restoring the transcript,
+working buffers, position indexes and append ordinal if staging fails. Earlier successful saves
+and flushes, including the preliminary flush in `save_messages()`, remain intact. This does not
+commit to the backend or roll back external provider writes.
+
 The private bridge requires an exact `2.0.0` snapshot. Even `get_messages()` may repair missing
 or duplicate internal IDs, so it is not a read-only inspection path. Mutation-capable hooks reject
 legacy and unsupported versions before changing stored history or working state. Use
