@@ -1015,6 +1015,25 @@ finalization retains pending tool results if filtering or staging fails, allowin
 
 ### 2. Append, lifecycle and snapshot capabilities
 
+#### Local SessionStore candidate
+
+This branch evaluates a private adapter implementing Core's experimental `SessionStore` contract.
+It is not yet an approved addition to the implementation stack. Session load/save uses the existing
+entity `session` field. The adapter is scoped to current staged data and does not commit, cache
+across operations, replace the agent's session factory, or change history ownership. Its access key
+is the physical entity identity, while migration can retain a distinct logical session identity.
+Public reset remains synchronous and clears the same local state through its existing transaction.
+
+JSON snapshot copies isolate working state without persisting the durable history bridge's temporary
+buffers. The candidate retains unknown session fields and the existing serialization format. The
+alternative is to keep the inline restore/capture helpers. A separate external session store was not
+chosen because it adds a persistence boundary requiring coordination with completion records.
+The expected benefit is a testable persistence boundary and explicit snapshot ownership, not fewer
+durability rules or automatic transcript migration. Promotion depends on compatibility validation
+and a separate value/approval decision.
+
+#### Provider lifecycle requirements
+
 `save_messages()` receives new messages rather than a replacement transcript. In the evaluated Redis
 provider, `rpush` appends content and `max_messages`/`ltrim` bounds it independently. A Cosmos
 container can use TTL. Neither mechanism is a core compaction rewrite contract.
