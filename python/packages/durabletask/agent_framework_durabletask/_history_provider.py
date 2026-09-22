@@ -393,7 +393,9 @@ class DurableHistoryProvider(HistoryProvider):
         for index, message in enumerate(messages):
             stored = DurableAgentStateMessage.from_chat_message(copy.deepcopy(message))
             receipt = getattr(message, "_durable_ingestion_receipt", None)
-            if kind == DurableAgentStateEntryJsonType.REQUEST and isinstance(receipt, tuple):
+            # Audit snapshots retain public IDs and their payload fingerprint, but
+            # only the load-enabled primary can supply durable acceptance evidence.
+            if self.load_messages and kind == DurableAgentStateEntryJsonType.REQUEST and isinstance(receipt, tuple):
                 items = cast("tuple[Any, ...]", receipt)
                 if len(items) == 2 and all(isinstance(item, str) for item in items):
                     occurrence, fingerprint = cast("tuple[str, str]", items)
@@ -471,7 +473,9 @@ class DurableHistoryProvider(HistoryProvider):
                 binding.append_response = previous_response
         binding.pending_inputs.clear()
         # Successful delivery does not require retaining the input transcript.
-        binding.accept(context.input_messages)
+        # A store-only audit must not broaden its primary's accepted subset.
+        if self.load_messages:
+            binding.accept(context.input_messages)
 
     def finalize_failed_run(self, state: dict[str, Any]) -> None:
         """Stage actual tool results left unsaved when a later service call fails."""
@@ -908,7 +912,7 @@ def service_stores_history(agent: Any, options: Mapping[str, Any] | None = None)
 
 
 def validate_history_providers(agent: SupportsAgentRun) -> None:
-    """Reject competing canonical adapters after preparation, allowing ordinary store-only sinks."""
+    """Require one primary and at most one canonical adapter, which may be an audit sink."""
     providers = getattr(agent, "context_providers", None)
     if not isinstance(providers, (list, tuple)):
         return
@@ -922,13 +926,6 @@ def validate_history_providers(agent: SupportsAgentRun) -> None:
     durable_count = sum(isinstance(provider, DurableHistoryProvider) for provider in cast("Sequence[Any]", providers))
     if not primaries or type(primaries[0]) is InMemoryHistoryProvider:
         durable_count += 1  # Preparation injects or replaces the primary with a durable adapter.
-    elif durable_count and not isinstance(primaries[0], DurableHistoryProvider):
-        # A load-disabled durable adapter still reconciles canonical state and
-        # accepts inputs independently of the selected external/custom primary.
-        raise ValueError(
-            "A DurableHistoryProvider cannot be a secondary history provider alongside an external or custom primary. "
-            "Use an ordinary store-only HistoryProvider with a distinct source_id for audits."
-        )
     if durable_count > 1:
         # source_id isolates session namespaces, not the canonical transcript or
         # binding. Even zero-store adapters can repair IDs and flush annotations.
