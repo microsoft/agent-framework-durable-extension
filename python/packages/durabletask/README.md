@@ -263,6 +263,9 @@ budget. For budget overrides, omission or `INHERIT` from `agent_framework_durabl
 host default, while explicit `None` disables pressure eviction. For the other overrides, `None`
 inherits. Shared workflow registrations must have matching settings.
 
+`AgentRegistrationSettings` retains its positional delivery-window and callback parameters.
+Its added retention and budget fields are keyword-only and default to non-evicting behavior.
+
 A hand-configured `DurableHistoryProvider(prune_excluded=...)` keeps its explicit value, including
 `False`, ahead of the inherited eager-pruning policy. This does not disable a pressure budget.
 An exact built-in in-memory primary is replaced with durable history while preserving its

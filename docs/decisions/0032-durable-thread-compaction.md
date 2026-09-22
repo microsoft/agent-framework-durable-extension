@@ -572,6 +572,9 @@ eager pruning. Configurable `high_watermark=0.85` and `low_watermark=0.70` must 
 deterministic oldest-group selection. Python uses core's fallback via
 `TokenBudgetComposedStrategy(strategies=[])`. Equivalent .NET behavior need not use that API.
 
+Python's `AgentRegistrationSettings` retains its original positional window and callback fields.
+The added retention and budget fields are keyword-only, preserving subclass positional parameters.
+
 Plan with detached messages whose exclusion flags are cleared, leaving stored annotations intact.
 All otherwise eligible old groups compete by age, including groups excluded from model context.
 Preserve atomic tool-call/result and reasoning groups. Hold system messages out of the candidate
