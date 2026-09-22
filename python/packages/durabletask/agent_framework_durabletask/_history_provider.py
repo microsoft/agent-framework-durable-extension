@@ -122,22 +122,25 @@ def current_durable_history_binding() -> DurableHistoryBinding | None:
 
 
 class _HistoryFlushSnapshot:
-    """Shallow undo journal for the original objects a flush can mutate.
+    """Shallow undo journal for the original objects a flush or append can mutate.
 
     Snapshot only object attributes and known mutable container boundaries, not
     arbitrary content, raw SDK objects, raw shadows or delivery/session payloads.
     Restoring the original containers also restores aliases retained by callers.
     """
 
-    def __init__(self, binding: DurableHistoryBinding, state: dict[str, Any], buffer: list[Message]) -> None:
+    def __init__(
+        self, binding: DurableHistoryBinding, state: dict[str, Any] | None, buffer: list[Message] | None
+    ) -> None:
         self._dictionaries: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
         self._lists: dict[int, tuple[list[Any], list[Any]]] = {}
         canonical = binding.state_provider.state
         self._dictionary(vars(binding))
         self._dictionary(vars(canonical))
         self._dictionary(vars(canonical.data))
-        self._dictionary(state)
-        positions = state.get(POSITIONS_KEY)
+        if state is not None:
+            self._dictionary(state)
+        positions = state.get(POSITIONS_KEY) if state is not None else None
         if isinstance(positions, dict):
             self._dictionary(cast("dict[str, Any]", positions))
         # Downstream eager pruning mutates entry message lists and replaces the
@@ -155,10 +158,11 @@ class _HistoryFlushSnapshot:
                 # Stored metadata is replaced, not edited in place. Its original
                 # reference is sufficient, including opaque skipped-entry data.
                 self._dictionary(vars(stored))
-        self._sequence(buffer)
-        for message in buffer:
-            self._dictionary(vars(message))
-            self._annotations(message.additional_properties)
+        if buffer is not None:
+            self._sequence(buffer)
+            for message in buffer:
+                self._dictionary(vars(message))
+                self._annotations(message.additional_properties)
 
     def _dictionary(self, value: dict[str, Any]) -> None:
         if id(value) not in self._dictionaries:
@@ -373,10 +377,30 @@ class DurableHistoryProvider(HistoryProvider):
         state: dict[str, Any] | None,
         response: AgentResponse | None = None,
     ) -> None:
-        """Append one hook batch, exposing only nonterminal batches to core compaction."""
+        """Atomically stage one append, retaining earlier successful saves and flushes."""
         self._require_writable_history(binding)
         if not messages or binding.service_owns_history:
             return
+        raw_buffer = state.get(WORKING_BUFFER_KEY) if state is not None else None
+        if state is not None and WORKING_BUFFER_KEY in state and not isinstance(raw_buffer, list):
+            raise ValueError("Durable history working buffer must be a list.")
+        buffer = cast("list[Message]", raw_buffer) if isinstance(raw_buffer, list) else None
+        snapshot = _HistoryFlushSnapshot(binding, state, buffer)
+        try:
+            self._stage_append_messages(binding, messages, state=state, response=response)
+        except BaseException:
+            snapshot.restore()
+            raise
+
+    def _stage_append_messages(
+        self,
+        binding: DurableHistoryBinding,
+        messages: Sequence[Message],
+        *,
+        state: dict[str, Any] | None,
+        response: AgentResponse | None,
+    ) -> None:
+        """Append inside the undo boundary, including lazy repairs and final indexing."""
         if state is not None and WORKING_BUFFER_KEY not in state:
             state[POSITIONS_KEY] = self._positions(binding)
             state[WORKING_BUFFER_KEY] = [
