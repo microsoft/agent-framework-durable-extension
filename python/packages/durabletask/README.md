@@ -177,6 +177,11 @@ The existing lock already selects `1.7.2`, so this raises the supported minimum 
 the locked SDK version. The Core requirement remains `agent-framework-core>=1.13.0,<2`.
 This package directly requires `pydantic>=2.11,<3` for structured response handling.
 
+Append staging is atomic in memory, undoing lazy internal-ID repairs and restoring the transcript,
+working buffers, position indexes and append ordinal if staging fails. Earlier successful saves
+and flushes, including the preliminary flush in `save_messages()`, remain intact. This does not
+commit to the backend or roll back external provider writes.
+
 The history bridge requires an exact `2.0.0` snapshot. Even `get_messages()` may repair missing
 or duplicate internal IDs, so it is not a read-only inspection path. Mutation-capable hooks reject
 legacy and unsupported versions before changing stored history or working state. Use

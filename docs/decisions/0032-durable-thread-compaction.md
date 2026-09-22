@@ -1012,6 +1012,12 @@ must be isolated and tested. It does not give Redis, Cosmos, file or other provi
 rewrite capability. Core should expose store-rewrite capabilities and diagnose a configured hook
 that cannot reach its store.
 
+In the private Python history bridge, append staging is atomic in memory, undoing lazy internal-ID
+repairs and restoring the transcript, working buffers, position indexes and append ordinal if
+staging fails. Earlier successful saves and flushes, including the preliminary flush in
+`save_messages()`, remain intact. This does not commit to the backend or roll back external
+provider writes.
+
 ### 2. Append, lifecycle and snapshot capabilities
 
 `save_messages()` receives new messages rather than a replacement transcript. In the evaluated Redis
