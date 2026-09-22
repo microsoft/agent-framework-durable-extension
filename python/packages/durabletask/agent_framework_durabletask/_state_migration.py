@@ -322,7 +322,7 @@ def _preserve_session(state: DurableAgentState, source_session_id: str) -> None:
         state.data.session = {"session_id": source_session_id, "state": {}}
         return
     if not isinstance(session, dict):
-        raise ValueError("Legacy session must be an AgentSession-like object or null.")
+        raise ValueError("Legacy session must be an AgentSession-like object when present.")
     existing_id = session.get("session_id")
     if existing_id is not None and not isinstance(existing_id, str):
         raise ValueError("Legacy session.session_id must be a string or null.")

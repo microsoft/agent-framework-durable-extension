@@ -6,7 +6,6 @@ Focuses on critical behavioral flows for executor strategies.
 Run with: pytest tests/test_executors.py -v
 """
 
-import time
 from typing import Any
 from unittest.mock import Mock
 
@@ -219,20 +218,18 @@ class TestClientAgentExecutorPollingConfiguration:
 class TestClientAgentExecutorFireAndForget:
     """Test fire-and-forget mode (wait_for_response=False) for ClientAgentExecutor."""
 
-    def test_fire_and_forget_returns_immediately(self, mock_client: Mock) -> None:
+    def test_fire_and_forget_returns_immediately(self, mock_client: Mock, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify wait_for_response=False returns immediately without polling."""
         executor = ClientAgentExecutor(mock_client, max_poll_retries=10, poll_interval_seconds=0.1)
+        forbidden_sleep = Mock(side_effect=AssertionError("Fire-and-forget must not wait for a response"))
+        monkeypatch.setattr("agent_framework_durabletask._executors.time.sleep", forbidden_sleep)
+        mock_client.get_entity.side_effect = AssertionError("Fire-and-forget must not poll for a response")
 
         # Create a request with wait_for_response=False
         request = RunRequest(message="test message", correlation_id="test-123", wait_for_response=False)
 
-        # Measure time taken
-        start = time.time()
         result = executor.run_durable_agent("test_agent", request)
-        elapsed = time.time() - start
-
-        # Should return immediately without polling (elapsed time should be very small)
-        assert elapsed < 0.1  # Much faster than any polling would take
+        forbidden_sleep.assert_not_called()
 
         # Should return an AgentResponse
         assert isinstance(result, AgentResponse)
