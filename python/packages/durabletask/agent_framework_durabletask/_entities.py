@@ -749,16 +749,20 @@ class AgentEntity:
                 self.agent = original_agent
 
         if uses_context_pipeline:
+            # Only an explicit receipt occurrence is acceptance evidence. A
+            # canonical audit's public ID and payload fingerprint are not receipts.
+            # Keep primary request saves even if a later hook or output save failed.
             staged_inputs = {
                 (stored.ingestion_occurrence, stored.ingestion_identity)
                 for entry in self.state.data.conversation_history
                 if isinstance(entry, DurableAgentStateRequest) and entry.correlation_id == correlation_id
                 for stored in entry.messages
+                if stored.ingestion_occurrence and stored.ingestion_identity
             }
             staged_inputs.update(history_binding.accepted_inputs)
             self.state.data.ingested_messages = prior_receipts
             for stored in state_request.messages:
-                identity = stored.ingestion_occurrence or stored.message_id
+                identity = stored.ingestion_occurrence
                 if identity and (identity, stored.ingestion_identity) in staged_inputs:
                     fingerprints = self.state.data.ingested_messages.get(identity, [])
                     if fingerprints is not None and stored.ingestion_identity:
