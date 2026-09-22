@@ -433,6 +433,9 @@ class DurableHistoryProvider(HistoryProvider):
                 else None,
             )
             entry.preserve_response_timestamp(response.created_at)
+        # Admit the actual stored entry, not just Core's projection, which can
+        # omit opaque metadata. Timestamp fallback must not skip admission.
+        entry.to_dict()
         binding.state_provider.state.data.conversation_history.append(entry)
         if state is not None:
             buffer = cast("list[Message]", state.setdefault(WORKING_BUFFER_KEY, []))
@@ -563,13 +566,13 @@ class DurableHistoryProvider(HistoryProvider):
             return
         self._require_writable_history(binding)
         pending_inputs = binding.pending_inputs
-        binding.pending_inputs = []
         if (
             not pending_inputs
             or not self.store_inputs
             or binding.service_owns_history
             or binding.correlation_id is None
         ):
+            binding.pending_inputs = []
             return
 
         pending_calls: set[str] = set()
@@ -593,6 +596,9 @@ class DurableHistoryProvider(HistoryProvider):
                 messages.append(message)
                 pending_calls.difference_update(result_ids)
         self._append_messages(binding, messages, state=state)
+        # Preserve the original pending list if filtering or append staging
+        # fails, so a retry can still save the actual unsaved tool results.
+        binding.pending_inputs = []
 
     def flush(self, state: dict[str, Any]) -> None:
         """Atomically apply compaction results to the bound in-memory state.
