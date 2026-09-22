@@ -15,10 +15,12 @@ import re
 import unicodedata
 import uuid
 from collections.abc import Callable, Mapping
+from copy import copy
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
+import aiohttp
 import azure.durable_functions as df
 import azure.functions as func
 from agent_framework import SupportsAgentRun, Workflow
@@ -73,6 +75,7 @@ from agent_framework_durabletask._workflows.naming import (
 )
 from agent_framework_durabletask._workflows.registration import collect_hosted_workflows
 from agent_framework_durabletask._workflows.serialization import strip_pickle_markers, strip_subworkflow_markers
+from azure.durable_functions.models.utils.http_utils import post_async_request as _sdk_post_async_request
 from azure.functions.decorators.function_app import Function
 
 from ._entities import create_agent_entity
@@ -108,6 +111,59 @@ class _WorkflowCompletionClient(Protocol):
         timeout_in_milliseconds: int = 10_000,
         retry_interval_in_milliseconds: int = 1_000,
     ) -> func.HttpResponse: ...
+
+
+async def _raise_workflow_response(
+    client: df.DurableOrchestrationClient, instance_id: str, event_name: str, response_data: Any
+) -> None:
+    """Preserve the HTTP reply's JSON type across the native SDK transport.
+
+    SDK raise_event (verified in 1.6.0 and 1.7.0) pre-encodes data, then POSTs
+    it with aiohttp's json= argument, encoding it again. Keep URL construction
+    and status handling, but replace that sender on a per-call shallow copy.
+    Capture the sanitized value, not the SDK's serialized argument, so strings
+    that look like JSON remain strings. Explicit null must be a JSON body too:
+    aiohttp's json=None would instead omit the JSON payload/content type.
+
+    Only adapt the native method/transport pair. Custom implementations keep
+    their own transport contract. Neither the original client nor SDK globals
+    are modified, and no receiver heuristic or new event envelope is needed.
+    This relies on the SDK's private sender signature, covered by the HTTP
+    roundtrip tests when upgrading the SDK.
+    """
+    event_client: Any = client
+    if (
+        getattr(client.raise_event, "__func__", None) is df.DurableOrchestrationClient.raise_event
+        and getattr(client, "_post_async_request", None) is _sdk_post_async_request
+    ):
+        body = json.dumps(response_data).encode("utf-8")
+
+        async def post_json(
+            url: str,
+            data: Any = None,
+            trace_parent: str | None = None,
+            trace_state: str | None = None,
+            function_invocation_id: str | None = None,
+        ) -> list[Any]:
+            # Ignore the SDK's intermediate data. The captured body already
+            # represents the application's value, including an actual string.
+            headers = {"Content-Type": "application/json"}
+            if trace_parent:
+                headers["traceparent"] = trace_parent
+            if trace_state:
+                headers["tracestate"] = trace_state
+            if function_invocation_id:
+                headers["X-Azure-Functions-InvocationId"] = function_invocation_id
+            timeout = aiohttp.ClientTimeout(total=240, sock_connect=10, sock_read=None)
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.post(url, data=body, headers=headers) as response,
+            ):
+                return [response.status, await response.json(content_type=None)]
+
+        event_client = copy(client)
+        event_client._post_async_request = post_json
+    await event_client.raise_event(instance_id=instance_id, event_name=event_name, event_data=response_data)
 
 
 def _json_default(obj: Any) -> Any:
@@ -857,10 +913,11 @@ class AgentFunctionApp(DFAppBase):
 
             # Send the response as an external event. The (bare) request_id is used as the
             # event name for correlation on the owning orchestration instance.
-            await client.raise_event(
+            await _raise_workflow_response(
+                client,
                 instance_id=target_instance_id,
                 event_name=bare_request_id,
-                event_data=response_data,
+                response_data=response_data,
             )
 
             return func.HttpResponse(
