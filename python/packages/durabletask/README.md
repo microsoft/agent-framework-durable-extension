@@ -94,6 +94,9 @@ Different source IDs do not create separate durable transcripts. Multiple durabl
 rejected before model execution, even when loading or all store flags are disabled, because loading
 and flushing can still update shared history. Use an ordinary store-only `HistoryProvider` with a
 distinct source ID for an independent audit store.
+A single load-disabled durable adapter may audit an external primary into the canonical transcript.
+Its stored messages and public IDs do not acknowledge input delivery. Only the active primary's
+acceptance evidence contributes ingestion receipts, so an audit cannot suppress a later retry.
 On a service-owned turn, the inactive external primary's custom hooks are also suppressed because
 they may load or persist history directly. Ownership-independent work belongs in a separate context
 provider or store-only sink. Client-owned turns retain the original primary's hooks and resources.
