@@ -63,7 +63,7 @@ def test_registered_dt_factory_migrate_uses_real_entity_boundary_without_model_o
 
     monkeypatch.setattr("agent_framework_durabletask._state_migration.load_agent_response", forbidden)
     monkeypatch.setattr(AgentSession, "from_dict", forbidden)
-    monkeypatch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+    monkeypatch.setattr("agent_framework_durabletask._session_store._register_loaded_state_types", forbidden)
     source = _legacy_source(_error_response_entry(), version=version)
     source["data"]["session"] = {
         "session_id": SOURCE_SESSION_ID,
@@ -231,7 +231,7 @@ def test_agent_entity_migrate_rejects_invalid_session_without_side_effects(
         pytest.fail("Migration must not deserialize session values or register provider types.")
 
     monkeypatch.setattr(AgentSession, "from_dict", forbidden)
-    monkeypatch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+    monkeypatch.setattr("agent_framework_durabletask._session_store._register_loaded_state_types", forbidden)
     with pytest.raises(ValueError, match=rf"Legacy session\.{field} must be"):
         entity.migrate(request)
 
@@ -257,7 +257,7 @@ def test_agent_entity_migrate_rejects_invalid_session_without_side_effects(
         },
     ],
 )
-def test_migration_cold_host_restores_structured_service_id_without_provider_io(
+async def test_migration_cold_host_restores_structured_service_id_without_provider_io(
     version: str, service_session_id: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = _legacy_source(version=version)
@@ -280,7 +280,7 @@ def test_migration_cold_host_restores_structured_service_id_without_provider_io(
 
     with monkeypatch.context() as migration_patch:
         migration_patch.setattr(AgentSession, "from_dict", forbidden)
-        migration_patch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+        migration_patch.setattr("agent_framework_durabletask._session_store._register_loaded_state_types", forbidden)
         assert entity.migrate(request) == {
             "status": "migrated",
             "migrationId": "migration-1",
@@ -306,7 +306,7 @@ def test_migration_cold_host_restores_structured_service_id_without_provider_io(
     # The real service-owned run path restores this session without clearing its ID.
     # Generic Core Agent continuation rejects mappings, so do not substitute a run mock.
     assert service_stores_history(cold_entity.agent, {})
-    restored = cold_entity._create_session()
+    restored = await cold_entity._create_session()
 
     assert isinstance(restored, AgentSession)
     assert restored.session_id == SOURCE_SESSION_ID
