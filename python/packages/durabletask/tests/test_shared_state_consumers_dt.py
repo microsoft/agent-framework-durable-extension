@@ -563,7 +563,7 @@ def test_public_client_polling_controls_still_reach_the_executor(
 
 
 @pytest.mark.parametrize("invalid", ["malformed-json", "future-version", "missing-collections", "receipt-mismatch"])
-def test_invalid_state_currently_logs_and_uses_the_existing_timeout_contract(
+def test_invalid_stored_state_is_terminal_without_retry_or_typed_validation(
     invalid: str, client_agent: DurableAIAgent[AgentResponse], rpc: Mock, sleep: Mock, caplog: pytest.LogCaptureFixture
 ) -> None:
     raw: Any = _shared()
@@ -578,16 +578,48 @@ def test_invalid_state_currently_logs_and_uses_the_existing_timeout_contract(
     before = _json(raw)
     with pytest.raises(ValueError):
         read_agent_state(raw)
-    rpc.get_entity.return_value = _metadata(raw, as_json=False)
+    first, second = _metadata(raw, as_json=False), _metadata(_shared())
+    rpc.get_entity.side_effect = [first, second]
 
-    # Characterize the existing catch-and-retry boundary, not a new state-error API.
+    # The approved stored-state contract matches AF: invalid decoded state is a
+    # terminal read error, not pending work. Only SDK retrieval failures retry.
     with caplog.at_level(logging.WARNING, logger="agent_framework.durabletask"):
-        response = client_agent.run("question", session=SESSION)
+        response = client_agent.run("question", session=SESSION, options={"response_format": CountAnswer})
 
-    assert [error.error_code for error in _errors(response)] == ["response_timeout"]
-    assert sum("Error reading entity state:" in record.getMessage() for record in caplog.records) == 3
-    _assert_polled(rpc, sleep, 3)
+    assert [error.error_code for error in _errors(response)] == ["state_read_error"]
+    assert _errors(response)[0].message == "Failed to read the stored agent response."
+    assert response.additional_properties == {"durable_status": "error", "correlation_id": CORRELATION}
+    assert response.value is None
+    warnings = [record for record in caplog.records if record.name == "agent_framework.durabletask"]
+    assert len(warnings) == 1
+    assert warnings[0].getMessage() == "[ClientAgentExecutor] Failed to decode or project stored agent state"
+    assert warnings[0].exc_info is None
+    _assert_polled(rpc, sleep, 1)
+    first.get_state.assert_called_once_with()
+    second.get_state.assert_not_called()
     assert _json(raw) == before
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
+@pytest.mark.parametrize("recovers", [False, True])
+def test_metadata_get_state_failure_remains_a_retryable_sdk_read(
+    error_type: type[Exception], recovers: bool, client_agent: DurableAIAgent[AgentResponse], rpc: Mock, sleep: Mock
+) -> None:
+    first, second = _metadata(_shared()), _metadata(_shared())
+    first.get_state.side_effect = error_type("SDK state retrieval failed")
+    rpc.get_entity.side_effect = [first, second] if recovers else [first] * 3
+
+    response = client_agent.run("question", session=SESSION)
+
+    if recovers:
+        assert response.text == "canonical answer"
+        assert _errors(response) == []
+        second.get_state.assert_called_once_with()
+    else:
+        assert [error.error_code for error in _errors(response)] == ["response_timeout"]
+        second.get_state.assert_not_called()
+    assert first.get_state.call_count == (1 if recovers else 3)
+    _assert_polled(rpc, sleep, 2 if recovers else 3)
 
 
 def test_client_fire_and_forget_signals_and_returns_acceptance_without_reading(
