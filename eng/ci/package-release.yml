@@ -16,7 +16,7 @@ parameters:
     displayName: 'Pipeline artifact name'
   - name: nugetServiceConnection
     type: string
-    default: 'agent-framework-durable-extension-nuget-org'
+    default: 'DurableTask org NuGet API Key'
     displayName: 'NuGet.org service connection'
   - name: esrpMainPublisher
     type: string
