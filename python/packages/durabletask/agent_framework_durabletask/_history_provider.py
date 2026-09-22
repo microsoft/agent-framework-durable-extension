@@ -763,6 +763,13 @@ def validate_history_providers(agent: SupportsAgentRun) -> None:
     durable_count = sum(isinstance(provider, DurableHistoryProvider) for provider in cast("Sequence[Any]", providers))
     if not primaries or type(primaries[0]) is InMemoryHistoryProvider:
         durable_count += 1  # Preparation injects or replaces the primary with a durable adapter.
+    elif durable_count and not isinstance(primaries[0], DurableHistoryProvider):
+        # A load-disabled durable adapter still reconciles canonical state and
+        # accepts inputs independently of the selected external/custom primary.
+        raise ValueError(
+            "A DurableHistoryProvider cannot be a secondary history provider alongside an external or custom primary. "
+            "Use an ordinary store-only HistoryProvider with a distinct source_id for audits."
+        )
     if durable_count > 1:
         # source_id isolates session namespaces, not the canonical transcript or
         # binding. Even zero-store adapters can repair IDs and flush annotations.
