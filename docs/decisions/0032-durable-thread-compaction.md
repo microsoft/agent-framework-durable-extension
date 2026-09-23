@@ -1351,7 +1351,8 @@ conversion hooks. Supported lazy values retained their existing policy, and dupl
 remained no-ops without inspecting a replacement producer.
 
 History reconciliation in [PR #111](https://github.com/microsoft/agent-framework-durable-extension/pull/111)
-distinguished loaded occurrence IDs from unallocated summary IDs and compared summary revisions
-with JSON-exact payloads. External-primary observation used the provider's storage flags without
+distinguished loaded occurrence IDs from unallocated summary IDs, allocated new/revised occurrences
+before repairing backlinks, and compared revisions with JSON-exact payloads.
+External-primary observation used the provider's storage flags without
 rebinding its custom hooks. Naive response timestamp strings received the same UTC interpretation
 on direct and history-provider append paths.
