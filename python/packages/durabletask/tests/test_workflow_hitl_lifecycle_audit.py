@@ -41,6 +41,7 @@ from typing_extensions import Never
 
 from agent_framework_durabletask import DurableWorkflowClient, serialize_agent_response
 from agent_framework_durabletask._workflows import orchestrator as engine
+from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 from agent_framework_durabletask._workflows.serialization import deserialize_workflow_output
 
 
@@ -555,7 +556,7 @@ def test_repeated_child_retires_public_path_and_keeps_host_prefix_in_sync(nested
         second = client.get_pending_hitl_requests("root-run")
         second_id = "sub~1~leaf~0~approval" if nested else "sub~1~approval"
         assert [request["request_id"] for request in second] == [second_id]
-        assert root.host.statuses[-1]["subworkflows"] == {"sub": {"1": "root-run::sub::1"}}
+        assert root.host.statuses[-1]["subworkflows"] == {"sub": {"1": subworkflow_instance_id("root-run", "sub", 1)}}
         native.raise_orchestration_event.reset_mock()
         with pytest.raises(ValueError, match="No active sub-workflow"):
             client.send_hitl_response("root-run", first_id, {"for": 1})
@@ -595,8 +596,10 @@ def test_global_child_ordinal_spans_other_nodes_and_supersteps() -> None:
     address = {"root_instance_id": "root-run", "root_workflow_name": workflow.name, "request_path_prefix": ""}
     _, first, _ = engine._prepare_all_tasks(ctx, workflow, {"other": [({}, "seed")]}, {}, counter, address)
     _, second, _ = engine._prepare_all_tasks(ctx, workflow, {"sub": [({}, "seed"), ({}, "seed")]}, {}, counter, address)
-    assert engine._index_subworkflows(first) == {"other": {"0": "root-run::other::0"}}
-    assert engine._index_subworkflows(second) == {"sub": {"1": "root-run::sub::1", "2": "root-run::sub::2"}}
+    assert engine._index_subworkflows(first) == {"other": {"0": subworkflow_instance_id("root-run", "other", 0)}}
+    assert engine._index_subworkflows(second) == {
+        "sub": {str(ordinal): subworkflow_instance_id("root-run", "sub", ordinal) for ordinal in (1, 2)}
+    }
     prefixes = [
         call.args[1]["input"]["__subworkflow_address__"]["request_path_prefix"]
         for call in ctx.call_sub_orchestrator.call_args_list

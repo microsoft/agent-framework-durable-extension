@@ -51,11 +51,12 @@ workers and clients is the recommended way to keep old workers and histories off
 
 **Start fresh workflow instances after this update, including upgrades from earlier v2 builds.**
 Workflow protocol `2` is unchanged, but start admission is stricter and checkpointed HITL admission
-and mixed parent/child scheduling change the replay action graph. Existing v2 in-flight instances
-and recorded histories are not supported by this runtime and may fail. The version marker checks
-start-envelope admission, not feature or replay compatibility. Older v2 envelopes can still pass
-that check. There is no replay migration or compatibility fallback.
-If old runs must finish, keep them on their original workers and hub rather than resume them here.
+and mixed parent/child scheduling change the replay action graph, including generated child IDs.
+Existing v2 in-flight instances and recorded histories are not supported by this runtime and may
+fail. The version marker checks start-envelope admission, not feature or replay compatibility.
+Older v2 envelopes can still pass that check. There is no replay migration or compatibility fallback.
+If old runs must finish, keep them on their original workers and hub, including published histories
+with concatenated child IDs. Do not resume them here.
 
 The current layer includes canonical transaction state, session capture, the workflow
 protocol boundary, and a privileged manual migration path. Migration is a backend entity
@@ -161,6 +162,24 @@ ancestry or claimed root's authority. It does not protect against a malicious ap
 supplying an otherwise consistent envelope. Trusted worker and application deployments remain
 required. The internal checkpoint codec still uses pickle and is not safe for arbitrary untrusted
 input.
+
+Generated child-ID scheme `1` always produces a physical instance ID of exactly 74 ASCII characters,
+`dafxsw_v1_` followed by the full 64-character SHA-256 hex digest. The digest covers a domain separator
+and length-framed UTF-8 values for the parent's actual instance ID, the exact executor ID and the
+dispatch ordinal in decimal. Dispatch and provenance helpers use this same derivation at every hop.
+The hash checks address consistency, not authentication.
+Bounded physical IDs do not imply unlimited nesting, as logical paths and payloads still grow with
+depth and their limits still apply.
+
+Original executor IDs and workflow names, `~`-qualified HITL paths and the root notification address
+remain unchanged. Clients follow actual child IDs in the parent's `subworkflows` status map at each
+hop. They must not parse physical child IDs or reconstruct addresses from their names.
+
+For a known standalone `DurableTaskSchedulerClient`, an explicit root ID must be nonblank, contain
+1-100 printable ASCII characters and not start with `@`. It is validated, never rewritten or hashed. Generic
+`TaskHubGrpcClient` behavior is preserved because its backend is unknown. The Functions generic route
+validator retains its existing 100-character limit and Unicode-aware rules, not an ASCII-only rule,
+because its provider is unknown. Application-owned native orchestrator calls are unchanged.
 
 There is no automatic transcript recovery for a rejected service conversation ID. A specifically
 rejected parent response can receive up to three additional identical-request retries for a

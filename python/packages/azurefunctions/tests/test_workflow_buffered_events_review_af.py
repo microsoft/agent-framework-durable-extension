@@ -17,6 +17,7 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 from azure.durable_functions import DurableOrchestrationContext
 from azure.durable_functions.models.ReplaySchema import ReplaySchema
 from azure.durable_functions.models.Task import TaskState
@@ -166,7 +167,7 @@ def test_mixed_rejections_consume_each_buffered_occurrence_before_correction(
     if early:
         deliver()
     transport.complete_named("root", "seed")
-    transport.complete_named("root::sub::0", "child")
+    transport.complete_named(subworkflow_instance_id("root", "sub", 0), "child")
     for executor in ("parent", "writer", "sink"):
         transport.complete_named("root", executor)
     if not early:
@@ -191,7 +192,7 @@ def test_mixed_rejections_consume_each_buffered_occurrence_before_correction(
         assert replay["customStatus"] == {
             key: value for key, value in transport.statuses["root"].items() if key != "events"
         }
-        assert replay["customStatus"]["subworkflows"] == {"sub": {"0": "root::sub::0"}}
+        assert replay["customStatus"]["subworkflows"] == {"sub": {"0": subworkflow_instance_id("root", "sub", 0)}}
         assert registrations == expected_waits
         actions = _atomic_actions(replay["actions"])
         assert [

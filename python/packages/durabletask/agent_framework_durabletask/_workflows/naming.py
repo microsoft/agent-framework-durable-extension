@@ -25,6 +25,7 @@ reuse an executor id cannot collide.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterator
 from typing import Any, cast
@@ -39,6 +40,8 @@ __all__ = [
     "parse_workflow_message_id",
     "qualify_subworkflow_request_id",
     "split_subworkflow_request_id",
+    "subworkflow_instance_id",
+    "validate_dts_instance_id",
     "validate_executor_id",
     "validate_workflow_name",
     "workflow_executor_activity_name",
@@ -111,13 +114,53 @@ def parse_workflow_message_id(message_id: str | None) -> tuple[str, int] | None:
 # :func:`validate_executor_id`), so only the structural hops carry the separator.
 SUBWORKFLOW_REQUEST_SEPARATOR = "~"
 
-# Upper bound on an executor id's length when a workflow is hosted durably. The id is
-# interpolated into durable activity/entity names (``dafx-{workflow}-{executor}``) and,
-# for sub-workflow nodes, into recursively-nested child orchestration instance ids
-# (``{parent}::{executor}::{n}``). Capping it keeps those derived strings within typical
-# durable backend name/id limits; combined with the workflow-name cap, the worst-case
-# instance id stays bounded even for deeply-nested sub-workflows.
+# Executor IDs remain in registered names and semantic HITL paths. This limit is
+# independent of backend instance-ID constraints. Generated children use a bounded
+# physical identity instead of concatenating the entire ancestry.
 MAX_EXECUTOR_ID_LENGTH = 128
+
+_SUBWORKFLOW_INSTANCE_DOMAIN = "dafx/subworkflow-instance/v1"
+_SUBWORKFLOW_INSTANCE_PREFIX = "dafxsw_v1_"
+
+
+def subworkflow_instance_id(parent_instance_id: str, executor_id: str, ordinal: int) -> str:
+    """Derive a replay-stable 74-character ASCII identity for a generated child.
+
+    Scheme 1 hashes four UTF-8 fields in order: the fixed domain, exact immediate
+    parent ID, exact executor ID, and canonical decimal ordinal. Each field is
+    prefixed by its byte length as an unsigned eight-byte big-endian integer.
+    Length framing avoids delimiter ambiguity. Never normalize names or truncate
+    the digest. These bytes are a replay contract, not an authorization mechanism.
+    """
+    if not isinstance(parent_instance_id, str) or not parent_instance_id:
+        raise ValueError("Parent instance ID must be a non-empty string.")
+    if not isinstance(executor_id, str):
+        raise ValueError("Executor ID must be a string.")
+    validate_executor_id(executor_id)
+    if type(ordinal) is not int or ordinal < 0:
+        raise ValueError("Child dispatch ordinal must be a nonnegative integer.")
+    digest = hashlib.sha256()
+    try:
+        for field in (_SUBWORKFLOW_INSTANCE_DOMAIN, parent_instance_id, executor_id, str(ordinal)):
+            encoded = field.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+    except UnicodeEncodeError as exc:
+        raise ValueError("Child identity components must be valid UTF-8 strings.") from exc
+    return _SUBWORKFLOW_INSTANCE_PREFIX + digest.hexdigest()
+
+
+def validate_dts_instance_id(instance_id: str) -> None:
+    """Validate an explicit Scheduler root ID without changing the caller's ID."""
+    if (
+        not isinstance(instance_id, str)
+        or not 1 <= len(instance_id) <= 100
+        or not instance_id.strip()
+        or instance_id.startswith("@")
+        or any(not 0x20 <= ord(character) <= 0x7E for character in instance_id)
+    ):
+        raise ValueError("DTS instance ID must be nonblank, 1-100 printable ASCII characters and not start with '@'.")
+
 
 # A workflow name is interpolated into durable orchestration/activity/entity names
 # *and* into HTTP route segments (``workflow/{workflowName}/run``), so it must be
@@ -258,26 +301,18 @@ def is_auto_generated_workflow_name(workflow_name: str) -> bool:
 
 
 def validate_executor_id(executor_id: str) -> None:
-    """Validate that an executor id is safe to host durably.
+    """Validate a stable executor ID for durable hosting.
 
-    An executor id is interpolated into durable activity/entity names and, for
-    sub-workflow nodes, into nested child-orchestration instance ids and the
-    qualified ids used to address nested human-in-the-loop requests. Two properties
-    must hold:
-
-    * It must not contain :data:`SUBWORKFLOW_REQUEST_SEPARATOR`. That sequence
-      separates the structural hops of a qualified nested-HITL request id, so an id
-      containing it would make a qualified id ambiguous and mis-route a response.
-    * It must be at most :data:`MAX_EXECUTOR_ID_LENGTH` characters, so the durable
-      names and (recursively nested) instance ids derived from it stay within typical
-      durable backend limits.
+    Executor IDs must be nonempty and at most MAX_EXECUTOR_ID_LENGTH characters.
+    They must not contain the '~' separator used by qualified nested-HITL request
+    IDs. Physical child IDs are
+    derived separately, so this does not validate backend instance-ID limits.
 
     Args:
         executor_id: The executor's id within a hosted workflow.
 
     Raises:
-        ValueError: If the id is empty, contains the reserved separator, or is too
-            long.
+        ValueError: If the executor ID is not valid for durable hosting.
     """
     if not executor_id:
         raise ValueError("Executor id must be a non-empty string.")
@@ -290,7 +325,7 @@ def validate_executor_id(executor_id: str) -> None:
     if len(executor_id) > MAX_EXECUTOR_ID_LENGTH:
         raise ValueError(
             f"Executor id '{executor_id[:32]}...' is too long ({len(executor_id)} > "
-            f"{MAX_EXECUTOR_ID_LENGTH}). Durable activity/entity names and nested instance ids are "
+            f"{MAX_EXECUTOR_ID_LENGTH}). Durable registered names and logical request paths are "
             "derived from it; use a shorter id."
         )
 

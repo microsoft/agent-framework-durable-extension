@@ -17,12 +17,14 @@ from collections.abc import AsyncIterator
 from typing import Any, cast
 
 from agent_framework import WorkflowEvent
+from durabletask.azuremanaged.client import DurableTaskSchedulerClient
 from durabletask.client import OrchestrationStatus, TaskHubGrpcClient
 
 from .naming import (
     iter_subworkflow_instances,
     qualify_subworkflow_request_id,
     split_subworkflow_request_id,
+    validate_dts_instance_id,
     workflow_orchestrator_name,
 )
 from .protocol import validate_workflow_start_input, wrap_workflow_input
@@ -115,12 +117,16 @@ class DurableWorkflowClient:
             workflow_name: The workflow to start. Optional if a default was set on
                 the client; required otherwise.
             instance_id: Optional explicit orchestration instance ID. If omitted, one
-                is generated.
+                is generated. A Scheduler client requires a nonblank ID of 1-100 printable ASCII
+                characters with no leading '@'. Other clients retain their backend's
+                input contract. Caller-supplied root IDs are never rewritten.
 
         Returns:
             The orchestration instance ID, for use with ``await_workflow_output``.
         """
         orchestration_name = workflow_orchestrator_name(self._resolve_workflow_name(workflow_name))
+        if instance_id is not None and isinstance(self._client, DurableTaskSchedulerClient):
+            validate_dts_instance_id(instance_id)
         validate_workflow_start_input(input)
         new_instance_id = self._client.schedule_new_orchestration(
             orchestration_name,

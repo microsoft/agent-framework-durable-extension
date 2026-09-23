@@ -22,6 +22,7 @@ from unittest.mock import Mock
 import pytest
 from agent_framework import Executor, Workflow, WorkflowBuilder, WorkflowContext, WorkflowExecutor, handler
 from agent_framework_durabletask import wrap_workflow_input
+from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 from agent_framework_durabletask._workflows.serialization import SUBWORKFLOW_RESULT_KEY
 from azure.durable_functions import DurableOrchestrationContext
 from azure.durable_functions.models.history.HistoryEvent import HistoryEvent
@@ -173,7 +174,7 @@ def test_generated_af_child_completion_preserves_metadata_without_sdk_constructi
         # single child task is task 0 in that parent's independent history.
         instance, state = host.child(parent, action, 0)
         executor_id = "child" if hop == 0 else "grand"
-        assert instance == f"{parent}::{executor_id}::0"
+        assert instance == subworkflow_instance_id(parent, executor_id, 0)
         assert host.starts[instance]["parentInstanceId"] == parent
         assert host.starts[instance]["history"][1]["Version"] == ""
         assert echo.seen == [] and _DECODER_CALLS == [] and _decode_attempts == []
