@@ -26,10 +26,10 @@ from aiohttp.payload import BytesPayload, JsonPayload
 from azure.durable_functions.models.ReplaySchema import ReplaySchema
 from azure.durable_functions.models.utils import http_utils
 from pydantic import BaseModel, field_validator
-from test_workflow_buffered_events_review_af import _event
-from test_workflow_generic_hitl_review import _generic_workflow
-from test_workflow_generic_hitl_review_af import _request
-from test_workflow_mixed_hitl_review import _atomic_actions
+from test_workflow_buffered_events_af import _event
+from test_workflow_generic_hitl import _generic_workflow
+from test_workflow_generic_hitl_af import _request
+from test_workflow_mixed_hitl_scheduling import _atomic_actions
 
 from agent_framework_azurefunctions import AgentFunctionApp
 

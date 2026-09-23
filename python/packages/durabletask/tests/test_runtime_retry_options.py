@@ -17,10 +17,10 @@ from agent_framework import AgentSession, ChatContext, ChatMiddleware, ChatRespo
 from agent_framework.openai import OpenAIChatClient
 from openai import AsyncOpenAI
 from pydantic import BaseModel, create_model
-from test_entity_bounded_corrections import _entity, _RefusingClient
+from test_entity_retry_and_diagnostics import _entity, _RefusingClient
 from test_runtime_invocation_progress import _ScriptedNonStreamingClient
-from test_runtime_validation_privacy_review import sdk_response
-from test_service_commit_boundaries_review import _assert_failed, _committed, _MissingParent, _provider, _request
+from test_runtime_validation_privacy import sdk_response
+from test_service_commit_boundaries import _assert_failed, _committed, _MissingParent, _provider, _request
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState, RunRequest
 from agent_framework_durabletask import _entities as entities

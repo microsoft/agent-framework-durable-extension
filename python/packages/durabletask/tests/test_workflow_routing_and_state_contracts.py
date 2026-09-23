@@ -12,7 +12,7 @@ from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
-import test_workflow_admission_review as admission
+import test_workflow_dispatch_admission as admission
 from _execution_test_support import RecordingChatClient
 from _workflow_test_support import create_registration_worker
 from agent_framework import (
@@ -31,8 +31,8 @@ from agent_framework import (
 )
 from durabletask.client import TaskHubGrpcClient
 from durabletask.task import CompletableTask
-from test_workflow_admission_review import _registered_run, _run_core_workflow
-from test_workflow_protocol_review import _complete, _drain, _host
+from test_workflow_dispatch_admission import _registered_run, _run_core_workflow
+from test_workflow_protocol_boundaries_dt import _complete, _drain, _host
 from typing_extensions import Never
 
 from agent_framework_durabletask import DurableAIAgentWorker, DurableWorkflowClient, serialize_agent_response

@@ -6,8 +6,8 @@ import json
 from datetime import timedelta
 from typing import Any
 
+import _retention_metrics_test_support as retention_metrics
 import pytest
-import test_retention_telemetry as retention_metrics
 from _execution_test_support import JsonStateProvider, RecordingChatClient
 from agent_framework import EXCLUDED_KEY, Agent, AgentResponse, Message
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader, Metric, Sum

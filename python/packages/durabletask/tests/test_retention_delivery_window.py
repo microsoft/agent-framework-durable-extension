@@ -13,8 +13,8 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Literal, TypeAlias
 
+import _retention_test_support as retention_donor
 import pytest
-import test_retention as retention_donor
 from _execution_test_support import JsonStateProvider, RecordingChatClient
 from agent_framework import EXCLUDED_KEY, Agent, AgentResponse
 

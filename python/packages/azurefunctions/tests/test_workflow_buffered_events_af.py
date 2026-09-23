@@ -22,8 +22,8 @@ from azure.durable_functions import DurableOrchestrationContext
 from azure.durable_functions.models.ReplaySchema import ReplaySchema
 from azure.durable_functions.models.Task import TaskState
 from azure.durable_functions.models.TaskOrchestrationExecutor import TaskOrchestrationExecutor
-from test_workflow_mixed_hitl_review import _atomic_actions, _Episodes, _mixed
-from test_workflow_recorded_replay_review import _af_replay
+from test_workflow_mixed_hitl_scheduling import _atomic_actions, _Episodes, _mixed
+from test_workflow_sdk_history_replay import _af_replay
 
 from agent_framework_azurefunctions._workflow_af_context import AzureFunctionsWorkflowContext
 

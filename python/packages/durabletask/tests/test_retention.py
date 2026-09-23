@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, cast, get_args
 
 import pytest
+from _retention_test_support import _state
 from _workflow_test_support import create_registration_worker
 from agent_framework import (
     Agent,
@@ -48,63 +49,6 @@ from agent_framework_durabletask._retention import (
 
 BUDGET = 40_000
 """Small enough to keep these tests fast, large enough to hold a realistic conversation."""
-
-
-def _state(turns: int, *, chars: int = 400, excluded_before: int = 0, excluded_recent: int = 0) -> DurableAgentState:
-    """Build legacy transcript-delivered state with the given number of user/assistant turns.
-
-    Args:
-        turns: How many exchanges to record.
-        chars: Size of each message's text.
-
-    Keyword Args:
-        excluded_before: Mark this many leading messages as compaction-excluded, as a user's own
-            sliding window would.
-        excluded_recent: Mark this many of the most recent messages as compaction-excluded, as a
-            tool-result strategy can do without touching the oldest turns.
-
-    Returns:
-        The populated state.
-    """
-    # These manually appended responses use legacy history lookup. Version 2 fixtures must
-    # record independent mailbox results instead of treating transcript entries as delivery.
-    state = DurableAgentState(schema_version="1.2.0")
-    now = datetime.now(tz=timezone.utc)
-    # Space legacy turns a minute apart so their delivery windows have elapsed. Tests of live
-    # delivery explicitly refresh timestamps rather than depending on the test's running time.
-    marked = 0
-    for index in range(turns):
-        occurred_at = now - timedelta(minutes=turns - index)
-        request = DurableAgentStateRequest(
-            correlation_id=f"c{index}",
-            created_at=occurred_at,
-            messages=[
-                DurableAgentStateMessage.from_chat_message(
-                    Message(role="user", contents=["u" * chars], message_id=f"u{index}")
-                )
-            ],
-        )
-        response = DurableAgentStateResponse(
-            correlation_id=f"c{index}",
-            created_at=occurred_at,
-            messages=[
-                DurableAgentStateMessage.from_chat_message(
-                    Message(role="assistant", contents=["a" * chars], message_id=f"a{index}")
-                )
-            ],
-        )
-        for entry in (request, response):
-            for stored in entry.messages:
-                if marked < excluded_before:
-                    stored.extension_data = {"_excluded": True, "_excluded_reason": "sliding_window"}
-                    marked += 1
-        state.data.conversation_history.extend([request, response])
-
-    if excluded_recent:
-        stored_messages = [m for entry in state.data.conversation_history for m in entry.messages]
-        for stored in stored_messages[-excluded_recent:]:
-            stored.extension_data = {"_excluded": True, "_excluded_reason": "tool_result_compaction"}
-    return state
 
 
 def _size(state: DurableAgentState) -> int:

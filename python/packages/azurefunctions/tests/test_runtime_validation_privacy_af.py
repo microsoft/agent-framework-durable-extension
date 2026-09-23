@@ -14,7 +14,7 @@ import pytest
 from agent_framework_durabletask import serialize_agent_response
 from azure.durable_functions.models.actions.NoOpAction import NoOpAction
 from azure.durable_functions.models.Task import AtomicTask
-from test_runtime_validation_privacy_review import (
+from test_runtime_validation_privacy import (
     PRIVATE,
     SAFE,
     GroupedValidationAgent,
