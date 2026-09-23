@@ -104,6 +104,10 @@ def _assert_retry_rejected(retry: _Retry, message: str) -> None:
     request_before = deepcopy(request)
     assert expected_state["data"]["migration"]["requestDigest"] == state_snapshot_digest(request)
 
+    if cache_before is not None and message == _BINDING_ERROR:
+        # Warm mutations now fail against the committed snapshot at entry. Cold
+        # state still needs the original request to detect a consistent rebind.
+        message = "Committed migration binding fields cannot be removed or changed."
     with pytest.raises(ValueError, match=message):
         entity.migrate(request)
 

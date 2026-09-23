@@ -60,8 +60,10 @@ def _host(
     return entity, provider, client
 
 
-def _migrated(*, journals: bool = True) -> tuple[AgentEntity, JsonStateProvider, RecordingChatClient, dict[str, Any]]:
-    entity, provider, client = _host()
+def _migrated(
+    *, journals: bool = True, external: _ObservedExternalHistory | None = None
+) -> tuple[AgentEntity, JsonStateProvider, RecordingChatClient, dict[str, Any]]:
+    entity, provider, client = _host(external=external)
     source = _legacy_source(_error_response_entry()) if journals else _legacy_source()
     if journals:
         source["data"]["session"] = {
@@ -88,6 +90,110 @@ def _migrated(*, journals: bool = True) -> tuple[AgentEntity, JsonStateProvider,
     assert provider.raw["data"]["session"]["session_id"] == SOURCE_SESSION_ID
     assert client.received_messages == []
     return entity, provider, client, request
+
+
+@pytest.mark.parametrize("change", ["delete-binding", "rebind"])
+@pytest.mark.parametrize("aliased", [True, False], ids=["warm-cache", "detached-unsaved"])
+async def test_warm_run_checks_committed_binding_before_history_or_model(change: str, aliased: bool) -> None:
+    external = _ObservedExternalHistory()
+    entity, provider, client, _ = _migrated(external=external)
+    committed = _json(provider.raw)
+    binding = deepcopy(provider.raw["data"]["migration"])
+    warm = entity.state
+    candidate = warm if aliased else deepcopy(warm)
+    if change == "delete-binding":
+        del candidate.data.unknown_fields["migration"]
+    else:
+        assert candidate.data.session is not None
+        candidate.data.session["session_id"] = "another-provider:session"
+        candidate.data.unknown_fields["migration"]["sourceSessionId"] = "another-provider:session"
+    candidate_before = _json(candidate.to_dict())
+    assert candidate_before != committed
+    assert entity.state is warm
+    assert _json(provider.raw) == committed
+    assert external.calls == client.received_messages == []
+
+    # No setter or explicit persist: the real entry point must reject before effects,
+    # not just reject the final write after another provider key has already been used.
+    request = {"message": "continue", "correlationId": "warm-binding-check"}
+    if aliased:
+        with pytest.raises(ValueError, match="Committed migration binding fields cannot be removed or changed"):
+            await entity.run(request)
+        assert entity.state is warm
+        assert _json(entity.state.to_dict()) == candidate_before
+        assert _json(provider.raw) == committed
+        assert provider.attempted_writes == provider.successful_writes == 1
+        assert external.calls == client.received_messages == client.received_options == []
+    else:
+        # Editing a detached value is not a state transition and must not block a run.
+        assert _json(warm.to_dict()) == committed
+        assert (await entity.run(request)).text == "reply-1"
+        assert external.calls == [("load", SOURCE_SESSION_ID), ("save", SOURCE_SESSION_ID)]
+        assert [[message.text for message in messages] for messages in client.received_messages] == [["continue"]]
+        assert provider.raw["data"]["session"]["session_id"] == SOURCE_SESSION_ID
+        assert _json(provider.raw["data"]["migration"]) == _json(binding)
+        assert provider.attempted_writes == provider.successful_writes == 2
+    assert _json(candidate.to_dict()) == candidate_before
+
+
+@pytest.mark.parametrize("change", ["delete-binding", "restore-valid-binding"])
+async def test_warm_cache_cannot_hide_invalid_committed_binding(change: str) -> None:
+    _, donor, _, _ = _migrated()
+    raw = deepcopy(donor.raw)
+    raw["data"]["migration"]["requestDigest"] = "invalid"
+    external = _ObservedExternalHistory()
+    entity, provider, client = _host(raw, external=external)
+    committed = _json(provider.raw)
+    warm = entity.state  # Establish the committed snapshot before changing only the cache.
+    if change == "delete-binding":
+        del warm.data.unknown_fields["migration"]
+    else:
+        warm.data.unknown_fields["migration"] = deepcopy(donor.raw["data"]["migration"])
+    candidate_before = _json(warm.to_dict())
+    assert candidate_before != committed
+
+    with pytest.raises(ValueError, match="Committed migration session binding is invalid"):
+        await entity.run({"message": "continue", "correlationId": "invalid-committed-binding"})
+
+    assert entity.state is warm
+    assert _json(warm.to_dict()) == candidate_before
+    assert _json(provider.raw) == committed
+    assert provider.attempted_writes == provider.successful_writes == 0
+    assert external.calls == client.received_messages == client.received_options == []
+
+
+@pytest.mark.parametrize("destination", ["absent", "initialized-empty", "migrated"])
+def test_warm_session_identity_checks_only_binding_projection(
+    destination: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if destination == "migrated":
+        entity, provider, _, _ = _migrated()
+        expected = SOURCE_SESSION_ID
+    else:
+        entity, provider, _ = _host(DurableAgentState().to_dict() if destination == "initialized-empty" else None)
+        expected = provider.core_session_id
+    warm = entity.state
+    committed = _json(provider.raw)
+    writes = (provider.attempted_writes, provider.successful_writes)
+    warm.data.unknown_fields["application"] = {"pending": [False, 0, 0.0]}
+    if destination == "migrated":
+        warm.data.unknown_fields["migration"]["operatorNotes"] = {"pending": [False, 0, 0.0]}
+    pending = _json(warm.to_dict())
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("Warm identity checks must not copy, serialize, or reread the complete state.")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(warm, "to_dict", forbidden)
+        guard.setattr(provider, "_get_state_dict", forbidden)
+        guard.setattr("agent_framework_durabletask._entities.deepcopy", forbidden)
+        assert provider.migration_session_id() == expected
+        assert provider.migration_session_id() == expected
+
+    assert entity.state is warm
+    assert _json(warm.to_dict()) == pending
+    assert _json(provider.raw) == committed
+    assert (provider.attempted_writes, provider.successful_writes) == writes
 
 
 @pytest.mark.parametrize("writer", ["detached-setter", "aliased-setter", "shallow-setter", "persist"])
@@ -307,7 +413,12 @@ def test_empty_cache_cannot_hide_used_committed_destination(migrated: bool, monk
     provider.replace_cached_state(DurableAgentState())
     stage = Mock(side_effect=AssertionError("Used committed state must be rejected before migration staging."))
     monkeypatch.setattr("agent_framework_durabletask._entities.migrate_legacy_state", stage)
-    with pytest.raises(ValueError, match="Migration destination must be empty"):
+    message = (
+        "Committed migration binding fields cannot be removed or changed"
+        if migrated
+        else "Migration destination must be empty"
+    )
+    with pytest.raises(ValueError, match=message):
         entity.migrate(request)
     stage.assert_not_called()
     assert _json(provider.raw) == _json(provider._persisted_state_snapshot) == committed

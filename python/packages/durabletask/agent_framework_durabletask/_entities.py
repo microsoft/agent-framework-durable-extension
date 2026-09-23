@@ -342,7 +342,21 @@ class AgentEntityStateProviderMixin:
 
     def migration_session_id(self) -> str:
         """Validate the migration binding before an operation uses its session identity."""
-        binding = self._migration_binding(self.state.data.unknown_fields, self.state.data.session)
+        state = self.state
+        binding = self._migration_binding(state.data.unknown_fields, state.data.session)
+        # The getter normally captures this before callers can mutate the cache.
+        # A replacement cache may precede the first backing read. Once captured,
+        # compare only identity fields, without copying or serializing the payload.
+        snapshot = self._persisted_state_snapshot
+        if snapshot is None:
+            snapshot = deepcopy(self._read_writable_state_dict())
+            self._persisted_state_snapshot = snapshot
+        before = snapshot.get("data", {})
+        committed_binding = self._migration_binding(before, before.get("session"))
+        if binding != committed_binding:
+            if committed_binding is None:
+                raise ValueError("Initial migration binding requires migrate into an empty destination.")
+            raise ValueError("Committed migration binding fields cannot be removed or changed.")
         return self.core_session_id if binding is None else binding["sourceSessionId"]
 
     def validate_migration_state(self, request: dict[str, Any], *, request_digest: str) -> bool:
