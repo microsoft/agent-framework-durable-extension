@@ -51,6 +51,8 @@ def _context(rows: list[dict[str, Any]]) -> Any:
         parentInstanceId=None,
         input="null",
         upperSchemaVersion=ReplaySchema.V3.value,
+        maximumShortTimerDuration="00:05:00",
+        longRunningTimerIntervalDuration="00:03:00",
     )
 
 
