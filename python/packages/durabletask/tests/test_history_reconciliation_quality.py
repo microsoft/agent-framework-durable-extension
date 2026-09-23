@@ -162,7 +162,7 @@ async def test_same_flush_source_backlinks_do_not_depend_on_candidate_order(
         assert working["messages"] is buffer and buffer[0] is loaded[0]
         assert all(actual is expected for actual, expected in zip(buffer[1:], pending, strict=True))
         assert source.additional_properties is source_annotations and source.contents is source_contents
-        assert source.message_id == getattr(source, "_durable_history_id") == "new-source"
+        assert source.message_id == source._durable_history_id == "new-source"  # type: ignore[attr-defined]
         assert _json(original.to_dict()) == original_before
     cold, replay = await _cold_replay(owner, controls)
     summary_id = "durable_revision_compaction_current_1_0" if source_first else REVISION
@@ -222,7 +222,7 @@ async def test_loaded_source_wins_over_new_candidates_with_the_same_public_id(
     working: dict[str, Any] = {}
     with _bound(owner) as binding:
         loaded = await history.get_messages("quality", state=working)
-        assert getattr(loaded[2], "_durable_history_id") == "new-source"
+        assert loaded[2]._durable_history_id == "new-source"  # type: ignore[attr-defined]
         assert not hasattr(source, "_durable_history_id") and not hasattr(summary, "_durable_history_id")
         working["messages"].extend([source, summary] if source_first else [summary, source])
         history.flush(working)
@@ -233,7 +233,8 @@ async def test_loaded_source_wins_over_new_candidates_with_the_same_public_id(
     second_id = "durable_revision_compaction_current_1_0"
     source_id, summary_id = (REVISION, second_id) if source_first else (second_id, REVISION)
     source_public_id = source_id if pending_summary else "new-source"
-    assert source.message_id == source_public_id and getattr(source, "_durable_history_id") == source_id
+    assert source.message_id == source_public_id
+    assert source._durable_history_id == source_id  # type: ignore[attr-defined]
     if grouped and pending_summary:
         pending_before["_group"]["id"] = f"group_{source_id}"
     assert source.additional_properties == pending_before
@@ -259,7 +260,9 @@ async def test_loaded_source_wins_over_new_candidates_with_the_same_public_id(
 
 
 @pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError, GeneratorExit])
-async def test_deferred_backlink_failure_restores_retained_aliases_before_retry(error_type: type[BaseException]) -> None:
+async def test_deferred_backlink_failure_restores_retained_aliases_before_retry(
+    error_type: type[BaseException],
+) -> None:
     owner = _owner([_request("seed", _stored("unrelated", message_id="same"))])
     source = Message(
         "user",
