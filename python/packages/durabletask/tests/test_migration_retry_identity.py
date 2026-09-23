@@ -12,8 +12,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from _execution_test_support import JsonStateProvider, RecordingChatClient
-from agent_framework import Agent, AgentResponse, Message
-from test_migration_host_boundaries import (
+from _migration_test_support import (
     SOURCE_SESSION_ID,
     _completion_journal,
     _error_response_entry,
@@ -24,6 +23,7 @@ from test_migration_host_boundaries import (
     _original_result,
     _sdk_registered_entity,
 )
+from agent_framework import Agent, AgentResponse, Message
 
 from agent_framework_durabletask import AgentEntity, state_snapshot_digest
 

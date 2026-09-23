@@ -14,13 +14,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _workflow_replay_test_support import _Episodes, _replay
 from _workflow_state_process_support import SET_MEMBERS, process_identity, state_workflow
+from _workflow_state_test_support import _core_committed_state, _registered_result
 from agent_framework import Executor, WorkflowContext, handler
 from durabletask.internal import helpers
 from durabletask.internal import orchestrator_service_pb2 as pb
-from test_workflow_mixed_hitl_scheduling import _Episodes
-from test_workflow_sdk_history_replay import _replay
-from test_workflow_state_write_intent import _core_committed_state, _registered_result
 
 from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 from agent_framework_durabletask._workflows.serialization import deserialize_value
@@ -37,8 +36,8 @@ def activity_process() -> Callable[..., dict[str, Any]]:
     assert Path(identity["activity"]) == package / "agent_framework_durabletask/_workflows/activity.py"
     for symbol, name in (
         (state_workflow, "_workflow_state_process_support.py"),
-        (_Episodes, "test_workflow_mixed_hitl_scheduling.py"),
-        (_registered_result, "test_workflow_state_write_intent.py"),
+        (_Episodes, "_workflow_replay_test_support.py"),
+        (_registered_result, "_workflow_state_test_support.py"),
     ):
         assert Path(inspect.getfile(symbol)).resolve() == support.parent / name
     paths = [str(package), str(support.parent), *(str(Path(path).resolve()) for path in sys.path if path)]

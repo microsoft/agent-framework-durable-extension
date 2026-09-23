@@ -94,10 +94,10 @@ def _af_harness(monkeypatch: pytest.MonkeyPatch) -> Any:
     tests = Path(__file__).resolve().parent
     monkeypatch.syspath_prepend(str(tests.parents[1] / "durabletask" / "tests"))
     monkeypatch.syspath_prepend(str(tests))
-    import test_workflow_child_provenance_af
+    import _workflow_provenance_test_support_af as sdk_history
 
-    assert Path(test_workflow_child_provenance_af.__file__).resolve() == tests / "test_workflow_child_provenance_af.py"
-    return test_workflow_child_provenance_af
+    assert Path(sdk_history.__file__).resolve() == tests / "_workflow_provenance_test_support_af.py"
+    return sdk_history
 
 
 class _Echo(Executor):

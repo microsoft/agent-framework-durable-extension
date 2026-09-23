@@ -11,58 +11,18 @@ from unittest.mock import Mock
 
 import pytest
 from _execution_test_support import RecordingChatClient
+from _migration_test_support import (
+    SOURCE_SESSION_ID,
+    _completion_journal,
+    _error_response_entry,
+    _legacy_source,
+    _migration_request,
+    _original_result,
+)
 from agent_framework import Agent, AgentSession
-from agent_framework_durabletask import state_snapshot_digest
 
 from agent_framework_azurefunctions import AgentFunctionApp
 from agent_framework_azurefunctions._entities import create_agent_entity
-
-SOURCE_SESSION_ID = "legacy-provider:source-session"
-
-
-def _legacy_source(*entries: dict[str, Any], version: str = "1.1.0") -> dict[str, Any]:
-    return {"schemaVersion": version, "data": {"conversationHistory": deepcopy(list(entries))}}
-
-
-def _error_response_entry(correlation_id: str = "done") -> dict[str, Any]:
-    return {
-        "$type": "errorResponse",
-        "correlationId": correlation_id,
-        "createdAt": "2024-01-02T03:04:06+00:00",
-        "messages": [{"role": "assistant", "contents": [{"$type": "error", "message": "legacy failure"}]}],
-    }
-
-
-def _original_result(correlation_id: str = "done") -> dict[str, Any]:
-    return {
-        "correlationId": correlation_id,
-        "outcome": "failed",
-        "completedAt": "2024-01-03T04:05:06+00:00",
-        "response": {"messages": [{"role": "assistant", "contents": [{"$type": "text", "text": "original result"}]}]},
-        "error": {"code": "provider_failure", "message": "Original invocation failed."},
-    }
-
-
-def _completion_journal(source: dict[str, Any], *results: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "sourceDigest": state_snapshot_digest(source),
-        "evidenceId": "completion-journal-1",
-        "complete": True,
-        "results": deepcopy(list(results)),
-    }
-
-
-def _migration_request(source: dict[str, Any], destination_session_id: str, **overrides: Any) -> dict[str, Any]:
-    request: dict[str, Any] = {
-        "source": deepcopy(source),
-        "sourceDigest": state_snapshot_digest(source),
-        "sourceSessionId": SOURCE_SESSION_ID,
-        "destinationSessionId": destination_session_id,
-        "migrationId": "migration-1",
-        "ownershipTransferId": "transfer-1",
-    }
-    request.update(overrides)
-    return request
 
 
 class _MigrationContext:

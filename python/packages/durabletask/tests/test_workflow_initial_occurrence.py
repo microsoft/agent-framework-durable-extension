@@ -7,9 +7,9 @@ from copy import deepcopy
 from typing import Any
 
 from _execution_test_support import JsonStateProvider, RecordingChatClient
+from _workflow_admission_test_support import _registered_run
+from _workflow_protocol_test_support import _complete, _drain
 from agent_framework import Agent, AgentExecutor, Executor, WorkflowBuilder, WorkflowContext, handler
-from test_workflow_dispatch_admission import _registered_run
-from test_workflow_protocol_boundaries_dt import _complete, _drain
 from typing_extensions import Never
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState, serialize_agent_response

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import pytest
+from _shared_history_test_support import _bound, _CanonicalStateProvider, _request, _stored
 from agent_framework import (
     Agent,
     AgentResponse,
@@ -23,7 +24,6 @@ from agent_framework import (
     ResponseStream,
     SessionContext,
 )
-from test_shared_history_provider import _bound, _CanonicalStateProvider, _request, _stored
 
 from agent_framework_durabletask._history_provider import DurableHistoryProvider, ensure_durable_history
 from agent_framework_durabletask._shared_agent_state import (

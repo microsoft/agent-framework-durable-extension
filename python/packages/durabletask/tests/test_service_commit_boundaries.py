@@ -12,12 +12,20 @@ from typing import Any, Literal, cast
 
 import pytest
 from _execution_test_support import JsonStateProvider, NonStreamingAgent, RecordingChatClient, ToolChatClient
+from _service_commit_test_support import (
+    Answer,
+    _assert_failed,
+    _committed,
+    _MissingParent,
+    _provider,
+    _request,
+    _SessionProbe,
+)
 from agent_framework import (
     AgentResponse,
     AgentSession,
     ChatMiddlewareLayer,
     ChatResponse,
-    ContextProvider,
     FunctionInvocationLayer,
     HistoryProvider,
     Message,
@@ -27,35 +35,12 @@ from agent_framework import (
 )
 from agent_framework._sessions import MessageInjectionMiddleware as CoreMessageInjectionMiddleware
 from durabletask.task import CompletableTask
-from pydantic import BaseModel
 
-from agent_framework_durabletask import AgentEntity, DurableAgentState, DurableHistoryProvider, RunRequest
+from agent_framework_durabletask import AgentEntity, DurableHistoryProvider, RunRequest
 from agent_framework_durabletask import _entities as durable_entities
 from agent_framework_durabletask._executors import DurableAgentTask
 from agent_framework_durabletask._history_provider import current_durable_history_binding
 from agent_framework_durabletask._response_utils import ensure_response_format, serialize_agent_response
-
-
-class Answer(BaseModel):
-    answer: int
-
-
-class _MissingParent(RuntimeError):
-    code = "previous_response_not_found"
-
-
-class _SessionProbe(ContextProvider):
-    def __init__(self) -> None:
-        super().__init__("probe")
-        self.session: AgentSession | None = None
-        self.entries: list[dict[str, Any]] = []
-
-    async def before_run(self, *, session: AgentSession, context: SessionContext, **kwargs: Any) -> None:
-        self.session = session
-        self.entries.append({
-            "session": deepcopy(session.to_dict()),
-            "inputs": deepcopy([message.to_dict() for message in context.input_messages]),
-        })
 
 
 class _Audit(HistoryProvider):
@@ -142,16 +127,6 @@ class _ServiceClient(FunctionInvocationLayer, ChatMiddlewareLayer, RecordingChat
         return complete()
 
 
-def _provider(*, service_id: Any = "S0", injection: CoreMessageInjectionMiddleware | None = None) -> JsonStateProvider:
-    session = AgentSession(session_id="@review@thread", service_session_id=deepcopy(service_id))
-    session.state = {"untouched": {"marker": [False, 0]}, "probe": {}, "audit": {}, "history": {}}
-    if injection is not None:
-        injection.enqueue_messages(session, [Message("user", ["queued input"], message_id="Q")])
-    state = DurableAgentState()
-    state.data.session = session.to_dict()
-    return JsonStateProvider(state.to_dict(), session_id="thread", entity_name="review")
-
-
 def _build(
     provider: JsonStateProvider,
     *,
@@ -176,38 +151,10 @@ def _build(
     return AgentEntity(agent, state_provider=provider), client, probe, audit
 
 
-def _request(correlation: str, *ids: str) -> dict[str, Any]:
-    return {
-        "message": "contextMessages are authoritative",
-        "correlationId": correlation,
-        "enable_tool_calls": False,
-        "options": {"store": True},
-        "contextMessages": [Message("user", [key], message_id=key).to_dict() for key in ids],
-        "contextMessageIds": [f"occ-{key}" for key in ids],
-    }
-
-
-def _committed(provider: JsonStateProvider) -> DurableAgentState:
-    return DurableAgentState.from_dict(deepcopy(provider.raw))
-
-
 def _session(provider: JsonStateProvider) -> AgentSession:
     payload = _committed(provider).data.session
     assert isinstance(payload, dict)
     return AgentSession.from_dict(deepcopy(payload))
-
-
-def _assert_failed(provider: JsonStateProvider, response: AgentResponse, error_code: str, detail: str) -> None:
-    assert response.additional_properties["durable_status"] == "error"
-    assert detail in response.text
-    codes = [
-        content.error_code for message in response.messages for content in message.contents if content.type == "error"
-    ]
-    assert codes == [error_code]
-    assert provider.successful_writes == 1
-    data = provider.raw["data"]
-    assert data["completionReceipts"]["first"]["outcome"] == "failed"
-    assert data["terminalResults"]["first"]["outcome"] == "failed"
 
 
 @pytest.fixture(autouse=True)

@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from _workflow_replay_test_support import _af_replay, _Episodes, _replay
+from _workflow_state_test_support import _core_committed_state, _registered_result
 from agent_framework import (
     Executor,
     Workflow,
@@ -24,9 +26,6 @@ from agent_framework import (
 )
 from agent_framework._workflows._state import State
 from durabletask.internal import orchestrator_service_pb2 as pb
-from durabletask.worker import _ActivityExecutor
-from test_workflow_mixed_hitl_scheduling import _Episodes
-from test_workflow_sdk_history_replay import _LOGGER, _af_replay, _replay, _worker
 from typing_extensions import Never
 
 from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
@@ -68,31 +67,6 @@ class _ScriptedWriter(Executor):
     @handler(input=str)
     async def handle(self, message: str, ctx: WorkflowContext) -> None:
         _operations(ctx, self.steps)
-
-
-def _registered_result(executor: Executor, snapshot: dict[str, Any]) -> dict[str, Any]:
-    workflow = WorkflowBuilder(name="state-intent", start_executor=executor).build()
-    native = _worker(workflow)
-    payload = json.dumps({
-        "message": "go",
-        "source_executor_ids": ["seed"],
-        "shared_state_snapshot": serialize_value(snapshot),
-    })
-    raw = _ActivityExecutor(native._registry, _LOGGER, native._data_converter).execute(
-        "state-intent-instance", f"dafx-state-intent-{executor.id}", 1, json.dumps(payload)
-    )
-    assert raw is not None
-    return json.loads(json.loads(raw))
-
-
-def _core_committed_state(executor: Executor, snapshot: dict[str, Any]) -> dict[str, Any]:
-    # A real, unmodified Core State and Executor.execute are the paired control.
-    # No activity journal, durable delta extraction or version-detection probe.
-    state = State()
-    state.import_state(deepcopy(snapshot))
-    asyncio.run(executor.execute("go", ["seed"], state, CapturingRunnerContext()))
-    state.commit()
-    return serialize_value(state.export_state())
 
 
 @pytest.mark.parametrize(

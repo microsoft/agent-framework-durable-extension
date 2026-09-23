@@ -12,6 +12,10 @@ from unittest.mock import Mock
 
 import pytest
 from _execution_test_support import JsonStateProvider, RecordingChatClient
+from _workflow_admission_test_support import _registered_run
+from _workflow_protocol_test_support import _complete, _drain
+from _workflow_replay_test_support import _replay, _worker
+from _workflow_selection_test_support import _assert_same_action_contract, _request_contract
 from agent_framework import (
     Agent,
     AgentExecutor,
@@ -27,9 +31,6 @@ from agent_framework import (
 from durabletask.internal import helpers
 from durabletask.internal import orchestrator_service_pb2 as pb
 from durabletask.worker import _ActivityExecutor
-from test_workflow_dispatch_admission import _registered_run
-from test_workflow_protocol_boundaries_dt import _complete, _drain
-from test_workflow_sdk_history_replay import _replay, _worker
 from typing_extensions import Never, Self
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState, _models, serialize_agent_response
@@ -40,39 +41,6 @@ from agent_framework_durabletask._workflows.orchestrator import (
     _prepare_agent_task,
     _WorkflowDeliveryLedger,
 )
-
-
-def _request_contract(request: dict[str, Any]) -> str:
-    """Compare every request field except its wall-clock bookkeeping timestamp.
-
-    RunRequest supplies created_at from datetime.now, even in an orchestrator.
-    In durabletask 1.7.2, action sequence IDs and history-clock UUIDs identify
-    entity calls. Replaying entityOperationCalled consumes the scheduled action
-    without comparing or hashing its input. Occurrence/revision hashes cover
-    Messages, not this request timestamp. created_at is still persisted metadata:
-    this oracle does NOT establish byte-identical requests or stored timestamps.
-    Never remove timestamps from nested application messages or options.
-    """
-    contract = deepcopy(request)
-    created_at = contract.pop("created_at")
-    assert isinstance(created_at, str)
-    parsed = datetime.fromisoformat(created_at)
-    assert parsed.tzinfo is not None and parsed.utcoffset() == timezone.utc.utcoffset(parsed)
-    # Canonical JSON also distinguishes False/0 and integer/float payloads,
-    # unlike Python dict equality. Only object member ordering is immaterial.
-    return json.dumps(contract, sort_keys=True, separators=(",", ":"), allow_nan=False)
-
-
-def _assert_same_action_contract(actual: Any, recorded: Any) -> None:
-    actual, recorded = deepcopy(actual), deepcopy(recorded)
-    for action in (actual, recorded):
-        if action.HasField("sendEntityMessage"):
-            assert action.sendEntityMessage.HasField("entityOperationCalled")
-            called = action.sendEntityMessage.entityOperationCalled
-            called.input.value = _request_contract(json.loads(called.input.value))
-    # Includes action ID, kind, all routing/UUID fields and every stable input
-    # field. Non-entity actions retain full protobuf equality without exclusions.
-    assert actual == recorded
 
 
 def test_request_oracle_excludes_only_valid_top_level_bookkeeping_timestamp() -> None:

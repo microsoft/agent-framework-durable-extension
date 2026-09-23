@@ -13,10 +13,9 @@ from typing import Any, Tuple, get_args, get_origin
 from unittest.mock import Mock
 
 import pytest
+from _workflow_generic_hitl_test_support import _core_trial, _generic_workflow
+from _workflow_replay_test_support import _Episodes, _replay
 from durabletask.internal import orchestrator_service_pb2 as pb
-from test_workflow_generic_hitl import _core_trial, _generic_workflow
-from test_workflow_mixed_hitl_scheduling import _Episodes
-from test_workflow_sdk_history_replay import _replay
 
 from agent_framework_durabletask._workflows.serialization import (
     deserialize_response_type,

@@ -6,9 +6,8 @@ from collections.abc import Callable
 from copy import deepcopy
 
 import pytest
-from agent_framework import Agent, HistoryProvider, InMemoryHistoryProvider, SupportsAgentRun
-from test_private_history_pipeline import ToolChatClient
-from test_shared_history_provider import (
+from _history_pipeline_test_support import ToolChatClient
+from _shared_history_test_support import (
     OrdinaryExternalHistory,
     _bound,
     _CanonicalStateProvider,
@@ -17,6 +16,7 @@ from test_shared_history_provider import (
     _request,
     _stored,
 )
+from agent_framework import Agent, HistoryProvider, InMemoryHistoryProvider, SupportsAgentRun
 
 from agent_framework_durabletask._history_provider import (
     DurableHistoryProvider,

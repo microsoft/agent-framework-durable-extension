@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pytest
+from _shared_history_test_support import _bound, _CanonicalStateProvider, _request, _stored
 from agent_framework import AgentResponse, Message
-from test_shared_history_provider import _bound, _CanonicalStateProvider, _request, _stored
 
 from agent_framework_durabletask._history_provider import WORKING_BUFFER_KEY, DurableHistoryProvider
 from agent_framework_durabletask._shared_agent_state import DurableAgentState, DurableAgentStateResponse

@@ -10,56 +10,20 @@ to AF by the existing replay helper. Neither is a live Functions-host capture.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from _workflow_event_test_support_af import _context, _event, _execute, _prefix
+from _workflow_mixed_test_support import _mixed
+from _workflow_replay_test_support import _af_replay, _atomic_actions, _Episodes
 from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
-from azure.durable_functions import DurableOrchestrationContext
-from azure.durable_functions.models.ReplaySchema import ReplaySchema
 from azure.durable_functions.models.Task import TaskState
-from azure.durable_functions.models.TaskOrchestrationExecutor import TaskOrchestrationExecutor
-from test_workflow_mixed_hitl_scheduling import _atomic_actions, _Episodes, _mixed
-from test_workflow_sdk_history_replay import _af_replay
 
 from agent_framework_azurefunctions._workflow_af_context import AzureFunctionsWorkflowContext
-
-
-def _event(kind: int, event_id: int = -1, **fields: Any) -> dict[str, Any]:
-    return {
-        "EventType": kind,
-        "EventId": event_id,
-        "IsPlayed": True,
-        "Timestamp": "2026-09-21T00:00:00Z",
-        "Version": None,
-        **fields,
-    }
-
-
-def _prefix() -> list[dict[str, Any]]:
-    return [_event(12), _event(0, Name="buffered-events", Input="null"), _event(4, 0, Name="gate", Input="null")]
-
-
-def _context(rows: list[dict[str, Any]]) -> Any:
-    return DurableOrchestrationContext(
-        rows,
-        instanceId="buffered-events",
-        isReplaying=True,
-        parentInstanceId=None,
-        input="null",
-        upperSchemaVersion=ReplaySchema.V3.value,
-        maximumShortTimerDuration="00:05:00",
-        longRunningTimerIntervalDuration="00:03:00",
-    )
-
-
-def _execute(rows: list[dict[str, Any]], function: Callable[..., Any]) -> tuple[dict[str, Any], Any]:
-    context = _context(rows)
-    result = TaskOrchestrationExecutor().execute(context, context.histories, function)
-    return json.loads(result), context
 
 
 @pytest.mark.parametrize("early", [False, True])

@@ -5,9 +5,9 @@
 from typing import Any
 
 import pytest
+from _shared_history_test_support import _bound, _CanonicalStateProvider, _history_texts, _request, _stored
+from _shared_history_test_support import _PassiveChatClient as RecordingChatClient
 from agent_framework import Agent, CompactionProvider, ContextProvider, InMemoryHistoryProvider, Message, SessionContext
-from test_shared_history_provider import _bound, _CanonicalStateProvider, _history_texts, _request, _stored
-from test_shared_history_provider import _PassiveChatClient as RecordingChatClient
 
 from agent_framework_durabletask._history_provider import DurableHistoryProvider, ensure_durable_history
 

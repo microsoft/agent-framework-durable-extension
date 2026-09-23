@@ -15,6 +15,8 @@ from typing import Any
 
 import pytest
 from _execution_test_support import RecordingChatClient
+from _workflow_replay_test_support import _replay, _worker
+from _workflow_selection_test_support import _assert_same_action_contract, _request_contract
 from agent_framework import (
     Agent,
     AgentExecutor,
@@ -35,8 +37,6 @@ from durabletask.internal import orchestrator_service_pb2 as pb
 from durabletask.internal.entity_state_shim import StateShim
 from durabletask.serialization import JsonDataConverter
 from durabletask.worker import _ActivityExecutor
-from test_workflow_sdk_history_replay import _replay, _worker
-from test_workflow_selection_occurrences import _assert_same_action_contract, _request_contract
 
 from agent_framework_durabletask import DurableAgentState, load_agent_response, wrap_workflow_input
 from agent_framework_durabletask._message_identity import message_identity

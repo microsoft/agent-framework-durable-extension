@@ -6,6 +6,8 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 import pytest
+from _history_pipeline_test_support import AddContext, ToolChatClient
+from _shared_history_test_support import _bound, _CanonicalStateProvider, _request, _stored
 from agent_framework import (
     Agent,
     AgentSession,
@@ -16,8 +18,6 @@ from agent_framework import (
     SessionContext,
     SupportsAgentRun,
 )
-from test_private_history_pipeline import AddContext, ToolChatClient
-from test_shared_history_provider import _bound, _CanonicalStateProvider, _request, _stored
 
 from agent_framework_durabletask._history_provider import (
     WORKING_BUFFER_KEY,
