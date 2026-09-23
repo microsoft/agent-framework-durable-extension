@@ -762,6 +762,10 @@ Reset may clear local session data, but cannot remove or redirect that binding. 
 migration into an empty destination installs it. These local integrity checks do not authorize
 the operator or prove the source journal's authority or completeness.
 
+Registered migration inputs use the same code-selected plain-JSON decoder as agent inputs.
+Source and request digests therefore include opaque SDK-shaped metadata rather than a
+custom-object projection. Unrelated native SDK registrations retain their existing decoding.
+
 #### Python runtime implementation note, 2026-09-22
 
 The current Python runtime update deliberately retains workflow protocol `2` while tightening start
