@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Sequence
 from copy import deepcopy
@@ -12,10 +13,12 @@ from typing import Any
 
 import pytest
 from agent_framework import Agent, AgentResponse, AgentSession, HistoryProvider, Message, SessionContext
+from test_history_flush_atomicity_review import _reference_check
 from test_private_history_pipeline import ToolChatClient, _bound, _CanonicalStateProvider, _request, _stored, lookup
 from test_shared_history_provider import OrdinaryExternalHistory
 
 from agent_framework_durabletask._history_provider import (
+    DurableHistoryBinding,
     DurableHistoryProvider,
     current_durable_history_binding,
     ensure_durable_history,
@@ -116,32 +119,200 @@ async def test_summary_candidate_cannot_shadow_its_loaded_source(
     assert _json({message.message_id: message.additional_properties for message in replay}) == _json(expected)
 
 
-async def test_same_flush_source_is_indexed_after_allocation_before_a_later_summary() -> None:
-    owner = _owner([_request("seed", _stored("unrelated", message_id="same"))])
+@pytest.mark.parametrize("grouped", [False, True], ids=["top-level", "core-group"])
+@pytest.mark.parametrize("source_first", [True, False], ids=["source-before-summary", "summary-before-source"])
+@pytest.mark.parametrize("source_is_summary", [False, True], ids=["new-message-source", "new-summary-source"])
+async def test_same_flush_source_backlinks_do_not_depend_on_candidate_order(
+    grouped: bool, source_first: bool, source_is_summary: bool
+) -> None:
+    original = _stored("unrelated", message_id="same")
+    original_before = _json(original.to_dict())
+    owner = _owner([_request("seed", original)])
     controls = _controls(owner)
+    before = _json(owner.state.to_dict())
+    source_properties: dict[str, Any] = {"_summarized_by_summary_id": "same"}
+    summary_properties: dict[str, Any] = {"_summary_of_message_ids": ["new-source"]}
+    if source_is_summary:
+        source_properties["_summary_of_message_ids"] = []
+    if grouped:
+        source_properties = {"_group": {"id": "source-group", **source_properties}}
+        summary_properties = {"_group": {"id": "group_same", **summary_properties}}
     source = Message(
-        "user", ["new source"], message_id="new-source", additional_properties={"_summarized_by_summary_id": "same"}
+        "assistant" if source_is_summary else "user",
+        ["new source"],
+        message_id="new-source",
+        additional_properties=source_properties,
     )
+    summary = Message("assistant", ["summary"], message_id="same", additional_properties=summary_properties)
+    source_annotations, source_contents = source.additional_properties, source.contents
+    source_before = deepcopy(source.to_dict())
+    history = DurableHistoryProvider(skip_excluded=False)
+    working: dict[str, Any] = {}
+    with _bound(owner) as binding:
+        loaded = await history.get_messages("quality", state=working)
+        buffer = working["messages"]
+        assert not hasattr(source, "_durable_history_id") and not hasattr(summary, "_durable_history_id")
+        pending = [source, summary] if source_first else [summary, source]
+        buffer.extend(pending)
+        assert _json(owner.state.to_dict()) == before and binding.append_ordinal == 0
+        history.flush(working)
+        snapshot = _json(owner.state.to_dict())
+        history.flush(working)
+        assert binding.append_ordinal == 2 and _json(owner.state.to_dict()) == snapshot
+        assert working["messages"] is buffer and buffer[0] is loaded[0]
+        assert all(actual is expected for actual, expected in zip(buffer[1:], pending, strict=True))
+        assert source.additional_properties is source_annotations and source.contents is source_contents
+        assert source.message_id == getattr(source, "_durable_history_id") == "new-source"
+        assert _json(original.to_dict()) == original_before
+    cold, replay = await _cold_replay(owner, controls)
+    summary_id = "durable_revision_compaction_current_1_0" if source_first else REVISION
+    expected_ids = ["same", *(["new-source", summary_id] if source_first else [summary_id, "new-source"])]
+    stored = [message for entry in cold.state.data.conversation_history for message in entry.messages]
+    assert [message.message_id for message in stored] == [message.message_id for message in replay] == expected_ids
+    assert len(set(expected_ids)) == len(stored) == 3
+    expected_source: dict[str, Any] = {"_summarized_by_summary_id": summary_id}
+    expected_summary: dict[str, Any] = {"_summary_of_message_ids": ["new-source"]}
+    if source_is_summary:
+        expected_source["_summary_of_message_ids"] = []
+    if grouped:
+        expected_source = {"_group": {"id": "source-group", **expected_source}}
+        expected_summary = {"_group": {"id": f"group_{summary_id}", **expected_summary}}
+    source_before["additional_properties"] = expected_source
+    assert _json(source.to_dict()) == _json(source_before)
+    expected = {"same": {}, "new-source": expected_source, summary_id: expected_summary}
+    assert _json({message.message_id: message.extension_data or {} for message in stored}) == _json(expected)
+    assert _json({message.message_id: message.additional_properties for message in replay}) == _json(expected)
+
+
+@pytest.mark.parametrize("grouped", [False, True], ids=["top-level", "core-group"])
+@pytest.mark.parametrize("source_first", [True, False], ids=["source-before-summary", "summary-before-source"])
+@pytest.mark.parametrize("pending_summary", [False, True], ids=["ordinary-candidate", "summary-candidate"])
+async def test_loaded_source_wins_over_new_candidates_with_the_same_public_id(
+    grouped: bool, source_first: bool, pending_summary: bool
+) -> None:
+    def annotations(group_id: str, **links: Any) -> dict[str, Any]:
+        return {"_group": {"id": group_id, **links}} if grouped else links
+
+    old_source = _stored("old source", message_id="old-source")
+    old_source.extension_data = annotations("old-source-group", _summarized_by_summary_id="same")
+    old_summary = _stored("old summary", role="assistant", message_id="same")
+    old_summary.extension_data = annotations("group_same", _summary_of_message_ids=["old-source"])
+    original = _stored("existing source", message_id="new-source")
+    original.extension_data = annotations("existing-group", _summarized_by_summary_id="same")
+    old_lineage = _json([old_source.to_dict(), old_summary.to_dict()])
+    owner = _owner([_request("seed", old_source, old_summary, original)])
+    controls = _controls(owner)
+    pending_links: dict[str, Any] = {"_summarized_by_summary_id": "same"}
+    if pending_summary:
+        pending_links["_summary_of_message_ids"] = []
+    source = Message(
+        "assistant" if pending_summary else "user",
+        ["pending source"],
+        message_id="new-source",
+        additional_properties=annotations("pending-group", **pending_links),
+    )
+    pending_before = deepcopy(source.additional_properties)
     summary = Message(
-        "assistant", ["summary"], message_id="same", additional_properties={"_summary_of_message_ids": ["new-source"]}
+        "assistant",
+        ["new summary"],
+        message_id="same",
+        additional_properties=annotations("group_same", _summary_of_message_ids=["new-source"]),
     )
     history = DurableHistoryProvider(skip_excluded=False)
     working: dict[str, Any] = {}
     with _bound(owner) as binding:
-        await history.get_messages("quality", state=working)
+        loaded = await history.get_messages("quality", state=working)
+        assert getattr(loaded[2], "_durable_history_id") == "new-source"
         assert not hasattr(source, "_durable_history_id") and not hasattr(summary, "_durable_history_id")
-        working["messages"].extend([source, summary])
+        working["messages"].extend([source, summary] if source_first else [summary, source])
         history.flush(working)
         snapshot = _json(owner.state.to_dict())
         history.flush(working)
         assert binding.append_ordinal == 2 and _json(owner.state.to_dict()) == snapshot
     cold, replay = await _cold_replay(owner, controls)
-    summary_id = "durable_revision_compaction_current_1_0"
-    assert [message.message_id for message in replay] == ["same", "new-source", summary_id]
-    assert replay[1].additional_properties == {"_summarized_by_summary_id": summary_id}
-    assert replay[2].additional_properties == {"_summary_of_message_ids": ["new-source"]}
-    stored_source = cold.state.to_dict()["data"]["conversationHistory"][1]["messages"][0]
-    assert stored_source["extensionData"] == {"_summarized_by_summary_id": summary_id}
+    second_id = "durable_revision_compaction_current_1_0"
+    source_id, summary_id = (REVISION, second_id) if source_first else (second_id, REVISION)
+    source_public_id = source_id if pending_summary else "new-source"
+    assert source.message_id == source_public_id and getattr(source, "_durable_history_id") == source_id
+    if grouped and pending_summary:
+        pending_before["_group"]["id"] = f"group_{source_id}"
+    assert source.additional_properties == pending_before
+    assert original.extension_data == annotations("existing-group", _summarized_by_summary_id=summary_id)
+    assert _json([old_source.to_dict(), old_summary.to_dict()]) == old_lineage
+    stored = [message for entry in cold.state.data.conversation_history for message in entry.messages]
+    expected_ids = [
+        "old-source", "same", "new-source", *([source_id, summary_id] if source_first else [summary_id, source_id])
+    ]
+    expected_public = [
+        "old-source",
+        "same",
+        "new-source",
+        *([source_public_id, summary_id] if source_first else [summary_id, source_public_id]),
+    ]
+    assert [message.message_id for message in stored] == expected_ids and len(set(expected_ids)) == 5
+    assert [message.public_message_id for message in stored] == expected_public
+    assert [message.message_id for message in replay] == expected_public
+    assert _json([message.to_dict() for message in stored[:2]]) == old_lineage
+    assert stored[2].extension_data == replay[2].additional_properties == original.extension_data
+    pending_index = 3 if source_first else 4
+    assert stored[pending_index].extension_data == replay[pending_index].additional_properties == pending_before
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError, GeneratorExit])
+async def test_deferred_backlink_failure_restores_retained_aliases_before_retry(error_type: type[BaseException]) -> None:
+    owner = _owner([_request("seed", _stored("unrelated", message_id="same"))])
+    source = Message(
+        "user",
+        ["new source"],
+        message_id="new-source",
+        additional_properties={
+            "_summarized_by_summary_id": "same",
+            "_group": {"id": "source-group", "_summarized_by_summary_id": "same"},
+        },
+    )
+    summary = Message(
+        "assistant",
+        ["summary"],
+        message_id="same",
+        additional_properties={"_group": {"id": "group_same", "_summary_of_message_ids": ["new-source"]}},
+    )
+    error = error_type("after deferred backlink repair")
+    reached: list[bool] = []
+
+    class FailAfterFlush(DurableHistoryProvider):
+        def _flush(self, binding: DurableHistoryBinding, state: dict[str, Any], buffer: list[Message]) -> None:
+            super()._flush(binding, state, buffer)
+            assert source.additional_properties["_summarized_by_summary_id"] == REVISION
+            assert source.additional_properties["_group"]["_summarized_by_summary_id"] == REVISION
+            assert summary.additional_properties["_group"]["id"] == f"group_{REVISION}"
+            assert binding.append_ordinal == 2
+            reached.append(True)
+            raise error
+
+    history = FailAfterFlush(skip_excluded=False)
+    working: dict[str, Any] = {}
+    with _bound(owner) as binding:
+        await history.get_messages("quality", state=working)
+        buffer = working["messages"]
+        buffer.extend([summary, source])
+        objects: list[Any] = [owner, owner.state, owner.state.data, binding, *buffer]
+        for entry in owner.state.data.conversation_history:
+            objects.extend((entry, *entry.messages))
+        check_references = _reference_check(working, *(vars(value) for value in objects))
+        before = _json(owner.state.to_dict())
+        working_before = _json([message.to_dict() for message in buffer])
+        for _ in range(2):
+            try:
+                with pytest.raises(error_type) as caught:
+                    history.flush(working)
+                assert caught.value is error
+            finally:
+                check_references()
+                assert _json(owner.state.to_dict()) == before
+                assert _json([message.to_dict() for message in buffer]) == working_before
+                assert binding.append_ordinal == 0 and owner.persist_count == 0
+                assert not hasattr(source, "_durable_history_id") and not hasattr(summary, "_durable_history_id")
+    assert reached == [True, True]
 
 
 @pytest.mark.parametrize("summary", [True, False], ids=["summary-revision", "ordinary-working-only"])
