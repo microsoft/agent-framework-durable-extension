@@ -41,6 +41,10 @@ _LOG = logging.getLogger(__name__)
 _NOW = datetime(2026, 9, 23, tzinfo=timezone.utc)
 
 
+def _assert_json(actual: Any, expected: Any) -> None:
+    assert json.dumps(actual, sort_keys=True, allow_nan=False) == json.dumps(expected, sort_keys=True, allow_nan=False)
+
+
 def _payload(marker: bool) -> dict[str, Any]:
     return {
         "__durabletask_autoobject__": marker,
@@ -194,8 +198,8 @@ def test_registered_agent_input_and_native_entity_completion(marker: bool, proto
         "root", entity_id, called.operation, state, called.input.value
     )
     assert produced is not None
-    assert client.options[0]["metadata"] == value
-    assert json.loads(produced)["messages"][0]["additional_properties"]["opaque"] == value
+    _assert_json(client.options[0]["metadata"], value)
+    _assert_json(json.loads(produced)["messages"][0]["additional_properties"]["opaque"], value)
 
     if protocol == "current":
         scheduled = pb.HistoryEvent(eventId=action.id, entityOperationCalled=called)
@@ -208,8 +212,8 @@ def test_registered_agent_input_and_native_entity_completion(marker: bool, proto
     else:
         scheduled = helpers.new_event_sent_event(action.id, str(entity_id), json.dumps({"id": called.requestId}))
         done = helpers.new_event_raised_event(called.requestId, json.dumps({"result": produced}))
-    assert json.loads(_completed(replay.replay("root", scheduled, done)).result.value) == value
-    assert json.loads(_completed(replay.replay("root")).result.value) == value
+    _assert_json(json.loads(_completed(replay.replay("root", scheduled, done)).result.value), value)
+    _assert_json(json.loads(_completed(replay.replay("root")).result.value), value)
     assert len(client.options) == 1
 
 
@@ -415,7 +419,15 @@ def test_tag_only_decodes_one_json_layer(wire: str | None, expected: Any) -> Non
     from agent_framework_durabletask._json_payload import JsonPayload
 
     replay = _Replay()
-    assert replay.worker._data_converter.deserialize(wire, JsonPayload) == expected
+    actual = replay.worker._data_converter.deserialize(wire, JsonPayload)
+    assert type(actual) is type(expected)
+    _assert_json(actual, expected)
+
+
+@pytest.mark.parametrize(("actual", "expected"), [(False, 0), ({"value": 0}, {"value": 0.0})])
+def test_json_oracle_detects_numeric_type_changes(actual: Any, expected: Any) -> None:
+    with pytest.raises(AssertionError):
+        _assert_json(actual, expected)
 
 
 def test_invalid_framework_json_does_not_fall_back_to_custom_decoder() -> None:
