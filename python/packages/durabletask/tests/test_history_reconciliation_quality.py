@@ -262,6 +262,168 @@ async def test_loaded_source_wins_over_new_candidates_with_the_same_public_id(
     assert stored[pending_index].extension_data == replay[pending_index].additional_properties == pending_before
 
 
+@pytest.mark.parametrize("grouped", [False, True], ids=["top-level", "core-group"])
+@pytest.mark.parametrize("source_first", [True, False], ids=["source-before-summary", "summary-before-source"])
+@pytest.mark.parametrize(
+    "error_type",
+    [None, RuntimeError, asyncio.CancelledError, GeneratorExit],
+    ids=["success", "repair-error", "repair-cancel", "repair-close"],
+)
+async def test_loaded_summary_revision_repairs_the_original_named_occurrence(
+    grouped: bool,
+    source_first: bool,
+    error_type: type[BaseException] | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def annotations(group_id: str, **links: Any) -> dict[str, Any]:
+        return {"_group": {"id": group_id, **links}} if grouped else links
+
+    def links(properties: dict[str, Any]) -> dict[str, Any]:
+        return properties["_group"] if grouped else properties
+
+    leaf = _stored("leaf", message_id="leaf-public")
+    leaf.set_history_id("leaf")
+    leaf.extension_data = annotations("leaf-group", _summarized_by_summary_id="source")
+    source = _stored("stored source summary", role="assistant", message_id="source")
+    source.extension_data = {
+        **annotations("source-group", _summary_of_message_ids=["leaf"], _summarized_by_summary_id="same"),
+        "opaque": {"values": [False, 0, 0.0, None]},
+    }
+    previous = _stored("previous summary", role="assistant", message_id="same")
+    previous.extension_data = annotations("group_same", _summary_of_message_ids=["source"])
+    original_leaf, original_source = deepcopy(leaf.to_dict()), deepcopy(source.to_dict())
+    original_previous = _json(previous.to_dict())
+    owner = _owner([_request("seed", leaf), DurableAgentStateCompaction(OLD, [source, previous])])
+    owner.state.unknown_fields["futureRoot"] = {"keep": [False, 0.0]}
+    owner.state.data.unknown_fields["futureData"] = {"keep": [0, None]}
+    owner.state.record_response(
+        "finished",
+        AgentResponse(messages=[Message("assistant", ["retained result"], message_id="result-public")]),
+        delivery_window_seconds=3600,
+        now=OLD,
+    )
+    controls = _controls(owner)
+    history = DurableHistoryProvider(skip_excluded=False)
+    working: dict[str, Any] = {}
+    summary = Message(
+        "assistant",
+        ["new summary"],
+        message_id="same",
+        additional_properties=annotations("group_same", _summary_of_message_ids=["source"]),
+    )
+    second_id = "durable_revision_compaction_current_1_0"
+    source_revision_id, summary_id = (REVISION, second_id) if source_first else (second_id, REVISION)
+    with _bound(owner) as binding:
+        loaded = await history.get_messages("quality", state=working)
+        loaded_source = loaded[1]
+        assert [message.message_id for message in loaded] == ["leaf-public", "source", "same"]
+        assert loaded_source._durable_history_id == "source"  # type: ignore[attr-defined]
+        assert links(loaded_source.additional_properties)["_summarized_by_summary_id"] == "same"
+        loaded_source.contents[0].text = "revised source summary"
+        source_annotations, source_contents = loaded_source.additional_properties, loaded_source.contents
+        buffer = working["messages"]
+        buffer.insert(2 if source_first else 0, summary)
+        assert not hasattr(summary, "_durable_history_id")
+        assert _json(source.to_dict()) == _json(original_source)
+
+        if error_type is not None:
+            error = error_type("after the original source backlink was repaired")
+            original_repair = history._repair_summary_links
+            reached: list[str] = []
+
+            def fail_after_repair(*args: Any, **kwargs: Any) -> None:
+                original_repair(*args, **kwargs)
+                if args[0] is summary:
+                    assert source.extension_data is not None
+                    assert links(source.extension_data)["_summarized_by_summary_id"] == summary_id
+                    assert links(loaded_source.additional_properties)["_summarized_by_summary_id"] == "same"
+                    assert binding.append_ordinal == 2
+                    reached.append(summary_id)
+                    raise error
+
+            objects: list[Any] = [owner, owner.state, owner.state.data, binding, *buffer]
+            for entry in owner.state.data.conversation_history:
+                objects.extend((entry, *entry.messages))
+                objects.extend(content for message in entry.messages for content in message.contents)
+            objects.extend(content for message in buffer for content in message.contents)
+            check_references = _reference_check(working, *(vars(value) for value in objects))
+            before = _json(owner.state.to_dict())
+            working_before = _json([message.to_dict() for message in buffer])
+            with monkeypatch.context() as patch:
+                patch.setattr(history, "_repair_summary_links", fail_after_repair)
+                for _ in range(2):
+                    try:
+                        with pytest.raises(error_type) as caught:
+                            history.flush(working)
+                        assert caught.value is error
+                    finally:
+                        check_references()
+                        assert _json(owner.state.to_dict()) == before
+                        assert _json([message.to_dict() for message in buffer]) == working_before
+                        assert loaded_source._durable_history_id == "source"  # type: ignore[attr-defined]
+                        assert not hasattr(summary, "_durable_history_id")
+                        assert binding.append_ordinal == 0 and owner.persist_count == 0
+            assert reached == [summary_id, summary_id]
+
+        history.flush(working)
+        snapshot = _json(owner.state.to_dict())
+        history.flush(working)
+        assert _json(owner.state.to_dict()) == snapshot and binding.append_ordinal == 2
+        assert working["messages"] is buffer
+        assert any(message is loaded_source for message in buffer) and any(message is summary for message in buffer)
+        assert loaded_source.additional_properties is source_annotations and loaded_source.contents is source_contents
+        assert loaded_source.message_id == source_revision_id
+        assert loaded_source._durable_history_id == source_revision_id  # type: ignore[attr-defined]
+        assert summary.message_id == summary._durable_history_id == summary_id  # type: ignore[attr-defined]
+
+    expected_source = deepcopy(original_source)
+    links(expected_source["extensionData"])["_summarized_by_summary_id"] = summary_id
+    expected_source["extensionData"]["_excluded"] = True
+    expected_leaf = deepcopy(original_leaf)
+    links(expected_leaf["extensionData"])["_summarized_by_summary_id"] = source_revision_id
+    expected_revision = deepcopy(original_source["extensionData"])
+    if grouped:
+        expected_revision["_group"]["id"] = f"group_{source_revision_id}"
+    expected_annotations = {
+        "leaf": expected_leaf["extensionData"],
+        "source": expected_source["extensionData"],
+        "same": previous.extension_data,
+        source_revision_id: expected_revision,
+        summary_id: annotations(f"group_{summary_id}", _summary_of_message_ids=["source"]),
+    }
+    expected_order = (
+        ["leaf", source_revision_id, summary_id, "source", "same"]
+        if source_first
+        else [summary_id, "leaf", source_revision_id, "source", "same"]
+    )
+    assert _json(source.to_dict()) == _json(expected_source)
+    assert _json(leaf.to_dict()) == _json(expected_leaf) and _json(previous.to_dict()) == original_previous
+    assert _json(loaded_source.additional_properties) == _json(expected_revision)
+    assert _controls(owner) == controls and owner.persist_count == 0
+    cold, replay = await _cold_replay(owner, controls)
+    stored = [message for entry in cold.state.data.conversation_history for message in entry.messages]
+    assert [message.message_id for message in stored] == expected_order and len(stored) == 5
+    expected_public_ids = ["leaf-public" if message_id == "leaf" else message_id for message_id in expected_order]
+    assert (
+        [message.public_message_id for message in stored]
+        == [message.message_id for message in replay]
+        == (expected_public_ids)
+    )
+    assert _json({message.message_id: message.extension_data for message in stored}) == _json(expected_annotations)
+    replay_annotations = {
+        getattr(message, "_durable_history_id", None): message.additional_properties for message in replay
+    }
+    assert _json(replay_annotations) == _json(expected_annotations)
+    assert {message.message_id: message.text for message in stored} == {
+        "leaf": "leaf",
+        "source": "stored source summary",
+        "same": "previous summary",
+        source_revision_id: "revised source summary",
+        summary_id: "new summary",
+    }
+    assert _json(cold.state.to_dict()) == snapshot
+
+
 @pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError, GeneratorExit])
 async def test_deferred_backlink_failure_restores_retained_aliases_before_retry(
     error_type: type[BaseException],

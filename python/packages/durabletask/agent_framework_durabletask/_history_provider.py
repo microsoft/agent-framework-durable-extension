@@ -679,13 +679,6 @@ class DurableHistoryProvider(HistoryProvider):
                     last_known = (entry, first_exposed[1] - 1)
                 break
             last_known = (entry, len(entry.messages) - 1)
-        # New candidate IDs are not source identities. A summary may reuse its
-        # own source's public ID before allocation assigns a distinct occurrence.
-        sources_by_history_id = {
-            history_id: message
-            for message in buffer
-            if isinstance(history_id := getattr(message, _HISTORY_ID_ATTRIBUTE, None), str)
-        }
         pending_summary_links: list[tuple[Message, str, list[str]]] = []
 
         for message in buffer:
@@ -724,27 +717,22 @@ class DurableHistoryProvider(HistoryProvider):
                     index=stored_by_id,
                     used_ids=used_ids,
                 )
-                if history_id is not None and sources_by_history_id.get(history_id) is message:
-                    # A revised working object no longer represents its old occurrence.
-                    del sources_by_history_id[history_id]
                 if original_id and original_id != message.message_id and summary_ids is not None:
                     group = message.additional_properties.get(GROUP_ANNOTATION_KEY)
                     if isinstance(group, dict):
                         group[GROUP_ID_KEY] = f"group_{message.message_id}"
-                    unresolved = self._repair_summary_links(
-                        message, original_id, summary_ids, sources_by_history_id, stored_by_id
-                    )
-                    if unresolved:
-                        pending_summary_links.append((message, original_id, unresolved))
-                # Later summaries may reference this newly allocated occurrence,
-                # but never its original, potentially colliding candidate ID.
-                sources_by_history_id[cast(str, _history_message_id(message))] = message
+                    pending_summary_links.append((message, original_id, summary_ids))
             last_known = position
 
-        # A summary can precede its new source in the same flush. Resolve only
-        # allocated occurrence IDs, before the final annotation writeback.
-        for summary, original_id, unresolved in pending_summary_links:
-            self._repair_summary_links(summary, original_id, unresolved, sources_by_history_id, stored_by_id)
+        # Resolve every backlink after allocation, including loaded summaries
+        # that became revisions. Candidate IDs never identify source occurrences.
+        sources_by_history_id = {
+            history_id: message
+            for message in buffer
+            if isinstance(history_id := getattr(message, _HISTORY_ID_ATTRIBUTE, None), str)
+        }
+        for summary, original_id, summary_ids in pending_summary_links:
+            self._repair_summary_links(summary, original_id, summary_ids, sources_by_history_id, stored_by_id)
 
         for message in buffer:
             history_id = _history_message_id(message)
@@ -798,23 +786,20 @@ class DurableHistoryProvider(HistoryProvider):
         summary_ids: list[str],
         sources_by_history_id: dict[str, Message],
         stored_by_id: dict[str, tuple[DurableAgentStateEntry, int]],
-    ) -> list[str]:
-        """Repair known occurrences and return IDs whose sources are not allocated yet."""
-        unresolved: list[str] = []
+    ) -> None:
+        """Repair backlinks against final working occurrences or their stored originals."""
         for summary_source_id in set(summary_ids):
             source = sources_by_history_id.get(summary_source_id)
             stored_source: DurableAgentStateMessage | None = None
             if source is None:
                 source_position = stored_by_id.get(summary_source_id)
                 if source_position is None:
-                    unresolved.append(summary_source_id)
                     continue
                 source_entry, source_index = source_position
                 stored_source = source_entry.messages[source_index]
                 source = self._to_message(stored_source)
                 if source is None:
                     continue
-                setattr(source, _HISTORY_ID_ATTRIBUTE, source_entry.messages[source_index].message_id)
             if source is summary:
                 continue
             source_group = source.additional_properties.get(GROUP_ANNOTATION_KEY)
@@ -829,10 +814,6 @@ class DurableHistoryProvider(HistoryProvider):
                 source.additional_properties[SUMMARIZED_BY_SUMMARY_ID_KEY] = summary.message_id
             if stored_source is not None:
                 stored_source.extension_data = _copy_history_annotations(source.additional_properties)
-            source_history_id = _history_message_id(source)
-            if source_history_id is not None:
-                sources_by_history_id[source_history_id] = source
-        return unresolved
 
     @staticmethod
     def _summary_original_ids(message: Message) -> list[str] | None:

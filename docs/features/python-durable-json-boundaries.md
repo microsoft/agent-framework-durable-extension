@@ -13,12 +13,13 @@ At the plain-JSON payload decoding steps below, every object key is data. Names 
 do not select Python types, import modules or invoke SDK custom-object constructors.
 JSON-looking strings remain strings after the required transport layers are decoded.
 
-This is not a promise that reserved fields are ignored by later consumers. State and response
-envelopes still have defined meanings and validation rules. Shared v2 readers retain unknown
-JSON without activating profiles. Shared response projection uses fixed `AgentResponse`, `Message`
-and `Content` constructors. `ensure_response_format()` takes its requested Pydantic type from
-calling code. Separately, the existing `RunRequest.response_format` transport can resolve
-module-qualified models. This SDK boundary does not replace that transport or the checkpoint codec.
+Plain parsing preserves the received shape before consumer validation. It does not coerce an array
+or string into a state object. This is not a promise that reserved fields are ignored by later
+consumers. State, response and workflow envelopes still have schema, shape and profile checks.
+Unknown JSON metadata does not activate an unsupported profile. Shared response projection uses
+fixed `AgentResponse`, `Message` and `Content` constructors. `ensure_response_format()` takes its
+requested Pydantic type from calling code. Separately, the existing `RunRequest.response_format`
+transport can resolve module-qualified models. The SDK boundary does not replace that transport.
 
 ## Covered host paths
 
