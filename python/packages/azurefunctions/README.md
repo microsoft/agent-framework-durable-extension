@@ -50,6 +50,15 @@ changes. V2 readers do not resume provider sessions or workflow history.
 The Core requirement remains `agent-framework-core>=1.13.0,<2`. The Durable Task dependency
 directly requires `pydantic>=2.11,<3` for structured response handling.
 
+### JSON runtime boundary
+
+`AgentFunctionApp` decodes state and operation inputs as plain JSON for agent entities it
+generates, including workflow agent entities. This does not change native co-hosted decoding
+or cover manually wrapped entity factories or Functions workflow start, child-result and event
+decoding. The local Durable Task dependency requires `durabletask>=1.7.1,<2`. The Functions SDK
+floor remains `azure-functions-durable>=1.3.1,<2`.
+See [Python durable JSON boundaries](../../../docs/features/python-durable-json-boundaries.md).
+
 ### Basic Usage Example
 
 See the durable functions integration sample in the repository to learn how to:

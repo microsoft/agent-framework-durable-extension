@@ -61,6 +61,15 @@ uses legacy `1.1.0`, and v2 execution and mutation remain rejected. A later runt
 validate its complete candidate against an independent committed baseline before storage.
 Read-only consumers reuse the same lookup rules, without transcript fallback or cleanup writes.
 
+### JSON runtime boundary
+
+The local runtime requires `durabletask>=1.7.1,<2`. Construct `DurableAIAgentWorker` before
+starting the SDK worker. Framework-selected reads for generated agents and workflows use plain
+JSON rather than SDK custom-object reconstruction. Native co-hosted work keeps its original
+converter behavior. See
+[Python durable JSON boundaries](../../../docs/features/python-durable-json-boundaries.md) for
+covered paths, custom-converter constraints and separate checkpoint trust requirements.
+
 ### Basic Usage Example
 
 ```python

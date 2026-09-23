@@ -29,6 +29,7 @@ from ._durable_agent_state import (
     DurableAgentStateResponse,
     _validate_legacy_state_layout,  # pyright: ignore[reportPrivateUsage]
 )
+from ._json_payload import JsonPayload
 from ._models import RunRequest
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -394,8 +395,9 @@ class DurableTaskEntityStateProvider(DurableEntity, AgentEntityStateProviderMixi
 
     def _get_state_dict(self) -> dict[str, Any]:
         # A requested dict type lets the SDK coerce arrays or strings into a
-        # dictionary before admission. Validate the actual decoded wire shape.
-        raw = self.get_state(default={})
+        # dictionary before admission. The non-class tag selects plain JSON
+        # decoding, leaving the actual wire shape for the check below.
+        raw = self.get_state(intended_type=cast(Any, JsonPayload), default={})
         if raw is None:
             return {}
         if not isinstance(raw, dict):
