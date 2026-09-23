@@ -12,7 +12,9 @@ pip install agent-framework-durabletask --pre
 
 The durable task integration lets you host Microsoft Agent Framework agents using the [Durable Task](https://github.com/microsoft/durabletask-python) framework so they can persist state, replay conversation history, and recover from failures automatically.
 
-### Current Runtime Contract On This Branch
+<a id="current-runtime-contract-on-this-branch"></a>
+
+### Current Runtime Contract On This Unreleased Stack
 
 This README describes the current `python-runtime-protocol` branch. It documents unreleased
 behavior and should not be read as a released compatibility promise.
@@ -201,12 +203,12 @@ snapshots, not Core's in-process visibility of other executors' uncommitted writ
 
 ### JSON runtime boundary
 
-The local runtime requires `durabletask>=1.7.1,<2`. Construct `DurableAIAgentWorker` before
-starting the SDK worker. Framework-selected reads for generated agents and workflows use plain
-JSON rather than SDK custom-object reconstruction. Native co-hosted work keeps its original
-converter behavior. See
+The unreleased runtime uses scoped plain JSON for generated agent operation inputs, backing state,
+blocking agent results, generated workflow starts, child results and external-event/HITL values.
+Construct `DurableAIAgentWorker` before starting the SDK worker, with upstream
+`durabletask>=1.7.1,<2`. Native co-hosted work keeps its original converter behavior. See
 [Python durable JSON boundaries](../../../docs/features/python-durable-json-boundaries.md) for
-covered paths, custom-converter constraints and separate checkpoint trust requirements.
+shape and profile validation, custom-converter constraints and separate checkpoint trust requirements.
 
 ### Basic Usage Example
 

@@ -1326,21 +1326,32 @@ transcript as automatic recovery insurance.
 
 ## Python reader-stage runtime note, 2026-09-23
 
-The local reader-first implementation adds registration-scoped plain-JSON SDK decoding.
-The standalone integration requires `durabletask>=1.7.1,<2` at this stage for target-aware
-input/result decoding and deferred state reads. `AgentFunctionApp` applies its new boundary
-only to generated agent entities, not Functions workflow start, child-result or event decoding.
-See [Python durable JSON boundaries](../features/python-durable-json-boundaries.md).
+The earlier reader-first implementation in
+[PR #108](https://github.com/microsoft/agent-framework-durable-extension/pull/108) added
+registration-scoped plain-JSON SDK decoding. Its standalone integration required
+`durabletask>=1.7.1,<2` for target-aware input/result decoding and deferred state reads.
+At that stage, `AgentFunctionApp` applied the boundary only to generated agent entities, not
+Functions workflow start, child-result or event decoding.
 
-This does not activate v2 writers, migration or session restoration. Mutable state still defaults
-to `1.1.0`, and v2 snapshots remain read-only. The checkpoint codec and this ADR's rollout gates
-are unchanged. This source-level note adds no live-host validation claim.
+That stage did not activate v2 writers, migration or session restoration. Mutable state still
+defaulted to `1.1.0`, and v2 snapshots remained read-only. Those were PR #108's stage limits, not
+the current runtime contract. The checkpoint codec and this ADR's rollout gates were unchanged.
 
-Delivery staging audits unsupported live response fields before Core serialization. Rejection
-does not invoke their conversion hooks. Supported lazy values retain their existing policy,
-and duplicate completions remain no-ops without inspecting a replacement producer.
+The current unreleased stack through
+[PR #112](https://github.com/microsoft/agent-framework-durable-extension/pull/112) includes canonical
+v2 writes and scoped Functions workflow and standalone agent-result decoding. See the
+[current JSON boundary guide](../features/python-durable-json-boundaries.md) and
+[runtime implementation note](#python-runtime-implementation-note-2026-09-22) for the present
+contract and fresh-instance requirement under protocol `2`. This historical note makes no new
+live-host or supported-version validation claim.
 
-History reconciliation distinguishes loaded occurrence IDs from unallocated summary IDs and
-compares summary revisions with JSON-exact payloads. External-primary observation uses the
-provider's current storage flags, without rebinding its custom hooks. Naive response timestamp
-strings receive the same UTC interpretation on direct and history-provider append paths.
+Delivery staging in [PR #109](https://github.com/microsoft/agent-framework-durable-extension/pull/109)
+audited unsupported live response fields before Core serialization. Rejection did not invoke their
+conversion hooks. Supported lazy values retained their existing policy, and duplicate completions
+remained no-ops without inspecting a replacement producer.
+
+History reconciliation in [PR #111](https://github.com/microsoft/agent-framework-durable-extension/pull/111)
+distinguished loaded occurrence IDs from unallocated summary IDs and compared summary revisions
+with JSON-exact payloads. External-primary observation used the provider's storage flags without
+rebinding its custom hooks. Naive response timestamp strings received the same UTC interpretation
+on direct and history-provider append paths.

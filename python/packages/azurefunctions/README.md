@@ -12,7 +12,9 @@ pip install agent-framework-azurefunctions --pre
 
 The durable agent extension lets you host Microsoft Agent Framework agents on Azure Durable Functions so they can persist state, replay conversation history, and recover from failures automatically.
 
-### Current Runtime Contract On This Branch
+<a id="current-runtime-contract-on-this-branch"></a>
+
+### Current Runtime Contract On This Unreleased Stack
 
 This README describes the current `python-runtime-protocol` branch. It documents unreleased
 behavior and should not be read as a released compatibility promise.
@@ -156,13 +158,14 @@ snapshots, not Core's in-process visibility of other executors' uncommitted writ
 
 ### JSON runtime boundary
 
-`AgentFunctionApp` decodes state and operation inputs as plain JSON for generated agent entities.
-Framework agent results, generated workflow starts, child results and HITL event values also
-use scoped JSON decoding. Native co-hosted calls retain their SDK behavior. Manually wrapping
-entity factories does not install the generated-entity boundary. The Durable Task dependency
-requires `durabletask>=1.7.1,<2`. The Functions SDK
-floor remains `azure-functions-durable>=1.3.1,<2`.
-See [Python durable JSON boundaries](../../../docs/features/python-durable-json-boundaries.md).
+`AgentFunctionApp` uses plain JSON for generated agent operation inputs and backing state,
+generated workflow starts, child results and external-event/HITL values. Blocking framework
+agent-call results are guarded in generated workflows and standalone public proxies from
+`AgentFunctionApp.get_agent()`. Native co-hosted calls retain their SDK behavior. Manually wrapping
+entity factories does not install the generated-entity boundary. The upstream Durable Task floor
+is `durabletask>=1.7.1,<2`, and the Functions SDK floor remains `azure-functions-durable>=1.3.1,<2`.
+See [Python durable JSON boundaries](../../../docs/features/python-durable-json-boundaries.md) for
+shape and profile validation and separate checkpoint trust requirements.
 
 ### Basic Usage Example
 
