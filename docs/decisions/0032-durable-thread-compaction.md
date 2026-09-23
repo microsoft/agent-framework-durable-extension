@@ -757,6 +757,11 @@ gaps in delivery evidence. If evidence is missing, reject or defer migration rat
 delivered prefix. A matching `2.x` version does not certify mixed-format compatibility. These are
 prototype deployment constraints, not a mandate for its private APIs or exact final common schema.
 
+The Python writer preserves established migration binding fields across ordinary state writes.
+Reset may clear local session data, but cannot remove or redirect that binding. Only an explicit
+migration into an empty destination installs it. These local integrity checks do not authorize
+the operator or prove the source journal's authority or completeness.
+
 #### Python runtime implementation note, 2026-09-22
 
 The current Python runtime update deliberately retains workflow protocol `2` while tightening start
