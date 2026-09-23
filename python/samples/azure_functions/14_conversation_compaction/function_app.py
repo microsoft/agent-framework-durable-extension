@@ -66,7 +66,8 @@ def _create_agent() -> Any:
         # Keep the conversation client-side so the history provider (and therefore compaction)
         # owns the model's context.
         default_options={"store": False},
-        context_providers=[history, compaction],
+        # After hooks run in reverse, so append this turn before compacting it.
+        context_providers=[compaction, history],
     )
 
 

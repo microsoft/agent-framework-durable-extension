@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import logging
+from collections import deque
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -997,7 +998,7 @@ def prune_messages(
     from ._retention import _can_drop_entry  # pyright: ignore[reportPrivateUsage]
 
     live_entries = {id(entry) for entry in history}
-    changed: set[int] = set()
+    batches: dict[int, tuple[list[DurableAgentStateMessage], dict[int, deque[int]]]] = {}
     for entry, stored in pruned:
         if (
             id(entry) not in live_entries
@@ -1005,11 +1006,23 @@ def prune_messages(
             or entry.json_type not in tuple(DurableAgentStateEntryJsonType)
         ):
             continue
-        for index, candidate in enumerate(entry.messages):
-            if candidate is stored:
-                del entry.messages[index]
-                changed.add(id(entry))
-                break
+        # Count identity occurrences, not equal payloads. Shared message lists
+        # also share a batch, with selection order deciding which owner actually
+        # removed each occurrence and may therefore lose its empty envelope.
+        _, victims = batches.setdefault(id(entry.messages), (entry.messages, {}))
+        victims.setdefault(id(stored), deque()).append(id(entry))
+
+    changed: set[int] = set()
+    for messages, victims in batches.values():
+        retained: list[DurableAgentStateMessage] = []
+        for message in messages:
+            owners = victims.get(id(message))
+            if owners:
+                changed.add(owners.popleft())
+            else:
+                retained.append(message)
+        if len(retained) != len(messages):
+            messages[:] = retained
 
     remaining = [entry for entry in history if entry.messages or id(entry) not in changed or not _can_drop_entry(entry)]
     if len(remaining) != len(history):
@@ -1351,7 +1364,9 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = Fa
 
     Hand-configured durable providers retain explicit pruning preferences. Otherwise a
     shallow copy inherits ``prune_excluded``, including when preparing an already prepared
-    agent under a different policy. Caller-owned providers are never mutated.
+    agent under a different policy. This also applies to a store-only canonical audit.
+    An unset audit already disables pruning, so preparing it with the non-deleting default
+    remains a no-op. Caller-owned providers are never mutated.
     """
     validate_history_providers(agent)
     providers = getattr(agent, "context_providers", None)
@@ -1380,15 +1395,6 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = Fa
         replacement = DurableHistoryProvider(source_id=source_id)
         replacement.prune_excluded = prune_excluded
         updated.insert(insertion, replacement)
-    elif isinstance(existing, DurableHistoryProvider):
-        if existing._prune_excluded_explicit or existing.prune_excluded is prune_excluded:  # pyright: ignore[reportPrivateUsage]
-            updated = list(provider_list)
-        else:
-            replacement = copy.copy(existing)
-            replacement.prune_excluded = prune_excluded
-            if existing.store_context_from is not None:
-                replacement.store_context_from = set(existing.store_context_from)
-            updated = [replacement if provider is existing else provider for provider in provider_list]
     elif type(existing) is InMemoryHistoryProvider:
         replacement = DurableHistoryProvider(
             source_id=existing.source_id,
@@ -1403,9 +1409,27 @@ def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = Fa
             replacement.after_run_once_per_turn = existing.after_run_once_per_turn
         updated = [replacement if provider is existing else provider for provider in provider_list]
     else:
-        # Keep the external primary untouched, but still adapt compaction for an
-        # explicitly configured canonical audit below.
+        # Preserve configured providers before applying canonical retention and
+        # adapting compaction below. External primary hooks remain untouched.
         updated = list(provider_list)
+
+    # Loading ownership does not determine the sole canonical adapter's retention.
+    # Keep an unset, non-deleting audit's existing no-op preparation, but reapply
+    # inherited policy in either direction without touching explicit pins or hooks.
+    for index, provider in enumerate(updated):
+        if not isinstance(provider, DurableHistoryProvider):
+            continue
+        if provider._prune_excluded_explicit:  # pyright: ignore[reportPrivateUsage]
+            continue
+        if provider.prune_excluded is prune_excluded:
+            continue
+        if provider.prune_excluded is None and not prune_excluded and not provider.load_messages:
+            continue
+        replacement = copy.copy(provider)
+        replacement.prune_excluded = prune_excluded
+        if provider.store_context_from is not None:
+            replacement.store_context_from = set(provider.store_context_from)
+        updated[index] = replacement
 
     durable_sources = {provider.source_id for provider in updated if isinstance(provider, DurableHistoryProvider)}
     updated = [

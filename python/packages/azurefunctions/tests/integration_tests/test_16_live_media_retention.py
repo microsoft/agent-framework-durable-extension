@@ -58,12 +58,14 @@ TURNS = 8
 
 def _equal(actual: Any, expected: Any, label: str) -> None:
     # Equality covers full JSON, not just text/counts. Only hashes reach failures.
-    if actual != expected:
+    actual_json = json.dumps(actual, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    expected_json = json.dumps(expected, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    if actual_json != expected_json:
 
-        def digest(value: Any) -> str:
-            return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+        def digest(encoded: str) -> str:
+            return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
-        pytest.fail(f"{label}: full JSON mismatch ({digest(actual)} != {digest(expected)})", pytrace=False)
+        pytest.fail(f"{label}: full JSON mismatch ({digest(actual_json)} != {digest(expected_json)})", pytrace=False)
 
 
 def _stored(raw: dict[str, Any]) -> list[dict[str, Any]]:

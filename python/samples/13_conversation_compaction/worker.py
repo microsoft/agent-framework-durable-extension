@@ -90,7 +90,8 @@ def create_historian_agent() -> Agent:
         # Keep the conversation client-side so the history provider (and therefore compaction)
         # owns the model's context.
         default_options={"store": False},
-        context_providers=[history, compaction],
+        # After hooks run in reverse, so append this turn before compacting it.
+        context_providers=[compaction, history],
     )
 
 
@@ -145,15 +146,13 @@ def setup_worker(worker: DurableTaskSchedulerWorker) -> DurableAIAgentWorker:
 
 async def main():
     """Main entry point for the worker process."""
-    worker = get_worker()
-    setup_worker(worker)
-
-    logger.info("Worker is ready and listening for requests...")
-
     try:
-        worker.start()
-        while True:
-            await asyncio.sleep(1)
+        with get_worker() as worker:
+            setup_worker(worker)
+            logger.info("Worker is ready and listening for requests...")
+            worker.start()
+            while True:  # noqa: ASYNC110
+                await asyncio.sleep(1)
     except KeyboardInterrupt:
         logger.debug("Worker shutdown initiated")
 
