@@ -127,6 +127,15 @@ Host activation, transactional session capture and the versioned workflow start 
 land together in the later runtime layer. The private model alone does not enforce a committed
 storage baseline or make provider side effects transactional.
 
+### JSON runtime boundary
+
+The local runtime requires `durabletask>=1.7.1,<2`. Construct `DurableAIAgentWorker` before
+starting the SDK worker. Framework-selected reads for generated agents and workflows use plain
+JSON rather than SDK custom-object reconstruction. Native co-hosted work keeps its original
+converter behavior. See
+[Python durable JSON boundaries](../../../docs/features/python-durable-json-boundaries.md) for
+covered paths, custom-converter constraints and separate checkpoint trust requirements.
+
 ### Basic Usage Example
 
 ```python

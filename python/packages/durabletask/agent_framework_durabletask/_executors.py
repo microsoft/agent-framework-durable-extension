@@ -15,7 +15,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 from agent_framework import AgentResponse, AgentSession, Content, Message
 from durabletask.client import TaskHubGrpcClient
@@ -24,6 +24,7 @@ from durabletask.task import CompletableTask, CompositeTask, OrchestrationContex
 from pydantic import BaseModel
 
 from ._constants import DEFAULT_MAX_POLL_RETRIES, DEFAULT_POLL_INTERVAL_SECONDS
+from ._json_payload import JsonPayload
 from ._models import AgentSessionId, DurableAgentSession, RunRequest
 from ._response_utils import ensure_response_format, load_agent_response
 from ._state_reader import read_agent_state
@@ -537,7 +538,9 @@ class OrchestrationAgentExecutor(DurableAgentExecutor[DurableAgentTask]):
             entity_task.complete(acceptance_response)
         else:
             # Blocking mode: call entity and wait for response
-            entity_task = self._context.call_entity(entity_id, "run", run_request.to_dict())
+            entity_task = self._context.call_entity(
+                entity_id, "run", run_request.to_dict(), return_type=cast(Any, JsonPayload)
+            )
 
         # Wrap in DurableAgentTask for response transformation
         return DurableAgentTask(
