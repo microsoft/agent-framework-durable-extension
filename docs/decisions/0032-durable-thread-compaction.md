@@ -1262,3 +1262,8 @@ are unchanged. This source-level note adds no live-host validation claim.
 Delivery staging audits unsupported live response fields before Core serialization. Rejection
 does not invoke their conversion hooks. Supported lazy values retain their existing policy,
 and duplicate completions remain no-ops without inspecting a replacement producer.
+
+History reconciliation distinguishes loaded occurrence IDs from unallocated summary IDs and
+compares summary revisions with JSON-exact payloads. External-primary observation uses the
+provider's current storage flags, without rebinding its custom hooks. Naive response timestamp
+strings receive the same UTC interpretation on direct and history-provider append paths.
