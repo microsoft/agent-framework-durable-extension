@@ -29,6 +29,7 @@ from test_workflow_mixed_hitl_review import _Episodes
 from test_workflow_recorded_replay_review import _LOGGER, _af_replay, _replay, _worker
 from typing_extensions import Never
 
+from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 from agent_framework_durabletask._workflows.runner_context import CapturingRunnerContext
 from agent_framework_durabletask._workflows.serialization import deserialize_value, serialize_value
 
@@ -534,7 +535,7 @@ def test_sdk_dispatch_order_merge_reaches_message_pipeline_independent_of_comple
     if mixed:
         assert "root" not in transport.completions
         transport.cold("root")
-        transport.complete_named("root::sub::0", "child")
+        transport.complete_named(subworkflow_instance_id("root", "sub", 0), "child")
     completion = transport.completions["root"]
     assert completion.orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
     assert json.dumps(json.loads(completion.result.value), sort_keys=True) == json.dumps(expected, sort_keys=True)

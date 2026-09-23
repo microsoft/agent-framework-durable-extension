@@ -35,6 +35,7 @@ from test_workflow_recorded_replay_review import _LOGGER, _af_replay, _replay, _
 from typing_extensions import Never
 
 from agent_framework_durabletask import DurableWorkflowClient
+from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 
 
 class _Episodes:
@@ -306,8 +307,8 @@ def test_real_downstream_signaler_advances_two_waves_before_child_join_and_cold_
         transport.signal("root", event_name="a", data=10)
         transport.flush()
     transport.complete_named("root", "seed")
-    children = ["root::sub::0", "root::sub::1"]
-    owners = [f"{child}::leaf::0" if nested else child for child in children]
+    children = [subworkflow_instance_id("root", "sub", ordinal) for ordinal in range(2)]
+    owners = [subworkflow_instance_id(child, "leaf", 0) if nested else child for child in children]
     expected_parents = {child: "root" for child in children}
     if nested:
         expected_parents.update(zip(owners, children, strict=True))
@@ -388,20 +389,21 @@ def test_ready_later_child_routes_to_collector_that_answers_earlier_child() -> N
     controls.update(client=transport.client, cascade=True)
     transport.client.start_workflow("go", instance_id="root")
     transport.complete_named("root", "seed")
-    for instance in ("root::sub::0", "root::sub::1"):
+    children = [subworkflow_instance_id("root", "sub", ordinal) for ordinal in range(2)]
+    for instance in children:
         transport.complete_named(instance, "child")
     transport.complete_named("root", "parent")
     transport.complete_named("root", "writer")
     transport.reply("a", 10)
     for executor in ("parent", "bridge", "signaler"):
         transport.complete_named("root", executor)
-    transport.complete_named("root::sub::1", "child")
+    transport.complete_named(children[1], "child")
     assert transport.pending() == {"sub~0~b"}
-    assert transport.statuses["root"]["subworkflows"] == {"sub": {"0": "root::sub::0"}}
+    assert transport.statuses["root"]["subworkflows"] == {"sub": {"0": children[0]}}
     # Original-invocation ordered buffering would deadlock right here.
     _cold_both(transport, workflow)
     transport.complete_named("root", "collector")
-    transport.complete_named("root::sub::0", "child")
+    transport.complete_named(children[0], "child")
     transport.complete_named("root", "collector")
     expected = [{"signal": 11}, {"child": 12}, {"child": 11}]
     assert json.loads(transport.completions["root"].result.value) == expected
@@ -415,7 +417,7 @@ def test_waiting_for_child_at_wave_budget_does_not_spend_another_iteration() -> 
     transport.client.start_workflow("go", instance_id="root")
     for executor in ("seed", "parent", "writer", "sink"):
         transport.complete_named("root", executor)
-    transport.complete_named("root::sub::0", "child")
+    transport.complete_named(subworkflow_instance_id("root", "sub", 0), "child")
     # Rejections execute only admission, not handlers or state changes.
     for _ in range(3):
         transport.reply("a", "invalid")
@@ -428,7 +430,7 @@ def test_waiting_for_child_at_wave_budget_does_not_spend_another_iteration() -> 
     transport.complete_named("root", "sink")
     _cold_both(transport, workflow)
     transport.reply("sub~0~b", 11)
-    transport.complete_named("root::sub::0", "child")
+    transport.complete_named(subworkflow_instance_id("root", "sub", 0), "child")
     assert transport.completions["root"].orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
 
 
@@ -454,7 +456,7 @@ def test_rejected_event_is_consumed_once_before_corrected_reply_on_cold_sdks(
     if early:
         deliver_invalid()
     transport.complete_named("root", "seed")
-    transport.complete_named("root::sub::0", "child")
+    transport.complete_named(subworkflow_instance_id("root", "sub", 0), "child")
     for executor in ("parent", "writer", "sink"):
         transport.complete_named("root", executor)
     if not early:
@@ -581,7 +583,7 @@ def test_downstream_failure_or_termination_does_not_dispatch_signaler(failure: s
     transport.reply("a", 10)
     transport.complete_named("root", "parent")
     if failure == "child":
-        _, task_id = transport.parents["root::sub::0"]
+        _, task_id = transport.parents[subworkflow_instance_id("root", "sub", 0)]
         event = helpers.new_sub_orchestration_failed_event(task_id, RuntimeError("downstream failure"))
     elif failure == "bridge":
         event = helpers.new_task_failed_event(next(iter(transport.actions["root"])), RuntimeError("downstream failure"))
@@ -692,8 +694,8 @@ def test_direct_signal_control_preserves_wave_state_and_outputs(
     transport = _Episodes(workflow)
     assert transport.client.start_workflow("go", instance_id="root") == "root"
     transport.complete_named("root", "seed")
-    child_ids = ["root::sub::0", "root::sub::1"]
-    owners = [f"{child}::leaf::0" if nested else child for child in child_ids]
+    child_ids = [subworkflow_instance_id("root", "sub", ordinal) for ordinal in range(2)]
+    owners = [subworkflow_instance_id(child, "leaf", 0) if nested else child for child in child_ids]
     paths = [f"sub~{ordinal}~" + ("leaf~0~" if nested else "") + "b" for ordinal in range(2)]
     for owner in owners:
         transport.complete_named(owner, "child")
@@ -787,10 +789,10 @@ def test_mixed_sdk_failure_does_not_schedule_or_run_a_pending_reply(failure: str
     transport.complete_named("root", "parent")
     transport.complete_named("root", "writer")
     transport.complete_named("root", "sink")
-    transport.complete_named("root::sub::0", "child")
+    transport.complete_named(subworkflow_instance_id("root", "sub", 0), "child")
     assert transport.pending() == {"a", "sub~0~b"}
     if failure == "child":
-        _, task_id = transport.parents["root::sub::0"]
+        _, task_id = transport.parents[subworkflow_instance_id("root", "sub", 0)]
         event = helpers.new_sub_orchestration_failed_event(task_id, RuntimeError("child failed"))
         expected = pb.ORCHESTRATION_STATUS_FAILED
     elif failure == "activity":
@@ -821,7 +823,7 @@ def test_functions_replay_services_parent_reply_while_child_is_pending() -> None
     transport.complete_named("root", "parent")
     transport.complete_named("root", "writer")
     transport.complete_named("root", "sink")
-    transport.complete_named("root::sub::0", "child")
+    transport.complete_named(subworkflow_instance_id("root", "sub", 0), "child")
     transport.reply("a", 10)
     controls["send"] = lambda value: transport.client.send_hitl_response("root", "sub~0~b", value)
     transport.complete_named("root", "parent")
@@ -830,7 +832,7 @@ def test_functions_replay_services_parent_reply_while_child_is_pending() -> None
     result = _af_replay(transport.histories["root"], workflow, instance="root")
     assert not result["isDone"]
     assert set(result["customStatus"]["pending_requests"]) == {"c"}
-    assert result["customStatus"]["subworkflows"] == {"sub": {"0": "root::sub::0"}}
+    assert result["customStatus"]["subworkflows"] == {"sub": {"0": subworkflow_instance_id("root", "sub", 0)}}
     assert "events" not in result["customStatus"]
     assert controls["seen"] == expected == [("a", 10)]
 
@@ -855,7 +857,7 @@ def test_ready_sibling_wait_survives_parent_handler_and_child_completion() -> No
     transport.complete_named("root", "parent")
     transport.complete_named("root", "writer")
     transport.complete_named("root", "sink")
-    transport.complete_named("root::sub::0", "child")
+    transport.complete_named(subworkflow_instance_id("root", "sub", 0), "child")
     assert transport.pending() == {"a", "d", "sub~0~b"}
     transport.reply("a", 10)
     scheduled = set(transport.actions["root"])
@@ -869,7 +871,7 @@ def test_ready_sibling_wait_survives_parent_handler_and_child_completion() -> No
     assert transport.pending() == {"c", "d", "sub~0~b"}
     transport.cold("root")
     transport.reply("sub~0~b", 11)
-    transport.complete_named("root::sub::0", "child")
+    transport.complete_named(subworkflow_instance_id("root", "sub", 0), "child")
     assert transport.pending() == {"c", "d"}
     assert "subworkflows" not in transport.statuses["root"]
     transport.complete_named("root", "parent")
@@ -913,7 +915,7 @@ def test_functions_sdk_mixed_failure_ends_the_shared_orchestrator(failure: str) 
     transport.complete_named("root", "writer")
     transport.complete_named("root", "sink")
     if failure == "child":
-        _, task_id = transport.parents["root::sub::0"]
+        _, task_id = transport.parents[subworkflow_instance_id("root", "sub", 0)]
         failed = helpers.new_sub_orchestration_failed_event(task_id, RuntimeError("mixed failure"))
     else:
         transport.reply("a", 10)

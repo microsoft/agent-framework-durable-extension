@@ -21,6 +21,7 @@ from durabletask.internal import orchestrator_service_pb2 as pb
 from durabletask.worker import TaskHubGrpcWorker, _ActivityExecutor, _OrchestrationExecutor
 
 from agent_framework_durabletask import DurableAIAgentWorker, wrap_workflow_input
+from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 from agent_framework_durabletask._workflows.protocol import validate_workflow_start_input
 from agent_framework_durabletask._workflows.serialization import (
     SUBWORKFLOW_ADDRESS_KEY,
@@ -210,13 +211,14 @@ def test_probe_detects_actual_checkpoint_construction_but_json_validation_does_n
     ids=["none", "empty", "blank", "bool", "number", "mapping", "mock", "string-spec-mock"],
 )
 def test_provenance_requires_real_nonblank_parent_string(parent: Any) -> None:
-    # Keep new-helper imports local so registered regression tests can also be
-    # collected against the unmodified baseline for meaningful red/green runs.
+    # Exercise the provenance boundary directly with an otherwise valid child ID.
     from agent_framework_durabletask._workflows.protocol import validate_workflow_start_provenance
 
     value = _internal(serialize_value(_PickleProbe("rejected")))
     with pytest.raises(ValueError, match="requires SDK parent instance metadata"):
-        validate_workflow_start_provenance(value, instance_id="root::child::0", parent_instance_id=parent)
+        validate_workflow_start_provenance(
+            value, instance_id=subworkflow_instance_id("root", "child", 0), parent_instance_id=parent
+        )
     assert _PICKLE_CALLS == []
 
 
@@ -233,7 +235,9 @@ def test_registered_dt_root_rejects_internal_markers_before_decoding(parent: str
     # Application-supplied metadata cannot substitute for the service field.
     value["parent_instance_id"] = "root"
     before = deepcopy(value)
-    result = host.start("dafx-provenance-leaf", "root::child::0", wrap_workflow_input(value), parent)
+    result = host.start(
+        "dafx-provenance-leaf", subworkflow_instance_id("root", "child", 0), wrap_workflow_input(value), parent
+    )
     failure = _only_action(result, "completeOrchestration").completeOrchestration
     assert failure.orchestrationStatus == pb.ORCHESTRATION_STATUS_FAILED
     assert failure.failureDetails.errorType == "ValueError"
@@ -246,7 +250,12 @@ def test_registered_dt_root_rejects_internal_markers_before_decoding(parent: str
 def test_registered_dt_child_rejects_inconsistent_address_before_decoding(case: str) -> None:
     workflow, echo = _leaf()
     host = _DTStarts(workflow)
-    result = host.start("dafx-provenance-leaf", "root::child::0", wrap_workflow_input(_invalid_child(case)), "root")
+    result = host.start(
+        "dafx-provenance-leaf",
+        subworkflow_instance_id("root", "child", 0),
+        wrap_workflow_input(_invalid_child(case)),
+        "root",
+    )
     failure = _only_action(result, "completeOrchestration").completeOrchestration
     assert failure.orchestrationStatus == pb.ORCHESTRATION_STATUS_FAILED
     assert failure.failureDetails.errorType == "ValueError"
@@ -256,7 +265,11 @@ def test_registered_dt_child_rejects_inconsistent_address_before_decoding(case: 
 
 @pytest.mark.parametrize(
     ("parent", "instance"),
-    [("unrelated", "root::child::0"), ("root", "root::other::0"), ("root", "root::child::0::grand::0")],
+    [
+        ("unrelated", subworkflow_instance_id("root", "child", 0)),
+        ("root", subworkflow_instance_id("root", "other", 0)),
+        ("root", subworkflow_instance_id(subworkflow_instance_id("root", "child", 0), "grand", 0)),
+    ],
 )
 def test_registered_dt_metadata_must_match_immediate_parent_and_current_child(parent: str, instance: str) -> None:
     workflow, echo = _leaf()
@@ -298,8 +311,8 @@ def test_registered_dt_child_and_grandchild_use_real_parent_history_and_typed_va
     child_id, child = host.child(root, child_action)
     grand_action = _only_action(child, "createSubOrchestration")
     grand_id, grand = host.child(child_id, grand_action)
-    assert child_id == f"{root}::sub:: 世界::0"
-    assert grand_id == f"{child_id}::grand hop::0"
+    assert child_id == subworkflow_instance_id(root, "sub:: 世界", 0)
+    assert grand_id == subworkflow_instance_id(child_id, "grand hop", 0)
     for instance, expected_parent in ((child_id, root), (grand_id, child_id)):
         start = next(e.executionStarted for e in host.histories[instance] if e.HasField("executionStarted"))
         assert start.parentInstance.orchestrationInstance.instanceId == expected_parent
