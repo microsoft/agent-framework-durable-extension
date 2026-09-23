@@ -242,7 +242,10 @@ async def test_loaded_source_wins_over_new_candidates_with_the_same_public_id(
     assert _json([old_source.to_dict(), old_summary.to_dict()]) == old_lineage
     stored = [message for entry in cold.state.data.conversation_history for message in entry.messages]
     expected_ids = [
-        "old-source", "same", "new-source", *([source_id, summary_id] if source_first else [summary_id, source_id])
+        "old-source",
+        "same",
+        "new-source",
+        *([source_id, summary_id] if source_first else [summary_id, source_id]),
     ]
     expected_public = [
         "old-source",
