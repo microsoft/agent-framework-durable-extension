@@ -788,6 +788,12 @@ application parent supplying an otherwise consistent envelope. Trusted worker an
 deployments remain required. Internal checkpoint decoding still uses pickle and is not safe for
 arbitrary untrusted input.
 
+Activity state is compared with a detached encoding captured on the receiving worker, not
+producer pickle bytes. Explicit writes still win, and in-place JSON changes remain type-sensitive.
+Streaming fallback is limited to an immediate capability refusal. Exceptions from awaited setup,
+iteration or finalization never authorize a second invocation. Custom non-streaming agents must
+reject the stream argument before entering asynchronous work.
+
 Child-ID scheme `1` always uses 74 ASCII characters, `dafxsw_v1_` plus the full SHA-256 hex digest
 over a domain separator and length-framed UTF-8 (actual parent ID, exact executor ID, decimal ordinal).
 Dispatch and provenance helpers apply the same derivation at every hop, not an authentication check.
