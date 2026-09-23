@@ -1052,7 +1052,7 @@ class AgentEntity:
             origin_code = traceback.tb_frame.f_code if traceback is not None else None
             entry_failure = origin_code is not None and (
                 origin_code is getattr(run_callable, "__code__", None)
-                or origin_code is getattr(getattr(type(run_callable), "__call__", None), "__code__", None)
+                or origin_code is getattr(type(run_callable).__call__, "__code__", None)
                 or any(
                     origin_code is getattr(vars(base).get("run"), "__code__", None) for base in type(self.agent).__mro__
                 )
