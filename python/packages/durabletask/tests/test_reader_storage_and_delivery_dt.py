@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Reader follow-ups at real SDK storage and task completion boundaries."""
+"""State admission and response delivery at SDK storage and task completion boundaries."""
 
 from __future__ import annotations
 
