@@ -5,7 +5,7 @@
 from typing import Any, cast
 
 from .._shared_state_validation import _json_value  # pyright: ignore[reportPrivateUsage]
-from .naming import split_subworkflow_request_id, validate_executor_id
+from .naming import split_subworkflow_request_id, subworkflow_instance_id, validate_executor_id
 from .serialization import SUBWORKFLOW_ADDRESS_KEY, SUBWORKFLOW_INPUT_KEY
 
 WORKFLOW_ENGINE_VERSION = 2
@@ -54,8 +54,8 @@ def validate_workflow_start_provenance(value: Any, *, instance_id: str, parent_i
     if not all(type(field) is str and field.strip() for field in (root, workflow_name, prefix)):
         raise ValueError("Invalid internal workflow child address.")
 
-    # Reconstruct from the address, rather than splitting instance IDs on '::'.
-    # Root IDs and legitimate executor IDs may themselves contain that sequence.
+    # Reconstruct each physical hop using the dispatch naming contract. Logical
+    # paths retain executor names, while physical IDs never expose their ancestry.
     claimed_parent = cast(str, root)
     remainder = cast(str, prefix)
     while remainder:
@@ -66,7 +66,7 @@ def validate_workflow_start_provenance(value: Any, *, instance_id: str, parent_i
         validate_executor_id(executor_id)
         if ordinal < 0 or remainder != f"{executor_id}~{ordinal}~{tail}":
             raise ValueError("Invalid internal workflow child address prefix.")
-        child = f"{claimed_parent}::{executor_id}::{ordinal}"
+        child = subworkflow_instance_id(claimed_parent, executor_id, ordinal)
         if not tail:
             if claimed_parent != parent_instance_id or child != instance_id:
                 raise ValueError("Internal workflow child address does not match SDK instance metadata.")

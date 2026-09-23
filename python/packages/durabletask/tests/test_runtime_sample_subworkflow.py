@@ -23,6 +23,7 @@ from durabletask.task import CompletableTask
 from durabletask.worker import _Registry as TaskRegistry
 
 from agent_framework_durabletask import DurableAIAgentWorker
+from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 from agent_framework_durabletask._workflows.orchestrator import SUBWORKFLOW_ADDRESS_KEY, SUBWORKFLOW_INPUT_KEY
 from agent_framework_durabletask._workflows.protocol import unwrap_workflow_input
 from agent_framework_durabletask._workflows.serialization import deserialize_value
@@ -292,7 +293,7 @@ def test_real_sample_subworkflow_completes_through_registered_hosts(
     assert request["message"] == review.strip()
     assert request["contextMessages"] == [Message("user", [review.strip()]).to_dict()]
     assert len(request["contextMessageIds"]) == 1
-    assert backend.sub_orchestrator_calls[0]["instance_id"] == "root-run::sentiment_sub::0"
+    assert backend.sub_orchestrator_calls[0]["instance_id"] == subworkflow_instance_id("root-run", "sentiment_sub", 0)
     assert len(backend.entity_contexts) == 1
 
     chat_messages = chat_client.calls[0]

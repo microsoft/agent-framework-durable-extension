@@ -64,6 +64,7 @@ from .hitl_checkpoint import workflow_hitl_checkpoint_name
 from .naming import (
     WORKFLOW_INPUT_EXECUTOR_ID,
     qualify_subworkflow_request_id,
+    subworkflow_instance_id,
     workflow_executor_activity_name,
     workflow_message_id,
     workflow_orchestrator_name,
@@ -110,11 +111,9 @@ _FORWARDING_PROVENANCE = "_durable_workflow_forwarding"
 # trust-boundary sanitizer in serialization.py) so the child orchestrator can tell a
 # trusted sub-orchestration payload apart from untrusted top-level client input.
 #
-# Nesting is intentionally *not* capped by a depth counter: a workflow graph cannot
-# express unbounded recursion (a WorkflowExecutor wraps a concrete Workflow instance,
-# so the nesting tree is finite and fixed at build time), and the recursively-derived
-# child instance ids grow with depth, so the durable backend's instance-id length
-# limit is the natural ceiling for any pathological construction.
+# This layer adds no nesting-depth counter. Physical child IDs have fixed length,
+# but logical request paths, checkpoint payloads and registration work still grow
+# with nesting. Bounded IDs do not remove backend payload or application limits.
 
 
 # ============================================================================
@@ -1667,12 +1666,10 @@ def _prepare_all_tasks(
                 agent_messages_by_executor[executor_id].append((executor_id, message, source_executor_id))
         elif isinstance(executor, WorkflowExecutor):
             for message, source_executor_id in messages_with_sources:
-                # Derive a deterministic, globally-unique child instance id. The counter
-                # persists across supersteps, so two invocations of the same node (in the
-                # same or different supersteps, e.g. fan-out) never collide, and the ids
-                # are stable across orchestration replay.
+                # Derive a bounded, deterministic physical child ID. The run-wide
+                # ordinal distinguishes repeated invocations, including across waves.
                 ordinal = subworkflow_counter[0]
-                child_instance_id = f"{ctx.instance_id}::{executor_id}::{ordinal}"
+                child_instance_id = subworkflow_instance_id(ctx.instance_id, executor_id, ordinal)
                 subworkflow_counter[0] += 1
                 # Extend this orchestration's request-path prefix by one hop
                 # (``{executor}~{ordinal}~``) so an executor inside the child builds a

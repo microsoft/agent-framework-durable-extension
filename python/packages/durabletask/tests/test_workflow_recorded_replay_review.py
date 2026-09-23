@@ -12,11 +12,13 @@ old in-flight protocol-2 runs. Fresh starts are required despite the same marker
 New histories below are constructed from real registered producer results,
 not relabeled historical captures. No network worker is started.
 
-The historical child also lacks ExecutionStarted.parentInstance and is legacy
-incompatible with the parent-provenance guard. Positive child replay controls
-explicitly transform a copy using its matching recorded parent dispatch. That
-service-shaped metadata is not part of the original capture or a compatibility
-claim. No parent is inferred from child input markers or an instance ID shape.
+The historical child also lacks ExecutionStarted.parentInstance and has an old
+concatenated instance ID. Positive replay controls explicitly transform copies
+of both histories using the matching recorded parent dispatch, adding service
+parent metadata and replacing the child ID in the start and parent-created
+events. These are service-shaped controls, not original captures or a claim
+that old runs can be migrated. No parent is inferred from child input markers
+or an instance ID shape.
 
 Mixed local/child assertions are unconditional. They require a reconstructed
 snapshot with local requests and only unfinished child ordinals. Live backend
@@ -53,6 +55,7 @@ from test_workflow_hitl_lifecycle_audit import _Transport, _typed_workflow
 from typing_extensions import Never
 
 from agent_framework_durabletask import DurableAIAgentWorker, DurableWorkflowClient, wrap_workflow_input
+from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "workflow_replay"
 _LOGGER = logging.getLogger(__name__)
@@ -98,26 +101,37 @@ def _history(name: str) -> list[Any]:
     return [ParseDict(row, pb.HistoryEvent()) for row in rows]
 
 
-def _child_history_with_recorded_parent(parent: list[Any], child: list[Any]) -> list[Any]:
-    """Transform a legacy copy using its recorded dispatch, not its input markers."""
+def _service_shaped_histories(parent: list[Any], child: list[Any]) -> tuple[list[Any], list[Any]]:
+    """Transform legacy copies only after proving their original dispatch matches."""
     parent_starts = [event.executionStarted for event in parent if event.HasField("executionStarted")]
     child_starts = [event.executionStarted for event in child if event.HasField("executionStarted")]
     assert len(parent_starts) == len(child_starts) == 1
     parent_start, child_start = parent_starts[0], child_starts[0]
     parent_id = parent_start.orchestrationInstance.instanceId
+    old_child_id = child_start.orchestrationInstance.instanceId
     assert parent_id and not child_start.HasField("parentInstance")
     dispatches = [
         event
         for event in parent
         if event.HasField("subOrchestrationInstanceCreated")
-        and event.subOrchestrationInstanceCreated.instanceId == child_start.orchestrationInstance.instanceId
+        and event.subOrchestrationInstanceCreated.instanceId == old_child_id
     ]
     assert len(dispatches) == 1
     dispatch = dispatches[0]
     assert dispatch.subOrchestrationInstanceCreated.name == child_start.name
     assert dispatch.subOrchestrationInstanceCreated.input == child_start.input
-    transformed = deepcopy(child)
-    started = next(event.executionStarted for event in transformed if event.HasField("executionStarted"))
+    # Keep the capture's legacy identity explicit. The graph above supplies the
+    # executor and ordinal, not a parsed child ID or claimed input parentage.
+    assert parent_id == "audit-mixed" and old_child_id == "audit-mixed::sub::0"
+    child_id = subworkflow_instance_id(parent_id, "sub", 0)
+    transformed_parent, transformed_child = deepcopy(parent), deepcopy(child)
+    for event in transformed_parent:
+        if event.HasField("subOrchestrationInstanceCreated"):
+            created = event.subOrchestrationInstanceCreated
+            assert created.instanceId == old_child_id
+            created.instanceId = child_id
+    started = next(event.executionStarted for event in transformed_child if event.HasField("executionStarted"))
+    started.orchestrationInstance.instanceId = child_id
     started.parentInstance.CopyFrom(
         pb.ParentInstanceInfo(
             taskScheduledId=dispatch.eventId,
@@ -126,7 +140,9 @@ def _child_history_with_recorded_parent(parent: list[Any], child: list[Any]) -> 
         )
     )
     assert not child_start.HasField("parentInstance")
-    return transformed
+    assert child_start.orchestrationInstance.instanceId == old_child_id
+    assert dispatch.subOrchestrationInstanceCreated.instanceId == old_child_id
+    return transformed_parent, transformed_child
 
 
 def _worker(workflow: Workflow) -> Any:
@@ -341,8 +357,8 @@ def test_constructed_sibling_histories_replay_exact_registered_results(host: str
 def test_service_shaped_replay_rebuilds_local_and_active_child_status_snapshot() -> None:
     workflow, _ = _graph(mixed=True)
     native = _worker(workflow)
-    parent = _history("mixed-parent-paused")
-    child = _child_history_with_recorded_parent(parent, _history("mixed-child-paused"))
+    parent, child = _service_shaped_histories(_history("mixed-parent-paused"), _history("mixed-child-paused"))
+    child_id = subworkflow_instance_id("audit-mixed", "sub", 0)
     assert len(parent) == 9 and len(child) == 5
     # The local gate has completed, the child has not. Discovery must precede
     # the child join, including a cold replay with no new completion event.
@@ -350,14 +366,14 @@ def test_service_shaped_replay_rebuilds_local_and_active_child_status_snapshot()
     assert not any(event.HasField("subOrchestrationInstanceCompleted") for event in parent)
     before = _replay(native, "audit-mixed", parent[:3], parent[3:7])
     visible = json.loads(before.encoded_custom_status)
-    assert visible["subworkflows"] == {"sub": {"0": "audit-mixed::sub::0"}}
+    assert visible["subworkflows"] == {"sub": {"0": child_id}}
     after = _replay(native, "audit-mixed", parent[:7], parent[7:])
     assert list(after.actions) == []
-    child_state = _replay(native, "audit-mixed::sub::0", child[:3], child[3:])
+    child_state = _replay(native, child_id, child[:3], child[3:])
     assert "b" in json.loads(child_state.encoded_custom_status)["pending_requests"]
     assert after.encoded_custom_status is not None
     status = json.loads(after.encoded_custom_status)
-    assert status["subworkflows"] == {"sub": {"0": "audit-mixed::sub::0"}}
+    assert status["subworkflows"] == {"sub": {"0": child_id}}
     assert status["state"] == "waiting_for_human_input" and set(status["pending_requests"]) == {"a"}
     cold = _replay(native, "audit-mixed", parent)
     assert list(cold.actions) == []
@@ -388,20 +404,20 @@ def test_public_discovery_includes_local_request_before_child_completion() -> No
 def test_service_shaped_all_completed_transition_retires_child_address() -> None:
     workflow, gates = _graph(mixed=True)
     native = _worker(workflow)
-    parent = _history("mixed-parent-paused")
-    child = _child_history_with_recorded_parent(parent, _history("mixed-child-paused"))
+    parent, child = _service_shaped_histories(_history("mixed-parent-paused"), _history("mixed-child-paused"))
+    child_id = subworkflow_instance_id("audit-mixed", "sub", 0)
     reply = ParseDict({"eventId": -1, "eventRaised": {"name": "b", "input": "22"}}, pb.HistoryEvent())
     new = [helpers.new_orchestrator_started_event(), reply]
-    resumed = _replay(native, "audit-mixed::sub::0", child, new)
+    resumed = _replay(native, child_id, child, new)
     assert len(resumed.actions) == 1 and resumed.actions[0].HasField("scheduleTask")
     action = resumed.actions[0]
     result = _ActivityExecutor(native._registry, _LOGGER, native._data_converter).execute(
-        "audit-mixed::sub::0", action.scheduleTask.name, action.id, action.scheduleTask.input.value
+        child_id, action.scheduleTask.name, action.id, action.scheduleTask.input.value
     )
     assert result is not None
     completed_child = _replay(
         native,
-        "audit-mixed::sub::0",
+        child_id,
         [
             *child,
             *new,
@@ -603,15 +619,15 @@ def test_functions_sdk_exposes_historical_sibling_schedule_divergence(count: int
     assert [gate.seen for gate in gates] == [[], []]
 
 
-def test_functions_sdk_reconstructs_mixed_parent_snapshot() -> None:
+def test_functions_sdk_reconstructs_service_shaped_mixed_parent_snapshot() -> None:
     workflow, gates = _graph(mixed=True)
-    history = _history("mixed-parent-paused")
+    history, _ = _service_shaped_histories(_history("mixed-parent-paused"), _history("mixed-child-paused"))
     result = _af_replay(history, workflow, instance="audit-mixed")
     assert not result["isDone"]
     status = result["customStatus"]
     assert status["state"] == "waiting_for_human_input"
     assert set(status["pending_requests"]) == {"a"}
-    assert status["subworkflows"] == {"sub": {"0": "audit-mixed::sub::0"}}
+    assert status["subworkflows"] == {"sub": {"0": subworkflow_instance_id("audit-mixed", "sub", 0)}}
     assert "events" not in status
     assert _af_replay(history, workflow, instance="audit-mixed")["customStatus"] == status
     assert [gate.seen for gate in gates] == [[], []]

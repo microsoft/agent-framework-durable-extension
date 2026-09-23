@@ -17,6 +17,7 @@ import azure.durable_functions as df
 import pytest
 from agent_framework import Workflow
 from agent_framework_durabletask import wrap_workflow_input
+from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 from agent_framework_durabletask._workflows.serialization import (
     SUBWORKFLOW_ADDRESS_KEY,
     SUBWORKFLOW_INPUT_KEY,
@@ -193,7 +194,9 @@ def test_registered_af_root_rejects_before_pickle_or_sdk_custom_decoding(
     value["parent_instance_id"] = "root"
     before = deepcopy(value)
     with pytest.raises(Exception, match="requires SDK parent instance metadata") as error:
-        host.start("dafx-provenance-leaf", "root::child::0", wrap_workflow_input(value), parent)
+        host.start(
+            "dafx-provenance-leaf", subworkflow_instance_id("root", "child", 0), wrap_workflow_input(value), parent
+        )
     _failure(error)
     assert _DECODER_CALLS == [] and _observe_construction == [] and _PICKLE_CALLS == [] and echo.seen == []
     assert value == before
@@ -208,14 +211,20 @@ def test_registered_af_child_rejects_inconsistent_address_before_decoding(
     value = _invalid_child(case)
     value["sdk_constructor"] = _metadata()
     with pytest.raises(Exception, match="workflow child") as error:
-        host.start("dafx-provenance-leaf", "root::child::0", wrap_workflow_input(value), "root")
+        host.start(
+            "dafx-provenance-leaf", subworkflow_instance_id("root", "child", 0), wrap_workflow_input(value), "root"
+        )
     _failure(error)
     assert _DECODER_CALLS == [] and _observe_construction == [] and _PICKLE_CALLS == [] and echo.seen == []
 
 
 @pytest.mark.parametrize(
     ("parent", "instance"),
-    [("unrelated", "root::child::0"), ("root", "root::other::0"), ("root", "root::child::0::grand::0")],
+    [
+        ("unrelated", subworkflow_instance_id("root", "child", 0)),
+        ("root", subworkflow_instance_id("root", "other", 0)),
+        ("root", subworkflow_instance_id(subworkflow_instance_id("root", "child", 0), "grand", 0)),
+    ],
 )
 def test_registered_af_metadata_must_match_immediate_parent_and_current_child(
     parent: str, instance: str, _observe_construction: list[str]
@@ -259,8 +268,8 @@ def test_registered_af_child_and_grandchild_preserve_typed_checkpoint_values(
     parent = host.complete_activity(root, _last_action(initial, 0))
     child_id, child = host.child(root, _last_action(parent, 2), 1)
     grand_id, grand = host.child(child_id, _last_action(child, 2), 0)
-    assert child_id == f"{root}::sub:: 世界::0"
-    assert grand_id == f"{child_id}::grand hop::0"
+    assert child_id == subworkflow_instance_id(root, "sub:: 世界", 0)
+    assert grand_id == subworkflow_instance_id(child_id, "grand hop", 0)
     assert host.starts[child_id]["parentInstanceId"] == root
     assert host.starts[grand_id]["parentInstanceId"] == child_id
     action = _last_action(grand, 0)

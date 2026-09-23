@@ -18,7 +18,7 @@ from unittest.mock import Mock
 
 from agent_framework import WorkflowExecutor
 
-from agent_framework_durabletask._workflows.naming import qualify_subworkflow_request_id
+from agent_framework_durabletask._workflows.naming import qualify_subworkflow_request_id, subworkflow_instance_id
 from agent_framework_durabletask._workflows.orchestrator import (
     SUBWORKFLOW_ADDRESS_KEY,
     SUBWORKFLOW_INPUT_KEY,
@@ -80,19 +80,21 @@ class TestPrepareSubworkflowTask:
         ctx.call_sub_orchestrator.return_value = "task-sentinel"
         executor = _subworkflow_executor("sub-node", "inner_wf")
 
-        task = _prepare_subworkflow_task(ctx, executor, "hello", "parent::sub-node::0", _CHILD_ADDRESS)
+        child_id = subworkflow_instance_id("root-instance", "sub-node", 0)
+        task = _prepare_subworkflow_task(ctx, executor, "hello", child_id, _CHILD_ADDRESS)
 
         assert task == "task-sentinel"
         ctx.call_sub_orchestrator.assert_called_once()
         args, kwargs = ctx.call_sub_orchestrator.call_args
         assert args[0] == "dafx-inner_wf"
-        assert kwargs["instance_id"] == "parent::sub-node::0"
+        assert kwargs["instance_id"] == child_id
 
     def test_wraps_message_in_marker(self) -> None:
         ctx = Mock()
         executor = _subworkflow_executor("sub-node", "inner_wf")
 
-        _prepare_subworkflow_task(ctx, executor, "payload", "child-id", _CHILD_ADDRESS)
+        child_id = subworkflow_instance_id("root-instance", "sub-node", 0)
+        _prepare_subworkflow_task(ctx, executor, "payload", child_id, _CHILD_ADDRESS)
 
         args, _ = ctx.call_sub_orchestrator.call_args
         child_input = args[1]
@@ -292,8 +294,9 @@ class TestResolveWorkflowAddress:
                 "request_path_prefix": "review_sub~0~",
             },
         }
-        # ctx.instance_id ("child-id") is ignored in favour of the marker's root values.
-        addr = _resolve_workflow_address(marker, "child-id", "human_review")
+        # The child's instance ID is ignored in favour of the marker's root values.
+        child_id = subworkflow_instance_id("root", "review_sub", 0)
+        addr = _resolve_workflow_address(marker, child_id, "human_review")
         assert addr == {
             "root_instance_id": "root",
             "root_workflow_name": "outer_wf",
@@ -318,7 +321,7 @@ class TestSubworkflowAddressPropagation:
     """
 
     def _dispatch(
-        self, address: dict[str, str], message_count: int
+        self, address: dict[str, str], message_count: int, *, instance_id: str = "root"
     ) -> tuple[list[dict[str, object]], list[str], list[TaskMetadata]]:
         """Run _prepare_all_tasks for one WorkflowExecutor node fanning out N children.
 
@@ -337,7 +340,7 @@ class TestSubworkflowAddressPropagation:
             return f"task::{instance_id}"
 
         ctx = Mock()
-        ctx.instance_id = address["root_instance_id"]
+        ctx.instance_id = instance_id
         ctx.call_sub_orchestrator.side_effect = _call_sub
 
         pending = {node_id: [(f"msg-{i}", "src") for i in range(message_count)]}
@@ -363,7 +366,7 @@ class TestSubworkflowAddressPropagation:
             assert child_address["root_workflow_name"] == "moderation_pipeline"
 
         # Child instance ids and public addresses use the same global ordinal.
-        assert child_ids == ["root::review_sub::0", "root::review_sub::1", "root::review_sub::2"]
+        assert child_ids == [subworkflow_instance_id("root", "review_sub", ordinal) for ordinal in range(3)]
 
     def test_prefix_accumulates_when_already_nested(self) -> None:
         # Simulate dispatching from a workflow that is itself one level deep.
@@ -372,7 +375,8 @@ class TestSubworkflowAddressPropagation:
             "root_workflow_name": "moderation_pipeline",
             "request_path_prefix": "outer_node~2~",
         }
-        child_inputs, _child_ids, _task_metadata = self._dispatch(nested, message_count=2)
+        parent_id = subworkflow_instance_id("root", "outer_node", 2)
+        child_inputs, _child_ids, _task_metadata = self._dispatch(nested, message_count=2, instance_id=parent_id)
         addresses = [unwrap_workflow_input(child_input)[SUBWORKFLOW_ADDRESS_KEY] for child_input in child_inputs]
 
         assert [a["request_path_prefix"] for a in addresses] == [

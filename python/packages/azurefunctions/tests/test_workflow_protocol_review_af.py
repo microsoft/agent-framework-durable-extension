@@ -17,6 +17,7 @@ import pytest
 from agent_framework import Executor, Workflow, WorkflowExecutor
 from agent_framework._workflows import _checkpoint_encoding
 from agent_framework._workflows._edge import SingleEdgeGroup
+from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 from agent_framework_durabletask._workflows.orchestrator import SOURCE_HITL_RESPONSE, SOURCE_WORKFLOW_START
 from agent_framework_durabletask._workflows.protocol import unwrap_workflow_input
 from agent_framework_durabletask._workflows.serialization import (
@@ -408,7 +409,7 @@ async def test_parent_dispatch_wraps_typed_child_input_and_registered_child_keep
         "dafx-parent-sink",
     ]
     dispatch = calls[1]
-    assert dispatch["instance"] == "root-run::child::0"
+    assert dispatch["instance"] == subworkflow_instance_id("root-run", "child", 0)
     child_input = unwrap_workflow_input(dispatch["input"])
     assert dispatch["input"] == {_VERSION: 2, "input": child_input}
     assert type(dispatch["input"][_VERSION]) is int
