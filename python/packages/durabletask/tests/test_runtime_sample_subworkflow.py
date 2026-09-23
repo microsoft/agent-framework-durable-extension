@@ -18,11 +18,12 @@ import pytest
 from agent_framework import BaseChatClient, ChatResponse, ChatResponseUpdate, Message, ResponseStream
 from durabletask.entities import EntityContext, EntityInstanceId
 from durabletask.internal.entity_state_shim import StateShim
-from durabletask.serialization import JsonDataConverter
+from durabletask.serialization import DataConverter, JsonDataConverter
 from durabletask.task import CompletableTask
 from durabletask.worker import _Registry as TaskRegistry
 
 from agent_framework_durabletask import DurableAIAgentWorker
+from agent_framework_durabletask._json_payload import JsonPayload
 from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 from agent_framework_durabletask._workflows.orchestrator import SUBWORKFLOW_ADDRESS_KEY, SUBWORKFLOW_INPUT_KEY
 from agent_framework_durabletask._workflows.protocol import unwrap_workflow_input
@@ -78,6 +79,8 @@ class _SyntheticChatClient(BaseChatClient):
 
 class _RecordingBackend:
     def __init__(self) -> None:
+        self._data_converter: DataConverter = JsonDataConverter()
+        self._is_running = False
         self.registry = TaskRegistry()
         self.activities: dict[str, Any] = {}
         self.orchestrators: dict[str, Any] = {}
@@ -124,7 +127,8 @@ class _MockSDKContext:
     def set_custom_status(self, status: Any) -> None:
         self.statuses.append(deepcopy(status))
 
-    def wait_for_external_event(self, name: str) -> Any:
+    def wait_for_external_event(self, name: str, *, data_type: Any) -> Any:
+        assert data_type is JsonPayload
         raise AssertionError(name)
 
     def create_timer(self, fire_at: datetime) -> Any:
@@ -133,23 +137,27 @@ class _MockSDKContext:
     def signal_entity(self, *args: Any, **kwargs: Any) -> None:
         raise AssertionError((args, kwargs))
 
-    def call_entity(self, entity_id: EntityInstanceId, operation: str, request: dict[str, Any]) -> CompletableTask[Any]:
+    def call_entity(
+        self, entity_id: EntityInstanceId, operation: str, request: dict[str, Any], *, return_type: Any
+    ) -> CompletableTask[Any]:
+        assert return_type is JsonPayload
         request = json.loads(json.dumps(request, allow_nan=False))
         self._backend.entity_calls.append({
             "entity": entity_id.entity,
             "key": entity_id.key,
             "request": deepcopy(request),
+            "return_type": return_type,
         })
         entity_class = cast(type[Any], self._backend.registry.get_entity(entity_id.entity))
         assert entity_class is not None
         entity = entity_class()
-        state_shim = StateShim(None, JsonDataConverter(), is_serialized=True)
+        state_shim = StateShim(None, self._backend._data_converter, is_serialized=True)
         context = EntityContext(
             "orchestration",
             operation,
             state_shim,
             entity_id,
-            JsonDataConverter(),
+            self._backend._data_converter,
         )
         self._backend.entity_contexts.append(context)
         entity._initialize_entity_context(context)
@@ -166,10 +174,18 @@ class _MockSDKContext:
         task.complete(self._backend.activities[name](Mock(), input))
         return task
 
-    def call_sub_orchestrator(self, name: str, *, input: Any, instance_id: str | None = None) -> CompletableTask[Any]:
+    def call_sub_orchestrator(
+        self, name: str, *, input: Any, instance_id: str | None = None, return_type: Any
+    ) -> CompletableTask[Any]:
+        assert return_type is JsonPayload
         input = json.loads(json.dumps(input, allow_nan=False))
         child_id = instance_id or f"{self.instance_id}:child"
-        self._backend.sub_orchestrator_calls.append({"name": name, "input": deepcopy(input), "instance_id": child_id})
+        self._backend.sub_orchestrator_calls.append({
+            "name": name,
+            "input": deepcopy(input),
+            "instance_id": child_id,
+            "return_type": return_type,
+        })
         child = _MockSDKContext(self._backend, instance_id=child_id, parent_instance_id=self.instance_id)
         task: CompletableTask[Any] = CompletableTask()
         result = _run_orchestrator(self._backend.orchestrators[name], child, input)
@@ -260,12 +276,14 @@ def test_real_sample_subworkflow_completes_through_registered_hosts(
     assert len(chat_client.calls) == 1
     assert chat_client.options_history[0]["response_format"] is sample.SentimentResult
     assert [call["name"] for call in backend.sub_orchestrator_calls] == ["dafx-sentiment_analysis"]
+    assert backend.sub_orchestrator_calls[0]["return_type"] is JsonPayload
     assert [call["name"] for call in backend.activity_calls] == [
         "dafx-review_pipeline-intake",
         "dafx-sentiment_analysis-sentiment_formatter",
         "dafx-review_pipeline-reporter",
     ]
     assert [call["entity"] for call in backend.entity_calls] == ["dafx-sentiment_analysis-sentimentagent"]
+    assert backend.entity_calls[0]["return_type"] is JsonPayload
 
     intake_input = backend.activity_calls[0]["input"]
     assert intake_input["message"] == review

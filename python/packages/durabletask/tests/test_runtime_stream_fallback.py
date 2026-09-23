@@ -141,6 +141,71 @@ async def test_synchronous_refusal_in_direct_or_inherited_run_completes_once(age
     assert callback.updates == [] and len(callback.responses) == 1
 
 
+class _SyncRefusalRun:
+    def __init__(self, detail: str, *, from_helper: bool = False) -> None:
+        self.error = TypeError(detail)
+        self.from_helper = from_helper
+        self.modes: list[bool] = []
+        self.helper_calls = 0
+        self.responses: list[AgentResponse] = []
+
+    def __call__(self, *, stream: bool = False, **kwargs: Any) -> AgentResponse:
+        self.modes.append(stream)
+        if stream:
+            if self.from_helper:
+                self._reject()
+            raise self.error
+        response = AgentResponse(
+            messages=[Message("assistant", ["callable response"])],
+            response_id="callable-response",
+        )
+        self.responses.append(response)
+        return response
+
+    def _reject(self) -> None:
+        self.helper_calls += 1
+        raise self.error
+
+
+class _SyncCallableAgent:
+    name = "sync-callable"
+
+    def __init__(self, runner: _SyncRefusalRun, *, bound_call: bool = False) -> None:
+        self.run = runner.__call__ if bound_call else runner
+
+
+@pytest.mark.parametrize("bound_call", [False, True], ids=["callable-object", "bound-call-method"])
+@pytest.mark.parametrize("detail", ["stream is not supported", "streaming not supported"])
+async def test_synchronous_callable_refusal_returns_direct_response_once(bound_call: bool, detail: str) -> None:
+    runner = _SyncRefusalRun(detail)
+    agent = _SyncCallableAgent(runner, bound_call=bound_call)
+    callback = _RecordingCallback()
+    response, committed = await _run_and_redeliver(agent, callback=callback)
+    assert runner.modes == [True, False] and runner.helper_calls == 0
+    assert len(runner.responses) == 1 and isinstance(runner.responses[0], AgentResponse)
+    assert response.text == "callable response" and response.response_id == "callable-response"
+    assert committed["data"]["completionReceipts"]["fallback"]["outcome"] == "succeeded"
+    assert committed["data"]["terminalResults"]["fallback"]["outcome"] == "succeeded"
+    assert callback.events == [("final", "callable response")]
+    assert callback.updates == [] and len(callback.responses) == 1
+    assert callback.responses[0] is not runner.responses[0]
+    assert callback.responses[0].response_id == "callable-response"
+
+
+@pytest.mark.parametrize("bound_call", [False, True], ids=["callable-object", "bound-call-method"])
+@pytest.mark.parametrize("detail", ["stream is not supported", "streaming not supported"])
+async def test_synchronous_callable_helper_refusal_does_not_retry(bound_call: bool, detail: str) -> None:
+    runner = _SyncRefusalRun(detail, from_helper=True)
+    agent = _SyncCallableAgent(runner, bound_call=bound_call)
+    callback = _RecordingCallback()
+    response, committed = await _run_and_redeliver(agent, callback=callback)
+    assert runner.modes == [True] and runner.helper_calls == 1
+    assert runner.responses == []
+    assert callback.events == [] and callback.updates == [] and callback.responses == []
+    assert response.text == f"TypeError: {detail}"
+    _assert_failed(response, committed)
+
+
 async def test_legacy_async_refusal_is_terminal_even_before_model_progress() -> None:
     client = RecordingChatClient()
     agent = _LegacyAsyncNonStreamingAgent(client=client, name="legacy-async")
@@ -259,15 +324,20 @@ async def test_async_body_type_errors_never_authorize_a_nonstream_retry(
     _assert_failed(response, committed)
 
 
+@pytest.mark.parametrize("callable_run", [False, True], ids=["run-method", "callable-object"])
 @pytest.mark.parametrize("field", ["stream_started", "function_started", "service_completed"])
-async def test_observed_progress_blocks_even_an_explicit_synchronous_refusal(field: str) -> None:
+async def test_observed_progress_blocks_even_an_explicit_synchronous_refusal(field: str, callable_run: bool) -> None:
     progress = InvocationProgress()
     setattr(progress, field, True)
     client = RecordingChatClient()
-    entity = AgentEntity(NonStreamingAgent(client=client, name="progress"), state_provider=JsonStateProvider())
+    runner = _SyncRefusalRun("stream is not supported")
+    agent: Any = _SyncCallableAgent(runner) if callable_run else NonStreamingAgent(client=client, name="progress")
+    entity = AgentEntity(agent, state_provider=JsonStateProvider())
     with pytest.raises(TypeError, match="stream is not supported"):
         await entity._invoke_agent({}, "fallback", "session", "hello", progress)
     assert client.received_messages == []
+    if callable_run:
+        assert runner.modes == [True] and runner.responses == []
 
 
 class _NoStreamKeywordAgent:

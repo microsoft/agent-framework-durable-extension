@@ -12,6 +12,7 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from _workflow_test_support import create_registration_worker
 from agent_framework import Executor, Workflow, WorkflowExecutor
 from agent_framework._workflows import _checkpoint_encoding
 from agent_framework._workflows._edge import SingleEdgeGroup
@@ -19,6 +20,7 @@ from durabletask.task import CompletableTask, OrchestrationContext
 
 from agent_framework_durabletask import DurableAIAgentWorker, DurableWorkflowClient
 from agent_framework_durabletask import _worker as worker_module
+from agent_framework_durabletask._json_payload import JsonPayload
 from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 from agent_framework_durabletask._workflows.orchestrator import SOURCE_HITL_RESPONSE, SOURCE_WORKFLOW_START
 from agent_framework_durabletask._workflows.protocol import unwrap_workflow_input
@@ -66,7 +68,7 @@ def _workflow(name: str = "protocol", nodes: list[Any] | None = None, edges: lis
 
 def _register(workflow: Any) -> dict[str, Callable[..., Any]]:
     # Use configure_workflow, not a reimplementation of its generated closure.
-    native = Mock()
+    native = create_registration_worker()
     DurableAIAgentWorker(native, deployment_mode="isolated_v2").configure_workflow(workflow)
     native.add_entity.assert_not_called()
     return {call.args[0].__name__: call.args[0] for call in native.add_orchestrator.call_args_list}
@@ -122,7 +124,8 @@ def _host(
         response = {"outputs": ["done"]} if result is None else result(name, payload)
         return _complete(json.dumps(response))
 
-    def child(name: str, *, input: Any, instance_id: str) -> CompletableTask[Any]:
+    def child(name: str, *, input: Any, instance_id: str, return_type: Any) -> CompletableTask[Any]:
+        assert return_type is JsonPayload
         assert functions is not None
         wire = json.loads(json.dumps(input))
         calls.append({"kind": "child", "instance": instance_id, "name": name, "input": deepcopy(wire)})
@@ -138,9 +141,13 @@ def _host(
         assert child_result[SUBWORKFLOW_RESULT_KEY] is True
         return _complete(child_result)
 
+    def wait(name: str, *, data_type: Any) -> CompletableTask[Any]:
+        assert data_type is JsonPayload
+        return CompletableTask()
+
     host.call_activity.side_effect = activity
     host.call_sub_orchestrator.side_effect = child
-    host.wait_for_external_event.side_effect = lambda name: CompletableTask()
+    host.wait_for_external_event.side_effect = wait
     # Copy when published, rather than observing later mutation of the same dict/list.
     host.statuses = []
     host.set_custom_status.side_effect = lambda status: host.statuses.append(deepcopy(status))
@@ -305,6 +312,9 @@ def test_parent_dispatch_wraps_typed_child_input_and_registered_child_keeps_root
     ]
     dispatch = calls[1]
     assert dispatch["instance"] == subworkflow_instance_id("root-run", "child", 0)
+    host.call_sub_orchestrator.assert_called_once_with(
+        "dafx-inner", input=dispatch["input"], instance_id=dispatch["instance"], return_type=JsonPayload
+    )
     child_input = unwrap_workflow_input(dispatch["input"])
     assert dispatch["input"] == {_VERSION: 2, "input": child_input}
     assert type(dispatch["input"][_VERSION]) is int
@@ -417,6 +427,7 @@ def test_v2_paused_hitl_replays_full_shared_generator_with_identical_dispatch_an
         ]
         assert _drain(generator, accepted.get_result()) == ["done"]
         assert [call.args[0] for call in host.wait_for_external_event.call_args_list] == ["approval", "approval"]
+        assert [call.kwargs for call in host.wait_for_external_event.call_args_list] == [{"data_type": JsonPayload}] * 2
         assert len(calls) == 4 and not host.statuses[-1].get("pending_requests")
         assert [item["input"]["source_executor_ids"] for item in calls[1:3]] == [
             [f"{SOURCE_HITL_RESPONSE}_approval"],

@@ -453,7 +453,7 @@ class DurableAIAgentWorker:
         captured_workflow = workflow
         orchestrator_name = workflow_orchestrator_name(workflow.name)
 
-    def workflow_orchestrator(context: OrchestrationContext, input_data: JsonPayload) -> Any:
+        def workflow_orchestrator(context: OrchestrationContext, input_data: JsonPayload) -> Any:
             # Reject legacy recorded starts before entering the changed engine.
             initial_message = unwrap_workflow_input(input_data)
             validate_workflow_start_provenance(
