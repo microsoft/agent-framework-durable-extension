@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Mapping, Sequence
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from agent_framework import (
@@ -69,9 +69,12 @@ class _CaptureChatClient(BaseChatClient):
         return get()
 
 
-class _TextReasoningAlias(DurableAgentStateTextReasoningContent):
-    def to_ai_content(self) -> Content:
-        return Content(type="text_reasoning", text=self.text)
+class _LegacyReasoningAlias(DurableAgentStateTextReasoningContent):
+    def to_core_content(self) -> Content:
+        content = super().to_core_content()
+        # Exercise the legacy filter spelling without changing canonical storage.
+        content.type = cast(Any, "reasoning")
+        return content
 
 
 def _assistant_message(*contents: Any, message_id: str = "assistant-id") -> DurableAgentStateMessage:
@@ -96,15 +99,17 @@ def _response_entry_dict(
 
 
 @pytest.mark.parametrize(
-    ("stored_message", "expected_texts"),
+    ("stored_message", "expected_projected_types", "expected_texts"),
     [
         pytest.param(
-            _assistant_message(DurableAgentStateTextReasoningContent("private"), message_id="reasoning-only"),
+            _assistant_message(_LegacyReasoningAlias("private"), message_id="reasoning-only"),
+            ["reasoning"],
             [],
             id="reasoning-only",
         ),
         pytest.param(
-            _assistant_message(_TextReasoningAlias("private"), message_id="text-reasoning-only"),
+            _assistant_message(DurableAgentStateTextReasoningContent("private"), message_id="text-reasoning-only"),
+            ["text_reasoning"],
             [],
             id="text-reasoning-only",
         ),
@@ -114,6 +119,7 @@ def _response_entry_dict(
                 DurableAgentStateTextContent("visible"),
                 message_id="mixed",
             ),
+            ["text_reasoning", "text"],
             ["visible"],
             id="mixed",
         ),
@@ -134,18 +140,21 @@ def _response_entry_dict(
                     {"$type": "text", "text": "visible"},
                 ],
             }),
+            ["text_reasoning", "text"],
             ["visible"],
             id="wire-profiled-mixed",
         ),
     ],
 )
 async def test_get_messages_filters_reasoning_spellings_without_mutating_storage(
-    stored_message: DurableAgentStateMessage, expected_texts: list[str]
+    stored_message: DurableAgentStateMessage, expected_projected_types: list[str], expected_texts: list[str]
 ) -> None:
     provider = _CanonicalStateProvider([_request("seed", stored_message)])
     history = DurableHistoryProvider(skip_excluded=False)
     state: dict[str, Any] = {}
     before = deepcopy(provider.state.to_dict())
+    projected = deepcopy(stored_message).to_chat_message()
+    assert [content.type for content in projected.contents] == expected_projected_types
 
     with _bound(provider):
         loaded = await history.get_messages("session", state=state)

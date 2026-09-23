@@ -22,6 +22,8 @@ from azure.durable_functions.models.actions.NoOpAction import NoOpAction
 from azure.durable_functions.models.Task import CompoundTask, TaskState
 from pydantic import BaseModel
 
+from ._workflow_af_context import json_entity_context
+
 logger = logging.getLogger("agent_framework.azurefunctions")
 
 CompoundActionConstructor: TypeAlias = Callable[[list[Any]], Any] | None
@@ -158,7 +160,7 @@ class AzureFunctionsAgentExecutor(DurableAgentExecutor[AgentTask]):
     """Executor that executes durable agents inside Azure Functions orchestrations."""
 
     def __init__(self, context: AgentOrchestrationContextType):
-        self.context = context
+        self.context = json_entity_context(context)
 
     def generate_unique_id(self) -> str:
         return str(self.context.new_uuid())

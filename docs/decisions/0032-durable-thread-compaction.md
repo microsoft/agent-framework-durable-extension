@@ -793,6 +793,12 @@ application parent supplying an otherwise consistent envelope. Trusted worker an
 deployments remain required. Internal checkpoint decoding still uses pickle and is not safe for
 arbitrary untrusted input.
 
+Activity state is compared with a detached encoding captured on the receiving worker, not
+producer pickle bytes. Explicit writes still win, and in-place JSON changes remain type-sensitive.
+Streaming fallback is limited to an immediate capability refusal. Exceptions from awaited setup,
+iteration or finalization never authorize a second invocation. Custom non-streaming agents must
+reject the stream argument before entering asynchronous work.
+
 Child-ID scheme `1` always uses 74 ASCII characters, `dafxsw_v1_` plus the full SHA-256 hex digest
 over a domain separator and length-framed UTF-8 (actual parent ID, exact executor ID, decimal ordinal).
 Dispatch and provenance helpers apply the same derivation at every hop, not an authentication check.
@@ -1318,3 +1324,24 @@ transcript as automatic recovery insurance.
 [prototype-tests]: https://github.com/microsoft/agent-framework-durable-extension/commit/1aac4fd
 [prototype-docs]: https://github.com/microsoft/agent-framework-durable-extension/commit/3ad9
 [prototype-validation]: https://github.com/microsoft/agent-framework-durable-extension/blob/7926226125ca71bf9c23289adae3b9653376b6a7/python/samples/README.md#prototype-validation
+
+## Python reader-stage runtime note, 2026-09-23
+
+The local reader-first implementation adds registration-scoped plain-JSON SDK decoding.
+The standalone integration requires `durabletask>=1.7.1,<2` at this stage for target-aware
+input/result decoding and deferred state reads. `AgentFunctionApp` applies its new boundary
+only to generated agent entities, not Functions workflow start, child-result or event decoding.
+See [Python durable JSON boundaries](../features/python-durable-json-boundaries.md).
+
+This does not activate v2 writers, migration or session restoration. Mutable state still defaults
+to `1.1.0`, and v2 snapshots remain read-only. The checkpoint codec and this ADR's rollout gates
+are unchanged. This source-level note adds no live-host validation claim.
+
+Delivery staging audits unsupported live response fields before Core serialization. Rejection
+does not invoke their conversion hooks. Supported lazy values retain their existing policy,
+and duplicate completions remain no-ops without inspecting a replacement producer.
+
+History reconciliation distinguishes loaded occurrence IDs from unallocated summary IDs and
+compares summary revisions with JSON-exact payloads. External-primary observation uses the
+provider's current storage flags, without rebinding its custom hooks. Naive response timestamp
+strings receive the same UTC interpretation on direct and history-provider append paths.

@@ -3,14 +3,16 @@
 """HTTP reply bytes through native SDK replay and registered response activities.
 
 The native raise_event method and, in the unadapted control, its HTTP helper are
-real. Only aiohttp sessions and status lookup are replaced. The session double
-uses aiohttp's payload encoders and treats json=None as an absent JSON body.
+real. Route calls replace only aiohttp sessions and status lookup. A separate
+native call records transport arguments to establish optional header support.
+The session double uses aiohttp's payload encoders and treats json=None as an absent JSON body.
 Captured bodies become constructed service histories, not live host captures.
 """
 
 import asyncio
 import json
 from copy import deepcopy
+from inspect import signature
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -427,6 +429,25 @@ def test_concurrent_route_and_native_calls_do_not_share_a_transport_override(net
 
 
 def test_nested_route_uses_the_native_child_url_and_invocation_header(network: _Network) -> None:
+    # Probe the installed native method's actual transport call. Older SDKs do
+    # not forward an invocation ID even when the client has the attribute.
+    control = _client()
+    control._function_invocation_id = "test-invocation"
+    transport = AsyncMock(return_value=[202, None])
+    control._post_async_request = transport
+    asyncio.run(control.raise_event(instance_id="child", event_name="approval", event_data=0))
+    transport.assert_awaited_once()
+    native_call = transport.await_args
+    assert native_call is not None
+    forwarded = signature(http_utils.post_async_request).bind(*native_call.args, **native_call.kwargs).arguments
+    assert forwarded["url"] == "https://example.test/instances/child/raiseEvent/approval"
+    assert forwarded["data"] == "0"
+    expected_headers = {"Content-Type": "application/json"}
+    invocation_id = forwarded.get("function_invocation_id")
+    assert invocation_id in (None, "test-invocation")
+    if invocation_id:
+        expected_headers["X-Azure-Functions-InvocationId"] = invocation_id
+
     native = _HttpWorkflow()
     native.client._function_invocation_id = "test-invocation"
     native.client.get_status.side_effect = lambda instance: SimpleNamespace(
@@ -440,9 +461,10 @@ def test_nested_route_uses_the_native_child_url_and_invocation_header(network: _
         {
             "url": "https://example.test/instances/child/raiseEvent/approval",
             "body": "0",
-            "headers": {"Content-Type": "application/json", "X-Azure-Functions-InvocationId": "test-invocation"},
+            "headers": expected_headers,
         }
     ]
+    assert native.client.raise_event.__func__ is df.DurableOrchestrationClient.raise_event
     assert native.client._post_async_request is http_utils.post_async_request
 
 

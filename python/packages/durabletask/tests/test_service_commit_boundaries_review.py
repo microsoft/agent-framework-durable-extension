@@ -365,11 +365,7 @@ class _MutatingAgent:
     def create_session(self, session_id: str) -> AgentSession:
         return AgentSession(session_id=session_id)
 
-    async def run(
-        self, *, session: AgentSession, messages: list[Message], stream: bool = False, **kwargs: Any
-    ) -> AgentResponse:
-        if stream:
-            raise TypeError("stream is not supported")
+    async def run(self, *, session: AgentSession, messages: list[Message], options: dict[str, Any]) -> AgentResponse:
         self.calls.append({
             "session": deepcopy(session.to_dict()),
             "inputs": deepcopy([message.to_dict() for message in messages]),

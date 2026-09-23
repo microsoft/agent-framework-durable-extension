@@ -12,6 +12,7 @@ from unittest.mock import Mock
 
 import pytest
 from _execution_test_support import JsonStateProvider, RecordingChatClient
+from _workflow_test_support import create_registration_worker
 from agent_framework import (
     Agent,
     AgentExecutor,
@@ -29,7 +30,6 @@ from agent_framework import (
     response_handler,
 )
 from durabletask.client import TaskHubGrpcClient
-from durabletask.worker import TaskHubGrpcWorker
 from test_workflow_protocol_review import _complete, _drain, _host, _node, _workflow
 from typing_extensions import Never
 
@@ -42,6 +42,7 @@ from agent_framework_durabletask import (
     serialize_agent_response,
     wrap_workflow_input,
 )
+from agent_framework_durabletask._json_payload import JsonPayload
 from agent_framework_durabletask._workflows.orchestrator import (
     SOURCE_WORKFLOW_START,
     TaskMetadata,
@@ -60,7 +61,7 @@ def _registered_run(
     workflow: Workflow, entity_call: Callable[..., Any] | None = None
 ) -> tuple[Generator[Any, Any, Any], Mock, list[dict[str, Any]]]:
     """Use existing SDK tasks with real registered activities and orchestration closures."""
-    native = Mock(spec=TaskHubGrpcWorker)
+    native = create_registration_worker()
     DurableAIAgentWorker(native, deployment_mode="isolated_v2").configure_workflow(workflow)
     activities = {call.args[0].__name__: call.args[0] for call in native.add_activity.call_args_list}
     functions = {call.args[0].__name__: call.args[0] for call in native.add_orchestrator.call_args_list}
@@ -69,10 +70,16 @@ def _registered_run(
     def activity(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return json.loads(activities[name](None, json.dumps(payload, allow_nan=False)))
 
+    def call_entity(entity_id: Any, operation: str, request: dict[str, Any], *, return_type: Any) -> Any:
+        assert return_type is JsonPayload
+        if entity_call is None:
+            raise AssertionError("Unexpected agent dispatch")
+        return entity_call(entity_id, operation, request)
+
     host = _host(calls, activity, functions=functions)
     ordinals = count()
     host.new_uuid.side_effect = lambda: f"correlation-{next(ordinals)}"
-    host.call_entity.side_effect = entity_call or AssertionError("Unexpected agent dispatch")
+    host.call_entity.side_effect = call_entity
     return functions[f"dafx-{workflow.name}"](host, wrap_workflow_input("go")), host, calls
 
 
@@ -254,7 +261,10 @@ def test_distinct_equal_emissions_and_repeated_selection_keep_distinct_transport
         requests.append(deepcopy(request))
         return _complete(serialize_agent_response(AgentResponse(messages=[Message("assistant", ["done"])])))
 
-    _drain(_registered_run(workflow, entity_call)[0])
+    generator, host, _ = _registered_run(workflow, entity_call)
+    _drain(generator)
+    host.call_entity.assert_called_once()
+    assert host.call_entity.call_args.kwargs == {"return_type": JsonPayload}
     assert len(requests) == 1
     assert requests[0]["contextMessages"] == [Message("assistant", ["equal"], message_id=public_id).to_dict()] * 3
     assert len(set(requests[0]["contextMessageIds"])) == 3

@@ -10,7 +10,7 @@ as durable orchestrations with automatically generated activity functions.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from agent_framework import SupportsAgentRun, Workflow
 from agent_framework._telemetry import mark_feature_used
@@ -29,6 +29,7 @@ from ._configuration import (
 from ._constants import DELIVERY_WINDOW_SECONDS
 from ._entities import AgentEntity, DurableTaskEntityStateProvider
 from ._feature_usage import FeatureIndex
+from ._json_payload import JsonPayload, install_json_payload_converter
 from ._response_utils import serialize_agent_response
 from ._workflows.activity import execute_workflow_activity
 from ._workflows.dt_context import DurableTaskWorkflowContext
@@ -111,6 +112,7 @@ class DurableAIAgentWorker:
         """
         validate_runtime_deployment(deployment_mode)
         validate_response_delivery_window(response_delivery_window_seconds)
+        install_json_payload_converter(worker)
         self._worker = worker
         self._callback = callback
         self._response_delivery_window_seconds = response_delivery_window_seconds
@@ -451,7 +453,7 @@ class DurableAIAgentWorker:
         captured_workflow = workflow
         orchestrator_name = workflow_orchestrator_name(workflow.name)
 
-        def workflow_orchestrator(context: OrchestrationContext, input_data: Any) -> Any:
+        def workflow_orchestrator(context: OrchestrationContext, input_data: JsonPayload) -> Any:
             # Reject legacy recorded starts before entering the changed engine.
             initial_message = unwrap_workflow_input(input_data)
             validate_workflow_start_provenance(
@@ -516,7 +518,7 @@ class DurableAIAgentWorker:
                     entity_name,
                 )
 
-            def run(self, request: Any) -> Any:
+            def run(self, request: JsonPayload) -> Any:
                 """Handle run requests from clients or orchestrations.
 
                 Args:
@@ -529,7 +531,7 @@ class DurableAIAgentWorker:
                 # Run on the shared persistent loop so async resources created by
                 # shared agent clients/credentials stay bound to a live loop across
                 # successive entity invocations (avoids cross-loop hangs).
-                response = run_agent_coroutine(self._agent_entity.run(request))
+                response = run_agent_coroutine(self._agent_entity.run(cast(Any, request)))
                 return serialize_agent_response(response)
 
             def reset(self) -> None:

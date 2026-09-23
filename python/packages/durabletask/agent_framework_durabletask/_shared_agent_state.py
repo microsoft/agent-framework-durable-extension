@@ -986,7 +986,16 @@ class DurableAgentStateResponse(DurableAgentStateEntry):
         try:
             validate_timestamp(created_at)
         except ValueError:
-            return  # Keep the caller's existing fallback timestamp policy.
+            try:
+                parsed = date_parser.parse(created_at)
+            except (ValueError, TypeError, OverflowError):
+                return  # Keep the caller's existing fallback timestamp policy.
+            if parsed.utcoffset() is not None:
+                return
+            # Match the direct factory's UTC interpretation of naive strings.
+            # Already-valid strings bypass normalization to retain their precision.
+            original_datetime = parsed.replace(tzinfo=timezone.utc)
+            created_at = original_datetime.isoformat()
         raw = self.to_dict()
         raw[DurableStateFields.CREATED_AT] = created_at
         self.created_at = (

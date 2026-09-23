@@ -12,12 +12,14 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from _workflow_test_support import create_registration_worker
 from agent_framework import Executor, Workflow, WorkflowExecutor
 from agent_framework._workflows import _checkpoint_encoding
 from agent_framework._workflows._edge import SingleEdgeGroup
 from durabletask.task import CompletableTask, OrchestrationContext
 
 from agent_framework_durabletask import DurableAIAgentWorker, DurableWorkflowClient
+from agent_framework_durabletask._json_payload import JsonPayload
 from agent_framework_durabletask._workflows.protocol import (
     WORKFLOW_ENGINE_VERSION,
     unwrap_workflow_input,
@@ -56,7 +58,7 @@ def _workflow(name: str = "protocol", nodes: list[Any] | None = None, edges: lis
 
 
 def _register(workflow: Any) -> dict[str, Callable[..., Any]]:
-    native = Mock()
+    native = create_registration_worker()
     DurableAIAgentWorker(native, deployment_mode="isolated_v2").configure_workflow(workflow)
     return {call.args[0].__name__: call.args[0] for call in native.add_orchestrator.call_args_list}
 
@@ -95,7 +97,8 @@ def _host(
         calls.append({"kind": "activity", "instance": instance_id, "name": name, "input": deepcopy(payload)})
         return _complete(json.dumps(result(name, payload)))
 
-    def child(name: str, *, input: Any, instance_id: str) -> CompletableTask[Any]:
+    def child(name: str, *, input: Any, instance_id: str, return_type: Any) -> CompletableTask[Any]:
+        assert return_type is JsonPayload
         wire = json.loads(json.dumps(input, allow_nan=False))
         calls.append({"kind": "child", "instance": instance_id, "name": name, "input": deepcopy(wire)})
         context = _host(
@@ -105,9 +108,13 @@ def _host(
         assert child_result[SUBWORKFLOW_RESULT_KEY] is True
         return _complete(child_result)
 
+    def wait(name: str, *, data_type: Any) -> CompletableTask[Any]:
+        assert data_type is JsonPayload
+        return CompletableTask()
+
     host.call_activity.side_effect = activity
     host.call_sub_orchestrator.side_effect = child
-    host.wait_for_external_event.side_effect = lambda name: CompletableTask()
+    host.wait_for_external_event.side_effect = wait
     host.statuses = []
     host.set_custom_status.side_effect = lambda status: host.statuses.append(deepcopy(status))
     return host
@@ -208,6 +215,9 @@ def test_registered_child_dispatch_wraps_once_and_preserves_typed_payload() -> N
     assert _drain(functions["dafx-parent"](host, wrap_workflow_input(payload))) == ["done"]
 
     dispatch = next(call for call in calls if call["kind"] == "child")
+    host.call_sub_orchestrator.assert_called_once_with(
+        "dafx-inner", input=dispatch["input"], instance_id=dispatch["instance"], return_type=JsonPayload
+    )
     child_input = unwrap_workflow_input(dispatch["input"])
     assert dispatch["input"] == {"_durable_workflow_version": WORKFLOW_ENGINE_VERSION, "input": child_input}
     decoded = _checkpoint_encoding.decode_checkpoint_value(child_input)
