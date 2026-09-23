@@ -1249,3 +1249,7 @@ See [Python durable JSON boundaries](../features/python-durable-json-boundaries.
 This does not activate v2 writers, migration or session restoration. Mutable state still defaults
 to `1.1.0`, and v2 snapshots remain read-only. The checkpoint codec and this ADR's rollout gates
 are unchanged. This source-level note adds no live-host validation claim.
+
+Delivery staging audits unsupported live response fields before Core serialization. Rejection
+does not invoke their conversion hooks. Supported lazy values retain their existing policy,
+and duplicate completions remain no-ops without inspecting a replacement producer.
