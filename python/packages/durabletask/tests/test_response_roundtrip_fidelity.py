@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Source-audit regressions at the shared projection and real SDK delivery boundaries."""
+"""Response round-trip fidelity through shared projections and SDK delivery."""
 
 import json
 from copy import deepcopy
