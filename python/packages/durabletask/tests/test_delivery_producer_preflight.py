@@ -27,7 +27,7 @@ class _Extra(SerializationMixin):
 
 @pytest.mark.parametrize("metadata", [False, True], ids=["extra", "metadata"])
 def test_staging_rejects_live_extra_before_calling_its_serializer(metadata: bool) -> None:
-    source = {
+    source: dict[str, Any] = {
         "schemaVersion": "2.0.0",
         "data": {
             "conversationHistory": [],
