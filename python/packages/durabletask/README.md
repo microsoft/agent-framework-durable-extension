@@ -15,7 +15,8 @@ The durable task integration lets you host Microsoft Agent Framework agents usin
 ### Current Runtime Contract On This Unreleased Stack
 
 This README describes the current unreleased schema-v2 runtime, not a released compatibility
-promise.
+promise. It is the common runtime contract for both Python hosts. See the
+[Azure Functions guide](../azurefunctions/README.md) for host-specific routes and settings.
 
 The public mutable state model is now canonical `DurableAgentState` schema `2.0.0`.
 `read_agent_state(raw)` remains explicitly backward compatible with legacy `1.x` payloads.
@@ -57,6 +58,8 @@ fail. The version marker checks start-envelope admission, not feature or replay 
 Older v2 envelopes can still pass that check. There is no replay migration or compatibility fallback.
 If old runs must finish, keep them on their original workers and hub, including published histories
 with concatenated child IDs. Do not resume them here.
+
+#### Migration
 
 The current layer includes canonical transaction state, session capture, the workflow
 protocol boundary, and a privileged manual migration path. Migration is a backend entity
@@ -129,6 +132,13 @@ with `agent_framework_durabletask.state_snapshot_digest(source)` computed from t
 }
 ```
 
+The optional migration helper budget `max_state_bytes` is a neutral admission limit, not a
+pressure policy. If the fully staged destination exceeds that bound, migration fails with
+`StateCapacityError`. It does not prune transcript, receipts, session state, or unknown JSON to
+fit. Runtime transcript retention is configured separately below.
+
+#### Session Restoration
+
 If the legacy source carries external session state, its original `session_id` is preserved and
 used by later host runs only after the migration is committed into the destination. Migration is
 the boundary that transfers that destination binding. A nonblank saved `session_id` must match
@@ -142,6 +152,8 @@ Service IDs, state values (including registered-type JSON), and unknown session 
 preserved without trimming, Core session deserialization, provider imports or provider calls
 during migration. Cold session restoration preserves structured IDs. Continuation still requires
 a compatible agent/provider, since Core's generic chat `Agent` requires a string service ID.
+
+#### Workflow Starts and Child Identity
 
 Workflow start input wrapping is not universal. `DurableWorkflowClient` and generated HTTP
 start routes wrap new inputs for host-generated workflows. Application-owned native orchestrators
@@ -181,20 +193,25 @@ For a known standalone `DurableTaskSchedulerClient`, an explicit root ID must be
 validator retains its existing 100-character limit and Unicode-aware rules, not an ASCII-only rule,
 because its provider is unknown. Application-owned native orchestrator calls are unchanged.
 
+#### Invocation and State Boundaries
+
 There is no automatic transcript recovery for a rejected service conversation ID. A specifically
 rejected parent response can receive up to three additional identical-request retries for a
 visibility delay, but only before any output, tool execution or session advance. The saved parent
 ID is not cleared.
 
-The optional migration helper budget `max_state_bytes` is a neutral admission limit, not a
-pressure policy. If the fully staged destination exceeds that bound, migration fails with
-`StateCapacityError`. It does not prune transcript, receipts, session state, or unknown JSON to
-fit. Runtime transcript retention is configured separately below.
+Streaming fallback requires an immediate capability refusal, not awaited setup, iteration or finalization errors.
+Async streaming remains supported. Activity state deltas compare a detached receiving-worker encoding, not producer
+pickle bytes. Explicit writes retain their intent, and in-place JSON changes remain type-sensitive.
 
-The Durable Task SDK requirement is now `durabletask>=1.7.1,<2` for SDK parent-instance metadata.
-The existing lock already selects `1.7.2`, so this raises the supported minimum without changing
-the locked SDK version. The Core requirement remains `agent-framework-core>=1.13.0,<2`.
-This package directly requires `pydantic>=2.11,<3` for structured response handling.
+Requires Python 3.10+, `durabletask>=1.7.1,<2` for scoped JSON decoding and SDK parent metadata,
+`agent-framework-core>=1.13.0,<2` and `pydantic>=2.11,<3` for structured response handling.
+
+#### History Provider Integration
+
+Ownership is resolved per run from its `store` option, then the agent's `default_options`, then
+the client's default. On client-owned runs, the active primary's load and storage flags select
+history and appends. `skip_excluded=True` omits compaction exclusions from later model context.
 
 Append staging is atomic in memory, undoing lazy internal-ID repairs and restoring the transcript,
 working buffers, position indexes and append ordinal if staging fails. Earlier successful saves
@@ -221,10 +238,13 @@ acceptance evidence contributes ingestion receipts, so an audit cannot suppress 
 On a service-owned turn, the inactive external primary's custom hooks are also suppressed because
 they may load or persist history directly. Ownership-independent work belongs in a separate context
 provider or store-only sink. Client-owned turns retain the original primary's hooks and resources.
+External-primary observation uses its current storage flags without rebinding custom hooks.
 Compaction aimed at an inactive external history source does not run its stored-history after
 hook. Its before hook still operates on unrelated current context, as Core specifies.
 Ordinary input and response IDs are preserved. Newly generated compaction summary occurrences get
 unique IDs when a strategy reuses a candidate ID, so both summary revisions and their links survive.
+Reconciliation distinguishes loaded occurrence IDs from unallocated summary IDs and compares
+summary revisions with JSON-exact payloads.
 With no primary, history is injected before a matching before-compaction provider. Core runs before
 hooks forward and after hooks in reverse, so that provider's after hook sees the previously stored
 history. After-only compaction retains the existing append-then-compact order. Per-service-call
@@ -307,6 +327,19 @@ conversation nor clears the saved service branch ID.
 
 #### Delivery and Maintenance
 
+Canonical `terminalResults` hold immutable original response envelopes by correlation ID,
+separately from transcript history. Matching `completionReceipts` retain `correlationId`, known
+`outcome` (`succeeded` or `failed`) and `completedAt`. Results include the full `response`, including
+messages, metadata and an optional explicit `value`, even null or falsey. Failures require `error.code`
+and `error.message`, while successes forbid `error`. `resultState="available"` requires a matching result.
+`resultState="unavailable"` forbids a result and requires `resultUnavailableAt`. Completion facts
+and any `resultExpiresAt` agree across the pair. See the
+[shared wire invariants](../../../schemas/README.md#proposed-wire-concepts-and-semantic-invariants).
+
+Staging rejects unsupported live response fields before Core serialization, without invoking their
+conversion hooks. Supported lazy values keep their existing policy. Duplicate completions remain
+no-ops without inspecting the replacement producer.
+
 Response availability has a default `response_delivery_window_seconds=60`. Transcript deletion
 does not delete the independent result or its completion outcome. Response expiry removes delivery
 payloads without deleting completion or ingestion receipts. There is no bounded receipt cleanup,
@@ -315,6 +348,10 @@ entities need application-owned maintenance to invoke `expire_responses()`. Poll
 persist cleanup. `reset` clears local transcript and session state while preserving completion
 receipts and live results. External-primary reset is rejected without a provider-owned clear
 operation.
+
+At or after a delivery deadline, lookup reports completion with its retained outcome, even before
+physical cleanup. It never returns the expired payload, reports pending work, reruns the request or
+reconstructs an original from compacted or external history. Shared v2 has no `unknown` outcome.
 
 ### Retention Metrics
 
@@ -349,6 +386,8 @@ Response-type descriptors retain declared types and generic arguments for suppor
 version, so nested model/dataclass and tuple/set reconstruction from JSON is Core-dependent.
 Custom types must already be loaded under their recorded module and qualified name. This does not
 make every Python annotation a supported reply type.
+Tuple descriptors preserve the declared argument shape, including Python 3.10's explicit empty-tuple
+argument. They do not assume all tuple aliases admit the same JSON or native tuple values.
 
 Valid replies for known fixed request IDs can arrive before their waits are published and remain
 buffered by the service. Sending a reply acknowledges event delivery, not type validation or handler
@@ -365,12 +404,13 @@ snapshots, not Core's in-process visibility of other executors' uncommitted writ
 
 ### JSON runtime boundary
 
-The local runtime requires `durabletask>=1.7.1,<2`. Construct `DurableAIAgentWorker` before
-starting the SDK worker. Framework-selected reads for generated agents and workflows use plain
-JSON rather than SDK custom-object reconstruction. Native co-hosted work keeps its original
-converter behavior. See
-[Python durable JSON boundaries](../../../docs/features/python-durable-json-boundaries.md) for
-covered paths, custom-converter constraints and separate checkpoint trust requirements.
+The current runtime writes canonical `2.0.0` state and supports the explicit migration above.
+Construct `DurableAIAgentWorker` before starting the SDK worker. Generated entity state and
+`run`/`migrate` inputs, blocking framework agent results, generated workflow starts, child results
+and external-event values use plain JSON rather than SDK custom-object reconstruction.
+Native co-hosted work keeps its original converter behavior. The
+[integrated JSON boundary guide](../../../docs/features/python-durable-json-boundaries.md)
+details both hosts, custom-converter constraints and separate checkpoint trust requirements.
 
 ### Basic Usage Example
 

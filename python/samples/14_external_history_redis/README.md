@@ -40,22 +40,10 @@ Registering that agent with the durable runtime changes nothing about how you co
 - **The provider owns transcript writes.** Core calls it according to `store_inputs`,
   `store_outputs`, `store_context_messages`, and `store_context_from`. This sample uses the default
   input/output storage flags and `store=False` so the provider supplies model context.
-- **Delivery is separate from history.** Fresh durable entity state has an empty `conversationHistory`, not metadata-only exchange envelopes or a local transcript mirror. It stores session state, original response envelopes in canonical `terminalResults` by correlation ID, and matching `completionReceipts`. Delivery expiry is independent of Redis history.
-
-Each result and receipt has `correlationId`, known `outcome` (`succeeded` or `failed`) and `completedAt`.
-The result includes the full inline `response`, including `messages`, optional structured `value`
-(even null or falsey values) and metadata. Failure also requires canonical `error.code` and
-`error.message`. Success forbids `error`. Receipt `resultState="available"` requires a matching
-result. `unavailable` forbids a result and requires `resultUnavailableAt`. Completion facts and
-optional `resultExpiresAt` must agree between result and receipt.
-
-The Python runtime assigns a delivery deadline, though `resultExpiresAt` is optional in the shared
-contract. At or after a configured deadline, lookup reports completed-but-result-unavailable with
-the retained outcome, even before physical cleanup. It does not return the expired payload, report
-pending work, rerun the request or reconstruct an original response from Redis history. Cleanup
-removes the result and records `resultUnavailableAt` without changing completion facts. Idle physical
-cleanup needs an application-owned schedule or backend operation. There is no `unknown` v2 outcome.
-See the [shared state contract](../../../schemas/README.md).
+- **Delivery is separate from history.** Fresh durable state has an empty `conversationHistory`,
+  not metadata-only exchanges or a local transcript mirror. It stores session state, original
+  results and completion receipts. Delivery expiry does not delete Redis history or reconstruct
+  an expired result from it. See the [common delivery contract](../../packages/durabletask/README.md#delivery-and-maintenance).
 
 ### Deployment namespace
 
@@ -93,9 +81,9 @@ provider-owned operation and coordination with the caller. The sample does not i
 
 The default `retention="keep_all"` and `max_state_bytes=None` do not prune Redis and do not enable
 local pressure eviction. `follow_compaction` or an explicit local byte budget does not manage Redis
-retention either. External storage does not give the entity unlimited capacity. Live response
-payloads, session state, and completion receipts still need space, and completion receipts persist
-until entity deletion. Existing local history from before an ownership change is not erased.
+retention either. Live responses, session state and unbounded receipts still consume entity capacity.
+Existing local history is not erased when ownership changes. See the
+[shared retention contract](../../packages/durabletask/README.md#retention-and-state-budgets).
 
 ## Running the sample
 

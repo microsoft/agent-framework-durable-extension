@@ -50,63 +50,30 @@ lets history append the current input and answer before the strategy keeps its f
 for the next turn. A group is not necessarily a whole turn.
 
 This sample stores inputs and outputs and keeps them with explicit `retention="keep_all"` and
-`max_state_bytes=None`, which are also the host defaults. Original responses live independently
-in canonical `terminalResults`, keyed by correlation ID, with matching `completionReceipts`.
-
-Each result and receipt has `correlationId`, known `outcome` (`succeeded` or `failed`) and `completedAt`.
-The result includes the full inline `response`, including `messages`, optional structured `value`
-(even null or falsey values) and metadata. Failure also requires canonical `error.code` and
-`error.message`. Success forbids `error`. Receipt `resultState="available"` requires a matching
-result. `unavailable` forbids a result and requires `resultUnavailableAt`. Completion facts and
-optional `resultExpiresAt` must agree between result and receipt.
-
-The Python runtime assigns a delivery deadline. `resultExpiresAt` is optional in the shared contract
-and independent of transcript retention. At or after a configured deadline, lookup reports
-completed-but-result-unavailable with the retained outcome, even before physical cleanup. It does
-not return the expired payload, report pending work, rerun the request or rebuild an original from
-compacted history. Cleanup removes the result and records `resultUnavailableAt` without changing
-completion facts. Idle physical cleanup needs an application-owned schedule or backend operation.
-There is no `unknown` v2 outcome. See the
-[shared contract invariants](../../../../schemas/README.md#proposed-wire-concepts-and-semantic-invariants).
+`max_state_bytes=None`, which are also the host defaults. Original response delivery is independent
+of history. See the common [delivery, expiry and maintenance contract](../../../packages/durabletask/README.md#delivery-and-maintenance).
 
 ### Retention and state budgets
 
-`retention="keep_all"` disables eager deletion of compaction exclusions. It does not disable an
-explicit byte budget. `retention="follow_compaction"` prunes eligible exclusions from local durable
-history, protecting system messages and the newest/current exchange, but does not enable pressure
-eviction by itself.
+Configure `AgentFunctionApp` or override with `add_agent()`.
 
-`max_state_bytes=None` disables pressure eviction, not the backend's capacity limit. To opt in,
-pass a positive integer chosen for your backend and workload, for example
-`max_state_bytes=1_048_576, high_watermark=0.85, low_watermark=0.70`. These watermark values are the
-defaults and must satisfy `0 < low_watermark < high_watermark <= 1`. The budget is independent of
-`retention` and can be used with either mode. Configure them on `AgentFunctionApp` or override
-them with `add_agent`.
+- `retention="keep_all"` leaves compaction exclusions stored. `follow_compaction` opts into eager
+  removal of eligible exclusions without enabling a byte budget.
+- `max_state_bytes=None` disables pressure eviction, not backend limits. Opt in independently with
+  a positive integer, for example `max_state_bytes=1_048_576, high_watermark=0.85, low_watermark=0.70`.
+  Functions rejects `"backend_limit"`, even when using DTS.
 
-Functions cannot infer the backend's limit and rejects `max_state_bytes="backend_limit"`. That
-option resolves to 1,048,576 bytes (1 MiB) only on the standalone DTS worker.
-
-Pressure eviction measures the whole serialized entity. It starts at the high watermark and aims
-for the low watermark, or the protected state size if larger. Live responses, completion receipts,
-session state, metadata, and protected transcript groups all need space. If the protected state
-reaches the high watermark, the operation fails with `StateCapacityError` rather than deleting
-responses still owed to callers. A burst of turns can fill a small budget even after history is
-pruned. Do not shorten delivery expiry to force the sample to fit.
-
-Neither mode gives unlimited capacity. Completion receipts persist until entity deletion, and
-terminal result expiry is separate from transcript retention. These settings do not prune an external
-store or service-managed history.
+See the [Functions settings and shared contract](../../../packages/azurefunctions/README.md#retention-and-state-budgets)
+for watermark validation, whole-entity accounting, protected atomic groups and `StateCapacityError`.
+Budget for live responses, receipts and session state as well as history. Do not shorten delivery
+expiry to make the demo fit. Neither option bounds receipt growth or cleans external/service history.
 
 ### Client-side vs service-managed history
 
-Compaction only applies to history the **client** owns. On a service-owned turn, the durable history
-provider neither loads nor appends a local transcript. Session state, response delivery payloads,
-and completion receipts are still persisted, not a second conversation record. Switching ownership
-does not erase existing local history.
-
-The runtime resolves ownership from the run's `store` option, then the agent's `default_options`,
-then the client's default. This sample sets `store=False` so client-side history and compaction
-control model context rather than Foundry's service-managed history.
+This sample sets `store=False` so client-side history and compaction control model context.
+On service-owned turns, durable history neither loads nor appends a local transcript. Session and
+delivery state still persist, and switching ownership does not erase old local history. See
+[history ownership and provider ordering](../../../packages/durabletask/README.md#history-provider-integration).
 
 ## Prerequisites
 

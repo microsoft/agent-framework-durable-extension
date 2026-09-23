@@ -44,68 +44,31 @@ Registering that agent with the durable runtime changes nothing about how you co
   model on the next turn. Individual messages can still be large.
 
 With this sample's storage flags and explicit `retention="keep_all", max_state_bytes=None`,
-compaction does not delete the local transcript. Original response envelopes live independently
-in canonical `terminalResults`, keyed by correlation ID, with matching `completionReceipts`.
-
-Each result and receipt has `correlationId`, known `outcome` (`succeeded` or `failed`) and `completedAt`.
-The result includes the full inline `response`, including `messages`, optional structured `value`
-(even null or falsey values) and metadata. Failure also requires canonical `error.code` and
-`error.message`. Success forbids `error`. Receipt `resultState="available"` requires a matching
-result. `unavailable` forbids a result and requires `resultUnavailableAt`. Completion facts and
-optional `resultExpiresAt` must agree between result and receipt.
-
-The Python runtime assigns a delivery deadline. `resultExpiresAt` is optional in the shared contract
-and independent of transcript retention. At or after a configured deadline, lookup reports
-completed-but-result-unavailable with the retained outcome, even before physical cleanup. It does
-not return the expired payload, report pending work, rerun the request or rebuild an original from
-compacted history. Cleanup removes the result and records `resultUnavailableAt` without changing
-completion facts. Idle physical cleanup needs an application-owned schedule or backend operation.
-There is no `unknown` v2 outcome. See the
-[shared state contract](../../../schemas/README.md).
+compaction does not delete the local transcript. Original response delivery is independent of
+history. See the common [delivery, expiry and maintenance contract](../../packages/durabletask/README.md#delivery-and-maintenance).
 
 ### Retention and state budgets
 
-Compaction selects model context. `retention` controls eager deletion of eligible compaction
-exclusions. `max_state_bytes` independently controls pressure eviction of local transcript groups.
-Set these on `DurableAIAgentWorker` or override them with `add_agent`.
+Configure `DurableAIAgentWorker` or override with `add_agent()`.
 
-| Mode | Behavior |
-| --- | --- |
-| `keep_all` (default) | Does not eagerly delete compaction exclusions. An explicitly configured byte budget can still evict eligible transcript groups. |
-| `follow_compaction` | Eagerly deletes eligible exclusions from local durable history, protecting system messages and the newest/current exchange. It does not enable a byte budget. |
+- `retention="keep_all"` leaves compaction exclusions stored. `follow_compaction` opts into eager
+   removal of eligible exclusions without enabling a byte budget.
+- `max_state_bytes=None` disables pressure eviction, not backend limits. A positive integer enables
+   it independently of retention. This standalone DTS worker also accepts `"backend_limit"` (1 MiB).
 
-`max_state_bytes=None` is the default and disables pressure eviction, not the backend's size limit.
-On the standalone DTS worker, `max_state_bytes="backend_limit"` resolves to 1,048,576 bytes (1 MiB).
-An explicit positive integer is also accepted. Azure Functions cannot infer its backend limit, so
-it requires an integer to enable pressure eviction and rejects `"backend_limit"`.
-
-For example, to retain compaction exclusions until state pressure requires eviction, use
-`retention="keep_all", max_state_bytes=1_048_576, high_watermark=0.85, low_watermark=0.70`.
-Use `retention="follow_compaction"` to opt into eager pruning as well. The watermark defaults are
-`0.85` and `0.70`, with `0 < low_watermark < high_watermark <= 1`. Pressure eviction starts at the
-high watermark and aims for the low watermark, or the protected state size if that is larger.
-
-The budget measures the whole serialized entity, including live terminal results, completion
-receipts, session state, and metadata. Pressure eviction preserves protected state and evicts whole
-atomic transcript groups. If protected state alone reaches the high watermark, the operation fails with
-`StateCapacityError` rather than discarding responses still owed to callers. Size a budget for those
-delivery obligations and the backend limit. A burst of turns can fill a small budget even after
-transcript pruning. Do not shorten delivery expiry just to make a demo fit.
-
-Neither retention mode provides unlimited capacity. Completion receipts persist until entity
-deletion, and terminal result expiry is independent of transcript retention. Retention does not
-prune an external store or service-managed history.
+For pressure eviction without eager pruning, use `retention="keep_all"`, `max_state_bytes=1_048_576`,
+`high_watermark=0.85` and `low_watermark=0.70`. See the
+[shared retention contract](../../packages/durabletask/README.md#retention-and-state-budgets) for
+watermark validation, whole-entity accounting, protected atomic groups and `StateCapacityError`.
+Budget for live responses, receipts and session state as well as history. Do not shorten delivery
+expiry to make the demo fit. Neither option bounds receipt growth or cleans external/service history.
 
 ### Client-side vs service-managed history
 
-Compaction only applies to history the **client** owns. When Foundry or the Responses API owns a
-turn's history, the durable history provider neither loads nor appends a local transcript. The
-entity still persists session state, response delivery payloads, and completion receipts, not a
-second conversation record. Existing local history is not erased when ownership changes.
-
-Ownership is resolved for each run from its `store` option, then the agent's `default_options`,
-then the client's default. This sample sets `store=False` so the client-side history provider and
-compaction control model context.
+This sample sets `store=False` so client-side history and compaction control model context.
+On service-owned turns, durable history neither loads nor appends a local transcript. Session and
+delivery state still persist, and switching ownership does not erase old local history. See
+[history ownership and provider ordering](../../packages/durabletask/README.md#history-provider-integration).
 
 ## Running the sample
 
