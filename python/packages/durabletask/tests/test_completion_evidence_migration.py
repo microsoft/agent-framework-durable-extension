@@ -92,20 +92,17 @@ def _cold(state: DurableAgentState) -> DurableAgentState:
     return restored
 
 
-def _assert_rejected(source: dict[str, Any], evidence: Any, **options: Any) -> None:
-    # Assign only after staging succeeds, as the parent's atomic commit must do.
-    destination = DurableAgentState()
-    destination.unknown_fields["keep"] = {"whole": [None, False, 0]}
-    target_before = destination.to_dict()
+def _assert_rejected(source: dict[str, Any], evidence: Any, **options: Any) -> ValueError:
+    # This detached helper has no destination. Host tests cover actual commit rollback.
     before = deepcopy(source)
     evidence_before = deepcopy(evidence)
     options_before = deepcopy(options)
-    with pytest.raises((ValueError, StateCapacityError)):
-        destination = _migrate(source, completion_evidence=evidence, **options)
+    with pytest.raises(ValueError) as caught:
+        _migrate(source, completion_evidence=evidence, **options)
     assert source == before
     assert evidence == evidence_before
     assert options == options_before
-    assert destination.to_dict() == target_before
+    return caught.value
 
 
 @pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
@@ -564,14 +561,17 @@ def test_unversioned_ingested_messages_are_not_completion_or_delivery_evidence(o
     _assert_rejected(source, None)
 
 
-def test_oversize_rejection_protects_whole_source_evidence_and_existing_destination() -> None:
+def test_oversize_rejection_protects_whole_source_and_evidence() -> None:
     source = _source(_entry())
     source["future"] = "雪😀" * 20
     evidence = _journal(source, _result())
     payload = _migrate(source, completion_evidence=evidence).to_dict()
     size = len(json.dumps(payload, allow_nan=False))
     assert _migrate(source, completion_evidence=evidence, max_state_bytes=size).to_dict() == payload
-    _assert_rejected(source, evidence, max_state_bytes=size - 1)
+    error = _assert_rejected(source, evidence, max_state_bytes=size - 1)
+    assert isinstance(error, StateCapacityError)
+    assert error.size_bytes == error.floor_bytes == size
+    assert error.max_state_bytes == error.target_bytes == size - 1
 
 
 @pytest.mark.parametrize("invalid", [None, 0, 1, "false"])

@@ -66,6 +66,17 @@ logger = logging.getLogger("agent_framework.durabletask")
 
 _SESSION_ID_KEY = "session_id"
 _DELIVERY_WINDOW_SECONDS = DELIVERY_WINDOW_SECONDS
+_MIGRATION_BINDING_FIELDS = (
+    "id",
+    "sourceDigest",
+    "sourceSessionId",
+    "ownershipTransferId",
+    "createdAt",
+    "requestDigest",
+    "destinationSessionId",
+    "evidenceId",
+    "completionEvidenceId",
+)
 
 try:
     from agent_framework._serialization import SerializationMixin
@@ -218,6 +229,7 @@ class AgentEntityStateProviderMixin:
     _state_cache: DurableAgentState | None = None
     _persisted_state_snapshot: dict[str, Any] | None = None
     _write_acknowledgement_uncertain: bool = False
+    _migration_candidate: DurableAgentState | None = None
 
     def _get_state_dict(self) -> dict[str, Any]:
         raise NotImplementedError
@@ -276,6 +288,104 @@ class AgentEntityStateProviderMixin:
     def _transition_validation_baseline(snapshot: dict[str, Any]) -> dict[str, Any]:
         return DurableAgentState().to_dict() if snapshot == {} else deepcopy(snapshot)
 
+    def _migration_binding(self, metadata: dict[str, Any], stored: Any) -> dict[str, str] | None:
+        """Validate and project only the reserved migration identity fields."""
+        if "migration" not in metadata:
+            return None
+        message = "Committed migration session binding is invalid or does not match this destination entity."
+        migration = metadata["migration"]
+        if not isinstance(migration, dict):
+            raise ValueError(message)
+        migration = cast("dict[str, Any]", migration)
+        for field in ("id", "sourceSessionId", "ownershipTransferId", "destinationSessionId"):
+            value = migration.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(message)
+        for field in ("sourceDigest", "requestDigest"):
+            value = migration.get(field)
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError(message)
+        try:
+            validate_timestamp(migration.get("createdAt"))
+        except ValueError as exc:
+            raise ValueError(message) from exc
+        for field in ("evidenceId", "completionEvidenceId"):
+            if field in migration and (not isinstance(migration[field], str) or not migration[field].strip()):
+                raise ValueError(message)
+        source_session_id = cast(str, migration["sourceSessionId"])
+        destination = self.core_session_id
+        if migration["destinationSessionId"] != destination or source_session_id == destination:
+            raise ValueError(message)
+        # Reset clears the local session, but does not relinquish migration ownership.
+        if stored is not None:
+            if not isinstance(stored, dict):
+                raise ValueError(message)
+            stored_id = cast("dict[str, Any]", stored).get(_SESSION_ID_KEY)
+            if not isinstance(stored_id, str) or not stored_id.strip() or stored_id != source_session_id:
+                raise ValueError(message)
+        return {field: migration[field] for field in _MIGRATION_BINDING_FIELDS if field in migration}
+
+    def _validate_migration_write(self, previous: dict[str, Any], current: dict[str, Any]) -> None:
+        before, after = previous["data"], current["data"]
+        old_binding = self._migration_binding(before, before.get("session"))
+        new_binding = self._migration_binding(after, after.get("session"))
+        if old_binding is not None:
+            if new_binding != old_binding:
+                raise ValueError("Committed migration binding fields cannot be removed or changed.")
+        elif new_binding is not None and (
+            self._migration_candidate is None
+            or self._state_cache is not self._migration_candidate
+            or previous != DurableAgentState().to_dict()
+        ):
+            raise ValueError("Initial migration binding requires migrate into an empty destination.")
+
+    def migration_session_id(self) -> str:
+        """Validate the migration binding before an operation uses its session identity."""
+        binding = self._migration_binding(self.state.data.unknown_fields, self.state.data.session)
+        return self.core_session_id if binding is None else binding["sourceSessionId"]
+
+    def validate_migration_state(self, request: dict[str, Any], *, request_digest: str) -> bool:
+        """Require an empty destination or return True for an identical committed retry.
+
+        The caller validates the request shape and destination before this read-only check.
+        """
+        state = self.state
+        snapshot = state.to_dict()
+        committed_baseline = self._transition_validation_baseline(self._read_committed_snapshot())
+        existing = state.data.unknown_fields.get("migration")
+        if isinstance(existing, dict) and cast("dict[str, Any]", existing).get("requestDigest") == request_digest:
+            expected_binding = {
+                "id": request["migrationId"],
+                "sourceDigest": request["sourceDigest"],
+                "sourceSessionId": request["sourceSessionId"],
+                "ownershipTransferId": request["ownershipTransferId"],
+                "destinationSessionId": self.core_session_id,
+            }
+            for request_field, binding_field in (
+                ("deliveryEvidence", "evidenceId"),
+                ("completionEvidence", "completionEvidenceId"),
+            ):
+                evidence = request.get(request_field)
+                if evidence is not None:
+                    expected_binding[binding_field] = (
+                        cast("dict[str, Any]", evidence).get("evidenceId") if isinstance(evidence, dict) else None
+                    )
+            committed_binding = {
+                field: value
+                for field, value in cast("dict[str, Any]", existing).items()
+                if field in expected_binding or field in ("evidenceId", "completionEvidenceId")
+            }
+            if committed_binding != expected_binding:
+                raise ValueError("Committed migration binding does not match the retry request")
+            self._validate_migration_write(committed_baseline, snapshot)
+            return True
+        empty = DurableAgentState().to_dict()
+        if snapshot != empty or committed_baseline != empty:
+            raise ValueError(
+                "Migration destination must be empty; an existing or different migration cannot be replaced."
+            )
+        return False
+
     def is_v2_writable(self) -> bool:
         raw_state = self._read_raw_state_dict()
         if raw_state == {}:
@@ -325,21 +435,45 @@ class AgentEntityStateProviderMixin:
 
     @state.setter
     def state(self, value: DurableAgentState) -> None:
+        if self._migration_candidate is not None:
+            raise ValueError("Cannot replace entity state during migration persistence.")
         self.ensure_v2_writable()
         prior_cache = self._state_cache
         prior_snapshot = deepcopy(self._persisted_state_snapshot)
+        if prior_cache is not None and prior_snapshot is None:
+            # replace_cached_state may have supplied a cache before its first backing read.
+            prior_snapshot = self._read_committed_snapshot()
         try:
             candidate = deepcopy(value)
             candidate.prepare_for_write(delivery_window_seconds=self._response_delivery_window_seconds())
             self._state_cache = candidate
             self.persist_state()
         except BaseException:
-            if value is prior_cache:
+            restore_committed = value is prior_cache
+            if not restore_committed and prior_cache is not None and prior_snapshot is not None:
+                # A distinct candidate can still share nested objects with the cache.
+                # Never put an aliased, damaged binding back after rejecting its write.
+                before = prior_snapshot.get("data", {})
+                try:
+                    restore_committed = self._migration_binding(
+                        prior_cache.data.unknown_fields, prior_cache.data.session
+                    ) != self._migration_binding(before, before.get("session"))
+                except ValueError:
+                    restore_committed = True
+            if restore_committed:
                 self._restore_persisted_cache(prior_snapshot)
             else:
                 self._state_cache = prior_cache
                 self._persisted_state_snapshot = prior_snapshot
             raise
+
+    def persist_migration(self, candidate: DurableAgentState) -> None:
+        """Persist staged state with initial binding admission limited to this exact candidate."""
+        self._migration_candidate = candidate
+        try:
+            self.persist_state()
+        finally:
+            self._migration_candidate = None
 
     def persist_state(self) -> None:
         """Pass state to the host, which may stage rather than confirm a durable write."""
@@ -356,6 +490,7 @@ class AgentEntityStateProviderMixin:
             state.prepare_for_write(delivery_window_seconds=self._response_delivery_window_seconds())
             payload = state.to_dict()
             validate_completion_transition(transition_baseline, payload)
+            self._validate_migration_write(transition_baseline, payload)
         except BaseException:
             self._restore_persisted_cache(committed_snapshot)
             raise
@@ -437,7 +572,7 @@ class AgentEntity:
     def expire_responses(self) -> int:
         """Remove expired delivery payloads without model execution or deleting receipts."""
         self._state_provider.ensure_v2_writable()
-        self._migration_session_id()
+        self._state_provider.migration_session_id()
         original = self.state
         staged = deepcopy(original)
         staged.prepare_for_write(delivery_window_seconds=self._response_delivery_window_seconds)
@@ -456,7 +591,7 @@ class AgentEntity:
 
     def reset(self) -> None:
         self._state_provider.ensure_v2_writable()
-        self._migration_session_id()
+        self._state_provider.migration_session_id()
         if self._has_context_pipeline():
             providers = cast("Sequence[Any]", self.agent.context_providers)  # type: ignore[attr-defined]
             if any(
@@ -494,7 +629,7 @@ class AgentEntity:
             The committed migration identity and destination session identity.
         """
         self._state_provider.ensure_v2_writable()
-        self._migration_session_id()
+        self._state_provider.migration_session_id()
         required = {
             "source",
             "sourceDigest",
@@ -521,37 +656,8 @@ class AgentEntity:
             raise ValueError("Migration source must be an exported state object.")
         digest = state_snapshot_digest(request)
         original = self.state
-        original_snapshot = original.to_dict()
-        existing = original.data.unknown_fields.get("migration")
-        if isinstance(existing, dict) and cast("dict[str, Any]", existing).get("requestDigest") == digest:
-            expected_binding = {
-                "id": request["migrationId"],
-                "sourceDigest": request["sourceDigest"],
-                "sourceSessionId": request["sourceSessionId"],
-                "ownershipTransferId": request["ownershipTransferId"],
-                "destinationSessionId": destination,
-            }
-            for request_field, binding_field in (
-                ("deliveryEvidence", "evidenceId"),
-                ("completionEvidence", "completionEvidenceId"),
-            ):
-                evidence = request.get(request_field)
-                if evidence is not None:
-                    expected_binding[binding_field] = (
-                        cast("dict[str, Any]", evidence).get("evidenceId") if isinstance(evidence, dict) else None
-                    )
-            committed_binding = {
-                field: value
-                for field, value in cast("dict[str, Any]", existing).items()
-                if field in expected_binding or field in ("evidenceId", "completionEvidenceId")
-            }
-            if committed_binding != expected_binding:
-                raise ValueError("Committed migration binding does not match the retry request")
+        if self._state_provider.validate_migration_state(request, request_digest=digest):
             return {"status": "migrated", "migrationId": request["migrationId"], "sessionId": destination}
-        if original_snapshot != DurableAgentState().to_dict():
-            raise ValueError(
-                "Migration destination must be empty; an existing or different migration cannot be replaced."
-            )
         staged = migrate_legacy_state(
             cast("dict[str, Any]", request["source"]),
             source_digest=request["sourceDigest"],
@@ -566,7 +672,7 @@ class AgentEntity:
         staged.data.unknown_fields["migration"].update({"requestDigest": digest, "destinationSessionId": destination})
         self._state_provider.replace_cached_state(staged)
         try:
-            self.persist_state()
+            self._state_provider.persist_migration(staged)
         except BaseException:
             self._state_provider.replace_cached_state(original)
             raise
@@ -582,7 +688,7 @@ class AgentEntity:
     ) -> AgentResponse:
         """Execute the agent with a message."""
         self._state_provider.ensure_v2_writable()
-        self._migration_session_id()
+        self._state_provider.migration_session_id()
         if isinstance(request, str):
             run_request = RunRequest.from_json(request)
         elif isinstance(request, dict):
@@ -1228,52 +1334,13 @@ class AgentEntity:
                 return provider
         return None
 
-    def _migration_session_id(self) -> str:
-        """Validate reserved committed binding metadata before any operation can use it."""
-        session_id = self._state_provider.core_session_id
-        metadata = self.state.data.unknown_fields
-        if "migration" not in metadata:
-            return session_id
-        message = "Committed migration session binding is invalid or does not match this destination entity."
-        migration = metadata["migration"]
-        if not isinstance(migration, dict):
-            raise ValueError(message)
-        migration = cast("dict[str, Any]", migration)
-        for field in ("id", "sourceSessionId", "ownershipTransferId", "destinationSessionId"):
-            value = migration.get(field)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(message)
-        for field in ("sourceDigest", "requestDigest"):
-            value = migration.get(field)
-            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
-                raise ValueError(message)
-        try:
-            validate_timestamp(migration.get("createdAt"))
-        except ValueError as exc:
-            raise ValueError(message) from exc
-        for field in ("evidenceId", "completionEvidenceId"):
-            if field in migration and (not isinstance(migration[field], str) or not migration[field].strip()):
-                raise ValueError(message)
-        source_session_id = cast(str, migration["sourceSessionId"])
-        if migration["destinationSessionId"] != session_id or source_session_id == session_id:
-            raise ValueError(message)
-        # Reset clears the local session, but does not relinquish migration ownership.
-        stored = self.state.data.session
-        if stored is not None:
-            if not isinstance(stored, dict):
-                raise ValueError(message)
-            stored_id = stored.get(_SESSION_ID_KEY)
-            if not isinstance(stored_id, str) or not stored_id.strip() or stored_id != source_session_id:
-                raise ValueError(message)
-        return source_session_id
-
     def _create_session(self) -> Any:
         create_session = getattr(self.agent, "create_session", None)
         if not callable(create_session):
             raise TypeError(
                 f"Agent {type(self.agent).__name__} exposes context providers but does not support create_session()."
             )
-        session: Any = create_session(session_id=self._migration_session_id())
+        session: Any = create_session(session_id=self._state_provider.migration_session_id())
         self._restore_session(session)
         return session
 

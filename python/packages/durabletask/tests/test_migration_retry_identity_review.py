@@ -304,7 +304,7 @@ def test_nonobject_warm_migrated_session_is_rejected_without_repair(stored: Any)
     warm.data.session = stored
 
     with pytest.raises(ValueError, match=_SESSION_BINDING_ERROR):
-        entity._migration_session_id()
+        provider.migration_session_id()
 
     assert provider.state is warm
     assert warm.data.session is stored

@@ -95,17 +95,6 @@ def _legacy_positions(data: dict[str, Any]) -> dict[str, int]:
     return positions
 
 
-def _validate_receipts(receipts: dict[str, list[str] | None]) -> None:
-    for identity, fingerprints in receipts.items():
-        _nonblank(identity, "ingestedMessages ID")
-        if fingerprints is None:
-            continue
-        if not fingerprints or any(_SHA256.fullmatch(value) is None for value in fingerprints):
-            raise ValueError("ingestedMessages requires nonempty lists of lowercase SHA-256 fingerprints.")
-        if len(set(fingerprints)) != len(fingerprints):
-            raise ValueError("ingestedMessages must not contain duplicate fingerprints.")
-
-
 def _journal_receipts(
     evidence: dict[str, Any], *, source_digest: str, positions: dict[str, int]
 ) -> tuple[str, dict[str, list[str]]]:
@@ -144,6 +133,7 @@ def _journal_receipts(
             raise ValueError("Recorded delivery evidence messagePositions must contain one entry per message.")
 
     receipts: dict[str, list[str]] = {}
+    seen_revisions: dict[str, set[str]] = {}
     maxima: dict[str, int] = {}
     for raw, position_record in zip(messages, attribution, strict=True):
         # Attribution comes from the authoritative accepted-input journal, not
@@ -176,10 +166,11 @@ def _journal_receipts(
             fingerprint = message_identity(message)
         except (TypeError, ValueError, AttributeError) as exc:
             raise ValueError("Recorded delivery evidence requires lossless complete canonical message inputs.") from exc
-        revisions = receipts.setdefault(identity, [])
-        if fingerprint in revisions:
+        seen = seen_revisions.setdefault(identity, set())
+        if fingerprint in seen:
             raise ValueError("Recorded delivery evidence contains a duplicate message ID/fingerprint pair.")
-        revisions.append(fingerprint)
+        seen.add(fingerprint)
+        receipts.setdefault(identity, []).append(fingerprint)
 
     # This is only a consistency check. Sparse positions are valid; a maximum is never
     # proof of a complete prefix, nor proof that the operator's journal is complete.
@@ -203,20 +194,12 @@ def _retained_request_ids(state: DurableAgentState) -> Iterator[str]:
 
 
 def _apply_journal(state: DurableAgentState, journal: dict[str, list[str]]) -> None:
-    receipts = state.data.ingested_messages
-    for identity, existing in receipts.items():
-        recorded = journal.get(identity)
-        if recorded is None or (existing is not None and not set(existing).issubset(recorded)):
-            raise ValueError("Recorded delivery evidence is inconsistent with existing ingestedMessages receipts.")
     for identity in _retained_request_ids(state):
         if identity not in journal:
             raise ValueError("Recorded delivery evidence must include every retained legacy request message ID.")
-    for identity, recorded in journal.items():
-        existing = receipts.get(identity)
-        if existing is None:
-            receipts[identity] = list(recorded)
-        else:
-            existing.extend(fingerprint for fingerprint in recorded if fingerprint not in existing)
+    # Accepted legacy sources have no active receipts. Unversioned ingestion
+    # fields stay opaque, and pythonIngestion is rejected before legacy parsing.
+    state.data.ingested_messages = {identity: list(recorded) for identity, recorded in journal.items()}
 
 
 def _response_evidence(response: dict[str, Any]) -> tuple[bool, bool]:
@@ -446,9 +429,12 @@ def migrate_legacy_state(
         _positive_int(max_state_bytes, "max_state_bytes")
     if not isinstance(source_digest, str) or _SHA256.fullmatch(source_digest) is None:
         raise ValueError("source_digest must be a lowercase SHA-256 snapshot digest.")
-    if state_snapshot_digest(source) != source_digest:
+    if not isinstance(source, dict):
+        raise ValueError("source must be a JSON object.")
+    source_json = _canonical_json(source)
+    if hashlib.sha256(source_json.encode("utf-8")).hexdigest() != source_digest:
         raise ValueError("source_digest does not match the canonical source snapshot.")
-    snapshot: dict[str, Any] = json.loads(_canonical_json(source))
+    snapshot: dict[str, Any] = json.loads(source_json)
     version = snapshot.get("schemaVersion")
     if not isinstance(version, str) or version not in ("1.0.0", "1.1.0", "1.2.0"):
         raise ValueError("Explicit migration accepts only legacy shared 1.0.0, 1.1.0 or 1.2.0, never a v2 source.")
@@ -499,7 +485,6 @@ def migrate_legacy_state(
         "completionReceipts": receipts,
     })
     _validate_retained_completions(raw_data["conversationHistory"], results)
-    _validate_receipts(state.data.ingested_messages)
     _preserve_session(state, source_session_id)
     evidence_id: str | None = None
     if delivery_evidence is not None:
@@ -525,9 +510,11 @@ def migrate_legacy_state(
         **({"evidenceId": evidence_id} if evidence_id is not None else {}),
         **({"completionEvidenceId": completion_evidence_id} if completion_evidence_id is not None else {}),
     }
-    size = len(json.dumps(state.to_dict(), allow_nan=False))
-    if max_state_bytes is not None and size > max_state_bytes:
-        raise StateCapacityError(
-            size_bytes=size, max_state_bytes=max_state_bytes, floor_bytes=size, target_bytes=max_state_bytes
-        )
+    payload = state.to_dict()
+    if max_state_bytes is not None:
+        size = len(json.dumps(payload, allow_nan=False))
+        if size > max_state_bytes:
+            raise StateCapacityError(
+                size_bytes=size, max_state_bytes=max_state_bytes, floor_bytes=size, target_bytes=max_state_bytes
+            )
     return state

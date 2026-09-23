@@ -6,6 +6,7 @@ import hashlib
 import json
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -612,6 +613,7 @@ def test_journal_fingerprints_cover_complete_canonical_inputs(mutation: str) -> 
     }
 
 
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
 @pytest.mark.parametrize(
     "opaque",
     [
@@ -631,10 +633,12 @@ def test_journal_fingerprints_cover_complete_canonical_inputs(mutation: str) -> 
         {"wf_upstream_3": None},
     ],
 )
-def test_unversioned_legacy_ingested_messages_are_arbitrary_opaque_json(opaque: Any) -> None:
+def test_unversioned_legacy_ingested_messages_are_arbitrary_opaque_json(version: str, opaque: Any) -> None:
     source = _source()
+    source["schemaVersion"] = version
     source["data"]["ingestedMessages"] = deepcopy(opaque)
     before = deepcopy(source)
+    assert DurableAgentState.from_dict(source).data.ingested_messages == {}
     result = _cold(_migrate(source, completion_evidence=_completions(source, _original_result())))
     assert result.to_dict()["data"]["ingestedMessages"] == opaque
     assert result.data.ingested_messages == {"custom-id": None}
@@ -888,10 +892,16 @@ def test_one_utc_clock_capture_for_migration_metadata_and_bounded_delivery(monke
         )
 
 
-def test_rfc3339_z_existing_delivery_reloads_without_python311_fromisoformat(monkeypatch: pytest.MonkeyPatch) -> None:
-    from agent_framework_durabletask import _durable_agent_state as state_module
+def test_rfc3339_z_existing_delivery_uses_shared_portable_parser(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_framework_durabletask import _shared_state_validation as validation_module
+
+    constructed: list[tuple[Any, ...]] = []
 
     class Python310Datetime(datetime):
+        def __new__(cls, *args: Any, **kwargs: Any) -> Self:
+            constructed.append(args)
+            return super().__new__(cls, *args, **kwargs)
+
         @classmethod
         def fromisoformat(cls, value: str) -> Self:
             assert not value.endswith(("Z", "z"))
@@ -902,10 +912,14 @@ def test_rfc3339_z_existing_delivery_reloads_without_python311_fromisoformat(mon
         delivery[field]["done"].update(completedAt="2024-01-01T00:00:00Z", resultExpiresAt="2024-01-01T00:01:00z")
     source = {"schemaVersion": "2.0.0", "data": delivery}
     before = deepcopy(source)
-    monkeypatch.setattr(state_module, "datetime", Python310Datetime)
+    monkeypatch.setattr(validation_module, "datetime", Python310Datetime)
     result = _cold(DurableAgentState.from_dict(source))
     assert result.to_dict() == before
-    result.expire_responses(now=NOW)
+    assert (2024, 1, 1, 0, 0, 0) in constructed
+    constructed.clear()
+    # The transition validator also requires an instance of its patched clock type.
+    result.expire_responses(now=Python310Datetime(2026, 9, 9, 12, tzinfo=timezone.utc))
+    assert (2024, 1, 1, 0, 1, 0) in constructed
     assert result.data.response_mailbox == {}
     assert result.data.completed_correlations["done"] == {
         **delivery["completionReceipts"]["done"],
@@ -1044,3 +1058,125 @@ def test_budget_includes_metadata_receipts_mailbox_session_and_ascii_escaped_unk
     assert source == before_source and evidence == before_evidence
     assert result.to_dict()["data"]["conversationHistory"] == source["data"]["conversationHistory"]
     assert "truncation" not in result.to_dict()["data"]
+
+
+def test_source_is_canonically_encoded_once_for_hash_and_detachment(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_framework_durabletask import _state_migration as migration_module
+
+    shared = {"values": [False, 0, 0.0, None, "雪😀"]}
+    source: dict[str, Any] = {"schemaVersion": "1.1.0", "data": {"future": shared}, "future": shared}
+    canonical = json.dumps(source, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    encode = migration_module._canonical_json
+    calls: list[object] = []
+
+    def observed(value: Any) -> str:
+        if value is source:
+            calls.append(value)
+        return encode(value)
+
+    monkeypatch.setattr(migration_module, "_canonical_json", observed)
+    result = migrate_legacy_state(
+        source,
+        source_digest=digest,
+        source_session_id=SESSION_ID,
+        migration_id="migration-1",
+        ownership_transfer_id="transfer-1",
+        delivery_window_seconds=WINDOW,
+        now=NOW,
+    )
+    assert len(calls) == 1
+    assert result.data.unknown_fields["migration"]["sourceDigest"] == digest
+    assert result.to_dict()["data"]["conversationHistory"] == []
+    assert "conversationHistory" not in source["data"]
+    expected = json.loads(canonical)["future"]
+    shared["values"].append("caller edit")
+    assert result.to_dict()["future"] == result.to_dict()["data"]["future"] == expected
+    caller_before = deepcopy(source)
+    result.unknown_fields["future"]["values"].append("result edit")
+    assert result.to_dict()["data"]["future"] == expected
+    assert source == caller_before
+
+
+@pytest.mark.parametrize("budget", [None, 1_000_000])
+def test_unbounded_migration_skips_only_outer_size_encoding(
+    budget: int | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_framework_durabletask import _state_migration as migration_module
+
+    source: dict[str, Any] = {"schemaVersion": "1.1.0", "data": {}}
+    encoded_targets: list[dict[str, Any]] = []
+    validated_targets: list[DurableAgentState] = []
+    to_dict = DurableAgentState.to_dict
+
+    def observe_dump(value: Any, **kwargs: Any) -> str:
+        if isinstance(value, dict) and value.get("schemaVersion") == "2.0.0":
+            encoded_targets.append(value)
+        return json.dumps(value, **kwargs)
+
+    def observe_validation(state: DurableAgentState) -> dict[str, Any]:
+        if state.schema_version == "2.0.0":
+            validated_targets.append(state)
+        return to_dict(state)
+
+    # Replace only the migration module's JSON reference, not process-wide json.dumps.
+    monkeypatch.setattr(migration_module, "json", SimpleNamespace(dumps=observe_dump, loads=json.loads))
+    monkeypatch.setattr(DurableAgentState, "to_dict", observe_validation)
+    result = _migrate(source, max_state_bytes=budget)
+    assert validated_targets == [result]
+    assert len(encoded_targets) == (0 if budget is None else 1)
+    assert to_dict(result)["data"]["session"] == {"session_id": SESSION_ID, "state": {}}
+
+
+@pytest.mark.parametrize("count", [32, 64])
+def test_journal_revision_membership_is_linear_and_preserves_encounter_order(
+    count: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_framework_durabletask import _state_migration as migration_module
+
+    source = _source()
+    source["data"]["ingestedMessages"] = {"custom-id": ["opaque legacy value"]}
+    messages = [
+        Message(
+            "user",
+            [f"revision-{revision}"],
+            message_id=identity,
+            additional_properties={"values": [False, 0, 0.0, None, "雪"]},
+        )
+        for revision in reversed(range(count))
+        for identity in ("custom-id", "another-id")
+    ]
+    evidence = _evidence(source, messages)
+    completion = _completions(source, _original_result())
+    before = deepcopy((source, evidence, completion))
+    expected: dict[str, list[str]] = {}
+    for raw in evidence["messages"]:
+        encoded = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        expected.setdefault(raw["message_id"], []).append(hashlib.sha256(encoded.encode("utf-8")).hexdigest())
+    comparisons = 0
+
+    class Fingerprint(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other: object) -> bool:
+            nonlocal comparisons
+            comparisons += 1
+            return str.__eq__(self, other)
+
+    def counted_fingerprint(message: Message) -> str:
+        return Fingerprint(message_identity(message))
+
+    monkeypatch.setattr(migration_module, "message_identity", counted_fingerprint)
+    result = _migrate(source, delivery_evidence=evidence, completion_evidence=completion)
+    # Count membership work, not wall time. List membership takes count*(count-1)
+    # comparisons across these two IDs before any final snapshot validation.
+    assert comparisons <= 4 * len(messages)
+    assert _cold(result).data.ingested_messages == expected
+    assert result.to_dict()["data"]["ingestedMessages"] == before[0]["data"]["ingestedMessages"]
+    assert (source, evidence, completion) == before
+
+    evidence["messages"].append(deepcopy(evidence["messages"][0]))
+    duplicate_before = deepcopy(evidence)
+    with pytest.raises(ValueError, match="duplicate message ID/fingerprint"):
+        _migrate(source, delivery_evidence=evidence, completion_evidence=completion)
+    assert evidence == duplicate_before and source == before[0] and completion == before[2]
