@@ -141,13 +141,15 @@ def serialize_response_type(annotation: Any) -> str | dict[str, Any] | None:
             kind = next((name for name, candidate in _RESPONSE_TYPE_ORIGINS.items() if candidate is origin), "")
         if not kind:
             raise ValueError(f"Unsupported HITL response annotation: {value!r}.")
-        # Tuple[()], tuple[()] and bare typing.Tuple all have tuple origin and
-        # no args. Core 1.16 can coerce JSON [] for these aliases, unlike concrete
-        # tuple. Preserve that distinction without imposing stricter arity than
-        # the installed Core's native-tuple admission.
+        # Keep tuple aliases distinct from the concrete tuple class. Python 3.10
+        # exposes ((),) for typing.Tuple[()], while newer Python exposes (). Core
+        # treats those argument shapes differently, so never normalize them.
         if not args and kind not in ("tuple", "union"):
             return f"builtins:{kind}"
-        children = [encode(arg, depth + 1) if arg is not Ellipsis else {"kind": "ellipsis"} for arg in args]
+        if kind == "tuple" and args == ((),):
+            children = [{"kind": "empty_tuple"}]
+        else:
+            children = [encode(arg, depth + 1) if arg is not Ellipsis else {"kind": "ellipsis"} for arg in args]
         return {_RESPONSE_TYPE_VERSION_KEY: _RESPONSE_TYPE_VERSION, "kind": kind, "args": children}
 
     encoded = encode(annotation, 0)
@@ -198,6 +200,10 @@ def deserialize_response_type(descriptor: Any) -> Any:
                 if kind != "tuple" or index != len(raw_args) - 1 or len(raw_args) not in (1, 2):
                     raise ValueError("Malformed HITL tuple ellipsis descriptor.")
                 args.append(Ellipsis)
+            elif child == {"kind": "empty_tuple"}:
+                if kind != "tuple" or len(raw_args) != 1:
+                    raise ValueError("Malformed HITL empty tuple argument descriptor.")
+                args.append(())
             else:
                 args.append(decode(child, depth + 1))
         if kind == "union":
