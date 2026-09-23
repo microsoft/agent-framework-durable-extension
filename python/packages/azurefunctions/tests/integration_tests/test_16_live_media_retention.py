@@ -290,7 +290,7 @@ def _capture(host: _Host, boot: str, calls: int, current_id: str, session: str, 
         capture["context"],
         {
             "provider": "AzureFunctionEntityStateProvider",
-            "type": "DurableEntityContext",
+            "type": "_JsonEntityContext",
             "entity_name": AgentSessionId.to_entity_name(AGENT),
             "entity_key": session,
             "operation": "run",
