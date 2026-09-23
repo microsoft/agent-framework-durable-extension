@@ -44,19 +44,8 @@ Unmarked native entity registrations retain the SDK path. Manually wrapping `cre
 with the native SDK does not install this boundary. This reader-stage change does not replace
 Functions workflow start, child-result or external-event decoding. It is not an app-wide decoder.
 
-### Worker indexing is a separate check
-
-The generated entity handler declares `context: str` for the JSON wire input and retains the
-SDK's optional `body` wrapper fallback. The native entity wrapper leaves its input unannotated.
-Signature and public binding-converter tests cover this distinction without depending on an
-installed Python worker. An external probe exercises the real worker registry and RPC metadata.
-
-Direct batch fixtures exercise plain-JSON decoding independently of worker indexing. They do
-not establish that the host accepts the generated signature on every supported SDK version.
-In the inspected `azure-functions==1.24.0` source, the entity-trigger converter accepts
-`EntityContext`, not `str`. The bundled worker keeps that converter for bindings with implicit
-output. The string annotation therefore remains a worker-compatibility gap to resolve, not a
-validated host fix.
+The exported handler matches the native SDK's unannotated rich-binding input and optional
+`body` wrapper. Direct batch tests and Python worker indexing test different boundaries.
 
 ## Dependencies and custom converters
 
