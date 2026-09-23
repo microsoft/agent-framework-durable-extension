@@ -8,8 +8,8 @@ from copy import deepcopy
 from typing import Any
 
 import pytest
+from _shared_history_test_support import _bound, _CanonicalStateProvider
 from agent_framework import Message
-from test_shared_history_provider import _bound, _CanonicalStateProvider
 
 from agent_framework_durabletask._history_provider import DurableHistoryProvider
 from agent_framework_durabletask._shared_agent_state import DurableAgentState, DurableAgentStateMessage

@@ -6,8 +6,7 @@ from copy import deepcopy
 from typing import Any
 
 import pytest
-from agent_framework import Agent, Content, ContextProvider, Message, SessionContext
-from test_shared_history_provider import (
+from _shared_history_test_support import (
     OrdinaryExternalHistory,
     _bound,
     _CanonicalStateProvider,
@@ -15,6 +14,7 @@ from test_shared_history_provider import (
     _request,
     _stored,
 )
+from agent_framework import Agent, Content, ContextProvider, Message, SessionContext
 
 from agent_framework_durabletask._history_provider import (
     POSITIONS_KEY,

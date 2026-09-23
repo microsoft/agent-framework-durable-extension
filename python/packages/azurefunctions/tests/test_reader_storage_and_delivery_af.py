@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Functions reader follow-ups through SDK tasks and registered HTTP handlers."""
+"""Functions storage retries and response delivery through SDK tasks and HTTP handlers."""
 
 import json
 from copy import deepcopy
@@ -8,11 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock, call
 
 import pytest
-from agent_framework import AgentResponse, Content
-from azure.durable_functions.models.actions.NoOpAction import NoOpAction
-from azure.durable_functions.models.Task import AtomicTask, TaskState
-from pydantic import ValidationError
-from test_shared_state_consumers import (
+from _reader_test_support import (
     CORRELATION_ID,
     ERROR_MESSAGE,
     SESSION_ID,
@@ -26,15 +22,19 @@ from test_shared_state_consumers import (
     _shared_state,
     _wire_response,
 )
-from test_shared_state_consumers import (
+from _reader_test_support import (
     app as app,
 )
-from test_shared_state_consumers import (
+from _reader_test_support import (
     handlers as handlers,
 )
-from test_shared_state_consumers import (
+from _reader_test_support import (
     sleep as sleep,
 )
+from agent_framework import AgentResponse, Content
+from azure.durable_functions.models.actions.NoOpAction import NoOpAction
+from azure.durable_functions.models.Task import AtomicTask, TaskState
+from pydantic import ValidationError
 
 from agent_framework_azurefunctions._orchestration import AgentTask
 

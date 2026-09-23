@@ -6,6 +6,8 @@ from copy import deepcopy
 from typing import Any
 
 import pytest
+from _history_pipeline_test_support import ToolChatClient
+from _shared_history_test_support import OrdinaryExternalHistory, _bound, _CanonicalStateProvider, _request, _stored
 from agent_framework import (
     GROUP_ANNOTATION_KEY,
     GROUP_ID_KEY,
@@ -15,8 +17,6 @@ from agent_framework import (
     CompactionProvider,
     Message,
 )
-from test_private_history_pipeline import ToolChatClient
-from test_shared_history_provider import OrdinaryExternalHistory, _bound, _CanonicalStateProvider, _request, _stored
 
 from agent_framework_durabletask._history_provider import (
     WORKING_BUFFER_KEY,
