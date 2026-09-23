@@ -22,7 +22,12 @@ from ._response_utils import (
     load_agent_response,
     serialize_agent_response,
 )
-from ._shared_response import load_terminal_response, serialize_terminal_response, terminal_error
+from ._shared_response import (
+    _audit_response,  # pyright: ignore[reportPrivateUsage]
+    load_terminal_response,
+    serialize_terminal_response,
+    terminal_error,
+)
 from ._shared_state_validation import (
     timestamp_reached,
     validate_completion_transition,
@@ -102,8 +107,9 @@ def stage_response(
     ):
         raise ValueError("A new completion requires a known invocation outcome, not an acknowledgement.")
 
-    # Resolve the value with the existing lazy-parsing and alias policy, but keep
-    # the instance for envelope preservation and the codec's pre-serialization audit.
+    # Reject unsupported live extras before Core can invoke their serializers.
+    # Resolve supported lazy values only after this non-converting audit.
+    _audit_response(response)
     core_payload = serialize_agent_response(response)
     projection = copy(response)
     projection._value = core_payload.get("value")  # pyright: ignore[reportPrivateUsage]
