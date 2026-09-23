@@ -48,6 +48,15 @@ changes. V2 readers do not resume provider sessions or workflow history.
 The Core requirement remains `agent-framework-core>=1.13.0,<2`. This package directly requires
 `pydantic>=2.11,<3` for structured response handling.
 
+### JSON runtime boundary
+
+The local runtime requires `durabletask>=1.7.1,<2`. Construct `DurableAIAgentWorker` before
+starting the SDK worker. Framework-selected reads for generated agents and workflows use plain
+JSON rather than SDK custom-object reconstruction. Native co-hosted work keeps its original
+converter behavior. See
+[Python durable JSON boundaries](../../../docs/features/python-durable-json-boundaries.md) for
+covered paths, custom-converter constraints and separate checkpoint trust requirements.
+
 ### Basic Usage Example
 
 ```python
