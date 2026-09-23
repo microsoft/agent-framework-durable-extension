@@ -280,6 +280,13 @@ def test_app_constructor_accepts_explicit_isolated_v2_without_env(monkeypatch: p
     assert app._deployment_mode == "isolated_v2"
 
 
+@pytest.mark.parametrize("value", ["legacy", "isolated", "", "ISOLATED_V2"])
+def test_app_constructor_rejects_invalid_deployment_environment(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("DURABLE_AGENTS_DEPLOYMENT_MODE", value)
+    with pytest.raises(ValueError, match="no other deployment mode is accepted"):
+        AgentFunctionApp(enable_health_check=False)
+
+
 @pytest.mark.parametrize(
     ("value", "valid"),
     [
