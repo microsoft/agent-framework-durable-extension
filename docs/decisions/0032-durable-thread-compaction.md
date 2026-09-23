@@ -794,6 +794,10 @@ Streaming fallback is limited to an immediate capability refusal. Exceptions fro
 iteration or finalization never authorize a second invocation. Custom non-streaming agents must
 reject the stream argument before entering asynchronous work.
 
+HITL tuple descriptors preserve Python's argument shape, including the explicit empty-tuple
+argument exposed by Python 3.10. Admission follows the installed Core implementation rather
+than inferring that all tuple aliases accept the same JSON or native tuple values.
+
 Child-ID scheme `1` always uses 74 ASCII characters, `dafxsw_v1_` plus the full SHA-256 hex digest
 over a domain separator and length-framed UTF-8 (actual parent ID, exact executor ID, decimal ordinal).
 Dispatch and provenance helpers apply the same derivation at every hop, not an authentication check.
