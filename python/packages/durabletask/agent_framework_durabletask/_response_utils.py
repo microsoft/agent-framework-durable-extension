@@ -205,24 +205,29 @@ def serialize_input_content(content: Content) -> dict[str, Any]:
     raw = cast("dict[str, Any]", raw_value) if isinstance(raw_value, dict) else {}
     if raw.get("type") == content.type:
         defaults = {
-            key: deepcopy(value)
+            key: value
             for key, value in raw.items()
-            if key not in fields or (key != "raw_representation" and getattr(content, key, object()) == value)
+            if key not in nested
+            and (key not in fields or (key != "raw_representation" and getattr(content, key, object()) == value))
         }
         current = {**defaults, **current}
+    # Children already own detached snapshots. Do not compare, copy or serialize
+    # their complete subtrees again at each ancestor.
+    current = deepcopy(current)
     current.update(nested)
-    return deepcopy(current)
+    return current
 
 
-def serialize_input_message(message: Message) -> dict[str, Any]:
-    """Snapshot current base fields and attached Core presence, never a shared shadow."""
+def _serialize_input_message_fields(message: Message) -> dict[str, Any]:
+    """Snapshot a detached message envelope without traversing its contents."""
     fields = _constructor_fields(Message)
     base = Message(message.role)
     for name in fields:
         if name not in ("contents", "raw_representation") and hasattr(message, name):
             # Do not normalize a consumer's field edit through constructor defaults.
             vars(base)[name] = getattr(message, name)
-    # Exclude raw SDK objects before traversal, even when a subclass clears Core's defaults.
+    # Keep Core's exclusion arguments for legacy serializable extras. Extending
+    # this set to all base fields would also filter those names inside extras.
     current = Message.to_dict(message, exclude={"contents", "raw_representation"})
     # Subclass exclusion rules and type identifiers cannot replace public base fields.
     for name in fields:
@@ -232,14 +237,20 @@ def serialize_input_message(message: Message) -> dict[str, Any]:
     if isinstance(raw_value, dict):
         raw = cast("dict[str, Any]", raw_value)
         retained = {
-            name: deepcopy(value)
+            name: value
             for name, value in raw.items()
             if name not in ("contents", "raw_representation")
             and (name not in fields or getattr(message, name, object()) == value)
         }
         current = {**retained, **current}
-    current["contents"] = [serialize_input_content(content) for content in message.contents]
     return deepcopy(current)
+
+
+def serialize_input_message(message: Message) -> dict[str, Any]:
+    """Snapshot current base fields and attached Core presence, never a shared shadow."""
+    current = _serialize_input_message_fields(message)
+    current["contents"] = [serialize_input_content(content) for content in message.contents]
+    return current
 
 
 def _structured_value_json(value: Any, *, sort_keys: bool = False) -> str:
@@ -333,7 +344,7 @@ def serialize_agent_response(response: AgentResponse[Any]) -> dict[str, Any]:
     # Stripping runtime-only fields afterward would still execute their serializers.
     payload = AgentResponse.to_dict(response, exclude={"messages", "raw_representation", "response_format"})
     payload.update(base.to_dict(exclude={"messages"}))
-    payload["messages"] = [serialize_input_message(message) for message in response.messages]
+    messages = [serialize_input_message(message) for message in response.messages]
     payload.pop("response_format", None)
     payload.pop("raw_representation", None)
     payload.pop("value", None)
@@ -375,7 +386,9 @@ def serialize_agent_response(response: AgentResponse[Any]) -> dict[str, Any]:
         payload[_VALUE_POLICY_KEY] = dict(_VALUE_POLICY)
     if _is_shared_approval(source):
         payload[_APPROVAL_POLICY_KEY] = dict(_APPROVAL_POLICY)
-    return deepcopy(payload)
+    payload = deepcopy(payload)
+    payload["messages"] = messages
+    return payload
 
 
 def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -> AgentResponse:
@@ -389,9 +402,9 @@ def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -
 
     Raises:
         ValueError: If agent_response is None, its optional delivery version is unsupported,
-            a content envelope is malformed, or an approval policy is invalid or does
-            not describe actual pending approval Content without a structured value
-            or an embedded response_format.
+            a content envelope or value policy is invalid, a value/approval policy
+            embeds response_format, or an approval policy does not describe actual
+            pending approval Content without a structured value.
         TypeError: If the input type, a message contents container, or required
             constructor fields are invalid.
     """
@@ -411,6 +424,8 @@ def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -
             policy = cast(dict[str, Any], policy)
             if policy != _VALUE_POLICY or type(policy.get("version")) is not int:
                 raise ValueError("Unsupported durable structured-value policy.")
+            if "response_format" in agent_response:
+                raise ValueError("The durable structured-value policy does not permit response_format.")
         if _APPROVAL_POLICY_KEY in agent_response:
             approval_policy = agent_response[_APPROVAL_POLICY_KEY]
             if not isinstance(approval_policy, dict):
@@ -440,7 +455,7 @@ def load_agent_response(agent_response: AgentResponse | dict[str, Any] | None) -
         data = deepcopy(agent_response)
         fields = _constructor_kwargs(data, AgentResponse)
         # A legacy caller-supplied format remains a constructor value, never a type
-        # to import. Approval-policy inputs must not enable Core's lazy value parser.
+        # to import. Value/approval-policy inputs must not enable Core's lazy parser.
         messages = fields.get("messages")
         if messages is not None and not isinstance(messages, Message):
             if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes, bytearray)):
