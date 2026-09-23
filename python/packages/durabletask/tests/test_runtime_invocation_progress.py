@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import pytest
 from _execution_test_support import JsonStateProvider, NonStreamingAgent, ToolChatClient
+from _invocation_progress_test_support import _ScriptedNonStreamingClient
 from agent_framework import (
     Agent,
     AgentResponse,
@@ -132,39 +133,6 @@ class _StreamRejectedClient(BaseChatClient):
             raise _missing_previous_response("streamed response id was rejected after partial output")
 
         return ResponseStream(updates(), finalizer=ChatResponse.from_updates)
-
-
-class _ScriptedNonStreamingClient(BaseChatClient):
-    STORES_BY_DEFAULT = True
-
-    def __init__(self, outcomes: Sequence[Callable[[], ChatResponse] | ChatResponse]) -> None:
-        super().__init__()
-        self._outcomes = list(outcomes)
-        self.received_messages: list[list[Message]] = []
-        self.received_options: list[dict[str, Any]] = []
-
-    def _inner_get_response(
-        self,
-        *,
-        messages: Sequence[Message],
-        stream: bool,
-        options: Mapping[str, Any],
-        **kwargs: Any,
-    ) -> Awaitable[ChatResponse]:
-        del kwargs
-        assert stream is False
-        self.received_messages.append(deepcopy(list(messages)))
-        self.received_options.append(dict(options))
-        if not self._outcomes:
-            raise AssertionError("missing scripted non-streaming outcome")
-        outcome = self._outcomes.pop(0)
-
-        async def get() -> ChatResponse:
-            if callable(outcome):
-                return outcome()
-            return outcome
-
-        return get()
 
 
 class _RejectAfterToolClient(ToolChatClient):

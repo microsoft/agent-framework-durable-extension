@@ -6,8 +6,8 @@ from copy import deepcopy
 from typing import Any
 
 import pytest
+from _shared_history_test_support import _bound, _CanonicalStateProvider, _PassiveChatClient, _request, _stored
 from agent_framework import Agent, CompactionProvider, InMemoryHistoryProvider, Message
-from test_shared_history_provider import _bound, _CanonicalStateProvider, _PassiveChatClient, _request, _stored
 
 from agent_framework_durabletask._history_provider import (
     WORKING_BUFFER_KEY,

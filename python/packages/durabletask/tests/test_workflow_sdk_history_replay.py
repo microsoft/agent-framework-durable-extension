@@ -30,13 +30,14 @@ rejection and remains owned by the independent validation change.
 
 import asyncio
 import json
-import logging
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from _workflow_lifecycle_test_support import _Transport, _typed_workflow
+from _workflow_replay_test_support import _LOGGER, _af_replay, _replay, _worker
 from agent_framework import (
     Executor,
     Workflow,
@@ -49,16 +50,14 @@ from agent_framework import (
 from durabletask.client import TaskHubGrpcClient
 from durabletask.internal import helpers
 from durabletask.internal import orchestrator_service_pb2 as pb
-from durabletask.worker import TaskHubGrpcWorker, _ActivityExecutor, _OrchestrationExecutor
+from durabletask.worker import _ActivityExecutor
 from google.protobuf.json_format import ParseDict
-from test_workflow_hitl_lifecycle import _Transport, _typed_workflow
 from typing_extensions import Never
 
-from agent_framework_durabletask import DurableAIAgentWorker, DurableWorkflowClient, wrap_workflow_input
+from agent_framework_durabletask import DurableWorkflowClient, wrap_workflow_input
 from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "workflow_replay"
-_LOGGER = logging.getLogger(__name__)
 
 
 class _Seed(Executor):
@@ -145,20 +144,6 @@ def _service_shaped_histories(parent: list[Any], child: list[Any]) -> tuple[list
     return transformed_parent, transformed_child
 
 
-def _worker(workflow: Workflow) -> Any:
-    native = TaskHubGrpcWorker(host_address="localhost:1")
-    DurableAIAgentWorker(native, deployment_mode="isolated_v2").configure_workflow(workflow)
-    return native
-
-
-def _replay(native: Any, instance: str, old: list[Any], new: list[Any] | None = None) -> Any:
-    # A fresh SDK executor/context on every episode, not a hand-driven generator
-    # whose is_replaying flag remains constant through the whole run.
-    return _OrchestrationExecutor(native._registry, _LOGGER, native._data_converter).execute(
-        instance, old, [helpers.new_orchestrator_started_event()] if new is None else new
-    )
-
-
 @pytest.mark.parametrize("name", ["siblings-completed", "mixed-parent-paused", "mixed-child-paused"])
 def test_historical_activity_results_characterize_admission_metadata_change(name: str) -> None:
     workflow, gates = _graph(mixed=name.startswith("mixed"))
@@ -230,8 +215,7 @@ def test_sdk_characterizes_historical_sibling_schedule_incompatibility(count: in
 @pytest.mark.parametrize("host", ["dt", "af"])
 @pytest.mark.parametrize("malformed", [False, True], ids=["typed-rejection", "malformed-envelope"])
 def test_constructed_sibling_histories_replay_exact_registered_results(host: str, malformed: bool) -> None:
-    # Local import avoids the mixed transport's dependency on this module.
-    from test_workflow_mixed_hitl_scheduling import _atomic_actions, _Episodes
+    from _workflow_replay_test_support import _atomic_actions, _Episodes
 
     workflow, gates = _graph()
     transport = _Episodes(workflow)
@@ -521,77 +505,9 @@ def test_generic_response_rejection_is_checkpointed_by_registered_activity() -> 
     }
 
 
-def _af_replay(history: list[Any], workflow: Workflow, *, instance: str = "audit-siblings") -> dict[str, Any]:
-    af = pytest.importorskip("agent_framework_azurefunctions")
-    from azure.durable_functions import DurableOrchestrationContext
-    from azure.durable_functions.models.ReplaySchema import ReplaySchema
-    from azure.durable_functions.models.TaskOrchestrationExecutor import TaskOrchestrationExecutor
-    from google.protobuf.json_format import MessageToDict
-
-    started = next(event.executionStarted for event in history if event.HasField("executionStarted"))
-    assert started.orchestrationInstance.instanceId == instance
-    # Preserve only service-shaped parent metadata already in the source event.
-    # Missing metadata stays missing, even when the input claims to be a child.
-    parent_instance_id = None
-    if started.HasField("parentInstance") and started.parentInstance.HasField("orchestrationInstance"):
-        parent_instance_id = started.parentInstance.orchestrationInstance.instanceId
-
-    kinds = {
-        "orchestratorStarted": 12,
-        "executionStarted": 0,
-        "taskScheduled": 4,
-        "taskCompleted": 5,
-        "taskFailed": 6,
-        "eventRaised": 15,
-        "subOrchestrationInstanceCreated": 7,
-        "subOrchestrationInstanceCompleted": 8,
-        "subOrchestrationInstanceFailed": 9,
-    }
-    rows: list[dict[str, Any]] = []
-    for original in history:
-        row = MessageToDict(original)
-        kind = next(key for key in kinds if key in row)
-        event: dict[str, Any] = {
-            "EventType": kinds[kind],
-            "EventId": row["eventId"] - 1 if row["eventId"] >= 1 else -1,
-            "IsPlayed": True,
-            "Timestamp": row.get("timestamp", "2026-09-20T23:00:00Z"),
-            "Version": None,
-        }
-        for key, value in row[kind].items():
-            if key == "taskScheduledId":
-                event["TaskScheduledId"] = value - 1
-            elif key in ("name", "input", "result"):
-                event[key.capitalize()] = value
-            elif key == "instanceId":
-                event["InstanceId"] = value
-            elif key == "failureDetails":
-                event["Reason"] = value["errorMessage"]
-                event["Details"] = value["errorType"]
-        rows.append(event)
-    rows.append({"EventType": 12, "EventId": -1, "IsPlayed": False, "Timestamp": "2026-09-20T23:00:00Z"})
-    app = af.AgentFunctionApp(workflow=workflow, enable_health_check=False, deployment_mode="isolated_v2")
-    function = next(
-        item.get_user_function().orchestrator_function
-        for item in app.get_functions()
-        if item.get_function_name() == started.name
-    )
-    context = DurableOrchestrationContext(
-        rows,
-        instanceId=instance,
-        isReplaying=True,
-        parentInstanceId=parent_instance_id,
-        input=started.input.value if started.HasField("input") else None,
-        upperSchemaVersion=ReplaySchema.V3.value,
-    )
-    # Verify the SDK-owned raw field without replacing it or invoking custom decoding.
-    assert vars(context)["_input"] == (started.input.value if started.HasField("input") else None)
-    return json.loads(TaskOrchestrationExecutor().execute(context, context.histories, function))
-
-
 @pytest.mark.parametrize("count", [11, 13, 18, 23], ids=["paused", "invalid", "partial", "completed"])
 def test_functions_sdk_exposes_historical_sibling_schedule_divergence(count: int) -> None:
-    from test_workflow_mixed_hitl_scheduling import _atomic_actions
+    from _workflow_replay_test_support import _atomic_actions
 
     workflow, gates = _graph()
     history = deepcopy(_history("siblings-completed")[:count])

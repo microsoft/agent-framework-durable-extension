@@ -8,17 +8,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pytest
-from agent_framework import (
-    Agent,
-    AgentResponse,
-    CompactionProvider,
-    ContextProvider,
-    InMemoryHistoryProvider,
-    Message,
-    SessionContext,
-)
-from test_private_history_pipeline import ToolChatClient
-from test_shared_history_provider import (
+from _history_pipeline_test_support import ToolChatClient
+from _shared_history_test_support import (
     OrdinaryExternalHistory,
     _bound,
     _CanonicalStateProvider,
@@ -27,6 +18,15 @@ from test_shared_history_provider import (
     _PassiveChatClient,
     _request,
     _stored,
+)
+from agent_framework import (
+    Agent,
+    AgentResponse,
+    CompactionProvider,
+    ContextProvider,
+    InMemoryHistoryProvider,
+    Message,
+    SessionContext,
 )
 
 from agent_framework_durabletask._history_provider import (

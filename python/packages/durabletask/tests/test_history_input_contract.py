@@ -9,8 +9,8 @@ from copy import deepcopy
 from typing import Any, ClassVar
 
 import pytest
+from _history_pipeline_test_support import _bound, _CanonicalStateProvider
 from agent_framework import Agent, AgentResponse, BaseChatClient, ChatMiddlewareLayer, ChatResponse, Content, Message
-from test_private_history_pipeline import _bound, _CanonicalStateProvider
 
 from agent_framework_durabletask import load_agent_response
 from agent_framework_durabletask._history_provider import DurableHistoryProvider

@@ -8,8 +8,8 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from _shared_history_test_support import _bound, _CanonicalStateProvider, _request, _stored
 from agent_framework import AgentResponse, Content, Message
-from test_shared_history_provider import _bound, _CanonicalStateProvider, _request, _stored
 
 from agent_framework_durabletask._history_provider import WORKING_BUFFER_KEY, DurableHistoryProvider
 from agent_framework_durabletask._shared_agent_state import DurableAgentStateMessage, DurableAgentStateResponse

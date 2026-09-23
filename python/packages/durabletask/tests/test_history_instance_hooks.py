@@ -7,9 +7,9 @@ from types import MethodType
 from typing import Any, cast
 
 import pytest
+from _history_pipeline_test_support import ToolChatClient
+from _shared_history_test_support import _bound, _CanonicalStateProvider
 from agent_framework import Agent, AgentResponse, AgentSession, HistoryProvider, Message, SessionContext
-from test_private_history_pipeline import ToolChatClient
-from test_shared_history_provider import _bound, _CanonicalStateProvider
 
 from agent_framework_durabletask._history_provider import (
     _ObservedHistoryProvider,

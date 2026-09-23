@@ -11,9 +11,11 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock, patch
 
+import _workflow_admission_test_support as admission
 import pytest
-import test_workflow_dispatch_admission as admission
 from _execution_test_support import RecordingChatClient
+from _workflow_admission_test_support import _registered_run, _run_core_workflow
+from _workflow_protocol_test_support import _complete, _drain, _host
 from _workflow_test_support import create_registration_worker
 from agent_framework import (
     Agent,
@@ -31,8 +33,6 @@ from agent_framework import (
 )
 from durabletask.client import TaskHubGrpcClient
 from durabletask.task import CompletableTask
-from test_workflow_dispatch_admission import _registered_run, _run_core_workflow
-from test_workflow_protocol_boundaries_dt import _complete, _drain, _host
 from typing_extensions import Never
 
 from agent_framework_durabletask import DurableAIAgentWorker, DurableWorkflowClient, serialize_agent_response

@@ -17,10 +17,8 @@ from unittest.mock import AsyncMock, Mock
 import azure.durable_functions as df
 import azure.functions as func
 import pytest
-from agent_framework_durabletask._workflows import activity as activity_module
-from agent_framework_durabletask._workflows.serialization import deserialize_response_type, deserialize_workflow_output
-from test_workflow_dispatch_admission_af import _registered_af_run
-from test_workflow_generic_hitl import (
+from _workflow_admission_test_support_af import _registered_af_run
+from _workflow_generic_hitl_test_support import (
     _CONCRETE_REPLAY_CASES,
     _PENDING_STATUS_CASES,
     _complete_generic_activity,
@@ -34,7 +32,10 @@ from test_workflow_generic_hitl import (
     _Models,
     _validator_replay_trial,
 )
-from test_workflow_protocol_boundaries_af import _drain
+from _workflow_generic_hitl_test_support_af import _request
+from _workflow_protocol_test_support_af import _drain
+from agent_framework_durabletask._workflows import activity as activity_module
+from agent_framework_durabletask._workflows.serialization import deserialize_response_type, deserialize_workflow_output
 
 from agent_framework_azurefunctions import AgentFunctionApp
 
@@ -266,17 +267,6 @@ def _http_functions(workflow: Any) -> dict[str, Any]:
     return functions
 
 
-def _request(operation: str, request_id: str = "approval", payload: Any = None) -> func.HttpRequest:
-    return func.HttpRequest(
-        method="GET" if operation == "status" else "POST",
-        url=f"https://example.test/api/workflow/generic-hitl/{operation}/root/{request_id}",
-        headers={"Content-Type": "application/json"},
-        params={},
-        route_params={"instanceId": "root", "requestId": request_id},
-        body=json.dumps(payload).encode("utf-8"),
-    )
-
-
 @pytest.mark.parametrize("nested", [False, True])
 @pytest.mark.parametrize(
     "runtime_status",
@@ -332,8 +322,7 @@ def test_http_absent_or_nonterminal_runtime_status_preserves_early_delivery(runt
 
 
 def test_http_early_fixed_id_is_buffered_by_real_sdk_then_validated_by_registered_activity() -> None:
-    from test_workflow_mixed_hitl_scheduling import _Episodes
-    from test_workflow_sdk_history_replay import _af_replay
+    from _workflow_replay_test_support import _af_replay, _Episodes
 
     workflow, seen = _generic_workflow(list[int])
     app = AgentFunctionApp(workflow=workflow, enable_health_check=False, deployment_mode="isolated_v2")

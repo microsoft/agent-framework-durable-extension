@@ -7,8 +7,9 @@ from types import MethodType
 from typing import Any
 
 import pytest
+from _history_acceptance_test_support import ACCEPTED, PRIOR, _input
+from _history_pipeline_test_support import ToolChatClient, _bound, _CanonicalStateProvider, lookup
 from agent_framework import Agent, AgentContext, AgentMiddleware, HistoryProvider, Message, SessionContext
-from test_private_history_pipeline import ToolChatClient, _bound, _CanonicalStateProvider, lookup
 
 from agent_framework_durabletask._history_provider import (
     DurableHistoryProvider,
@@ -16,15 +17,6 @@ from agent_framework_durabletask._history_provider import (
     prepare_history_owner,
 )
 from agent_framework_durabletask._shared_agent_state import DurableAgentStateRequest
-
-PRIOR = ("occ-prior", "fingerprint-prior")
-ACCEPTED = ("occ-B", "fingerprint-B")
-
-
-def _input(text: str) -> Message:
-    message = Message("user", [text])
-    message._durable_ingestion_receipt = (f"occ-{text}", f"fingerprint-{text}")  # type: ignore[attr-defined]
-    return message
 
 
 class _DropA(AgentMiddleware):

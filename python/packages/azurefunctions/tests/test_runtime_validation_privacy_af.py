@@ -11,10 +11,7 @@ from copy import deepcopy
 from typing import Any, cast
 
 import pytest
-from agent_framework_durabletask import serialize_agent_response
-from azure.durable_functions.models.actions.NoOpAction import NoOpAction
-from azure.durable_functions.models.Task import AtomicTask
-from test_runtime_validation_privacy import (
+from _validation_test_support import (
     PRIVATE,
     SAFE,
     GroupedValidationAgent,
@@ -24,6 +21,9 @@ from test_runtime_validation_privacy import (
     grouped_error,
     validation_error,
 )
+from agent_framework_durabletask import serialize_agent_response
+from azure.durable_functions.models.actions.NoOpAction import NoOpAction
+from azure.durable_functions.models.Task import AtomicTask
 
 from agent_framework_azurefunctions import _entities as entities
 from agent_framework_azurefunctions._orchestration import AgentTask
