@@ -31,7 +31,7 @@ from durabletask.client import TaskHubGrpcClient
 from durabletask.internal import helpers
 from durabletask.internal import orchestrator_service_pb2 as pb
 from durabletask.worker import _ActivityExecutor
-from test_workflow_recorded_replay_review import _LOGGER, _af_replay, _replay, _worker
+from test_workflow_sdk_history_replay import _LOGGER, _af_replay, _replay, _worker
 from typing_extensions import Never
 
 from agent_framework_durabletask import DurableWorkflowClient

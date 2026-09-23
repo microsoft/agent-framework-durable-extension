@@ -51,7 +51,7 @@ from durabletask.internal import helpers
 from durabletask.internal import orchestrator_service_pb2 as pb
 from durabletask.worker import TaskHubGrpcWorker, _ActivityExecutor, _OrchestrationExecutor
 from google.protobuf.json_format import ParseDict
-from test_workflow_hitl_lifecycle_audit import _Transport, _typed_workflow
+from test_workflow_hitl_lifecycle import _Transport, _typed_workflow
 from typing_extensions import Never
 
 from agent_framework_durabletask import DurableAIAgentWorker, DurableWorkflowClient, wrap_workflow_input
@@ -231,7 +231,7 @@ def test_sdk_characterizes_historical_sibling_schedule_incompatibility(count: in
 @pytest.mark.parametrize("malformed", [False, True], ids=["typed-rejection", "malformed-envelope"])
 def test_constructed_sibling_histories_replay_exact_registered_results(host: str, malformed: bool) -> None:
     # Local import avoids the mixed transport's dependency on this module.
-    from test_workflow_mixed_hitl_review import _atomic_actions, _Episodes
+    from test_workflow_mixed_hitl_scheduling import _atomic_actions, _Episodes
 
     workflow, gates = _graph()
     transport = _Episodes(workflow)
@@ -591,7 +591,7 @@ def _af_replay(history: list[Any], workflow: Workflow, *, instance: str = "audit
 
 @pytest.mark.parametrize("count", [11, 13, 18, 23], ids=["paused", "invalid", "partial", "completed"])
 def test_functions_sdk_exposes_historical_sibling_schedule_divergence(count: int) -> None:
-    from test_workflow_mixed_hitl_review import _atomic_actions
+    from test_workflow_mixed_hitl_scheduling import _atomic_actions
 
     workflow, gates = _graph()
     history = deepcopy(_history("siblings-completed")[:count])

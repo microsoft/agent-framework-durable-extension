@@ -26,17 +26,17 @@ from azure.durable_functions.models.ReplaySchema import ReplaySchema
 from azure.durable_functions.models.Task import AtomicTask, TaskState
 from azure.durable_functions.models.TaskOrchestrationExecutor import TaskOrchestrationExecutor
 from azure.functions import _durable_functions as sdk_codec
-from test_workflow_agent_rejection_backlog_review import _History, _workflow
-from test_workflow_buffered_events_review_af import _context, _event, _execute, _prefix
-from test_workflow_generic_hitl_review import (
+from test_workflow_agent_rejection_backlog import _History, _workflow
+from test_workflow_buffered_events_af import _context, _event, _execute, _prefix
+from test_workflow_generic_hitl import (
     _VALIDATOR_CALLS,
     _complete_generic_activity,
     _CountedDecision,
     _generic_workflow,
 )
-from test_workflow_generic_hitl_review_af import _request
-from test_workflow_mixed_hitl_review import _atomic_actions, _Episodes
-from test_workflow_recorded_replay_review import _replay
+from test_workflow_generic_hitl_af import _request
+from test_workflow_mixed_hitl_scheduling import _atomic_actions, _Episodes
+from test_workflow_sdk_history_replay import _replay
 
 from agent_framework_azurefunctions import AgentFunctionApp
 from agent_framework_azurefunctions._orchestration import AzureFunctionsAgentExecutor

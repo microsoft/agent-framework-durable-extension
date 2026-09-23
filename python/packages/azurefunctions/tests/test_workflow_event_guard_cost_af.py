@@ -18,8 +18,8 @@ import pytest
 from azure.durable_functions.models.history.HistoryEvent import HistoryEvent
 from azure.durable_functions.models.Task import TaskState
 from azure.durable_functions.models.TaskOrchestrationExecutor import TaskOrchestrationExecutor
-from test_workflow_buffered_events_review_af import _context, _event, _prefix
-from test_workflow_mixed_hitl_review import _atomic_actions
+from test_workflow_buffered_events_af import _context, _event, _prefix
+from test_workflow_mixed_hitl_scheduling import _atomic_actions
 
 from agent_framework_azurefunctions import _workflow_af_context as adapter_module
 from agent_framework_azurefunctions._workflow_af_context import AzureFunctionsWorkflowContext

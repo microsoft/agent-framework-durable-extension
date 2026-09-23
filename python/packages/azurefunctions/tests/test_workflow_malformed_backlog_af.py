@@ -25,10 +25,10 @@ from azure.durable_functions.models.TaskOrchestrationExecutor import TaskOrchest
 from durabletask.internal import helpers
 from durabletask.internal import orchestrator_service_pb2 as pb
 from durabletask.worker import _ActivityExecutor
-from test_workflow_buffered_events_review_af import _event
-from test_workflow_generic_hitl_review import _complete_generic_activity
-from test_workflow_mixed_hitl_review import _atomic_actions, _Episodes
-from test_workflow_recorded_replay_review import _LOGGER, _af_replay, _replay, _worker
+from test_workflow_buffered_events_af import _event
+from test_workflow_generic_hitl import _complete_generic_activity
+from test_workflow_mixed_hitl_scheduling import _atomic_actions, _Episodes
+from test_workflow_sdk_history_replay import _LOGGER, _af_replay, _replay, _worker
 from typing_extensions import Never
 
 from agent_framework_azurefunctions import AgentFunctionApp

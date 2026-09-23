@@ -13,8 +13,7 @@ from unittest.mock import Mock
 
 import pytest
 from _execution_test_support import JsonStateProvider, RecordingChatClient
-from agent_framework import Agent
-from test_migration_host_boundaries import (
+from _migration_test_support import (
     ENTITY_NAME,
     SOURCE_SESSION_ID,
     _completion_journal,
@@ -24,6 +23,7 @@ from test_migration_host_boundaries import (
     _ObservedExternalHistory,
     _original_result,
 )
+from agent_framework import Agent
 from typing_extensions import Self
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState

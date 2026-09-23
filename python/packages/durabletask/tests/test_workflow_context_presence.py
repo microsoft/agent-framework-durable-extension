@@ -35,8 +35,8 @@ from durabletask.internal import orchestrator_service_pb2 as pb
 from durabletask.internal.entity_state_shim import StateShim
 from durabletask.serialization import JsonDataConverter
 from durabletask.worker import _ActivityExecutor
-from test_workflow_recorded_replay_review import _replay, _worker
-from test_workflow_selection_occurrence_review import _assert_same_action_contract, _request_contract
+from test_workflow_sdk_history_replay import _replay, _worker
+from test_workflow_selection_occurrences import _assert_same_action_contract, _request_contract
 
 from agent_framework_durabletask import DurableAgentState, load_agent_response, wrap_workflow_input
 from agent_framework_durabletask._message_identity import message_identity

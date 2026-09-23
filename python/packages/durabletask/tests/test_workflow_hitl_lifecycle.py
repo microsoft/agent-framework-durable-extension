@@ -17,7 +17,7 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-import test_workflow_admission_review as admission
+import test_workflow_dispatch_admission as admission
 from _execution_test_support import RecordingChatClient
 from agent_framework import (
     Agent,
@@ -36,7 +36,7 @@ from agent_framework import (
 from durabletask.client import TaskHubGrpcClient
 from durabletask.task import CompletableTask
 from pydantic import BaseModel
-from test_workflow_protocol_review import _complete, _host
+from test_workflow_protocol_boundaries_dt import _complete, _host
 from typing_extensions import Never
 
 from agent_framework_durabletask import DurableWorkflowClient, serialize_agent_response

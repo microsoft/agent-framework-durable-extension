@@ -42,9 +42,9 @@ from durabletask.internal import orchestrator_service_pb2 as pb
 from durabletask.internal.entity_state_shim import StateShim
 from durabletask.serialization import JsonDataConverter
 from durabletask.worker import _ActivityExecutor
-from test_workflow_buffered_events_review_af import _event
-from test_workflow_mixed_hitl_review import _atomic_actions
-from test_workflow_recorded_replay_review import _LOGGER, _replay, _worker
+from test_workflow_buffered_events_af import _event
+from test_workflow_mixed_hitl_scheduling import _atomic_actions
+from test_workflow_sdk_history_replay import _LOGGER, _replay, _worker
 
 from agent_framework_azurefunctions import AgentFunctionApp
 from agent_framework_azurefunctions._workflow_af_context import AzureFunctionsWorkflowContext

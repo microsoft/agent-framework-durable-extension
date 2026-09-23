@@ -17,8 +17,8 @@ import pytest
 from agent_framework import Workflow, WorkflowBuilder
 from agent_framework_durabletask import wrap_workflow_input
 from agent_framework_durabletask._workflows.serialization import deserialize_workflow_output
-from test_workflow_admission_review import _hitl_workflow, _Relay, _Sink
-from test_workflow_protocol_review_af import _drain, _host
+from test_workflow_dispatch_admission import _hitl_workflow, _Relay, _Sink
+from test_workflow_protocol_boundaries_af import _drain, _host
 
 from agent_framework_azurefunctions import AgentFunctionApp
 

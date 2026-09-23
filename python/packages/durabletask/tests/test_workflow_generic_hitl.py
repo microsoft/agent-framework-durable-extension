@@ -31,7 +31,7 @@ from agent_framework import (
 from agent_framework._workflows._typing_utils import is_instance_of, try_coerce_to_type
 from durabletask.client import OrchestrationStatus, TaskHubGrpcClient
 from pydantic import BaseModel, field_validator
-from test_workflow_hitl_lifecycle_audit import _Transport
+from test_workflow_hitl_lifecycle import _Transport
 from typing_extensions import Never
 
 from agent_framework_durabletask import DurableWorkflowClient, execute_workflow_activity
@@ -665,7 +665,7 @@ class _CountedDataclass:
 def _complete_generic_activity(episodes: Any, *, functions: dict[str, Any] | None = None) -> dict[str, Any]:
     from durabletask.internal import helpers
     from durabletask.worker import _ActivityExecutor
-    from test_workflow_recorded_replay_review import _LOGGER
+    from test_workflow_sdk_history_replay import _LOGGER
 
     assert len(episodes.actions["root"]) == 1
     task_id, action = episodes.actions["root"].popitem()
@@ -701,8 +701,8 @@ _CONCRETE_REPLAY_CASES = [
 
 
 def _concrete_replay_trial(requested: type, answer: Any, correction: Any, *, functions_host: bool = False) -> None:
-    from test_workflow_mixed_hitl_review import _Episodes
-    from test_workflow_recorded_replay_review import _af_replay, _replay
+    from test_workflow_mixed_hitl_scheduling import _Episodes
+    from test_workflow_sdk_history_replay import _af_replay, _replay
 
     # The public Core workflow is independent of durable's descriptor and
     # admission helpers. In particular bool->float differs in Core 1.13/1.16.
@@ -788,8 +788,8 @@ def test_concrete_core_admission_is_checkpointed_before_pending_request_is_retir
 
 
 def _validator_replay_trial(annotation: Any, *, functions_host: bool = False) -> None:
-    from test_workflow_mixed_hitl_review import _Episodes
-    from test_workflow_recorded_replay_review import _af_replay, _replay
+    from test_workflow_mixed_hitl_scheduling import _Episodes
+    from test_workflow_sdk_history_replay import _af_replay, _replay
 
     _VALIDATOR_CALLS.clear()
     workflow, seen = _generic_workflow(annotation)
@@ -843,7 +843,7 @@ def test_validator_runs_in_registered_activity_not_cold_sdk_replay(annotation: A
 
 
 def test_real_sdk_buffers_fixed_id_before_request_activity_completes() -> None:
-    from test_workflow_mixed_hitl_review import _Episodes
+    from test_workflow_mixed_hitl_scheduling import _Episodes
 
     workflow, seen = _generic_workflow(list[int])
     episodes = _Episodes(workflow)
@@ -904,8 +904,8 @@ def test_rejected_activity_returns_only_safe_admission_metadata() -> None:
 
 
 def _invalid_generic_replay_trial(*, functions_host: bool = False) -> None:
-    from test_workflow_mixed_hitl_review import _Episodes
-    from test_workflow_recorded_replay_review import _af_replay, _replay
+    from test_workflow_mixed_hitl_scheduling import _Episodes
+    from test_workflow_sdk_history_replay import _af_replay, _replay
 
     workflow, seen = _generic_workflow(list[int])
     functions: dict[str, Any] | None = None
@@ -969,8 +969,8 @@ def _handler_failure_trial(*, functions_host: bool, output_failure: bool) -> Non
     from durabletask.internal import helpers
     from durabletask.internal import orchestrator_service_pb2 as pb
     from durabletask.worker import _ActivityExecutor
-    from test_workflow_mixed_hitl_review import _Episodes
-    from test_workflow_recorded_replay_review import _LOGGER, _af_replay
+    from test_workflow_mixed_hitl_scheduling import _Episodes
+    from test_workflow_sdk_history_replay import _LOGGER, _af_replay
 
     seen: list[int] = []
 
@@ -1038,7 +1038,7 @@ def test_handler_and_output_errors_become_sdk_terminal_failures(output_failure: 
 
 
 def test_invalid_reply_preserves_sibling_wait_and_ready_sibling_delivery() -> None:
-    from test_workflow_hitl_lifecycle_audit import _siblings
+    from test_workflow_hitl_lifecycle import _siblings
 
     workflow, seen = _siblings()
     transport = _Transport()

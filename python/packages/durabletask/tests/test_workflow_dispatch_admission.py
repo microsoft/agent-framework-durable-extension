@@ -30,7 +30,7 @@ from agent_framework import (
     response_handler,
 )
 from durabletask.client import TaskHubGrpcClient
-from test_workflow_protocol_review import _complete, _drain, _host, _node, _workflow
+from test_workflow_protocol_boundaries_dt import _complete, _drain, _host, _node, _workflow
 from typing_extensions import Never
 
 from agent_framework_durabletask import (
