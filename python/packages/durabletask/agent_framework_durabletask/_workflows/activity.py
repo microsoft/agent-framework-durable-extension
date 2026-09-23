@@ -155,10 +155,15 @@ def execute_workflow_activity(executor: Executor, input_json: str, workflow: Wor
 
         # Deserialize shared state values to reconstruct dataclasses / Pydantic models.
         deserialized_state: dict[str, Any] = {str(k): deserialize_value(v) for k, v in shared_state_snapshot.items()}
-        # The encoded input remains detached from the reconstructed state, even
-        # for in-place mutations. Compare encoded values, not Python equality
-        # (which conflates False/0 and 1/1.0, including inside containers).
         shared_state = _ActivityState(deserialized_state)
+        # Capture this consumer's encoding before executor code can mutate state.
+        # Producer pickle bytes are not canonical across processes (e.g. sets).
+        # Use the same Core export/copy boundary as the final comparison, and
+        # detach as JSON strings to retain nested mutations and False/0/1/1.0.
+        encoded_baseline = {
+            key: json.dumps(serialize_value(value), sort_keys=True, allow_nan=False)
+            for key, value in shared_state.export_state().items()
+        }
 
         hitl_message: dict[str, Any] | None = None
         if is_hitl_response:
@@ -194,7 +199,7 @@ def execute_workflow_activity(executor: Executor, input_json: str, workflow: Wor
         # Commit explicit operations, then include unjournaled in-place changes.
         shared_state.commit()
         current_state = shared_state.export_state()
-        original_keys: set[str] = set(shared_state_snapshot.keys())
+        original_keys: set[str] = set(encoded_baseline)
         current_keys: set[str] = set(current_state.keys())
 
         # A successful set-then-delete also deletes a sibling's earlier write,
@@ -210,8 +215,7 @@ def execute_workflow_activity(executor: Executor, input_json: str, workflow: Wor
             if (
                 key in shared_state.written_keys
                 or key not in original_keys
-                or json.dumps(encoded, sort_keys=True, allow_nan=False)
-                != json.dumps(shared_state_snapshot[key], sort_keys=True, allow_nan=False)
+                or json.dumps(encoded, sort_keys=True, allow_nan=False) != encoded_baseline[key]
             ):
                 serialized_updates[key] = encoded
 

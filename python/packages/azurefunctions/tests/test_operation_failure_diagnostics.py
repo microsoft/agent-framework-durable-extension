@@ -280,9 +280,11 @@ def test_real_entity_wrapper_failure_reaches_public_proxy_with_original_diagnost
     load, ensure = _forbid_parsing(monkeypatch)
     agent = Mock(spec=["name", "run"])
     agent.name = AGENT_NAME
+    run_calls = Mock()
     completed = Mock()
 
     def run(*, stream: bool = False, **kwargs: Any) -> Any:
+        run_calls(stream=stream, **kwargs)
         if stream:
             raise TypeError("streaming not supported")
 
@@ -292,7 +294,8 @@ def test_real_entity_wrapper_failure_reaches_public_proxy_with_original_diagnost
 
         return complete()
 
-    agent.run.side_effect = run
+    # Keep the capability refusal in the direct callable, not a Mock trampoline.
+    agent.run = run
     handler = create_agent_entity(agent)
     entity_context = Mock(spec=df.DurableEntityContext)
     entity_context.entity_name = f"dafx-{AGENT_NAME}"
@@ -363,6 +366,6 @@ def test_real_entity_wrapper_failure_reaches_public_proxy_with_original_diagnost
             assert "responseMailbox" not in attempted["data"] and "completedCorrelations" not in attempted["data"]
     else:
         entity_context.set_state.assert_not_called()
-        agent.run.assert_not_called()
+        run_calls.assert_not_called()
         completed.assert_not_called()
     assert DurableAgentState().schema_version == "2.0.0"

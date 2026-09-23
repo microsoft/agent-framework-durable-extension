@@ -40,6 +40,7 @@ from test_workflow_protocol_review import _complete, _host
 from typing_extensions import Never
 
 from agent_framework_durabletask import DurableWorkflowClient, serialize_agent_response
+from agent_framework_durabletask._json_payload import JsonPayload
 from agent_framework_durabletask._workflows import orchestrator as engine
 from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 from agent_framework_durabletask._workflows.serialization import deserialize_workflow_output
@@ -108,12 +109,14 @@ class _Transport:
         self.hosts[instance_id] = host
         events = self.events.setdefault(instance_id, {})
 
-        def wait(name: str) -> Any:
+        def wait(name: str, *, data_type: Any) -> Any:
+            assert data_type is JsonPayload
             task: CompletableTask[Any] = CompletableTask()
             events.setdefault(name, []).append(task)
             return task
 
-        def child(name: str, *, input: Any, instance_id: str) -> Any:
+        def child(name: str, *, input: Any, instance_id: str, return_type: Any) -> Any:
+            assert return_type is JsonPayload
             assert instance_id not in self.runs and name in functions
             wire = json.loads(json.dumps(input, allow_nan=False))
             calls.append({"kind": "child", "instance": instance_id, "name": name, "input": deepcopy(wire)})

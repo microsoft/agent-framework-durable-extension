@@ -23,7 +23,7 @@ import hashlib
 import inspect
 import json
 import logging
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from collections.abc import Generator, Mapping, Sequence
 from copy import copy
 from dataclasses import dataclass, field, replace
@@ -1994,9 +1994,10 @@ def run_workflow_orchestrator(
         next_pending_messages: dict[str, list[tuple[Any, _MessageSources]]] = {}
 
         # Phase 1: Prepare all tasks
-        all_tasks, task_metadata_list, remaining_agent_messages = _prepare_all_tasks(
+        all_tasks, task_metadata_list, queued_agent_messages = _prepare_all_tasks(
             ctx, workflow, pending_messages, shared_state, subworkflow_counter, workflow_address, delivery_ledger
         )
+        remaining_agent_messages = deque(queued_agent_messages)
         # A newly started child spends one wave now, not again on completion.
         # Local response activities may only validate/reject without invoking
         # a handler. Their checkpointed outcome decides whether to spend a wave.
@@ -2063,7 +2064,7 @@ def run_workflow_orchestrator(
                     # superstep too. Do not strand their approval requests behind
                     # the child join, or run a reply ahead of their original work.
                     while local_committed and remaining_agent_messages:
-                        executor_id, message, sources = remaining_agent_messages.pop(0)
+                        executor_id, message, sources = remaining_agent_messages.popleft()
                         meta = TaskMetadata(executor_id, message, sources, TaskType.AGENT)
                         task = _prepare_agent_task(
                             ctx,

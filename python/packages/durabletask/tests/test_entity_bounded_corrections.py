@@ -280,9 +280,7 @@ class _OpaqueAgent:
     def create_session(self, *, session_id: str) -> AgentSession:
         return AgentSession(session_id=session_id)
 
-    async def run(self, *, stream: bool = False, **kwargs: Any) -> AgentResponse:
-        if stream:
-            raise TypeError("stream is not supported")
+    async def run(self, *, session: AgentSession, messages: list[Message], options: dict[str, Any]) -> AgentResponse:
         self.effects.append("accepted opaque side effect")
         raise _MissingParent("opaque refusal with unchanged session")
 

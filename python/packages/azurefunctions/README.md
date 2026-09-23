@@ -292,6 +292,16 @@ and deletes merge in dispatch order before downstream work or reply handlers run
 recorded readiness defines order, not original child invocation order. This preserves durable
 snapshots, not Core's in-process visibility of other executors' uncommitted writes.
 
+### JSON runtime boundary
+
+`AgentFunctionApp` decodes state and operation inputs as plain JSON for generated agent entities.
+Framework agent results, generated workflow starts, child results and HITL event values also
+use scoped JSON decoding. Native co-hosted calls retain their SDK behavior. Manually wrapping
+entity factories does not install the generated-entity boundary. The Durable Task dependency
+requires `durabletask>=1.7.1,<2`. The Functions SDK
+floor remains `azure-functions-durable>=1.3.1,<2`.
+See [Python durable JSON boundaries](../../../docs/features/python-durable-json-boundaries.md).
+
 ### Basic Usage Example
 
 See the durable functions integration sample in the repository to learn how to:

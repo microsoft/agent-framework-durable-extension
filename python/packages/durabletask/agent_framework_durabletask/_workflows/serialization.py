@@ -141,7 +141,11 @@ def serialize_response_type(annotation: Any) -> str | dict[str, Any] | None:
             kind = next((name for name, candidate in _RESPONSE_TYPE_ORIGINS.items() if candidate is origin), "")
         if not kind:
             raise ValueError(f"Unsupported HITL response annotation: {value!r}.")
-        if not args and kind != "union":
+        # Tuple[()], tuple[()] and bare typing.Tuple all have tuple origin and
+        # no args. Core 1.16 can coerce JSON [] for these aliases, unlike concrete
+        # tuple. Preserve that distinction without imposing stricter arity than
+        # the installed Core's native-tuple admission.
+        if not args and kind not in ("tuple", "union"):
             return f"builtins:{kind}"
         children = [encode(arg, depth + 1) if arg is not Ellipsis else {"kind": "ellipsis"} for arg in args]
         return {_RESPONSE_TYPE_VERSION_KEY: _RESPONSE_TYPE_VERSION, "kind": kind, "args": children}

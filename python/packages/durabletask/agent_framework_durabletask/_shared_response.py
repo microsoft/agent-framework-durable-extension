@@ -43,12 +43,15 @@ from pydantic import BaseModel
 
 from ._response_utils import (
     _constructor_fields,  # pyright: ignore[reportPrivateUsage]
+    _serialize_input_message_fields,  # pyright: ignore[reportPrivateUsage]
     load_agent_response,
     serialize_agent_response,
     serialize_input_content,
-    serialize_input_message,
 )
-from ._shared_state_validation import validate_timestamp
+from ._shared_state_validation import (
+    _json_value,  # pyright: ignore[reportPrivateUsage]
+    validate_timestamp,
+)
 
 _CORE_FIELDS = "pythonCoreFields"
 _CORE_PROFILE = "agent-framework-python.core-fields"
@@ -324,7 +327,7 @@ def _content_to_core(value: Any) -> dict[str, Any]:
     return result
 
 
-def _content_snapshot(content: Content) -> dict[str, Any]:
+def _audit_content(content: Content) -> None:
     # Audit the explicit Core envelope before invoking its serializer, which otherwise
     # skips some unsupported values. Auditing must not reintroduce omitted defaults.
     # Only documented Content edges recurse as Content.
@@ -333,9 +336,10 @@ def _content_snapshot(content: Content) -> dict[str, Any]:
         if name.startswith("_") or name == "raw_representation" or (value is None and name in known):
             continue
         if name == "function_call" and isinstance(value, Content):
-            _content_snapshot(value)
+            _audit_content(value)
         elif name == "annotations" and isinstance(value, (list, tuple)):
-            _json_copy(list(cast(list[Any], value)))
+            for item in cast(list[Any], value):
+                _json_value(item)
         elif name in ("items", "inputs") or (
             name == "outputs" and content.type in ("code_interpreter_tool_result", "shell_tool_result")
         ):
@@ -343,37 +347,53 @@ def _content_snapshot(content: Content) -> dict[str, Any]:
                 raise ValueError("Nested Core content requires a sequence.")
             for item in cast(list[Any], value):
                 if isinstance(item, Content):
-                    _content_snapshot(item)
+                    _audit_content(item)
                 else:
-                    _json_copy(item)
+                    _json_value(item)
         else:
-            _json_copy(value)
-    # This serializer also restores inert fields from an attached Core input envelope.
-    # In particular, a bare result=None has no presence bit. Do not invent one here.
-    return _object(_json_copy(serialize_input_content(content)))
+            _json_value(value)
+
+
+def _audit_response(response: AgentResponse) -> None:
+    """Reject unsupported live envelope fields before serialization or copying.
+
+    Staging callers can use this before serialize_agent_response resolves a lazy
+    value. Raw representations and response formats are excluded. BaseModel values
+    retain the canonical serializer's policy and are not dumped or validated here.
+    This is a preflight, not a snapshot or a substitute for final JSON validation.
+    """
+    value = response._value  # pyright: ignore[reportPrivateUsage]
+    if not isinstance(value, BaseModel):
+        _json_value(value)
+    for name, value in vars(response).items():
+        if name.startswith("_") or name in ("messages", "raw_representation", "response_format"):
+            continue
+        _json_value(value.isoformat() if name == "created_at" and isinstance(value, datetime) else value)
+    for message in response.messages:
+        for name, value in vars(message).items():
+            if not name.startswith("_") and name not in ("contents", "raw_representation"):
+                _json_value(value)
+        for content in message.contents:
+            _audit_content(content)
 
 
 def _message_snapshot(message: Message) -> dict[str, Any]:
-    for name, value in vars(message).items():
-        if name.startswith("_") or name in ("contents", "raw_representation"):
-            continue
-        _json_copy(value)
-    contents = [_content_snapshot(content) for content in message.contents]
-    result = serialize_input_message(message)
-    result["contents"] = contents
-    return _object(_json_copy(result))
+    result = _serialize_input_message_fields(message)
+    # Each child is serialized once, bottom-up, after the complete live audit.
+    # The canonical serializer retains attached presence without inventing defaults.
+    result["contents"] = [serialize_input_content(content) for content in message.contents]
+    return result
 
 
 def _core_snapshot(response: AgentResponse) -> dict[str, Any]:
     # Use the canonical serializer on a base object with no response format. Never
     # evaluate the source's lazy value or execute its subclass serializer/getter.
+    _audit_response(response)
     value = response._value  # pyright: ignore[reportPrivateUsage]
     if isinstance(value, BaseModel) and getattr(response, "_durable_value_by_name", False):
         # The existing field-name policy owns this encoding even when this model
         # also accepts aliases. Do not invent shared provenance on the temporary base.
         value = value.model_dump(mode="json", by_alias=False, round_trip=True)
-    if not isinstance(value, BaseModel):
-        _json_copy(value)
     messages = [_message_snapshot(message) for message in response.messages]
     base = AgentResponse(value=value)
     base._value_parsed = response._value_parsed  # pyright: ignore[reportPrivateUsage]
@@ -382,10 +402,9 @@ def _core_snapshot(response: AgentResponse) -> dict[str, Any]:
     for name, value in vars(response).items():
         if name.startswith("_") or name in ("messages", "raw_representation", "response_format"):
             continue
-        # Core accepts datetime here. Its serializer still owns whether/how it emits it.
-        _json_copy(value.isoformat() if name == "created_at" and isinstance(value, datetime) else value)
         vars(base)[name] = value
-    base.messages = response.messages
+    # Keep the temporary base's messages empty instead of serializing the already
+    # detached children again just to replace that output.
     result = serialize_agent_response(base)
     result["messages"] = messages
     return _object(_json_copy(result))

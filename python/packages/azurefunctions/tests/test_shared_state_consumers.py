@@ -378,7 +378,7 @@ async def test_conflicting_success_evidence_is_an_explicit_read_error(
     assert response.status_code == 500
     payload = json.loads(response.get_body())
     assert payload["status"] == "error" and payload["error_code"] == "state_read_error"
-    assert "conflicts" in payload["error"]
+    assert payload["error"] == "Failed to read the stored agent response."
     _assert_one_delivery(client, sleep, raw)
 
 

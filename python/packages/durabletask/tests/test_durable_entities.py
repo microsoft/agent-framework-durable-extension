@@ -161,17 +161,13 @@ def _agent_response(text: str | None) -> AgentResponse:
 
 
 def _create_mock_run(response: AgentResponse | None = None, side_effect: Exception | None = None):
-    """Create a mock run function that handles stream parameter correctly.
+    """Create an async non-streaming run double with a strict call signature.
 
-    The durabletask entity code tries run(stream=True) first, then falls back to run(stream=False).
-    This helper creates a mock that raises TypeError for streaming (to trigger fallback) and
-    returns the response or raises the side_effect for non-streaming.
+    Reject stream during argument binding, before the async body can return the
+    response or raise the requested side effect.
     """
 
-    async def mock_run(*args, stream=False, **kwargs):
-        if stream:
-            # Simulate "streaming not supported" to trigger fallback
-            raise TypeError("streaming not supported")
+    async def mock_run(*, messages: list[Message], options: dict[str, Any]) -> AgentResponse | None:
         if side_effect:
             raise side_effect
         return response
@@ -294,10 +290,8 @@ class TestAgentEntityRunAgent:
         mock_agent = Mock()
         mock_response = _agent_response("Test response")
 
-        # Mock run() to return response for non-streaming, raise for streaming (to test fallback)
-        async def mock_run(*args, stream=False, **kwargs):
-            if stream:
-                raise TypeError("streaming not supported")
+        # Reject streaming at argument binding, before the async response body runs.
+        async def mock_run(*, messages: list[Message], options: dict[str, Any]) -> AgentResponse:
             return mock_response
 
         mock_agent.run = mock_run
@@ -504,10 +498,8 @@ class TestAgentEntityRunAgent:
         """Replayed durable history should not include reasoning-only content items."""
         captured_messages: list[Message] = []
 
-        async def mock_run(*args, stream=False, **kwargs):
-            if stream:
-                raise TypeError("streaming not supported")
-            captured_messages.extend(kwargs["messages"])
+        async def mock_run(*, messages: list[Message], options: dict[str, Any]) -> AgentResponse:
+            captured_messages.extend(messages)
             return _agent_response("Response")
 
         mock_agent = Mock()

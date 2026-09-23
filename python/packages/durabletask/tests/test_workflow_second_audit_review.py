@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 import pytest
 import test_workflow_admission_review as admission
 from _execution_test_support import RecordingChatClient
+from _workflow_test_support import create_registration_worker
 from agent_framework import (
     Agent,
     AgentExecutor,
@@ -30,12 +31,12 @@ from agent_framework import (
 )
 from durabletask.client import TaskHubGrpcClient
 from durabletask.task import CompletableTask
-from durabletask.worker import TaskHubGrpcWorker
 from test_workflow_admission_review import _registered_run, _run_core_workflow
 from test_workflow_protocol_review import _complete, _drain, _host
 from typing_extensions import Never
 
 from agent_framework_durabletask import DurableAIAgentWorker, DurableWorkflowClient, serialize_agent_response
+from agent_framework_durabletask._json_payload import JsonPayload
 from agent_framework_durabletask._workflows.orchestrator import SOURCE_HITL_RESPONSE
 from agent_framework_durabletask._workflows.serialization import deserialize_value, serialize_value
 
@@ -254,7 +255,8 @@ def test_genuine_typed_hitl_keeps_registered_root_and_child_routing(nested: bool
     def host_factory(calls: Any, result: Any, *, functions: Any, **kwargs: Any) -> Any:
         host = _host(calls, result, functions=functions, **kwargs)
 
-        def start_child(name: str, *, input: Any, instance_id: str) -> Any:
+        def start_child(name: str, *, input: Any, instance_id: str, return_type: Any) -> Any:
+            assert return_type is JsonPayload
             calls.append({"kind": "child", "instance": instance_id, "name": name, "input": deepcopy(input)})
             child_host = _host(
                 calls, result, functions=functions, instance_id=instance_id, parent_instance_id=host.instance_id
@@ -333,7 +335,8 @@ def test_genuine_agent_hitl_metadata_survives_multiple_reply_queue() -> None:
     generator, host, _ = _registered_run(workflow, entity_call)
     waits: dict[str, CompletableTask[Any]] = {}
 
-    def wait(name: str) -> CompletableTask[Any]:
+    def wait(name: str, *, data_type: Any) -> CompletableTask[Any]:
+        assert data_type is JsonPayload
         task: CompletableTask[Any] = CompletableTask()
         waits[name] = task
         return task
@@ -360,7 +363,7 @@ def test_genuine_agent_hitl_metadata_survives_multiple_reply_queue() -> None:
 
 def _registered_activity(executor: Executor) -> Callable[[dict[str, Any]], dict[str, Any]]:
     workflow = WorkflowBuilder(name="second-direct", start_executor=executor).build()
-    native = Mock(spec=TaskHubGrpcWorker)
+    native = create_registration_worker()
     DurableAIAgentWorker(native, deployment_mode="isolated_v2").configure_workflow(workflow)
     activities = {call.args[0].__name__: call.args[0] for call in native.add_activity.call_args_list}
     activity = activities[f"dafx-second-direct-{executor.id}"]

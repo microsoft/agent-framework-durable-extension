@@ -81,7 +81,7 @@ class _JsonEventTask(AtomicTask):
 
 
 class _JsonEntityTask(AtomicTask):
-    """Restore a workflow entity's JSON envelope after both native decode stages."""
+    """Restore a framework agent's JSON envelope after both native decode stages."""
 
     def __init__(self, task: Any) -> None:
         super().__init__(task.id, task.action_repr)
@@ -330,7 +330,9 @@ class _WorkflowOpenTasks(defaultdict[int | str, Any]):
                 raise RuntimeError("Unsupported Durable Functions workflow child history representation")
             index.project_child(key, "child")
         elif isinstance(key, str) and isinstance(task, (_JsonEventTask, _JsonEntityTask)):
-            _protect_event_inputs(self._context, key, entity=isinstance(task, _JsonEntityTask))
+            protected = _protect_event_inputs(self._context, key, entity=isinstance(task, _JsonEntityTask))
+            if isinstance(task, _JsonEntityTask) and not protected:
+                raise RuntimeError("Unsupported Durable Functions workflow entity history representation")
         elif isinstance(key, str):
             # A name may later belong to an unrelated native task. Undo only
             # our replay-local projection, preserving its original SDK semantics.
@@ -347,7 +349,7 @@ class _WorkflowOpenTasks(defaultdict[int | str, Any]):
 
 
 class _JsonEntityContext:
-    """Delegate agent scheduling unchanged, opting only workflow calls into JSON."""
+    """Delegate scheduling unchanged, opting only framework agent calls into JSON."""
 
     def __init__(self, context: DurableOrchestrationContext) -> None:
         self._context = context
@@ -359,11 +361,34 @@ class _JsonEntityContext:
         """Keep the SDK action but restore its result as JSON before Core loading."""
         context: Any = self._context
         if not isinstance(getattr(context, "histories", None), list):
+            # Spec-based mocks can report the SDK's __class__. Check the actual
+            # type so history-free doubles still forward their original tasks.
+            if issubclass(type(context), DurableOrchestrationContext):
+                _event_input_index(self._context)
+                raise RuntimeError("Unsupported Durable Functions workflow entity history representation")
             return context.call_entity(entity_id, operation, input_)
-        if not isinstance(context.open_tasks, _WorkflowOpenTasks):
+        if not isinstance(getattr(context, "open_tasks", None), _WorkflowOpenTasks):
             # Do not silently re-enable arbitrary construction on an unknown SDK.
             raise RuntimeError("Unsupported Durable Functions workflow entity task registry")
         return _JsonEntityTask(context.call_entity(entity_id, operation, input_))
+
+
+def json_entity_context(context: DurableOrchestrationContext | _JsonEntityContext) -> _JsonEntityContext:
+    """Guard framework agent results without adapting unrelated native waits.
+
+    Generated workflows already supply this proxy and install the same registry.
+    Reuse that proxy rather than decoding an entity envelope twice. Standalone
+    agent calls need only the pop-before-decode guard, never deferred-event FIFO.
+    Unknown layouts are rejected by call_entity before scheduling a native task.
+    """
+    if isinstance(context, _JsonEntityContext):
+        return context
+    if isinstance(getattr(context, "histories", None), list):
+        tasks: Any = getattr(context, "open_tasks", None)
+        if type(tasks) is defaultdict and tasks.default_factory is list:
+            orchestration_context: Any = context
+            orchestration_context.open_tasks = _WorkflowOpenTasks(context, cast(defaultdict[int | str, Any], tasks))
+    return _JsonEntityContext(context)
 
 
 class _DeferredEventCallbacks(dict[int | str, Any]):
