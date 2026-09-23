@@ -760,14 +760,15 @@ prototype deployment constraints, not a mandate for its private APIs or exact fi
 #### Python runtime implementation note, 2026-09-22
 
 The current Python runtime update deliberately retains workflow protocol `2` while tightening start
-admission and changing the HITL activity checkpoints and mixed parent/child replay action graph.
+admission and changing HITL activity checkpoints, mixed parent/child replay and generated child IDs.
 Users must start fresh workflow instances, including when upgrading from an earlier v2 build.
 Existing v2 in-flight instances and recorded histories are unsupported and may fail on the new
 runtime. The unchanged marker checks start-envelope admission only, not feature or replay
 compatibility. Older v2 envelopes can still pass that check. There is no replay migration or
 fallback. A new isolated hub with matching workers and clients is recommended.
-Keep the original deployment only if old runs need to finish there. The `isolated_v2` acknowledgement
-does not prove isolation or detect incompatible peers.
+Keep old runs, including published concatenated-child-ID histories, on their original workers and
+hub if they must finish. The `isolated_v2` acknowledgement does not prove isolation or detect
+incompatible peers.
 
 Generated root workflow starts take public application JSON, not internal checkpoint data. The
 workflow client and generated HTTP routes remove reserved child markers. Application input is
@@ -786,6 +787,19 @@ authenticate full ancestry or the claimed root's authority, or protect against a
 application parent supplying an otherwise consistent envelope. Trusted worker and application
 deployments remain required. Internal checkpoint decoding still uses pickle and is not safe for
 arbitrary untrusted input.
+
+Child-ID scheme `1` always uses 74 ASCII characters, `dafxsw_v1_` plus the full SHA-256 hex digest
+over a domain separator and length-framed UTF-8 (actual parent ID, exact executor ID, decimal ordinal).
+Dispatch and provenance helpers apply the same derivation at every hop, not an authentication check.
+Always hashing bounds physical ID length without truncating identity, restricting logical names further
+or maintaining a hybrid short-name/hash rule. Original executor/workflow names, `~` HITL paths and
+root notification addresses remain unchanged. Clients follow actual child status maps, not ID parsing.
+Bounded physical IDs do not imply unlimited nesting, as logical paths and payloads still grow with
+depth and their limits still apply.
+Known standalone `DurableTaskSchedulerClient` explicit roots require nonblank IDs of 1-100 printable
+ASCII characters and no `@` prefix, with no rewrite. Generic `TaskHubGrpcClient` behavior stays unchanged (unknown backend).
+Functions retains its 100-character Unicode-aware generic route validation because its provider is
+unknown, not an ASCII-only restriction. Application-owned native orchestrator calls remain unchanged.
 
 The standalone Durable Task SDK minimum is now `durabletask>=1.7.1,<2` for parent-instance metadata.
 The existing lock already selects `1.7.2`, so this raises the supported minimum without changing
