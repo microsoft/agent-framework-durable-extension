@@ -11,6 +11,7 @@ boundary. This module stays private until the host session and workflow activati
 from __future__ import annotations
 
 import copy
+import json
 import logging
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -34,7 +35,7 @@ from agent_framework import (
     SupportsAgentRun,
 )
 
-from ._response_utils import is_terminal_agent_response
+from ._response_utils import is_terminal_agent_response, serialize_input_message
 from ._shared_agent_state import (
     DurableAgentState,
     DurableAgentStateCompaction,
@@ -663,8 +664,12 @@ class DurableHistoryProvider(HistoryProvider):
                     last_known = (entry, first_exposed[1] - 1)
                 break
             last_known = (entry, len(entry.messages) - 1)
-        buffer_by_history_id = {
-            history_id: message for message in buffer if (history_id := _history_message_id(message)) is not None
+        # New candidate IDs are not source identities. A summary may reuse its
+        # own source's public ID before allocation assigns a distinct occurrence.
+        sources_by_history_id = {
+            history_id: message
+            for message in buffer
+            if isinstance(history_id := getattr(message, _HISTORY_ID_ATTRIBUTE, None), str)
         }
 
         for message in buffer:
@@ -679,12 +684,18 @@ class DurableHistoryProvider(HistoryProvider):
                 owner, index = position
                 original = self._to_message(owner.messages[index])
                 working = self._to_message(DurableAgentStateMessage.from_chat_message(copy.deepcopy(message)))
-                original_payload = original.to_dict() if original is not None else {}
-                working_payload = working.to_dict() if working is not None else {}
+                original_payload = serialize_input_message(original) if original is not None else {}
+                working_payload = serialize_input_message(working) if working is not None else {}
                 original_payload.pop("additional_properties", None)
                 working_payload.pop("additional_properties", None)
                 original_ids = self._summary_original_ids(original) if original is not None else None
-                summary_revision = original_payload != working_payload or original_ids != summary_ids
+                # Preserve public field presence and JSON numeric types, not
+                # Python equality (False == 0 == 0.0). Ordinary edits stay transient.
+                summary_revision = (
+                    json.dumps(original_payload, sort_keys=True, allow_nan=False)
+                    != json.dumps(working_payload, sort_keys=True, allow_nan=False)
+                    or original_ids != summary_ids
+                )
 
             if position is None or summary_revision:
                 if not summary_revision and loaded_occurrence and history_id in previous_ids:
@@ -697,13 +708,16 @@ class DurableHistoryProvider(HistoryProvider):
                     index=stored_by_id,
                     used_ids=used_ids,
                 )
+                if history_id is not None and sources_by_history_id.get(history_id) is message:
+                    # A revised working object no longer represents its old occurrence.
+                    del sources_by_history_id[history_id]
                 if original_id and original_id != message.message_id and summary_ids is not None:
                     summary_source_ids = set(summary_ids)
                     group = message.additional_properties.get(GROUP_ANNOTATION_KEY)
                     if isinstance(group, dict):
                         group[GROUP_ID_KEY] = f"group_{message.message_id}"
                     for summary_source_id in summary_source_ids:
-                        source = buffer_by_history_id.get(summary_source_id)
+                        source = sources_by_history_id.get(summary_source_id)
                         stored_source: DurableAgentStateMessage | None = None
                         if source is None:
                             source_position = stored_by_id.get(summary_source_id)
@@ -731,7 +745,10 @@ class DurableHistoryProvider(HistoryProvider):
                             stored_source.extension_data = _copy_history_annotations(source.additional_properties)
                         source_history_id = _history_message_id(source)
                         if source_history_id is not None:
-                            buffer_by_history_id[source_history_id] = source
+                            sources_by_history_id[source_history_id] = source
+                # Later summaries may reference this newly allocated occurrence,
+                # but never its original, potentially colliding candidate ID.
+                sources_by_history_id[cast(str, _history_message_id(message))] = message
             last_known = position
 
         for message in buffer:
@@ -962,7 +979,13 @@ class _ObservedHistoryProvider(HistoryProvider):
         await self.__wrapped__.before_run(agent=agent, session=session, context=context, state=state)
 
     def _get_context_messages_to_store(self, context: SessionContext) -> list[Message]:
-        return self.__wrapped__._get_context_messages_to_store(context)
+        messages = self.__wrapped__._get_context_messages_to_store(context)
+        # Core reads these flags after context selection. Capture the original's
+        # current settings, including changes in either hook, without writing back
+        # or undoing mutations made by the original provider during its save.
+        self.store_inputs = self.__wrapped__.store_inputs
+        self.store_outputs = self.__wrapped__.store_outputs
+        return messages
 
     async def after_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
         after_run = self.__wrapped__.after_run

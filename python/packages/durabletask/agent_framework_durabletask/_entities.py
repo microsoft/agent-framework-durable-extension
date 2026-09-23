@@ -47,6 +47,7 @@ from ._history_provider import (
     unbind_durable_history,
 )
 from ._invocation_safety import DurableServiceClient, DurableToolGuard, InvocationProgress
+from ._json_payload import JsonPayload
 from ._message_identity import message_identity
 from ._models import RunRequest
 from ._response_utils import is_terminal_agent_response, load_agent_response, preserve_input_envelope
@@ -1203,7 +1204,10 @@ class DurableTaskEntityStateProvider(DurableEntity, AgentEntityStateProviderMixi
         super().__init__()
 
     def _get_state_dict(self) -> dict[str, Any]:
-        raw = self.get_state(default={})
+        # A requested dict type lets the SDK coerce arrays or strings into a
+        # dictionary before admission. The non-class tag selects plain JSON
+        # decoding, leaving the actual wire shape for the check below.
+        raw = self.get_state(intended_type=cast(Any, JsonPayload), default={})
         if raw is None:
             return {}
         if not isinstance(raw, dict):
