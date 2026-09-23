@@ -817,7 +817,14 @@ class AgentEntity:
         request_message: str,
         progress: InvocationProgress | None = None,
     ) -> AgentResponse:
-        """Execute the agent, preferring streaming when available."""
+        """Prefer streaming, with capability fallback limited to the immediate call.
+
+        Async methods and callable objects can produce streams too. An awaited
+        no-stream refusal must not trigger a non-streaming retry, even before
+        observed progress, because arbitrary side effects cannot be ruled out.
+        Legacy synchronous refusal messages remain pre-work capability signals,
+        not a guarantee that arbitrary custom run bodies have no side effects.
+        """
         callback_context: AgentCallbackContext | None = None
         if self.callback is not None:
             callback_context = self._build_callback_context(
@@ -830,15 +837,35 @@ class AgentEntity:
 
         try:
             stream_candidate = run_callable(stream=True, **run_kwargs)
-            if inspect.isawaitable(stream_candidate):
-                stream_candidate = await stream_candidate
         except TypeError as type_error:
             detail = str(type_error)
+            traceback = type_error.__traceback__
+            binding_failure = traceback is not None and traceback.tb_next is None
+            while traceback is not None and traceback.tb_next is not None:
+                traceback = traceback.tb_next
+            origin_code = traceback.tb_frame.f_code if traceback is not None else None
+            entry_failure = origin_code is not None and (
+                origin_code is getattr(run_callable, "__code__", None)
+                or any(
+                    origin_code is getattr(vars(base).get("run"), "__code__", None) for base in type(self.agent).__mro__
+                )
+            )
+            # Retain explicit no-work refusals in run(), including inherited
+            # implementations reached through a synchronous wrapper.
+            # A helper's argument-binding error is not run()'s capability.
+            if progress is not None and (
+                progress.stream_started or progress.function_started or progress.service_completed
+            ):
+                raise
             if not (
-                "stream is not supported" in detail
-                or "streaming not supported" in detail
-                or "unexpected keyword argument 'stream'" in detail
-                or 'unexpected keyword argument "stream"' in detail
+                (entry_failure and detail in ("stream is not supported", "streaming not supported"))
+                or (
+                    binding_failure
+                    and (
+                        "unexpected keyword argument 'stream'" in detail
+                        or 'unexpected keyword argument "stream"' in detail
+                    )
+                )
             ):
                 raise
             logger.debug(
@@ -846,6 +873,10 @@ class AgentEntity:
                 type_error,
             )
         else:
+            # Awaiting can execute middleware, models and tools, including
+            # eager finalization. Its errors must never start a non-streaming retry.
+            if inspect.isawaitable(stream_candidate):
+                stream_candidate = await stream_candidate
             if isinstance(stream_candidate, AgentResponse):
                 direct_response = cast(AgentResponse, stream_candidate)
                 await self._notify_final_response(direct_response, callback_context)
