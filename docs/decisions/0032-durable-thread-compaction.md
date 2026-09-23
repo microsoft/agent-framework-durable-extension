@@ -1264,6 +1264,7 @@ does not invoke their conversion hooks. Supported lazy values retain their exist
 and duplicate completions remain no-ops without inspecting a replacement producer.
 
 History reconciliation distinguishes loaded occurrence IDs from unallocated summary IDs and
-compares summary revisions with JSON-exact payloads. External-primary observation uses the
+allocates all new or revised occurrences before repairing summary backlinks. Revisions compare
+JSON-exact payloads. External-primary observation uses the
 provider's current storage flags, without rebinding its custom hooks. Naive response timestamp
 strings receive the same UTC interpretation on direct and history-provider append paths.
