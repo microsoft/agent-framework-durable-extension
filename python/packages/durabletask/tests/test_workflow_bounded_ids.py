@@ -13,12 +13,12 @@ from unittest.mock import Mock, patch
 
 import grpc
 import pytest
+from _workflow_provenance_test_support import _DTStarts, _leaf, _only_action
 from agent_framework import WorkflowBuilder, WorkflowExecutor
 from durabletask.azuremanaged.client import DurableTaskSchedulerClient
 from durabletask.client import TaskHubGrpcClient
 from durabletask.internal import helpers
 from durabletask.internal import orchestrator_service_pb2 as pb
-from test_workflow_child_provenance import _DTStarts, _leaf, _only_action
 
 from agent_framework_durabletask import DurableWorkflowClient, wrap_workflow_input
 from agent_framework_durabletask._workflows.naming import subworkflow_instance_id, validate_dts_instance_id

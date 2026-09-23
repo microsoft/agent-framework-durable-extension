@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from _execution_test_support import NonStreamingAgent, RecordingChatClient
+from _workflow_replay_test_support import _replay, _worker
 from agent_framework import AgentExecutor, Executor, WorkflowBuilder, WorkflowContext, WorkflowExecutor, handler
 from durabletask.entities import EntityContext, EntityInstanceId
 from durabletask.internal import helpers
@@ -16,7 +17,6 @@ from durabletask.internal import orchestrator_service_pb2 as pb
 from durabletask.internal.entity_state_shim import StateShim
 from durabletask.serialization import JsonDataConverter
 from durabletask.worker import _ActivityExecutor
-from test_workflow_recorded_replay_review import _replay, _worker
 from typing_extensions import Never
 
 from agent_framework_durabletask import wrap_workflow_input
