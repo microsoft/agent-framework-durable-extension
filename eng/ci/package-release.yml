@@ -52,6 +52,7 @@ extends:
           - template: /eng/templates/official/jobs/build-packages.yml@self
             parameters:
               artifactName: ${{ parameters.artifactName }}
+              publishDotNet: ${{ parameters.publishDotNet }}
 
       # Gate the entire publish stage at compile time (not with a runtime `condition`).
       # 1ES validates referenced service connections even for jobs that would be
