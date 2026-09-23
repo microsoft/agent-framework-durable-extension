@@ -536,6 +536,10 @@ Neither control enables the other. In Python, an explicitly pinned provider `pru
 takes precedence over registration retention. The matrix assumes a supported local pruning path
 with no such provider override.
 
+The inherited policy also applies to a sole store-only canonical audit beside an external
+primary. It never prunes the external store. Physical deletion batches message identities per
+entry to avoid repeated list shifts while preserving surviving objects and list aliases.
+
 | | No pressure budget | Pressure budget set |
 | --- | --- | --- |
 | `keep_all` | Never delete transcript messages. | Do not prune because of exclusions, but evict eligible oldest groups under pressure. |

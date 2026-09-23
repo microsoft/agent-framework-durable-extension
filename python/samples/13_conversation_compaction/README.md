@@ -24,9 +24,13 @@ agent = Agent(
     client=...,
     name="Historian",
     default_options={"store": False},
-    context_providers=[history, compaction],
+    context_providers=[compaction, history],
 )
 ```
+
+Core runs after hooks in reverse order. Putting this after-only compaction provider first
+lets history append the current input and answer before the strategy keeps its four groups
+for the next turn. A group is not necessarily a whole turn.
 
 Registering that agent with the durable runtime changes nothing about how you configure it, but:
 

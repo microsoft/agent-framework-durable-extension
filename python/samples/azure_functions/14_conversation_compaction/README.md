@@ -34,7 +34,7 @@ agent = Agent(
     client=...,
     name="Historian",
     default_options={"store": False},
-    context_providers=[history, compaction],
+    context_providers=[compaction, history],
 )
 
 app = AgentFunctionApp(
@@ -44,6 +44,10 @@ app = AgentFunctionApp(
     max_state_bytes=None,
 )
 ```
+
+Core runs after hooks in reverse order. Putting this after-only compaction provider first
+lets history append the current input and answer before the strategy keeps its four groups
+for the next turn. A group is not necessarily a whole turn.
 
 This sample stores inputs and outputs and keeps them with explicit `retention="keep_all"` and
 `max_state_bytes=None`, which are also the host defaults. Original responses live independently
