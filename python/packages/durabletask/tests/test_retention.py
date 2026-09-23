@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, cast, get_args
 
 import pytest
+from _workflow_test_support import create_registration_worker
 from agent_framework import (
     Agent,
     AgentResponse,
@@ -130,7 +131,7 @@ class TestRetentionModes:
     def test_the_defaults_do_not_enable_deletion(self) -> None:
         from agent_framework_durabletask import DurableAIAgentWorker
 
-        worker = DurableAIAgentWorker(cast(Any, object()))
+        worker = DurableAIAgentWorker(create_registration_worker())
         assert worker._retention == "keep_all"
         assert worker._max_state_bytes is None
 

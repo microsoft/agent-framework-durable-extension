@@ -8,9 +8,11 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from _workflow_test_support import create_registration_worker
 from agent_framework import Agent, AgentExecutor, Executor, InMemoryHistoryProvider, WorkflowExecutor
 from durabletask.azuremanaged.worker import DurableTaskSchedulerWorker
-from durabletask.worker import TaskHubGrpcWorker, _Registry
+from durabletask.serialization import JsonDataConverter
+from durabletask.worker import _Registry
 
 from agent_framework_durabletask import DTS_MAX_STATE_BYTES, DurableAIAgentWorker, DurableHistoryProvider
 from agent_framework_durabletask._configuration import AgentRegistrationSettings, validate_agent_configuration
@@ -18,6 +20,8 @@ from agent_framework_durabletask._configuration import AgentRegistrationSettings
 
 class RecordingWorker:
     def __init__(self) -> None:
+        self._data_converter = JsonDataConverter()
+        self._is_running = False
         self.calls: list[tuple[str, str]] = []
         self.entities: dict[str, Any] = {}
         self.fail_at: int | None = None
@@ -116,7 +120,7 @@ def test_standalone_and_workflow_owners_cannot_share_an_entity(standalone_first:
 @pytest.mark.parametrize("nested", [False, True])
 def test_native_registry_allows_the_same_name_for_different_artifact_kinds(reverse: bool, nested: bool) -> None:
     registry = _Registry()
-    native = Mock(spec=TaskHubGrpcWorker)
+    native = create_registration_worker()
     native.add_entity.side_effect = registry.add_entity
     native.add_activity.side_effect = registry.add_activity
     native.add_orchestrator.side_effect = registry.add_orchestrator
@@ -293,7 +297,7 @@ def test_partial_native_failure_blocks_start_and_retry_without_false_metadata(fa
 
 @pytest.mark.parametrize("surface", ["host", "agent", "workflow"])
 def test_generic_grpc_worker_does_not_imply_a_dts_budget(surface: str) -> None:
-    native = Mock(spec=TaskHubGrpcWorker)
+    native = create_registration_worker()
     with pytest.raises(ValueError, match="known backend_limit"):
         if surface == "host":
             _worker(native, max_state_bytes="backend_limit")
@@ -308,7 +312,7 @@ def test_generic_grpc_worker_does_not_imply_a_dts_budget(surface: str) -> None:
 
 @pytest.mark.parametrize("surface", ["host", "agent", "workflow"])
 def test_dts_worker_resolves_backend_budget_on_every_surface(surface: str) -> None:
-    native = Mock(spec=DurableTaskSchedulerWorker)
+    native = Mock(spec=DurableTaskSchedulerWorker, _data_converter=JsonDataConverter(), _is_running=False)
     host = _worker(native, **({"max_state_bytes": "backend_limit"} if surface == "host" else {}))
     if surface == "workflow":
         host.configure_workflow(_workflow("flow", agent=_agent()), max_state_bytes="backend_limit")

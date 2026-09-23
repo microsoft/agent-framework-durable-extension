@@ -211,14 +211,14 @@ class _ContextLengthExceeded(Exception):
         self.code = "context_length_exceeded"
 
 
-def _agent(client: Any = None, **kwargs: Any) -> Agent:
+def _agent(client: Any = None, *, agent_type: type[Agent] = Agent, **kwargs: Any) -> Agent:
     """Build an agent with a stub client.
 
     The stubs cover the parts of the client protocol these tests exercise but not its full generic
     signature, so the type is relaxed here rather than at every call site.
     """
     chat_client: Any = client if client is not None else _StubClient()
-    return Agent(client=chat_client, name="a", **kwargs)
+    return agent_type(client=chat_client, name="a", **kwargs)
 
 
 def _history_providers(agent: Any) -> list[Any]:
@@ -641,7 +641,7 @@ class TestWeDoNotKeepASecondCopyOfSomeoneElsesConversation:
 class TestServiceManagedSessions:
     """Service-backed agents let the service own the conversation."""
 
-    @pytest.mark.parametrize("streaming", [False, True], ids=["nonstream-fallback", "streaming"])
+    @pytest.mark.parametrize("streaming", [False, True], ids=["nonstreaming", "streaming"])
     @pytest.mark.parametrize("external_history", [False, True], ids=["durable-primary", "external-primary"])
     @pytest.mark.parametrize(
         ("stores_by_default", "default_options", "service_options", "local_options"),
@@ -681,13 +681,19 @@ class TestServiceManagedSessions:
         ]
         raw: dict[str, Any] = {}
         originals: dict[str, dict[str, Any]] = {}
-        attempts = [True] if streaming else [True, False]
+        # The nonstreaming facade refuses at entry, before Core hooks or client work.
+        attempts = [True] if streaming else [False]
 
         for index, prompt in enumerate(prompts):
             # Rebuild the agent, entity and state provider; only the recording doubles survive.
             provider = _InMemoryStateProvider(raw=raw)
             entity = AgentEntity(
-                _agent(client, context_providers=providers, default_options=default_options),
+                _agent(
+                    client,
+                    agent_type=Agent if streaming else NonStreamingAgent,
+                    context_providers=providers,
+                    default_options=default_options,
+                ),
                 state_provider=provider,
             )
             history_providers = _history_providers(entity.agent)
@@ -738,19 +744,13 @@ class TestServiceManagedSessions:
             }
 
         expected_active_ids = [None, None, None, "service-branch-1"]
-        assert [entry["service_session_id"] for entry in observer.before] == [
-            value for value in expected_active_ids for _ in attempts
-        ]
-        assert [entry["context_service_session_id"] for entry in observer.before] == [
-            value for value in expected_active_ids for _ in attempts
-        ]
+        assert [entry["service_session_id"] for entry in observer.before] == expected_active_ids
+        assert [entry["context_service_session_id"] for entry in observer.before] == expected_active_ids
         # Implicit durable history is appended like Core's automatic provider, after the observer.
         # Only this before-hook sees raw input; keep the full model-input checks above unchanged.
         # An explicit external primary still runs before the observer and supplies its history.
         expected_before_inputs = expected_inputs if external is not None else [[prompt] for prompt in prompts]
-        assert [entry["texts"] for entry in observer.before] == [
-            batch for batch in expected_before_inputs for _ in attempts
-        ]
+        assert [entry["texts"] for entry in observer.before] == expected_before_inputs
         assert [entry["service_session_id"] for entry in observer.after] == [
             "service-branch-1",
             None,
@@ -771,6 +771,47 @@ class TestServiceManagedSessions:
             delivered = reloaded.try_get_agent_response(correlation_id)
             assert delivered is not None
             assert delivered.to_dict() == original
+
+    async def test_core_client_stream_refusal_after_before_hook_is_terminal(self) -> None:
+        """A deferred client refusal must not rerun Core or its provider hooks."""
+        client = _ConversationIdClient(stores_by_default=True, supports_streaming=False)
+        observer = _SessionObserver()
+        provider = _InMemoryStateProvider()
+        entity = AgentEntity(_agent(client, context_providers=[observer]), state_provider=provider)
+
+        response = await entity.run({"message": "service-first", "correlationId": "refused"})
+
+        assert [call["stream"] for call in client.calls] == [True]
+        assert [[message.text for message in call["messages"]] for call in client.calls] == [["service-first"]]
+        assert observer.before == [
+            {
+                "service_session_id": None,
+                "context_service_session_id": None,
+                "texts": ["service-first"],
+            }
+        ]
+        assert observer.after == []
+        assert response.additional_properties["durable_status"] == "error"
+        assert response.text == "TypeError: stream is not supported"
+        assert [
+            content.error_code
+            for message in response.messages
+            for content in message.contents
+            if content.type == "error"
+        ] == ["TypeError"]
+        raw = json.loads(json.dumps(provider._get_state_dict()))
+        data = raw["data"]
+        assert provider.writes == 1
+        assert data["conversationHistory"] == []
+        assert data["session"]["service_session_id"] is None
+        assert set(data["completionReceipts"]) == {"refused"}
+        assert set(data["terminalResults"]) == {"refused"}
+        assert data["completionReceipts"]["refused"]["outcome"] == "failed"
+        assert data["terminalResults"]["refused"]["outcome"] == "failed"
+        assert data["terminalResults"]["refused"]["response"] == serialize_terminal_response(response)
+        delivered = DurableAgentState.from_json(json.dumps(raw)).try_get_agent_response("refused")
+        assert delivered is not None
+        assert delivered.to_dict() == response.to_dict()
 
     async def test_a_service_owned_run_is_not_sent_its_own_history(self) -> None:
         """A service-owned run receives only new input, even before a service ID has been issued."""
@@ -822,9 +863,10 @@ class TestServiceManagedSessions:
 
                 return AgentSession()
 
-            async def run(self, messages: Any = None, *, stream: bool = False, **kwargs: Any) -> Any:
+            def run(self, messages: Any = None, *, stream: bool = False, **kwargs: Any) -> Any:
                 from agent_framework import AgentResponse
 
+                # Refuse at the synchronous entry, before recording application work.
                 if stream:
                     raise TypeError("stream is not supported")
                 recorded.append(list(messages or []))
@@ -853,7 +895,7 @@ class TestServiceManagedSessions:
 
                 return AgentSession()
 
-            async def run(
+            def run(
                 self,
                 messages: Any = None,
                 *,
@@ -863,6 +905,7 @@ class TestServiceManagedSessions:
             ) -> Any:
                 from agent_framework import AgentResponse
 
+                # Refuse at the synchronous entry, before reading or changing the session.
                 if stream:
                     raise TypeError("stream is not supported")
                 seen_ids.append(getattr(session, "service_session_id", None))

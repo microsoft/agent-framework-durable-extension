@@ -8,8 +8,10 @@ from typing import Any, get_args
 from unittest.mock import Mock, patch
 
 import pytest
+from _workflow_test_support import create_registration_worker
 from agent_framework import Agent, AgentExecutor, Executor, InMemoryHistoryProvider, WorkflowExecutor
 from durabletask.azuremanaged.worker import DurableTaskSchedulerWorker
+from durabletask.serialization import JsonDataConverter
 
 import agent_framework_durabletask as durabletask
 from agent_framework_durabletask import (
@@ -97,7 +99,7 @@ def test_only_the_enum_inherits_a_budget(inherited: Inherit) -> None:
 
 
 def test_worker_defaults_reach_the_entity_consumer() -> None:
-    grpc_worker = Mock()
+    grpc_worker = create_registration_worker()
     worker = DurableAIAgentWorker(grpc_worker)
     worker.add_agent(_agent())
 
@@ -118,7 +120,11 @@ def test_worker_defaults_reach_the_entity_consumer() -> None:
 def test_worker_pressure_budget_is_independent_of_retention(
     retention: RetentionMode, budget: Any, expected: int | None
 ) -> None:
-    grpc_worker = Mock(spec=DurableTaskSchedulerWorker) if budget == "backend_limit" else Mock()
+    grpc_worker = (
+        Mock(spec=DurableTaskSchedulerWorker, _data_converter=JsonDataConverter(), _is_running=False)
+        if budget == "backend_limit"
+        else create_registration_worker()
+    )
     worker = DurableAIAgentWorker(
         grpc_worker,
         retention=retention,
@@ -154,7 +160,9 @@ def test_budget_override_distinguishes_omitted_and_disabled(
     surface: str, overrides: dict[str, Any], expected: int | None
 ) -> None:
     grpc_worker = (
-        Mock(spec=DurableTaskSchedulerWorker) if overrides.get("max_state_bytes") == "backend_limit" else Mock()
+        Mock(spec=DurableTaskSchedulerWorker, _data_converter=JsonDataConverter(), _is_running=False)
+        if overrides.get("max_state_bytes") == "backend_limit"
+        else create_registration_worker()
     )
     worker = DurableAIAgentWorker(grpc_worker, max_state_bytes=8192)
     if surface == "agent":
@@ -166,7 +174,7 @@ def test_budget_override_distinguishes_omitted_and_disabled(
 
 
 def test_per_agent_overrides_do_not_change_the_host_defaults_or_callbacks() -> None:
-    grpc_worker = Mock()
+    grpc_worker = create_registration_worker()
     default_callback, specific_callback = Mock(), Mock()
     worker = DurableAIAgentWorker(
         grpc_worker,
@@ -210,7 +218,7 @@ def test_per_agent_overrides_do_not_change_the_host_defaults_or_callbacks() -> N
 
 @pytest.mark.parametrize("retention", get_args(RetentionMode))
 def test_workflow_overrides_reach_every_new_nested_entity(retention: RetentionMode) -> None:
-    grpc_worker = Mock()
+    grpc_worker = create_registration_worker()
     worker = DurableAIAgentWorker(grpc_worker, max_state_bytes=8192)
     inner = _workflow("inner", _agent("inneragent"))
     outer = _workflow("outer", _agent("outeragent"), child=inner)
@@ -253,7 +261,7 @@ _INVALID_SETTINGS: list[dict[str, Any]] = [
 @pytest.mark.parametrize("settings", _INVALID_SETTINGS)
 @pytest.mark.parametrize("surface", ["host", "agent", "workflow"])
 def test_invalid_settings_fail_before_registration(surface: str, settings: dict[str, Any]) -> None:
-    grpc_worker = Mock()
+    grpc_worker = create_registration_worker()
     if surface == "host":
         with pytest.raises(ValueError):
             DurableAIAgentWorker(grpc_worker, **settings)
@@ -272,7 +280,7 @@ def test_invalid_settings_fail_before_registration(surface: str, settings: dict[
 
 @pytest.mark.parametrize("surface", ["agent", "workflow", "nested_workflow"])
 def test_ambiguous_history_fails_before_any_registration(surface: str) -> None:
-    grpc_worker = Mock()
+    grpc_worker = create_registration_worker()
     worker = DurableAIAgentWorker(grpc_worker)
     agent = _agent(ambiguous_history=True)
     original_providers = agent.context_providers
@@ -293,7 +301,7 @@ def test_ambiguous_history_fails_before_any_registration(surface: str) -> None:
 
 
 def test_registration_validates_without_replacing_the_users_history_provider() -> None:
-    grpc_worker = Mock()
+    grpc_worker = create_registration_worker()
     worker = DurableAIAgentWorker(grpc_worker, retention="follow_compaction")
     agent = _agent()
     original_providers = agent.context_providers
@@ -305,7 +313,7 @@ def test_registration_validates_without_replacing_the_users_history_provider() -
 
 
 def test_backend_registration_failure_does_not_record_an_agent() -> None:
-    grpc_worker = Mock()
+    grpc_worker = create_registration_worker()
     grpc_worker.add_entity.side_effect = RuntimeError("registration failed")
     worker = DurableAIAgentWorker(grpc_worker)
     with pytest.raises(RuntimeError, match="registration failed"):
