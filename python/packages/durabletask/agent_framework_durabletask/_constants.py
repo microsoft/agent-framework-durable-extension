@@ -19,14 +19,21 @@ REQUEST_RESPONSE_FORMAT_TEXT: str = "text"
 MIMETYPE_APPLICATION_JSON: str = "application/json"
 MIMETYPE_TEXT_PLAIN: str = "text/plain"
 
-# Field and header names
+# Field and header names.
+#
+# These are the snake_case names the agent HTTP API originally shipped with. The canonical
+# agent HTTP names are now camelCase ("sessionId", "waitForResponse"), and both spellings stay
+# accepted on incoming requests. Only the session identifier is echoed back: responses carry it
+# as both "sessionId" and SESSION_ID_FIELD. WAIT_FOR_RESPONSE_FIELD is request-only and is never
+# part of a response. See docs/features/durable-agents/http-api-camelcase-migration.md.
 SESSION_ID_FIELD: str = "session_id"
 SESSION_ID_HEADER: str = "x-ms-session-id"
 WAIT_FOR_RESPONSE_FIELD: str = "wait_for_response"
 WAIT_FOR_RESPONSE_HEADER: str = "x-ms-wait-for-response"
 
 # Deprecated request field name. Incoming requests may still use "thread_id", but responses
-# only ever emit SESSION_ID_FIELD / SESSION_ID_HEADER.
+# never emit it; they carry the session identifier as SESSION_ID_HEADER and as both the
+# camelCase and SESSION_ID_FIELD body fields.
 LEGACY_THREAD_ID_FIELD: str = "thread_id"
 LEGACY_THREAD_ID_HEADER: str = "x-ms-thread-id"
 
