@@ -45,6 +45,17 @@ extends:
       image: 1es-windows-2022
       os: windows
 
+    # ESRP code signing uploads the files to be signed to ESRP storage gateways
+    # (prodgatewayv2*.blob.core.windows.net). This pipeline's default Network
+    # Isolation policy, `Preferred`, allows api.esrp.microsoft.com but not those
+    # storage endpoints, so the upload retries until the job times out. `ESRP` and
+    # `EsrpSigningExe` are add-on policies that allow exactly those connections.
+    # durabletask-dotnet signs successfully because it runs under `Good`, which is
+    # `Preferred` plus those two add-ons (and several unrelated ones).
+    # See https://eng.ms/docs/cloud-ai-platform/devdiv/one-engineering-system-1es/1es-build/cloudbuild/security/1espt-network-isolation
+    settings:
+      networkIsolationPolicy: Preferred,ESRP,EsrpSigningExe
+
     stages:
       - stage: BuildPackages
         displayName: 'Build packages'
@@ -52,6 +63,7 @@ extends:
           - template: /eng/templates/official/jobs/build-packages.yml@self
             parameters:
               artifactName: ${{ parameters.artifactName }}
+              publishDotNet: ${{ parameters.publishDotNet }}
 
       # Gate the entire publish stage at compile time (not with a runtime `condition`).
       # 1ES validates referenced service connections even for jobs that would be

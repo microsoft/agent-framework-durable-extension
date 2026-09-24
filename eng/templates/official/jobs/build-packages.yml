@@ -2,6 +2,14 @@ parameters:
   - name: artifactName
     type: string
     default: 'agent-framework-durable-extension-packages'
+  # Gates the ESRP signing steps. Signing is only needed for packages that are actually
+  # published, and eng/ci/package-release.yml deliberately keeps a dry run free of any
+  # publishing credential dependency. Compile-time `${{ if }}` rather than a runtime
+  # `condition:` for the same reason given there: 1ES validates referenced service
+  # connections even for steps a runtime condition would skip.
+  - name: publishDotNet
+    type: boolean
+    default: false
 
 jobs:
   - job: BuildPackages
@@ -14,6 +22,16 @@ jobs:
           artifactName: ${{ parameters.artifactName }}
     steps:
       - checkout: self
+
+      # ESRP signing requires the .NET 6 runtime, which is not present on the 1ES Windows image and is
+      # not supplied by the global.json SDK below. Installed side by side; global.json still selects the
+      # SDK the build uses. Matches microsoft/durabletask-dotnet eng/templates/build.yml.
+      - ${{ if eq(parameters.publishDotNet, true) }}:
+        - task: UseDotNet@2
+          displayName: 'Use .NET 6 SDK (ESRP)'
+          inputs:
+            packageType: sdk
+            version: '6.x'
 
       - task: UseDotNet@2
         displayName: 'Use .NET SDK from global.json'
@@ -68,6 +86,42 @@ jobs:
           searchFolder: $(Build.SourcesDirectory)
           failTaskOnFailedTests: true
 
+      # Authenticode-sign the assemblies before packing, mirroring
+      # microsoft/durabletask-dotnet (eng/templates/build.yml). Note that the
+      # SignAssembly/PublicSign settings in dotnet/Directory.Build.props only apply a
+      # strong name with a public key so InternalsVisibleTo resolves; they are not
+      # Authenticode and do not satisfy the official-package requirements.
+      #
+      # This runs after the unit tests so a failing build does not consume ESRP signing
+      # operations, and before pack so the signed assemblies are the ones embedded in
+      # the packages (the pack step below relies on --no-build to pick them up).
+      - ${{ if eq(parameters.publishDotNet, true) }}:
+        - template: ci/sign-files.yml@eng
+          parameters:
+            displayName: 'Sign .NET assemblies'
+            folderPath: '$(Build.SourcesDirectory)/dotnet/src'
+            pattern: '**/bin/Release/**/Microsoft.Agents.AI.*.dll'
+            minimatch: true
+            signType: dll
+
+        # Fail loudly if signing matched nothing. A pattern that goes stale (for example
+        # after a target-framework or output-path change) would otherwise sign zero files
+        # and still succeed, shipping unsigned packages that look signed.
+        - pwsh: |
+            $srcDir = "$(Build.SourcesDirectory)/dotnet/src"
+            $dlls = @(Get-ChildItem -Path $srcDir -Recurse -File -Filter 'Microsoft.Agents.AI.*.dll' |
+              Where-Object { $_.FullName -replace '\\','/' -match '/bin/Release/' })
+            if ($dlls.Count -eq 0) {
+              throw "No built assemblies found under $srcDir; the signing pattern cannot have matched anything."
+            }
+            $unsigned = @($dlls | Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -ne 'Valid' })
+            if ($unsigned.Count -gt 0) {
+              $names = ($unsigned | ForEach-Object { $_.Name }) -join ', '
+              throw "These assemblies are not Authenticode signed after the signing step: $names"
+            }
+            Write-Host "Verified Authenticode signatures on $($dlls.Count) assemblies."
+          displayName: 'Verify assembly signatures'
+
       - pwsh: |
           New-Item -ItemType Directory -Force -Path "$(Build.ArtifactStagingDirectory)/packages/dotnet" | Out-Null
           # Pass the output directory as an explicit MSBuild property rather than the
@@ -80,6 +134,75 @@ jobs:
           dotnet pack src/Microsoft.Agents.AI.Hosting.AzureFunctions/Microsoft.Agents.AI.Hosting.AzureFunctions.csproj --configuration Release --no-build "-p:PackageOutputPath=$(Build.ArtifactStagingDirectory)/packages/dotnet"
         workingDirectory: dotnet
         displayName: 'Pack .NET packages'
+
+      # Sign the packages themselves. `*.nupkg` deliberately does not match the
+      # co-located `.snupkg` symbol packages, which are not signed.
+      - ${{ if eq(parameters.publishDotNet, true) }}:
+        - template: ci/sign-files.yml@eng
+          parameters:
+            displayName: 'Sign .NET NuGet packages'
+            folderPath: '$(Build.ArtifactStagingDirectory)/packages/dotnet'
+            pattern: '*.nupkg'
+            signType: nuget
+
+        # Same rationale as the assembly check above: confirm the packages really carry a
+        # signature rather than trusting that the pattern matched.
+        #
+        # This also verifies the assemblies *inside* each package. The earlier check looks
+        # at dotnet/src/**/bin/Release, which is only the same content because `pack` runs
+        # with --no-build. If that flag were ever dropped, pack would rebuild and copy
+        # unsigned obj/ assemblies over the signed ones, and a bin-only check would still
+        # pass while the shipped lib/ assemblies were unsigned.
+        - pwsh: |
+            $dotnetDir = "$(Build.ArtifactStagingDirectory)/packages/dotnet"
+            $nupkgs = @(Get-ChildItem -File -Path $dotnetDir -Filter *.nupkg)
+            if ($nupkgs.Count -eq 0) {
+              throw "No .nupkg packages were produced in $dotnetDir; the signing pattern cannot have matched anything."
+            }
+            foreach ($pkg in $nupkgs) {
+              dotnet nuget verify $pkg.FullName
+              if ($LASTEXITCODE -ne 0) {
+                throw "$($pkg.Name) is not signed (dotnet nuget verify exited $LASTEXITCODE)."
+              }
+            }
+
+            $extractRoot = Join-Path $env:AGENT_TEMPDIRECTORY 'nupkg-verify'
+            Remove-Item -Recurse -Force $extractRoot -ErrorAction SilentlyContinue
+            $totalLibDlls = 0
+            foreach ($pkg in $nupkgs) {
+              $dest = Join-Path $extractRoot $pkg.BaseName
+              Expand-Archive -Path $pkg.FullName -DestinationPath $dest -Force
+              $libDir = Join-Path $dest 'lib'
+              if (-not (Test-Path $libDir)) {
+                throw "$($pkg.Name) contains no lib/ directory; cannot verify the assemblies it ships."
+              }
+              $libDlls = @(Get-ChildItem -Path $libDir -Recurse -File -Filter 'Microsoft.Agents.AI.*.dll')
+              if ($libDlls.Count -eq 0) {
+                throw "$($pkg.Name) ships no Microsoft.Agents.AI.* assemblies under lib/."
+              }
+              $unsigned = @($libDlls | Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -ne 'Valid' })
+              if ($unsigned.Count -gt 0) {
+                $names = ($unsigned | ForEach-Object { $_.FullName.Substring($dest.Length + 1) }) -join ', '
+                throw "$($pkg.Name) ships assemblies that are not Authenticode signed: $names"
+              }
+              $totalLibDlls += $libDlls.Count
+            }
+            Remove-Item -Recurse -Force $extractRoot -ErrorAction SilentlyContinue
+
+            Write-Host "Verified signatures on $($nupkgs.Count) packages and $totalLibDlls assemblies shipped inside them."
+          displayName: 'Verify package signatures'
+
+        # ESRP drops a CodeSignSummary-<guid>.md next to the signed packages. Nothing
+        # consumes it and the push only globs *.nupkg, but leaving it here means it is
+        # collected into the published pipeline artifact.
+        - pwsh: |
+            $dotnetDir = "$(Build.ArtifactStagingDirectory)/packages/dotnet"
+            $summaries = @(Get-ChildItem -File -Path $dotnetDir -Filter 'CodeSignSummary-*.md' -ErrorAction SilentlyContinue)
+            foreach ($f in $summaries) {
+              Remove-Item -Force $f.FullName
+              Write-Host "Removed ESRP artifact $($f.Name)."
+            }
+          displayName: 'Remove ESRP code-sign summaries'
 
       # Validate the packed .NET packages without pushing to a registry. This catches
       # packaging regressions early in a dry run: a missing co-located symbol package
