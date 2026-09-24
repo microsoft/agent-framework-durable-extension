@@ -1,10 +1,14 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Keep test deployment setup visible when pytest selects this package's config."""
+"""Configure shared-helper assertions and test-owned deployment isolation."""
 
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
+
+for support in Path(__file__).parent.parent.glob("*/tests/_*test_support*.py"):
+    pytest.register_assert_rewrite(support.stem)
 
 
 @pytest.fixture(scope="session", autouse=True)
