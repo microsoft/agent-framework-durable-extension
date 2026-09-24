@@ -10,6 +10,7 @@ from itertools import combinations
 from typing import Any
 
 import pytest
+from _history_pipeline_test_support import OLD, ToolChatClient
 from _retention_test_support import _InMemoryStateProvider
 from agent_framework import (
     GROUP_ANNOTATION_KEY,
@@ -21,7 +22,6 @@ from agent_framework import (
     InMemoryHistoryProvider,
     Message,
 )
-from test_private_history_pipeline import OLD, ToolChatClient
 
 from agent_framework_durabletask import AgentEntity
 from agent_framework_durabletask._history_provider import (
