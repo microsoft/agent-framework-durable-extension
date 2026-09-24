@@ -226,7 +226,8 @@ finalization retains pending tool results if filtering or staging fails, allowin
 Core sessions are loaded and staged through a private entity-backed `SessionStore` adapter.
 It uses the existing entity session field, not a separate backend or commit. The agent still
 creates its working session, and only the durable history adapter's temporary message/index
-buffers are omitted from its snapshot. External history providers keep their own transcripts
+buffers are omitted from its snapshot. Snapshot copies isolate saved state from failing custom
+decoders and retained working-session references. External history providers keep their own transcripts
 and provider state. This does not make external writes transactional or migrate history between
 providers. The adapter relies on Core's experimental store contract and is not a public storage
 configuration API.
