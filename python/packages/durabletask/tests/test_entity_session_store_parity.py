@@ -5,16 +5,15 @@
 The keyed external store is an in-memory Redis-style fake, not a backend integration.
 """
 
-from collections.abc import Sequence
 from copy import deepcopy
 from typing import Any, cast
 
 import pytest
 from _execution_test_support import JsonStateProvider, NonStreamingAgent, RecordingChatClient
+from _session_persistence_test_support import _cold, _ExternalHistory, _request, _seed
 from agent_framework import Agent, AgentSession, HistoryProvider, Message
-from test_runtime_sessions import _cold, _request
 
-from agent_framework_durabletask import AgentEntity, DurableAgentState, DurableHistoryProvider
+from agent_framework_durabletask import AgentEntity, DurableHistoryProvider
 
 
 class _FactorySession(AgentSession):
@@ -68,56 +67,6 @@ class _Client(RecordingChatClient):
     def _inner_get_response(self, **kwargs: Any) -> Any:
         self.events.append("model")
         return super()._inner_get_response(**kwargs)
-
-
-class _ExternalHistory(HistoryProvider):
-    def __init__(
-        self, store: dict[str, list[Message]], events: list[str], *, source_id: str = "external", load: bool = True
-    ) -> None:
-        super().__init__(source_id, load_messages=load)
-        self.store = store
-        self.events = events
-        self.calls: list[tuple[str, str | None, dict[str, Any]]] = []
-        self.partial_failure = False
-
-    async def before_run(self, **kwargs: Any) -> None:
-        self.events.append(f"{self.source_id}.before")
-        await super().before_run(**kwargs)
-
-    async def after_run(self, **kwargs: Any) -> None:
-        self.events.append(f"{self.source_id}.after")
-        await super().after_run(**kwargs)
-
-    async def get_messages(self, session_id: str | None, *, state: Any = None, **kwargs: Any) -> list[Message]:
-        assert isinstance(state, dict)
-        self.events.append(f"{self.source_id}.load")
-        self.calls.append(("load", session_id, deepcopy(state)))
-        state["loads"] = state.get("loads", 0) + 1
-        return deepcopy(self.store.get(f"{self.source_id}:{session_id}", []))
-
-    async def save_messages(
-        self, session_id: str | None, messages: Sequence[Message], *, state: Any = None, **kwargs: Any
-    ) -> None:
-        assert isinstance(state, dict)
-        self.events.append(f"{self.source_id}.save")
-        self.calls.append(("save", session_id, deepcopy(state)))
-        state["saves"] = state.get("saves", 0) + 1
-        accepted = messages[:1] if self.partial_failure else messages
-        self.store.setdefault(f"{self.source_id}:{session_id}", []).extend(deepcopy(list(accepted)))
-        if self.partial_failure:
-            raise OSError("partial external save")
-
-
-def _seed(state: dict[str, Any], **siblings: Any) -> JsonStateProvider:
-    initial = DurableAgentState()
-    initial.data.session = {
-        "type": "session",
-        "session_id": "previous-session-id",
-        "service_session_id": {"remote": "saved"},
-        "state": deepcopy(state),
-        **siblings,
-    }
-    return JsonStateProvider(initial.to_dict())
 
 
 @pytest.mark.parametrize("session_type", [_FactorySession, _DuckSession], ids=["subclass", "duck"])

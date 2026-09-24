@@ -121,6 +121,7 @@ async def test_get_registers_loaded_decoder_without_importing_payload_type(monke
             return cls(data.pop("values"))  # A consuming decoder must not mutate the stored snapshot.
 
     monkeypatch.setattr(core_sessions, "_STATE_TYPE_REGISTRY", {})
+    monkeypatch.setattr(core_sessions, "_STATE_CLASS_REGISTRY", {})
     monkeypatch.setattr(_session_store, "_registered_state_types", set())
     raw = _snapshot()
     raw["state"] = {
