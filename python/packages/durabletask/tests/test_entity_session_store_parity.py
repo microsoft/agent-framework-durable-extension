@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Black-box session parity controls for both the baseline and the extraction.
+"""Entity-level session compatibility and snapshot-isolation regressions.
 
 The keyed external store is an in-memory Redis-style fake, not a backend integration.
 """
@@ -11,7 +11,8 @@ from typing import Any, cast
 import pytest
 from _execution_test_support import JsonStateProvider, NonStreamingAgent, RecordingChatClient
 from _session_persistence_test_support import _cold, _ExternalHistory, _request, _seed
-from agent_framework import Agent, AgentSession, HistoryProvider, Message
+from agent_framework import Agent, AgentSession, HistoryProvider, Message, register_state_type
+from agent_framework import _sessions as core_sessions
 
 from agent_framework_durabletask import AgentEntity, DurableHistoryProvider
 
@@ -67,6 +68,30 @@ class _Client(RecordingChatClient):
     def _inner_get_response(self, **kwargs: Any) -> Any:
         self.events.append("model")
         return super()._inner_get_response(**kwargs)
+
+
+class _JsonOnlyDict(dict[str, Any]):
+    def __deepcopy__(self, memo: Any) -> Any:
+        raise TypeError("JSON snapshot does not support deepcopy")
+
+
+class _JsonSnapshotSession(AgentSession):
+    def to_dict(self) -> dict[str, Any]:
+        result = super().to_dict()
+        return _JsonOnlyDict(result) if self.state.get("finished") else result
+
+
+class _JsonSnapshotAgent(_FactoryAgent):
+    def run(self, *args: Any, **kwargs: Any) -> Any:
+        result = super().run(*args, **kwargs)
+
+        async def finish() -> Any:
+            response = await result
+            kwargs["session"].state["finished"] = True
+            kwargs["session"].state.setdefault("saved_only", {"values": [False, 0, None]})
+            return response
+
+        return finish()
 
 
 @pytest.mark.parametrize("session_type", [_FactorySession, _DuckSession], ids=["subclass", "duck"])
@@ -233,38 +258,114 @@ async def test_duplicate_skips_factory_pipeline_and_write(cold: bool, fail: bool
     assert (provider.attempted_writes, provider.successful_writes) == writes
 
 
-async def test_json_compatible_custom_serializer_does_not_require_deepcopy_support() -> None:
-    class JsonOnlyDict(dict[str, Any]):
-        def __deepcopy__(self, memo: Any) -> Any:
-            raise TypeError("JSON snapshot does not support deepcopy")
+@pytest.mark.parametrize("mutate", [False, True], ids=["read-only-decoder", "mutating-decoder"])
+async def test_failed_decoder_preserves_previous_session_and_duplicate_bypasses_it(
+    monkeypatch: pytest.MonkeyPatch, mutate: bool
+) -> None:
+    decoded: list[dict[str, Any]] = []
 
-    class JsonSession(AgentSession):
+    class FailingState:
+        TYPE = "durable_test_failing_session_decoder"
+
         def to_dict(self) -> dict[str, Any]:
-            result = super().to_dict()
-            if self.state.get("finished"):
-                return JsonOnlyDict(result)
-            return result
+            return {"type": self.TYPE, "values": ["saved"]}
 
-    class JsonAgent(_FactoryAgent):
-        def run(self, *args: Any, **kwargs: Any) -> Any:
-            result = super().run(*args, **kwargs)
+        @classmethod
+        def from_dict(cls, payload: dict[str, Any]) -> Any:
+            decoded.append(deepcopy(payload))
+            if mutate:
+                payload["values"].clear()
+            raise ValueError("session decoder rejected its input")
 
-            async def finish() -> Any:
-                response = await result
-                kwargs["session"].state["finished"] = True
-                return response
+    # Build this codec through Core, then scope only its entries. Replacing the
+    # whole registry during execution would lose other loaded-type registrations.
+    with monkeypatch.context() as registration:
+        registration.setattr(core_sessions, "_STATE_TYPE_REGISTRY", core_sessions._STATE_TYPE_REGISTRY.copy())
+        registration.setattr(core_sessions, "_STATE_CLASS_REGISTRY", core_sessions._STATE_CLASS_REGISTRY.copy())
+        register_state_type(FailingState)
+        codec = core_sessions._STATE_TYPE_REGISTRY[FailingState.TYPE]
+    monkeypatch.setitem(core_sessions._STATE_TYPE_REGISTRY, FailingState.TYPE, codec)
+    monkeypatch.setitem(core_sessions._STATE_CLASS_REGISTRY, FailingState, codec)
+    raw_value = {"type": FailingState.TYPE, "values": ["saved"]}
+    provider = _seed({"custom": raw_value, "application": [False, 0, None]})
+    expected = deepcopy(provider.raw["data"]["session"])
+    client = RecordingChatClient()
+    agent = _FactoryAgent(client=client)
+    entity = AgentEntity(agent, state_provider=provider)
 
-            return finish()
+    response = await entity.run(_request("decode-failure", "hello"))
+    assert decoded == [raw_value]
+    assert response.additional_properties["durable_status"] == "error"
+    assert f"Failed to deserialize registered state type '{FailingState.TYPE}'" in response.text
+    assert client.received_messages == [] and len(agent.created) == 1
+    assert provider.attempted_writes == provider.successful_writes == 1
+    assert entity.state.data.completed_correlations["decode-failure"]["outcome"] == "failed"
+    assert provider.raw["data"]["session"] == entity.state.data.session == expected
 
+    committed = deepcopy(provider.raw)
+    duplicate = await entity.run(_request("decode-failure", "must not decode again"))
+    assert duplicate.to_dict() == response.to_dict()
+    assert decoded == [raw_value] and len(agent.created) == 1
+    assert provider.raw == committed
+    assert provider.attempted_writes == provider.successful_writes == 1
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["reused-entity", "cold-entity"])
+async def test_retained_session_mutation_cannot_change_next_committed_service_id(cold: bool) -> None:
+    service_id = {"remote": {"ids": ["saved"]}}
+    provider = _seed({"application": [False, 0, None]}, service_session_id=service_id)
+    client = RecordingChatClient()
+    agent = _FactoryAgent(client=client, session_type=AgentSession)
+    entity = AgentEntity(agent, state_provider=provider)
+    assert (await entity.run(_request("first", "hello"))).text == "reply-1"
+    committed = deepcopy(provider.raw)
+    assert committed["data"]["session"]["service_session_id"] == service_id
+
+    # Local history leaves this service ID inactive, but it must still be isolated.
+    agent.created[-1].service_session_id["remote"]["ids"].append("not-committed")
+    assert provider.raw == committed
+    if cold:
+        entity, provider = _cold(agent, provider)
+    assert (await entity.run(_request("next", "hello"))).text == "reply-2"
+    assert provider.raw["data"]["session"]["service_session_id"] == service_id
+    assert entity.state.data.session == provider.raw["data"]["session"] == committed["data"]["session"]
+    assert len(agent.created) == len(client.received_messages) == 2
+    assert provider.attempted_writes == provider.successful_writes == (1 if cold else 2)
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["reused-entity", "cold-entity"])
+async def test_json_compatible_custom_serializer_does_not_require_deepcopy_support(cold: bool) -> None:
     provider = JsonStateProvider()
     client = RecordingChatClient()
-    agent = JsonAgent(client=client, session_type=JsonSession)
+    service_id = {"remote": {"ids": ["saved"]}}
+    agent = _JsonSnapshotAgent(client=client, session_type=_JsonSnapshotSession, service_id=service_id)
     entity = AgentEntity(agent, state_provider=provider)
     response = await entity.run(_request("custom-json", "hello"))
     assert response.text == "reply-1"
     assert provider.successful_writes == 1
     assert provider.raw["data"]["session"]["state"]["finished"] is True
     assert entity.state.data.completed_correlations["custom-json"]["outcome"] == "succeeded"
+
+    committed = deepcopy(provider.raw["data"]["session"])
+    assert committed["service_session_id"] == service_id
+    if cold:
+        client = RecordingChatClient()
+        agent = _JsonSnapshotAgent(client=client, session_type=_JsonSnapshotSession)
+        entity, provider = _cold(agent, provider)
+    else:
+        # History preparation keeps a shallow agent copy, not this original factory.
+        assert isinstance(entity.agent, _JsonSnapshotAgent)
+        entity.agent.service_id = None
+    assert isinstance(entity.agent, _JsonSnapshotAgent) and entity.agent.service_id is None
+    response = await entity.run(_request("next", "hello again"))
+    assert response.text == ("reply-1" if cold else "reply-2")
+    # Neither a fresh factory nor the next model call can supply these prior values.
+    assert agent.seen[-1][1]["finished"] is True
+    assert agent.seen[-1][1]["saved_only"] == {"values": [False, 0, None]}
+    assert agent.created[-1].service_session_id == service_id
+    assert provider.raw["data"]["session"] == committed
+    assert entity.state.data.completed_correlations["next"]["outcome"] == "succeeded"
+    assert provider.attempted_writes == provider.successful_writes == (1 if cold else 2)
 
 
 @pytest.mark.parametrize("invalid", [{1: "numeric", "1": "string"}, (False, 0, None)], ids=["keys", "tuple"])
