@@ -147,6 +147,12 @@ jobs:
 
         # Same rationale as the assembly check above: confirm the packages really carry a
         # signature rather than trusting that the pattern matched.
+        #
+        # This also verifies the assemblies *inside* each package. The earlier check looks
+        # at dotnet/src/**/bin/Release, which is only the same content because `pack` runs
+        # with --no-build. If that flag were ever dropped, pack would rebuild and copy
+        # unsigned obj/ assemblies over the signed ones, and a bin-only check would still
+        # pass while the shipped lib/ assemblies were unsigned.
         - pwsh: |
             $dotnetDir = "$(Build.ArtifactStagingDirectory)/packages/dotnet"
             $nupkgs = @(Get-ChildItem -File -Path $dotnetDir -Filter *.nupkg)
@@ -159,8 +165,44 @@ jobs:
                 throw "$($pkg.Name) is not signed (dotnet nuget verify exited $LASTEXITCODE)."
               }
             }
-            Write-Host "Verified signatures on $($nupkgs.Count) packages."
+
+            $extractRoot = Join-Path $env:AGENT_TEMPDIRECTORY 'nupkg-verify'
+            Remove-Item -Recurse -Force $extractRoot -ErrorAction SilentlyContinue
+            $totalLibDlls = 0
+            foreach ($pkg in $nupkgs) {
+              $dest = Join-Path $extractRoot $pkg.BaseName
+              Expand-Archive -Path $pkg.FullName -DestinationPath $dest -Force
+              $libDir = Join-Path $dest 'lib'
+              if (-not (Test-Path $libDir)) {
+                throw "$($pkg.Name) contains no lib/ directory; cannot verify the assemblies it ships."
+              }
+              $libDlls = @(Get-ChildItem -Path $libDir -Recurse -File -Filter 'Microsoft.Agents.AI.*.dll')
+              if ($libDlls.Count -eq 0) {
+                throw "$($pkg.Name) ships no Microsoft.Agents.AI.* assemblies under lib/."
+              }
+              $unsigned = @($libDlls | Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -ne 'Valid' })
+              if ($unsigned.Count -gt 0) {
+                $names = ($unsigned | ForEach-Object { $_.FullName.Substring($dest.Length + 1) }) -join ', '
+                throw "$($pkg.Name) ships assemblies that are not Authenticode signed: $names"
+              }
+              $totalLibDlls += $libDlls.Count
+            }
+            Remove-Item -Recurse -Force $extractRoot -ErrorAction SilentlyContinue
+
+            Write-Host "Verified signatures on $($nupkgs.Count) packages and $totalLibDlls assemblies shipped inside them."
           displayName: 'Verify package signatures'
+
+        # ESRP drops a CodeSignSummary-<guid>.md next to the signed packages. Nothing
+        # consumes it and the push only globs *.nupkg, but leaving it here means it is
+        # collected into the published pipeline artifact.
+        - pwsh: |
+            $dotnetDir = "$(Build.ArtifactStagingDirectory)/packages/dotnet"
+            $summaries = @(Get-ChildItem -File -Path $dotnetDir -Filter 'CodeSignSummary-*.md' -ErrorAction SilentlyContinue)
+            foreach ($f in $summaries) {
+              Remove-Item -Force $f.FullName
+              Write-Host "Removed ESRP artifact $($f.Name)."
+            }
+          displayName: 'Remove ESRP code-sign summaries'
 
       # Validate the packed .NET packages without pushing to a registry. This catches
       # packaging regressions early in a dry run: a missing co-located symbol package
