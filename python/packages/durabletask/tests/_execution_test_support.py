@@ -9,8 +9,8 @@ from collections.abc import AsyncIterable, Awaitable, Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
+from _history_pipeline_test_support import CountingHistory, ToolChatClient
 from agent_framework import Agent, BaseChatClient, ChatResponse, ChatResponseUpdate, Message, ResponseStream
-from test_private_history_pipeline import CountingHistory, ToolChatClient
 
 from agent_framework_durabletask import AgentEntityStateProviderMixin
 
