@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Keep test deployment setup visible when pytest selects this package's config."""
+"""Configure shared-helper assertions and test-owned deployment isolation."""
 
 from collections.abc import Iterator
 from pathlib import Path
