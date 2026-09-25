@@ -1065,6 +1065,48 @@ def test_parent_snapshot_resolves_lazy_value_before_shared_conversion() -> None:
     assert not response._value_parsed
 
 
+def test_literal_reasoning_profile_preserves_protected_data_through_core_delivery() -> None:
+    wire = {
+        "messages": [
+            {
+                "role": "assistant",
+                "contents": [
+                    {
+                        "$type": "reasoning",
+                        "text": "summary",
+                        "pythonCoreFields": {
+                            "profile": "agent-framework-python.core-fields",
+                            "version": 1,
+                            "fields": {"protected_data": "opaque-provider-token"},
+                        },
+                        "future": {"reserved": [False, None, 0]},
+                    }
+                ],
+            }
+        ]
+    }
+    before = deepcopy(wire)
+    _validate(wire)
+
+    response = load_terminal_response(wire)
+
+    content = response.messages[0].contents[0]
+    assert type(content) is Content
+    assert content.type == "text_reasoning" and content.text == "summary"
+    assert content.protected_data == "opaque-provider-token"
+    delivered = json.loads(json.dumps(serialize_agent_response(response), allow_nan=False))
+    assert delivered["messages"][0]["contents"] == [
+        {
+            "type": "text_reasoning",
+            "text": "summary",
+            "protected_data": "opaque-provider-token",
+            "additional_properties": {},
+        }
+    ]
+    assert serialize_terminal_response(response) == before
+    assert wire == before
+
+
 def test_public_validator_is_observational_and_does_not_load_runtime_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = _response_with({"$type": "unknown", "content": None, "pythonContentEncoding": CONTENT_PROFILE})
     before = deepcopy(payload)
