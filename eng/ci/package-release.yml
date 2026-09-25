@@ -20,8 +20,8 @@ parameters:
     displayName: 'NuGet.org service connection'
   - name: esrpMainPublisher
     type: string
-    default: 'agent-framework-durable-extension'
-    displayName: 'ESRP main publisher label (PyPI release)'
+    default: 'durabletask-java'
+    displayName: 'ESRP main publisher (PyPI release)'
 
 resources:
   repositories:

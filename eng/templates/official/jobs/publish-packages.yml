@@ -31,12 +31,16 @@ parameters:
   - name: esrpDomainTenantId
     type: string
     default: '33e01921-4d64-4f8c-a055-5bdaffd5e33d'
-  # ESRP release label. It is NOT bound to the target registry: durabletask-python
-  # publishes Python packages with a "durabletask-java" value against this same ESRP
-  # registration, confirming it is a free-form label. Set to this project's name.
+  # ESRP main publisher. This is NOT a free-form label: it is a registered identifier
+  # that ESRP grants to a tenant, and an unregistered value fails the release with
+  # "Tenant does not have access to the given Main Publisher" (ErrorCode 2252).
+  # "durabletask-java" is the Durable Task team's existing registration -- named after
+  # the Java SDK that onboarded it first, but not bound to a language or registry; the
+  # sibling microsoft/durabletask-python pipeline publishes its Python packages under
+  # this same value. Reused here rather than onboarding a second publisher.
   - name: esrpMainPublisher
     type: string
-    default: 'agent-framework-durable-extension'
+    default: 'durabletask-java'
   # ADO environment used to satisfy the 1ES release-job requirement. Defaults to the
   # Durable Task team's existing PyPI production environment so it resolves without
   # provisioning a new one; switch to a dedicated environment later if desired.
