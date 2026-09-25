@@ -6,16 +6,21 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import warnings
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timezone
+from threading import Event
 from typing import Any
 from unittest.mock import Mock, call
 
 import grpc
 import pytest
 from agent_framework import AgentResponse, Content
+from dateutil import parser as date_parser
+from dateutil import tz
 from durabletask.client import TaskHubGrpcClient as NativeTaskHubGrpcClient
 from durabletask.entities import EntityInstanceId
 from durabletask.entities.entity_metadata import EntityMetadata
@@ -436,6 +441,112 @@ def test_native_unknown_timezone_does_not_escape_through_python_warnings(
         assert [error.error_code for error in _errors(response)] == ["state_read_error"]
     _assert_calls(rpc, sleep, 1)
     assert _json(raw) == before
+
+
+def test_overlapping_legacy_reads_do_not_change_process_warning_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    first_parsing, second_parsing, first_finished = Event(), Event(), Event()
+    parse = date_parser.parse
+
+    def overlapped_parse(value: str, *args: Any, **kwargs: Any) -> datetime:
+        if value.endswith("QZXWV"):
+            first_parsing.set()
+            assert second_parsing.wait(5), "Second parse did not enter"
+        else:
+            second_parsing.set()
+            assert first_finished.wait(5), "First read did not finish"
+        return parse(value, *args, **kwargs)
+
+    def read_timestamp(token: str) -> str | None:
+        raw = {
+            "schemaVersion": "1.1.0",
+            "data": {
+                "conversationHistory": [
+                    {
+                        "$type": "response",
+                        "correlationId": CORRELATION,
+                        "createdAt": f"2026-09-23 11:00:00 {token}",
+                        "messages": [],
+                    }
+                ]
+            },
+        }
+        try:
+            response = read_agent_state(raw).try_get_agent_response(CORRELATION)
+            assert response is not None
+            return response.created_at
+        finally:
+            if token == "QZXWV":
+                first_finished.set()
+
+    monkeypatch.setattr(date_parser, "parse", overlapped_parse)
+    with warnings.catch_warnings(record=True) as emitted:
+        warnings.simplefilter("always")
+        policy = warnings.filters
+        with ThreadPoolExecutor(max_workers=2) as threads:
+            first = threads.submit(read_timestamp, "QZXWV")
+            assert first_parsing.wait(5), "First parse did not enter"
+            second = threads.submit(read_timestamp, "RJKLP")
+            assert first.result(timeout=10) == second.result(timeout=10) == "2026-09-23T11:00:00"
+        assert emitted == []
+        assert warnings.filters is policy
+        # An unrelated direct dependency call still follows the caller's policy.
+        parse("2026-09-23 11:00:00 QZXWV")
+        assert len(emitted) == 1 and "QZXWV" in str(emitted[0].message)
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected"),
+    [
+        ("2026-09-23 11:00:00", "2026-09-23T11:00:00"),
+        ("2026-09-23T11:00:00Z", "2026-09-23T11:00:00+00:00"),
+        ("2026-09-23 11:00:00 UTC", "2026-09-23T11:00:00+00:00"),
+        ("2026-09-23 11:00:00 GMT", "2026-09-23T11:00:00+00:00"),
+        ("2026-09-23T11:00:00+05:30", "2026-09-23T11:00:00+05:30"),
+        ("2026-09-23T11:00:00-03:00", "2026-09-23T11:00:00-03:00"),
+        ("2026-09-23 11:00:00 QZXWV-2", "2026-09-23T11:00:00+02:00"),
+    ],
+)
+def test_legacy_timezone_wire_values_keep_native_parsing(timestamp: str, expected: str) -> None:
+    assert date_parser.parse(timestamp).isoformat() == expected
+    raw = {
+        "schemaVersion": "1.1.0",
+        "data": {
+            "conversationHistory": [
+                {"$type": "response", "correlationId": CORRELATION, "createdAt": timestamp, "messages": []}
+            ]
+        },
+    }
+    response = read_agent_state(raw).try_get_agent_response(CORRELATION)
+    assert response is not None and response.created_at == expected
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected"),
+    [
+        ("2026-01-23 11:00:00 ABC", "2026-01-23T11:00:00-03:00"),
+        ("2026-09-23 11:00:00 XYZ", "2026-09-23T11:00:00-02:00"),
+        ("2026-09-23 11:00:00 ABC", "2026-09-23T11:00:00-02:00"),
+        ("2026-09-23 11:00:00 XYZ-4", "2026-09-23T11:00:00-02:00"),
+    ],
+)
+def test_legacy_local_zone_handling_remains_owned_by_dateutil(
+    timestamp: str, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Deterministic local DST rules independent of the machine running this test.
+    local_zone = tz.tzstr("ABC3XYZ")
+    monkeypatch.setattr(time, "tzname", ("ABC", "XYZ"))
+    monkeypatch.setattr(tz, "tzlocal", lambda: local_zone)
+    assert date_parser.parse(timestamp).isoformat() == expected
+    raw = {
+        "schemaVersion": "1.1.0",
+        "data": {
+            "conversationHistory": [
+                {"$type": "response", "correlationId": CORRELATION, "createdAt": timestamp, "messages": []}
+            ]
+        },
+    }
+    response = read_agent_state(raw).try_get_agent_response(CORRELATION)
+    assert response is not None and response.created_at == expected
 
 
 @pytest.mark.parametrize("value_case", ["missing", "invalid", "lossy"])
