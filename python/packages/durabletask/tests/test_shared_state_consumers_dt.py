@@ -31,6 +31,7 @@ from agent_framework_durabletask import (
     serialize_agent_response,
 )
 from agent_framework_durabletask._executors import ClientAgentExecutor, DurableAgentTask
+from agent_framework_durabletask._response_utils import ensure_response_format
 
 CORRELATION = "Request-01"
 COMPLETED = "2026-09-17T11:00:00+00:00"
@@ -318,10 +319,14 @@ def test_shared_absent_value_is_not_inferred_from_text_for_a_typed_caller(
     raw = _shared()
     _payload(raw)["messages"][0]["contents"][0]["text"] = text
     before = _json(raw)
+    projected = read_agent_state(raw).try_get_agent_response(CORRELATION)
+    assert projected is not None
+    with pytest.raises(ValueError, match="no structured value"):
+        ensure_response_format(response_format, CORRELATION, projected)
     rpc.get_entity.return_value = _metadata(raw)
     response = client_agent.run("question", session=SESSION, options={"response_format": response_format})
     assert [error.error_code for error in _errors(response)] == ["response_processing_error"]
-    assert "no structured value" in (_errors(response)[0].message or "")
+    assert _errors(response)[0].message == "Failed to process the agent response."
     assert response.value is None
     _assert_polled(rpc, sleep, 1)
     assert _json(raw) == before and "value" not in _payload(raw)
@@ -334,10 +339,14 @@ def test_shared_typed_projection_cannot_change_original_json_values(
     raw = _shared()
     _payload(raw)["value"] = deepcopy(value)
     before = _json(raw)
+    projected = read_agent_state(raw).try_get_agent_response(CORRELATION)
+    assert projected is not None
+    with pytest.raises(ValueError, match="preserve"):
+        ensure_response_format(CountAnswer, CORRELATION, projected)
     rpc.get_entity.return_value = _metadata(raw)
     response = client_agent.run("question", session=SESSION, options={"response_format": CountAnswer})
     assert [error.error_code for error in _errors(response)] == ["response_processing_error"]
-    assert "preserve" in (_errors(response)[0].message or "")
+    assert _errors(response)[0].message == "Failed to process the agent response."
     _assert_polled(rpc, sleep, 1)
     assert _json(raw) == before
 
@@ -589,7 +598,7 @@ def test_invalid_stored_state_is_terminal_without_retry_or_typed_validation(
     assert response.value is None
     warnings = [record for record in caplog.records if record.name == "agent_framework.durabletask"]
     assert len(warnings) == 1
-    assert warnings[0].getMessage() == "[ClientAgentExecutor] Failed to decode or project stored agent state"
+    assert warnings[0].getMessage() == "[ClientAgentExecutor] Failed to read the stored agent response."
     assert warnings[0].exc_info is None
     _assert_polled(rpc, sleep, 1)
     first.get_state.assert_called_once_with()

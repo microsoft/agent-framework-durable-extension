@@ -210,9 +210,9 @@ def test_terminal_snapshot_serializes_each_content_once(
         visits += 1
         return original(content)
 
-    # Retain both the imported root call and the real recursive serializer calls.
+    # The shared codec delegates to the canonical message/content snapshot owner.
+    # Count actual root and recursive content visits at that defining module.
     monkeypatch.setattr(core, "serialize_input_content", counted)
-    monkeypatch.setattr(shared, "serialize_input_content", counted)
     counts: dict[str, dict[int, int]] = {"nested": {}, "flat": {}}
     for shape, sizes in (("nested", (8, 16, 32)), ("flat", (32, 64))):
         for size in sizes:

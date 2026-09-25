@@ -367,19 +367,11 @@ class ClientAgentExecutor(DurableAgentExecutor[AgentResponse]):
 
                 return agent_response
 
-            except Exception as e:
-                logger.exception(
-                    "[ClientAgentExecutor] Error converting response for correlation: %s",
+            except Exception:
+                return self._response_error(
                     correlation_id,
-                )
-                error_message = Message(
-                    role="system",
-                    contents=[
-                        Content.from_error(
-                            message=f"Error processing agent response: {e}",
-                            error_code="response_processing_error",
-                        )
-                    ],
+                    "response_processing_error",
+                    "Failed to process the agent response.",
                 )
         else:
             logger.warning(
@@ -437,26 +429,25 @@ class ClientAgentExecutor(DurableAgentExecutor[AgentResponse]):
 
         try:
             state = read_agent_state(state_json)
+        except Exception:
+            return self._response_error(correlation_id, "state_read_error", "Failed to read the stored agent response.")
+
+        try:
             return state.try_get_agent_response(correlation_id)
         except Exception:
-            # Like the AF reader, fail fast on stored-state decode/projection errors.
-            # Do not render exceptions or tracebacks that may contain stored payloads.
-            logger.warning("[ClientAgentExecutor] Failed to decode or project stored agent state")
-            return AgentResponse(
-                messages=[
-                    Message(
-                        role="system",
-                        contents=[
-                            Content.from_error(
-                                message="Failed to read the stored agent response.",
-                                error_code="state_read_error",
-                            )
-                        ],
-                    )
-                ],
-                created_at=datetime.now(timezone.utc).isoformat(),
-                additional_properties={"durable_status": "error", "correlation_id": correlation_id},
+            return self._response_error(
+                correlation_id, "response_projection_error", "Failed to project the stored agent response."
             )
+
+    @staticmethod
+    def _response_error(correlation_id: str, error_code: str, message: str) -> AgentResponse:
+        """Report a terminal boundary failure without rendering stored values or exceptions."""
+        logger.warning("[ClientAgentExecutor] %s", message)
+        return AgentResponse(
+            messages=[Message(role="system", contents=[Content.from_error(message=message, error_code=error_code)])],
+            created_at=datetime.now(timezone.utc).isoformat(),
+            additional_properties={"durable_status": "error", "correlation_id": correlation_id},
+        )
 
 
 class OrchestrationAgentExecutor(DurableAgentExecutor[DurableAgentTask]):

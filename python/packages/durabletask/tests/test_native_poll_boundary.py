@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import warnings
 from collections.abc import Iterator
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -228,8 +229,15 @@ def test_native_stored_error_stops_before_a_later_valid_response(
     with caplog.at_level(logging.WARNING, logger="agent_framework.durabletask"):
         response = _run(client, typed=typed)
 
-    assert [item.error_code for item in _errors(response)] == ["state_read_error"]
-    assert _errors(response)[0].message == "Failed to read the stored agent response."
+    projection_failed = case.endswith("-profile") or case == "legacy-projection"
+    expected_code = "response_projection_error" if projection_failed else "state_read_error"
+    expected_message = (
+        "Failed to project the stored agent response."
+        if projection_failed
+        else "Failed to read the stored agent response."
+    )
+    assert [item.error_code for item in _errors(response)] == [expected_code]
+    assert _errors(response)[0].message == expected_message
     assert _errors(response)[0].error_details is None
     assert response.additional_properties == {"durable_status": "error", "correlation_id": CORRELATION}
     assert len(response.messages) == 1 and response.messages[0].role == "system"
@@ -238,7 +246,7 @@ def test_native_stored_error_stops_before_a_later_valid_response(
     _assert_calls(rpc, sleep, 1)
     warnings = [record for record in caplog.records if record.name == "agent_framework.durabletask"]
     assert len(warnings) == 1
-    assert warnings[0].getMessage() == "[ClientAgentExecutor] Failed to decode or project stored agent state"
+    assert warnings[0].getMessage() == f"[ClientAgentExecutor] {expected_message}"
     assert warnings[0].exc_info is None and warnings[0].stack_info is None
     assert SENTINEL not in caplog.text
     assert SENTINEL not in _json(response.to_dict())
@@ -352,16 +360,94 @@ def test_native_authoritative_outcomes_remain_terminal(outcome: str, delivery: s
     assert first.SerializeToString() == wire_before
 
 
+@pytest.mark.parametrize("known_entry", [False, True], ids=["decode-failure", "legacy-fallback"])
+@pytest.mark.parametrize("timestamp", [SENTINEL, {"private": SENTINEL}], ids=["text", "object"])
+def test_native_legacy_timestamp_warning_never_renders_stored_values(
+    known_entry: bool, timestamp: Any, native_poll: NativePoll, caplog: pytest.LogCaptureFixture
+) -> None:
+    client, rpc, sleep = native_poll
+    raw = {
+        "schemaVersion": "1.1.0",
+        "data": {
+            "conversationHistory": [
+                {
+                    "$type": "response" if known_entry else SENTINEL,
+                    "correlationId": CORRELATION,
+                    "createdAt": timestamp,
+                    "messages": [{"role": "assistant", "contents": [{"$type": "text", "text": "legacy answer"}]}],
+                }
+            ]
+        },
+    }
+    before = _json(raw)
+    rpc.GetEntity.side_effect = [_wire(before), _wire(_json(_shared()))]
+    started = datetime.now(timezone.utc)
+
+    with caplog.at_level(logging.WARNING, logger="agent_framework.durabletask"):
+        response = _run(client, typed=False)
+
+    if known_entry:
+        assert response.text == "legacy answer" and _errors(response) == []
+        assert isinstance(response.created_at, str)
+        assert started <= datetime.fromisoformat(response.created_at) <= datetime.now(timezone.utc)
+    else:
+        assert [error.error_code for error in _errors(response)] == ["state_read_error"]
+    _assert_calls(rpc, sleep, 1)
+    assert SENTINEL not in caplog.text + _json(response.to_dict())
+    warnings = [record for record in caplog.records if record.name == "agent_framework.durabletask"]
+    assert len(warnings) == (1 if known_entry else 2)
+    assert warnings[0].getMessage() == (
+        "Invalid or missing created_at in durable agent state. Defaulting to current UTC time."
+    )
+    assert all(record.exc_info is None and record.stack_info is None for record in warnings)
+    assert _json(raw) == before
+
+
+@pytest.mark.parametrize("known_entry", [False, True], ids=["decode-failure", "legacy-naive-time"])
+def test_native_unknown_timezone_does_not_escape_through_python_warnings(
+    known_entry: bool, native_poll: NativePoll, caplog: pytest.LogCaptureFixture
+) -> None:
+    client, rpc, sleep = native_poll
+    raw = {
+        "schemaVersion": "1.1.0",
+        "data": {
+            "conversationHistory": [
+                {
+                    "$type": "response" if known_entry else "unsupported",
+                    "correlationId": CORRELATION,
+                    "createdAt": "2026-09-23 11:00:00 QZXWV",
+                    "messages": [{"role": "assistant", "contents": [{"$type": "text", "text": "legacy answer"}]}],
+                }
+            ]
+        },
+    }
+    before = _json(raw)
+    rpc.GetEntity.side_effect = [_wire(before), _wire(_json(_shared()))]
+
+    with warnings.catch_warnings(record=True) as emitted:
+        warnings.simplefilter("always")
+        response = _run(client, typed=False)
+
+    assert emitted == []
+    assert "QZXWV" not in caplog.text + _json(response.to_dict())
+    if known_entry:
+        assert response.text == "legacy answer" and response.created_at == "2026-09-23T11:00:00"
+    else:
+        assert [error.error_code for error in _errors(response)] == ["state_read_error"]
+    _assert_calls(rpc, sleep, 1)
+    assert _json(raw) == before
+
+
 @pytest.mark.parametrize("value_case", ["missing", "invalid", "lossy"])
 def test_native_post_read_typed_errors_do_not_become_state_errors_or_timeouts(
-    value_case: str, native_poll: NativePoll
+    value_case: str, native_poll: NativePoll, caplog: pytest.LogCaptureFixture
 ) -> None:
     client, rpc, sleep = native_poll
     raw = _shared()
     if value_case == "missing":
         del _payload(raw)["value"]
     else:
-        _payload(raw)["value"] = {"answer": "not-an-integer" if value_case == "invalid" else True}
+        _payload(raw)["value"] = {"answer": SENTINEL if value_case == "invalid" else True}
     before = _json(raw)
     assert read_agent_state(before).try_get_agent_response(CORRELATION) is not None
     first = _wire(before)
@@ -371,6 +457,12 @@ def test_native_post_read_typed_errors_do_not_become_state_errors_or_timeouts(
     response = _run(client)
 
     assert [item.error_code for item in _errors(response)] == ["response_processing_error"]
+    assert _errors(response)[0].message == "Failed to process the agent response."
+    assert SENTINEL not in caplog.text + _json(response.to_dict())
+    warnings = [record for record in caplog.records if record.name == "agent_framework.durabletask"]
+    assert len(warnings) == 1
+    assert warnings[0].getMessage() == "[ClientAgentExecutor] Failed to process the agent response."
+    assert warnings[0].exc_info is None and warnings[0].stack_info is None
     _assert_calls(rpc, sleep, 1)
     assert _json(raw) == before
     assert first.SerializeToString() == wire_before
