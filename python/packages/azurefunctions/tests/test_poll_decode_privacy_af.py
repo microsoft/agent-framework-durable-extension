@@ -113,13 +113,20 @@ def _assert_polls(registered: SimpleNamespace, client: Mock, count: int) -> None
 
 @pytest.mark.parametrize("surface", ["json", "text", "mcp"])
 @pytest.mark.parametrize("encoded", [False, True], ids=["object-state", "json-state"])
+@pytest.mark.parametrize("invalid_timestamp", [False, True], ids=["valid-time", "private-invalid-time"])
 async def test_decode_failure_is_constant_private_and_terminal(
-    surface: str, encoded: bool, registered: SimpleNamespace, caplog: pytest.LogCaptureFixture
+    surface: str,
+    encoded: bool,
+    invalid_timestamp: bool,
+    registered: SimpleNamespace,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    bad = {
+    bad: dict[str, Any] = {
         "schemaVersion": "1.1.0",
         "data": {"conversationHistory": [{"$type": SENTINEL, "createdAt": "2026-09-23T11:00:00Z", "messages": []}]},
     }
+    if invalid_timestamp:
+        bad["data"]["conversationHistory"][0]["createdAt"] = {"private": SENTINEL}
     stored: Any = json.dumps(bad) if encoded else bad
     before = json.dumps(stored, sort_keys=True)
     with pytest.raises(ValueError, match=SENTINEL):
@@ -155,6 +162,9 @@ async def test_decode_failure_is_constant_private_and_terminal(
     assert len(warnings) == 1
     assert warnings[0].getMessage() == f"[HTTP Trigger] {READ_ERROR}"
     assert warnings[0].exc_info is None and warnings[0].stack_info is None
+    decoder_warnings = [record for record in caplog.records if record.name == "agent_framework.durabletask"]
+    assert len(decoder_warnings) == (2 if invalid_timestamp else 0)  # Direct control and actual HTTP/MCP decode.
+    assert all(record.exc_info is None and record.stack_info is None for record in decoder_warnings)
 
 
 @pytest.mark.parametrize("surface", ["json", "text", "mcp"])
@@ -187,3 +197,84 @@ async def test_provider_failure_diagnostic_is_not_replaced(surface: str, registe
         else:
             assert body == PROVIDER_ERROR
     _assert_polls(registered, client, 1)
+
+
+@pytest.mark.parametrize("surface", ["json", "text", "mcp"])
+@pytest.mark.parametrize("encoded", [False, True], ids=["object-state", "json-state"])
+async def test_targeted_profile_failure_is_a_private_terminal_projection_error(
+    surface: str, encoded: bool, registered: SimpleNamespace, caplog: pytest.LogCaptureFixture
+) -> None:
+    bad = _state()
+    bad["data"]["terminalResults"][CORRELATION]["response"]["pythonCoreFields"] = {
+        "profile": "agent-framework-python.core-fields",
+        "version": 1,
+        "fields": SENTINEL,
+    }
+    stored: Any = json.dumps(bad) if encoded else bad
+    before = json.dumps(stored, sort_keys=True)
+    reader = read_agent_state(stored)
+    with pytest.raises(ValueError):
+        reader.try_get_agent_response(CORRELATION)
+    client = _storage(stored, _state())
+    diagnostic = "Failed to project the stored agent response."
+
+    with caplog.at_level(logging.WARNING, logger="agent_framework.azurefunctions"):
+        if surface == "mcp":
+            with pytest.raises(RuntimeError, match=diagnostic) as error:
+                await _invoke(registered, client, surface)
+            public = str(error.value)
+        else:
+            status, public, payload = await _invoke(registered, client, surface)
+            assert status == 500
+            if surface == "json":
+                assert payload["status"] == "error"
+                assert payload["error_code"] == "response_projection_error"
+                assert payload["error"] == diagnostic and payload["response"] is None
+            else:
+                assert public == diagnostic
+
+    _assert_polls(registered, client, 1)
+    assert SENTINEL not in public + caplog.text
+    assert json.dumps(stored, sort_keys=True) == before
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1 and warnings[0].getMessage() == f"[HTTP Trigger] {diagnostic}"
+    assert warnings[0].exc_info is None and warnings[0].stack_info is None
+
+
+@pytest.mark.parametrize("surface", ["json", "text", "mcp"])
+async def test_delivery_serialization_failure_is_a_private_terminal_processing_error(
+    surface: str,
+    registered: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stored = _state()
+    before = json.dumps(stored, sort_keys=True)
+    client = _storage(stored, _state())
+    serializer = Mock(side_effect=ValueError(SENTINEL))
+    monkeypatch.setattr(af_app, "serialize_agent_response", serializer)
+    diagnostic = "Failed to process the agent response."
+
+    with caplog.at_level(logging.WARNING, logger="agent_framework.azurefunctions"):
+        if surface == "mcp":
+            with pytest.raises(RuntimeError, match=diagnostic) as error:
+                await _invoke(registered, client, surface)
+            public = str(error.value)
+        else:
+            status, public, payload = await _invoke(registered, client, surface)
+            assert status == 500
+            if surface == "json":
+                assert payload["status"] == "error"
+                assert payload["error_code"] == "response_processing_error"
+                assert payload["error"] == diagnostic and payload["response"] is None
+            else:
+                assert public == diagnostic
+
+    serializer.assert_called_once()
+    assert serializer.call_args.args[0].text == "Recovered"
+    _assert_polls(registered, client, 1)
+    assert SENTINEL not in public + caplog.text
+    assert json.dumps(stored, sort_keys=True) == before
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1 and warnings[0].getMessage() == f"[HTTP Trigger] {diagnostic}"
+    assert warnings[0].exc_info is None and warnings[0].stack_info is None

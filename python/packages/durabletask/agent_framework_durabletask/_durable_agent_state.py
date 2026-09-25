@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import warnings
 from collections.abc import MutableMapping
 from datetime import datetime, timezone
 from enum import Enum
@@ -89,16 +90,18 @@ def _parse_created_at(value: Any) -> datetime:
 
     if isinstance(value, str):
         try:
-            parsed = date_parser.parse(value)
+            # dateutil includes an unrecognized stored timezone token in its
+            # warning. Preserve its legacy naive-time result without emitting it.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", date_parser.UnknownTimezoneWarning)
+                parsed = date_parser.parse(value)
             if isinstance(parsed, datetime):
                 return parsed
         except (ValueError, TypeError):
             pass
 
-    logger.warning(
-        f"Invalid or missing created_at value in durable agent state; defaulting to current UTC time, {value}",
-        stack_info=True,
-    )
+    # Legacy fallback is retained, but malformed stored values are not diagnostics.
+    logger.warning("Invalid or missing created_at in durable agent state. Defaulting to current UTC time.")
     return datetime.now(tz=timezone.utc)
 
 
