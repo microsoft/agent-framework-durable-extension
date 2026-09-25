@@ -31,9 +31,9 @@ from __future__ import annotations
 
 import json
 import logging
-import warnings
+import time
 from collections.abc import MutableMapping
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from enum import Enum
 from typing import Any, ClassVar, cast
 
@@ -90,11 +90,17 @@ def _parse_created_at(value: Any) -> datetime:
 
     if isinstance(value, str):
         try:
-            # dateutil includes an unrecognized stored timezone token in its
-            # warning. Preserve its legacy naive-time result without emitting it.
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", date_parser.UnknownTimezoneWarning)
-                parsed = date_parser.parse(value)
+
+            def resolve_timezone(name: str | None, offset: int | None) -> tzinfo | int | None:
+                # Keep dateutil's local-zone and DST handling. Only that known
+                # branch delegates to its default resolver, which cannot emit
+                # UnknownTimezoneWarning. Other names keep their parsed offset
+                # or the legacy naive result without a payload-bearing warning.
+                if name in time.tzname:
+                    return date_parser.parse(value).tzinfo
+                return offset
+
+            parsed = date_parser.parse(value, tzinfos=resolve_timezone)
             if isinstance(parsed, datetime):
                 return parsed
         except (ValueError, TypeError):
