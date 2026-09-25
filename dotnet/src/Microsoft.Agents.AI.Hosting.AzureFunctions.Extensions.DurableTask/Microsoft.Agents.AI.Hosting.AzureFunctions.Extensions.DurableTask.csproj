@@ -1,0 +1,48 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>$(TargetFrameworksCore)</TargetFrameworks>
+    <!-- This assembly only carries an assembly-level attribute, so there is nothing to document. -->
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- The Durable Task worker extension is referenced for its build assets, not for its API surface. -->
+    <EnableReferenceTrimmer>false</EnableReferenceTrimmer>
+    <!--
+      Version of the WebJobs (host) Durable Task extension that Microsoft.Azure.Functions.Worker.Extensions.DurableTask
+      binds to. Keep in sync when that package reference is upgraded.
+    -->
+    <DurableTaskWebJobsExtensionVersion>3.8.2</DurableTaskWebJobsExtensionVersion>
+  </PropertyGroup>
+
+  <Import Project="$(RepoRoot)/dotnet/nuget/nuget-package.props" />
+
+  <!-- NuGet package metadata -->
+  <PropertyGroup>
+    <Title>Durable Task Azure Functions extension for Microsoft Agent Framework</Title>
+    <Description>Registers the Durable Task Azure Functions extension so that applications hosting durable agents do not need to declare a Durable Functions trigger of their own.</Description>
+    <!-- Enable package validation after the first stable version is published. -->
+    <PackageValidationBaselineVersion />
+    <EnablePackageValidation>false</EnablePackageValidation>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.DurableTask" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+        The Azure Functions worker SDK only honors a single ExtensionInformationAttribute per assembly
+        (https://github.com/Azure/azure-functions-dotnet-worker/issues/3423), and
+        Microsoft.Agents.AI.Hosting.AzureFunctions already uses its own attribute for the MCP extension.
+        This assembly exists solely to carry the Durable Task registration, with implicit registration
+        enabled so the WebJobs extension is loaded even when the application declares no Durable Functions
+        triggers of its own.
+    -->
+    <AssemblyAttribute Include="Microsoft.Azure.Functions.Worker.Extensions.Abstractions.ExtensionInformationAttribute">
+      <_Parameter1>Microsoft.Azure.WebJobs.Extensions.DurableTask</_Parameter1>
+      <_Parameter2>$(DurableTaskWebJobsExtensionVersion)</_Parameter2>
+      <_Parameter3>true</_Parameter3>
+      <_Parameter3_IsLiteral>true</_Parameter3_IsLiteral>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>
