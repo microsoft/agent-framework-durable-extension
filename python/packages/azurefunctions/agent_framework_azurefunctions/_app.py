@@ -1899,14 +1899,34 @@ class AgentFunctionApp(DFAppBase):
         message: str,
         session_id: str,
     ) -> dict[str, Any] | None:
+        def failure(error_code: str, diagnostic: str) -> dict[str, Any]:
+            # Exceptions in these phases can contain stored values. The phase,
+            # not exception text or a traceback, is the public diagnostic.
+            logger.warning("[HTTP Trigger] %s", diagnostic)
+            return self._build_response_payload(
+                response=None,
+                message=message,
+                session_id=session_id,
+                status="error",
+                correlation_id=correlation_id,
+                extra_fields={"error": diagnostic, "error_code": error_code},
+            )
+
         result: dict[str, Any] | None = None
         try:
             state = await self._read_cached_state(client, entity_instance_id)
+        except Exception:
+            return failure("state_read_error", "Failed to read the stored agent response.")
 
-            if state is None:
-                return None
+        if state is None:
+            return None
 
+        try:
             agent_response = state.try_get_agent_response(correlation_id)
+        except Exception:
+            return failure("response_projection_error", "Failed to project the stored agent response.")
+
+        try:
             if isinstance(state, SharedAgentStateReader):
                 if agent_response is None:
                     return None
@@ -1961,15 +1981,7 @@ class AgentFunctionApp(DFAppBase):
                 logger.debug(f"[HTTP Trigger] Found response for correlation ID: {correlation_id}")
 
         except Exception:
-            logger.warning("[HTTP Trigger] Failed to read the stored agent response.")
-            return self._build_response_payload(
-                response=None,
-                message=message,
-                session_id=session_id,
-                status="error",
-                correlation_id=correlation_id,
-                extra_fields={"error": "Failed to read the stored agent response.", "error_code": "state_read_error"},
-            )
+            return failure("response_processing_error", "Failed to process the agent response.")
 
         return result
 

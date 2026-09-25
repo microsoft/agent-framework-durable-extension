@@ -43,10 +43,9 @@ from pydantic import BaseModel
 
 from ._response_utils import (
     _constructor_fields,  # pyright: ignore[reportPrivateUsage]
-    _serialize_input_message_fields,  # pyright: ignore[reportPrivateUsage]
     load_agent_response,
     serialize_agent_response,
-    serialize_input_content,
+    serialize_input_message,
 )
 from ._shared_state_validation import (
     _json_value,  # pyright: ignore[reportPrivateUsage]
@@ -377,14 +376,6 @@ def _audit_response(response: AgentResponse) -> None:
             _audit_content(content)
 
 
-def _message_snapshot(message: Message) -> dict[str, Any]:
-    result = _serialize_input_message_fields(message)
-    # Each child is serialized once, bottom-up, after the complete live audit.
-    # The canonical serializer retains attached presence without inventing defaults.
-    result["contents"] = [serialize_input_content(content) for content in message.contents]
-    return result
-
-
 def _core_snapshot(response: AgentResponse) -> dict[str, Any]:
     # Use the canonical serializer on a base object with no response format. Never
     # evaluate the source's lazy value or execute its subclass serializer/getter.
@@ -394,7 +385,7 @@ def _core_snapshot(response: AgentResponse) -> dict[str, Any]:
         # The existing field-name policy owns this encoding even when this model
         # also accepts aliases. Do not invent shared provenance on the temporary base.
         value = value.model_dump(mode="json", by_alias=False, round_trip=True)
-    messages = [_message_snapshot(message) for message in response.messages]
+    messages = [serialize_input_message(message) for message in response.messages]
     base = AgentResponse(value=value)
     base._value_parsed = response._value_parsed  # pyright: ignore[reportPrivateUsage]
     if getattr(response, "_durable_value_by_name", False):
