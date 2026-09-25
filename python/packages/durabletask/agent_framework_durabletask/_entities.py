@@ -99,26 +99,38 @@ class AgentEntityStateProviderMixin:
             self._state_cache = original
             raise
 
-    def ensure_legacy_writable(self) -> None:
+    def ensure_legacy_writable(self) -> dict[str, Any] | None:
         """Check backing-state provenance before execution, cache replacement or writing.
 
         A fresh or relabeled candidate cannot grant permission to overwrite an
         existing shared snapshot. This guard deliberately does not load v2 state
         into the legacy mutable model or restore a provider session from it.
+
+        Return the validated cache snapshot for immediate persistence, or None
+        when cold. It is not authorization to skip admission on a later operation.
+        Serializing here also preserves rejection of malformed live cache entries
+        before execution or replacement.
         """
         _validate_legacy_state_layout(self._get_state_dict())
         if self._state_cache is not None:
-            _validate_legacy_state_layout(self._state_cache.to_dict())
+            snapshot = self._state_cache.to_dict()
+            _validate_legacy_state_layout(snapshot)
+            return snapshot
+        return None
 
     def persist_state(self) -> None:
         """Persist the current state to the underlying storage provider."""
-        self.ensure_legacy_writable()
-        if self._state_cache is None:
-            self._state_cache = DurableAgentState()
-        self._set_state_dict(self._state_cache.to_dict())
+        snapshot = self.ensure_legacy_writable()
+        if snapshot is None:
+            # Keep cold-state behavior and guard overrides that return None.
+            if self._state_cache is None:
+                self._state_cache = DurableAgentState()
+            snapshot = self._state_cache.to_dict()
+            _validate_legacy_state_layout(snapshot)
+        self._set_state_dict(snapshot)
 
     def reset(self) -> None:
-        """Clear conversation history by resetting state to a fresh DurableAgentState."""
+        """Reset to fresh legacy state. Overrides must retain admission before mutation."""
         self.ensure_legacy_writable()
         original = self._state_cache
         self._state_cache = DurableAgentState()
@@ -164,7 +176,7 @@ class AgentEntity:
         self._state_provider.persist_state()
 
     def reset(self) -> None:
-        self._state_provider.ensure_legacy_writable()
+        # The provider owns admission, including direct provider reset calls.
         self._state_provider.reset()
 
     def _is_error_response(self, entry: DurableAgentStateEntry) -> bool:

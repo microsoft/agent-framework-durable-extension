@@ -347,6 +347,28 @@ def test_af_legacy_state_assignment_and_persistence_remain_writable(operation: s
     assert V2_MAPS.isdisjoint(backing.raw["data"])
 
 
+def test_af_persistence_serializes_a_warm_history_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    backing = BackingStore(_legacy_state(populated=True))
+    provider = AzureFunctionEntityStateProvider(backing.context)
+    cache = provider.state
+    entries = [Mock(wraps=entry.to_dict) for entry in cache.data.conversation_history]
+    for entry, serializer in zip(cache.data.conversation_history, entries):
+        monkeypatch.setattr(entry, "to_dict", serializer)
+    backing.context.get_state.reset_mock()
+
+    provider.persist_state()
+
+    for serializer in entries:
+        serializer.assert_called_once_with()
+    backing.context.get_state.assert_called_once()
+    backing.context.set_state.assert_called_once()
+    expected = _legacy_state(populated=True)
+    for entry in expected["data"]["conversationHistory"]:
+        entry["createdAt"] = entry["createdAt"].replace("Z", "+00:00")
+    assert backing.raw == expected
+    assert provider._state_cache is cache
+
+
 @pytest.mark.parametrize("initial", ["absent", "empty", "legacy"])
 @pytest.mark.parametrize("operation", ["run", "run_agent"])
 @pytest.mark.parametrize("scenario", ["success", "streaming", "failure"])
@@ -399,6 +421,8 @@ def test_factory_legacy_reset_writes_fresh_1_1(initial: str) -> None:
     create_agent_entity(agent, callback)(backing.context)
 
     backing.context.set_result.assert_called_once_with({"status": "reset"})
+    # Admission before replacing the old cache, then re-admission at persistence.
+    assert backing.context.get_state.call_count == 2
     backing.context.set_state.assert_called_once_with(_legacy_state())
     assert backing.raw == _legacy_state()
     _assert_no_execution(agent, callback)

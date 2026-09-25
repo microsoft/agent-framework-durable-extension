@@ -5,7 +5,7 @@
 from collections.abc import AsyncIterator
 from copy import deepcopy
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -468,6 +468,114 @@ def test_legacy_state_assignment_and_persistence_remain_writable(
     agent.run_calls.assert_not_called()
     callback.on_agent_response.assert_not_called()
     callback.on_streaming_response_update.assert_not_called()
+
+
+@pytest.mark.parametrize("surface", ["plain", "registered"])
+@pytest.mark.parametrize("operation", ["persist", "reset"])
+def test_write_admission_reuses_the_validated_snapshot_without_revisiting_history(
+    monkeypatch: pytest.MonkeyPatch, surface: str, operation: str
+) -> None:
+    entity, provider, backing, agent, callback = _host(monkeypatch, surface, _legacy_state(populated=True))
+    cache = entity.state
+    entries = [Mock(wraps=entry.to_dict) for entry in cache.data.conversation_history]
+    for entry, serializer in zip(cache.data.conversation_history, entries):
+        monkeypatch.setattr(entry, "to_dict", serializer)
+    backing.get_state.reset_mock()
+
+    if operation == "persist":
+        entity.persist_state()
+    else:
+        entity.reset()
+
+    for serializer in entries:
+        serializer.assert_called_once_with()
+    assert backing.get_state.call_count == (1 if operation == "persist" else 2)
+    backing.set_state.assert_called_once()
+    expected = _legacy_state(populated=operation == "persist")
+    for entry in expected["data"]["conversationHistory"]:
+        entry["createdAt"] = entry["createdAt"].replace("Z", "+00:00")
+    assert backing.raw == expected
+    assert (provider._state_cache is cache) is (operation == "persist")
+    agent.run_calls.assert_not_called()
+    callback.on_agent_response.assert_not_called()
+
+
+@pytest.mark.parametrize("surface", ["plain", "registered"])
+@pytest.mark.parametrize("operation", ["persist", "reset", "setter", "run"])
+async def test_cached_serialization_failure_still_precedes_execution_or_replacement(
+    monkeypatch: pytest.MonkeyPatch, surface: str, operation: str
+) -> None:
+    entity, provider, backing, agent, callback = _host(monkeypatch, surface, _legacy_state(populated=True))
+    cache = entity.state
+    assert isinstance(cache, DurableAgentState)
+    history = cache.data.conversation_history
+    # Real mutable-model corruption, not an exception injected into the guard.
+    cast(Any, history[0]).created_at = None
+    original, snapshot = backing.raw, deepcopy(backing.raw)
+    spies = _blocked_execution_spies(monkeypatch)
+
+    with pytest.raises(AttributeError):
+        if operation == "persist":
+            entity.persist_state()
+        elif operation == "reset":
+            entity.reset()
+        elif operation == "setter":
+            entity.state = DurableAgentState()
+        elif surface == "plain":
+            await entity.run(_request("new"))
+        else:
+            entity.run(_request("new"))
+
+    assert provider._state_cache is cache and cache.data.conversation_history is history
+    assert len(history) == 2 and history[0].created_at is None
+    for spy in spies:
+        spy.assert_not_called()
+    _no_effects(backing, original, snapshot, agent, callback)
+
+
+@pytest.mark.parametrize("surface", ["plain", "registered"])
+@pytest.mark.parametrize("operation", ["setter", "reset"])
+def test_storage_rejection_restores_the_previous_cache(
+    monkeypatch: pytest.MonkeyPatch, surface: str, operation: str
+) -> None:
+    entity, provider, backing, agent, callback = _host(monkeypatch, surface, _legacy_state(populated=True))
+    cache = entity.state
+    original, snapshot = backing.raw, deepcopy(backing.raw)
+    backing.set_state.side_effect = OSError("Write rejected")
+
+    with pytest.raises(OSError, match="Write rejected"):
+        if operation == "setter":
+            entity.state = DurableAgentState()
+        else:
+            entity.reset()
+
+    assert provider._state_cache is cache
+    assert backing.raw is original and backing.raw == snapshot
+    backing.set_state.assert_called_once()
+    agent.run_calls.assert_not_called()
+    callback.on_agent_response.assert_not_called()
+
+
+def test_persistence_preserves_guard_override_that_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    class LegacyGuardProvider(InMemoryStateProvider):
+        def ensure_legacy_writable(self) -> None:
+            super().ensure_legacy_writable()
+
+    backing = BackingStore(_legacy_state(populated=True))
+    provider = LegacyGuardProvider(backing)
+    cache = provider.state
+    cache.data.extension_data = {"retained": False}
+    guard = Mock(wraps=provider.ensure_legacy_writable)
+    monkeypatch.setattr(provider, "ensure_legacy_writable", guard)
+
+    provider.persist_state()
+
+    guard.assert_called_once_with()
+    backing.set_state.assert_called_once()
+    assert backing.raw["schemaVersion"] == "1.1.0"
+    assert backing.raw["data"]["extensionData"] == {"retained": False}
+    assert len(backing.raw["data"]["conversationHistory"]) == 2
+    assert provider._state_cache is cache
 
 
 @pytest.mark.parametrize("surface", ["plain", "registered"])
