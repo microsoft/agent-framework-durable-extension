@@ -78,6 +78,44 @@ require SDK immediate-parent/address consistency before checkpoint decoding, not
 ancestry or protection against a malicious application parent. See the shared
 [workflow start contract](../../python/packages/durabletask/README.md#workflow-starts-and-child-identity).
 
+## Response codec contracts
+
+The response bridge has three separate contracts, not one general object decoder.
+
+| Boundary | Contract |
+| --- | --- |
+| Stored JSON validation | Validate the shared shape and result/receipt agreement. Preserve unknown JSON and profile bytes without constructing runtime objects. A storage-valid response need not be projectable by this Python version. |
+| Core projection and delivery | Interpret only recognized profiles using fixed base `AgentResponse`, `Message` and `Content` constructors. Preserve explicit value presence and original JSON separately. Foreign continuation bytes are inert, not resumable tokens. Modified projections cannot silently overwrite unprojectable fields. |
+| Caller-selected typed value | Apply only the Pydantic type supplied by calling code. Shared results require an explicit value and a JSON-preserving conversion. Legacy results alone retain text fallback. This is distinct from the stored request-format transport described above. |
+
+`serialize_terminal_response(instance)` does not resolve a lazy structured value. A producer
+that needs resolution passes a `serialize_agent_response()` snapshot instead. Both paths use
+the same bottom-up message/content snapshot functions. The shared-instance path performs
+live-value preflight before serializer hooks. Snapshot-producing callers own that preceding
+preflight, because the Core serializer may execute supported serialization hooks. Validating
+the resulting JSON afterwards is not a substitute for that ordering.
+
+Compatibility tests pair literal shared-wire expectations and fixed projected fields with
+round-trip/parity checks. Core constructor coverage tests detect new fields to review, but
+are not the sole oracle for the supported wire behavior.
+
+## Polling failure boundaries
+
+SDK retrieval failures retain bounded retry. Missing state or an absent completion remains
+pending. Once state is retrieved, deterministic failures are terminal and do not consume
+another poll attempt or fall back to transcript delivery.
+
+| Phase | Public error code |
+| --- | --- |
+| State decode, shape validation, or contradictory stored result/receipt evidence | `state_read_error` |
+| Requested result lookup/projection, including an incompatible recognized profile | `response_projection_error` |
+| Delivery serialization or caller-selected typed-value processing | `response_processing_error` |
+
+These diagnostics use constant text, not exception messages or tracebacks containing stored
+values. They do not invent a committed invocation outcome. Recorded provider failures and
+expired-delivery outcomes keep their existing codes. Functions returns HTTP `500` for the
+three errors above. MCP reports the corresponding constant diagnostic.
+
 <a id="reader-first-limits"></a>
 
 ## Current runtime and rollout
