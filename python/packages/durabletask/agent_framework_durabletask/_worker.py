@@ -19,11 +19,21 @@ from durabletask.worker import TaskHubGrpcWorker
 
 from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentResponseCallbackProtocol
-from ._entities import AgentEntity, AgentEntityStateProviderMixin, DurableTaskEntityStateProvider
+from ._configuration import (
+    AgentRegistrationSettings,
+    RegistrationIdentity,
+    validate_agent_configuration,
+    validate_response_delivery_window,
+    validate_runtime_deployment,
+)
+from ._constants import DELIVERY_WINDOW_SECONDS
+from ._entities import AgentEntity, DurableTaskEntityStateProvider
 from ._feature_usage import FeatureIndex
 from ._json_payload import JsonPayload, install_json_payload_converter
+from ._response_utils import serialize_agent_response
 from ._workflows.activity import execute_workflow_activity
 from ._workflows.dt_context import DurableTaskWorkflowContext
+from ._workflows.hitl_checkpoint import execute_hitl_checkpoint, workflow_hitl_checkpoint_name
 from ._workflows.naming import (
     validate_executor_id,
     validate_workflow_name,
@@ -32,6 +42,7 @@ from ._workflows.naming import (
     workflow_scoped_executor_id,
 )
 from ._workflows.orchestrator import run_workflow_orchestrator
+from ._workflows.protocol import unwrap_workflow_input, validate_workflow_start_provenance
 from ._workflows.registration import collect_hosted_workflows, plan_workflow_registration
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -54,6 +65,11 @@ class DurableAIAgentWorker:
     surfaces are split into :class:`DurableAIAgentClient` and ``DurableWorkflowClient``,
     because a caller invokes one or the other.)
 
+    Set ``deployment_mode="isolated_v2"`` or ``DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2``
+    to acknowledge an isolated schema 2 task hub/deployment with upgraded clients.
+    Old workflow histories must remain on the old engine. This acknowledgement is
+    not runtime proof of isolation and cannot detect peer workers.
+
     Example:
         ```python
         from durabletask.worker import TaskHubGrpcWorker
@@ -64,8 +80,8 @@ class DurableAIAgentWorker:
         # Create the underlying worker
         worker = TaskHubGrpcWorker(host_address="localhost:4001")
 
-        # Wrap it with the agent worker
-        agent_worker = DurableAIAgentWorker(worker)
+        # Acknowledge that this is an isolated schema 2 deployment
+        agent_worker = DurableAIAgentWorker(worker, deployment_mode="isolated_v2")
 
         # Register agents (or call configure_workflow(workflow) to host a workflow)
         client = OpenAIChatCompletionClient()
@@ -81,16 +97,25 @@ class DurableAIAgentWorker:
         self,
         worker: TaskHubGrpcWorker,
         callback: AgentResponseCallbackProtocol | None = None,
+        *,
+        deployment_mode: str | None = None,
+        response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
     ):
         """Initialize the worker wrapper.
 
         Args:
             worker: The durabletask worker instance to wrap
             callback: Optional callback for agent response notifications
+            deployment_mode: Exactly ``isolated_v2`` to acknowledge an isolated schema 2
+                deployment with upgraded clients. None reads ``DURABLE_AGENTS_DEPLOYMENT_MODE``.
+            response_delivery_window_seconds: Positive integer response delivery window in seconds.
         """
+        validate_runtime_deployment(deployment_mode)
+        validate_response_delivery_window(response_delivery_window_seconds)
         install_json_payload_converter(worker)
         self._worker = worker
         self._callback = callback
+        self._response_delivery_window_seconds = response_delivery_window_seconds
         self._registered_agents: dict[str, SupportsAgentRun] = {}
         self._workflows: dict[str, Workflow] = {}
         # Every workflow whose orchestration has been registered (top-level plus nested
@@ -98,6 +123,8 @@ class DurableAIAgentWorker:
         # sub-workflow shared across the tree is registered once while two different
         # workflows whose names collide (including case-only differences) are rejected.
         self._registered_orchestrations: dict[str, Workflow] = {}
+        self._registration_identities: dict[tuple[str, str], RegistrationIdentity] = {}
+        self._registration_failed = False
         logger.debug("[DurableAIAgentWorker] Initialized with worker type: %s", type(worker).__name__)
 
     def add_agent(
@@ -106,6 +133,7 @@ class DurableAIAgentWorker:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         entity_id: str | None = None,
+        response_delivery_window_seconds: int | None = None,
     ) -> None:
         """Register an agent with the worker.
 
@@ -119,39 +147,68 @@ class DurableAIAgentWorker:
             entity_id: Optional identity to register the entity under instead of
                 ``agent.name``. Workflow hosting passes the executor's ``id`` so the
                 entity matches the identity the orchestrator dispatches to.
+            response_delivery_window_seconds: Delivery window override, or None to inherit.
 
         Raises:
-            ValueError: If the agent doesn't have a name or is already registered
+            ValueError: If the name or history-provider composition is invalid, or the
+                agent is already registered.
         """
+        self._ensure_registration_usable()
         registration_name = entity_id or agent.name
-        if not registration_name:
+        if not isinstance(registration_name, str) or not registration_name:
             raise ValueError("Agent must have a name to be registered")
 
         if registration_name in self._registered_agents:
             raise ValueError(f"Agent '{registration_name}' is already registered")
 
+        effective_window = (
+            self._response_delivery_window_seconds
+            if response_delivery_window_seconds is None
+            else response_delivery_window_seconds
+        )
+        validate_response_delivery_window(effective_window)
+        validate_agent_configuration(agent)
+        effective_callback = self._callback if callback is None else callback
+        settings = AgentRegistrationSettings(effective_window, effective_callback)
+        identities = dict(self._registration_identities)
+        RegistrationIdentity(agent, agent, "entity", settings, f"agent '{registration_name}'").reserve(
+            identities, f"dafx-{registration_name}", namespace="entity-name"
+        )
+
         logger.info(
             "[DurableAIAgentWorker] Registering agent: %s as entity: dafx-%s", registration_name, registration_name
         )
 
-        # Store the agent reference
-        self._registered_agents[registration_name] = agent
-
-        # Use agent-specific callback if provided, otherwise use worker-level callback
-        effective_callback = callback or self._callback
-
         # Create a configured entity class using the factory
-        entity_class = self.__create_agent_entity(agent, effective_callback, entity_id=registration_name)
+        entity_class = self.__create_agent_entity(
+            agent,
+            effective_callback,
+            entity_id=registration_name,
+            response_delivery_window_seconds=effective_window,
+        )
 
         # Register the entity class with the worker
         # The worker.add_entity method takes a class
-        entity_registered: str = self._worker.add_entity(entity_class)
+        try:
+            entity_registered: str = self._worker.add_entity(entity_class)
+        except Exception:
+            self._registration_failed = True
+            raise
+        self._registered_agents[registration_name] = agent
+        self._registration_identities = identities
 
         logger.debug(
             "[DurableAIAgentWorker] Successfully registered entity class %s for agent: %s",
             entity_registered,
             registration_name,
         )
+
+    def _ensure_registration_usable(self) -> None:
+        if self._registration_failed:
+            raise RuntimeError(
+                "Backend registration failed; this host may be partially registered. "
+                "Create a new host with a new underlying worker before registering or starting."
+            )
 
     def start(self) -> None:
         """Start the worker to begin processing tasks.
@@ -160,6 +217,7 @@ class DurableAIAgentWorker:
             This method delegates to the underlying worker's start method.
             The worker will block until stopped.
         """
+        self._ensure_registration_usable()
         logger.info("[DurableAIAgentWorker] Starting worker with %d registered agents", len(self._registered_agents))
         mark_feature_used(FeatureIndex.DURABLETASK)
         self._worker.start()
@@ -200,6 +258,8 @@ class DurableAIAgentWorker:
         self,
         workflow: Workflow,
         callback: AgentResponseCallbackProtocol | None = None,
+        *,
+        response_delivery_window_seconds: int | None = None,
     ) -> None:
         """Register a :class:`Workflow` for automatic orchestration.
 
@@ -210,8 +270,8 @@ class DurableAIAgentWorker:
         Multiple workflows can be hosted on one worker: call this method once per
         workflow. Each workflow is keyed by its :attr:`Workflow.name`, and its
         durable primitives are scoped by that name (orchestration
-        ``dafx-{name}``; activities/entities ``dafx-{name}-{executorId}``) so two
-        co-hosted workflows that reuse an executor id do not collide.
+        ``dafx-{name}``; activities/entities ``dafx-{name}-{executorId}``). Ambiguous
+        derived names are rejected rather than renamed, preserving deployment compatibility.
 
         Sub-workflows nest: if the workflow contains
         :class:`~agent_framework.WorkflowExecutor` nodes, each inner workflow's
@@ -225,58 +285,94 @@ class DurableAIAgentWorker:
                 across restarts and would break durable resume). Every nested
                 sub-workflow must likewise be named.
             callback: Optional callback for agent response notifications.
+            response_delivery_window_seconds: Delivery window override, or None to inherit.
 
         Raises:
             ValueError: If the workflow (or a nested sub-workflow) name is missing,
-                invalid, or auto-generated, or if the top-level workflow name is
-                already registered on this worker.
+                invalid, or auto-generated, a derived name has a different owner,
+                a shared workflow has different settings, or history preparation fails.
         """
+        self._ensure_registration_usable()
         workflow_name = workflow.name
         validate_workflow_name(workflow_name)
-        if any(name.casefold() == workflow_name.casefold() for name in self._workflows):
-            raise ValueError(
-                f"Workflow '{workflow_name}' is already registered on this worker "
-                "(workflow names are compared case-insensitively)."
-            )
+        effective_window = (
+            self._response_delivery_window_seconds
+            if response_delivery_window_seconds is None
+            else response_delivery_window_seconds
+        )
+        validate_response_delivery_window(effective_window)
+        settings = AgentRegistrationSettings(effective_window, self._callback if callback is None else callback)
 
-        # Validate the whole composition (top-level plus every nested sub-workflow)
-        # up front, so an invalid/auto-generated nested name (or an executor id that
-        # would break durable naming / nested-HITL addressing) fails before any
-        # registration side effects leave the worker partially configured.
+        # Reserve the actual derived identities for the entire composition before any SDK calls.
         hosted_workflows = list(collect_hosted_workflows(workflow))
+        identities = dict(self._registration_identities)
         for hosted in hosted_workflows:
             validate_workflow_name(hosted.name)
             for executor_id in hosted.executors:
                 validate_executor_id(executor_id)
-
-        # Check every cross-call collision *before* mutating any state, so a clash
-        # between a nested sub-workflow and an already-registered orchestration cannot
-        # leave the worker partially configured (e.g. the top-level name added to
-        # ``_workflows`` while a later child fails). Registration below is then a pure
-        # commit step.
-        for hosted in hosted_workflows:
-            existing = self._registered_orchestrations.get(hosted.name.casefold())
-            if existing is not None and existing is not hosted:
-                raise ValueError(
-                    f"A different workflow named '{hosted.name}' collides with already-registered "
-                    f"'{existing.name}' on this worker. A workflow name maps to a single durable "
-                    f"orchestration ('dafx-{hosted.name}'), compared case-insensitively; rename one "
-                    "of them."
+            label = f"workflow '{hosted.name}'"
+            RegistrationIdentity(hosted, hosted, "orchestration", settings, label).reserve(
+                identities, workflow_orchestrator_name(hosted.name), namespace="orchestrator-name"
+            )
+            plan = plan_workflow_registration(hosted)
+            if plan.agent_executors:
+                RegistrationIdentity(hosted, hosted, "hitl-checkpoint", settings, label).reserve(
+                    identities, workflow_hitl_checkpoint_name(hosted.name), namespace="activity-name"
+                )
+            for agent_executor in plan.agent_executors:
+                validate_executor_id(agent_executor.id)
+                validate_agent_configuration(agent_executor.agent)
+                RegistrationIdentity(
+                    hosted,
+                    agent_executor.agent,
+                    "entity",
+                    settings,
+                    f"{label} executor '{agent_executor.id}'",
+                ).reserve(
+                    identities,
+                    f"dafx-{workflow_scoped_executor_id(hosted.name, agent_executor.id)}",
+                    namespace="entity-name",
+                )
+            for executor in plan.activity_executors:
+                validate_executor_id(executor.id)
+                RegistrationIdentity(
+                    hosted,
+                    executor,
+                    "activity",
+                    settings,
+                    f"{label} executor '{executor.id}'",
+                ).reserve(
+                    identities,
+                    workflow_executor_activity_name(hosted.name, executor.id),
+                    namespace="activity-name",
                 )
 
+        previous_agents = dict(self._registered_agents)
+        previous_identities = self._registration_identities
+        try:
+            for hosted in hosted_workflows:
+                if hosted.name.casefold() in self._registered_orchestrations:
+                    continue
+                self._register_single_workflow(
+                    hosted,
+                    callback,
+                    response_delivery_window_seconds=effective_window,
+                )
+        except Exception:
+            self._registration_failed = True
+            self._registered_agents = previous_agents
+            self._registration_identities = previous_identities
+            raise
+        self._registration_identities = identities
+        self._registered_orchestrations.update({hosted.name.casefold(): hosted for hosted in hosted_workflows})
         self._workflows[workflow_name] = workflow
-
-        # Commit: register the top-level workflow and every nested sub-workflow (deduped
-        # by name), so the parent can drive sub-workflows as durable child orchestrations.
-        for hosted in hosted_workflows:
-            if hosted.name.casefold() in self._registered_orchestrations:
-                continue
-            self._register_single_workflow(hosted, callback)
 
     def _register_single_workflow(
         self,
         workflow: Workflow,
         callback: AgentResponseCallbackProtocol | None,
+        *,
+        response_delivery_window_seconds: int | None = None,
     ) -> None:
         """Register one workflow's durable primitives (no recursion into sub-workflows).
 
@@ -295,8 +391,12 @@ class DurableAIAgentWorker:
         # id, which keeps conversation state isolated per run.
         for agent_executor in plan.agent_executors:
             scoped_id = workflow_scoped_executor_id(workflow.name, agent_executor.id)
-            if scoped_id not in self._registered_agents:
-                self.add_agent(agent_executor.agent, callback=callback, entity_id=scoped_id)
+            self.add_agent(
+                agent_executor.agent,
+                callback=callback,
+                entity_id=scoped_id,
+                response_delivery_window_seconds=response_delivery_window_seconds,
+            )
 
         # Register non-agent executors as durable activities, scoped by workflow name.
         # WorkflowExecutor nodes are intentionally not registered as activities: their
@@ -304,6 +404,9 @@ class DurableAIAgentWorker:
         # and driven as child orchestrations.
         for executor in plan.activity_executors:
             self._register_executor_activity(workflow, executor)
+
+        if plan.agent_executors:
+            self._register_hitl_checkpoint(workflow)
 
         # Register this workflow's orchestrator under its per-workflow name.
         self._register_workflow_orchestrator(workflow)
@@ -334,15 +437,30 @@ class DurableAIAgentWorker:
         self._worker.add_activity(executor_activity)
         logger.debug("[DurableAIAgentWorker] Registered activity: %s", activity_name)
 
+    def _register_hitl_checkpoint(self, workflow: Workflow) -> None:
+        """Register one inert rejection checkpoint for all agents in this workflow."""
+
+        def checkpoint_activity(ctx: ActivityContext, input_data: str) -> str:
+            return execute_hitl_checkpoint(input_data)
+
+        name = workflow_hitl_checkpoint_name(workflow.name)
+        checkpoint_activity.__name__ = name
+        checkpoint_activity.__qualname__ = name
+        self._worker.add_activity(checkpoint_activity)
+
     def _register_workflow_orchestrator(self, workflow: Workflow) -> None:
         """Register a workflow's orchestrator function under its per-workflow name."""
         captured_workflow = workflow
         orchestrator_name = workflow_orchestrator_name(workflow.name)
 
         def workflow_orchestrator(context: OrchestrationContext, input_data: JsonPayload) -> Any:
-            # Pass the deserialized client input straight to the shared engine, which
-            # reconstructs the start executor's declared type (see _coerce_initial_input).
-            initial_message = input_data
+            # Reject legacy recorded starts before entering the changed engine.
+            initial_message = unwrap_workflow_input(input_data)
+            validate_workflow_start_provenance(
+                initial_message,
+                instance_id=context.instance_id,
+                parent_instance_id=context.parent_instance_id,
+            )
             shared_state: dict[str, Any] = {}
 
             dt_ctx = DurableTaskWorkflowContext(context)
@@ -361,6 +479,7 @@ class DurableAIAgentWorker:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         entity_id: str | None = None,
+        response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
     ) -> type[DurableTaskEntityStateProvider]:
         """Factory function to create a DurableEntity class configured with an agent.
 
@@ -373,6 +492,7 @@ class DurableAIAgentWorker:
             entity_id: Optional identity to register the entity under instead of
                 ``agent.name`` (used by workflow hosting to key entities by
                 executor id).
+            response_delivery_window_seconds: Response delivery window in seconds.
 
         Returns:
             A new DurableEntity subclass configured for this agent
@@ -390,6 +510,7 @@ class DurableAIAgentWorker:
                     agent=agent,
                     callback=callback,
                     state_provider=self,
+                    response_delivery_window_seconds=response_delivery_window_seconds,
                 )
                 logger.debug(
                     "[ConfiguredAgentEntity] Initialized entity for agent: %s (entity name: %s)",
@@ -411,12 +532,16 @@ class DurableAIAgentWorker:
                 # shared agent clients/credentials stay bound to a live loop across
                 # successive entity invocations (avoids cross-loop hangs).
                 response = run_agent_coroutine(self._agent_entity.run(cast(Any, request)))
-                return response.to_dict()
+                return serialize_agent_response(response)
 
             def reset(self) -> None:
-                """Reset the agent's conversation history."""
+                """Delegate reset to the configured AgentEntity."""
                 logger.debug("[ConfiguredAgentEntity.reset] Resetting agent: %s", agent_name)
-                AgentEntityStateProviderMixin.reset(self)
+                self._agent_entity.reset()
+
+            def expire_responses(self) -> int:
+                """Remove expired payloads when signaled by application-owned maintenance."""
+                return self._agent_entity.expire_responses()
 
         # Set the entity name to match the prefixed agent name
         # This is used by durabletask to register the entity

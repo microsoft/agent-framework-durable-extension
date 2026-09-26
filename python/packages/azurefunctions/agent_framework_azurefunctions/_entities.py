@@ -16,11 +16,17 @@ from typing import Any, cast
 import azure.durable_functions as df
 from agent_framework import SupportsAgentRun
 from agent_framework_durabletask import (
+    DELIVERY_WINDOW_SECONDS,
     AgentEntity,
     AgentEntityStateProviderMixin,
     AgentResponseCallbackProtocol,
     run_agent_coroutine,
+    serialize_agent_response,
+    validate_agent_configuration,
+    validate_response_delivery_window,
+    validate_runtime_deployment,
 )
+from agent_framework_durabletask._entities import _validation_diagnostic  # pyright: ignore[reportPrivateUsage]
 
 logger = logging.getLogger("agent_framework.azurefunctions")
 
@@ -51,20 +57,31 @@ class AzureFunctionEntityStateProvider(AgentEntityStateProviderMixin):
     def _get_session_id_from_entity(self) -> str:
         return str(self._context.entity_key)
 
+    def _get_entity_name_from_entity(self) -> str:
+        return str(self._context.entity_name)
+
 
 def create_agent_entity(
     agent: SupportsAgentRun,
     callback: AgentResponseCallbackProtocol | None = None,
+    *,
+    deployment_mode: str | None = None,
+    response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
 ) -> Callable[[df.DurableEntityContext], None]:
     """Factory function to create an agent entity class.
 
     Args:
         agent: The Microsoft Agent Framework agent instance (must implement SupportsAgentRun)
         callback: Optional callback invoked during streaming and final responses
+        deployment_mode: Explicit isolated-v2 acknowledgement, or None to read the environment.
+        response_delivery_window_seconds: Positive integer response availability window.
 
     Returns:
         Entity function configured with the agent
     """
+    validate_runtime_deployment(deployment_mode)
+    validate_response_delivery_window(response_delivery_window_seconds)
+    validate_agent_configuration(agent)
 
     async def _entity_coroutine(context: df.DurableEntityContext) -> None:
         """Async handler that executes the entity operations."""
@@ -73,7 +90,12 @@ def create_agent_entity(
             logger.debug("[entity_function] Operation: %s", context.operation_name)
 
             state_provider = AzureFunctionEntityStateProvider(context)
-            entity = AgentEntity(agent, callback, state_provider=state_provider)
+            entity = AgentEntity(
+                agent,
+                callback,
+                state_provider=state_provider,
+                response_delivery_window_seconds=response_delivery_window_seconds,
+            )
 
             operation = context.operation_name
 
@@ -88,11 +110,14 @@ def create_agent_entity(
                     request = "" if input_data is None else str(cast(object, input_data))
 
                 result = await entity.run(request)
-                context.set_result(result.to_dict())
+                context.set_result(serialize_agent_response(result))
 
             elif operation == "reset":
                 entity.reset()
                 context.set_result({"status": "reset"})
+
+            elif operation == "expire_responses":
+                context.set_result({"expired": entity.expire_responses()})
 
             else:
                 logger.error("[entity_function] Unknown operation: %s", operation)
@@ -101,8 +126,13 @@ def create_agent_entity(
             logger.info("[entity_function] Operation %s completed successfully", operation)
 
         except Exception as exc:
-            logger.exception("[entity_function] Error executing entity operation %s", exc)
-            context.set_result({"error": str(exc), "status": "error"})
+            diagnostic = _validation_diagnostic(exc)
+            if diagnostic is not None:
+                logger.error("[entity_function] Error executing entity operation. %s", diagnostic)
+            else:
+                logger.exception("[entity_function] Error executing entity operation %s", exc)
+                diagnostic = str(exc)
+            context.set_result({"error": diagnostic, "status": "error"})
 
     def entity_function(context: df.DurableEntityContext) -> None:
         """Synchronous wrapper invoked by the Durable Functions runtime.
@@ -116,7 +146,12 @@ def create_agent_entity(
         try:
             run_agent_coroutine(_entity_coroutine(context))
         except Exception as exc:  # pragma: no cover - defensive logging
-            logger.error("[entity_function] Unexpected error executing entity: %s", exc, exc_info=True)
-            context.set_result({"error": str(exc), "status": "error"})
+            diagnostic = _validation_diagnostic(exc)
+            if diagnostic is not None:
+                logger.error("[entity_function] Unexpected error executing entity: %s", diagnostic)
+            else:
+                logger.error("[entity_function] Unexpected error executing entity: %s", exc, exc_info=True)
+                diagnostic = str(exc)
+            context.set_result({"error": diagnostic, "status": "error"})
 
     return entity_function

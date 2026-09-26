@@ -17,13 +17,17 @@ from collections.abc import AsyncIterator
 from typing import Any, cast
 
 from agent_framework import WorkflowEvent
-from durabletask.client import TaskHubGrpcClient
+from durabletask.azuremanaged.client import DurableTaskSchedulerClient
+from durabletask.client import OrchestrationStatus, TaskHubGrpcClient
 
 from .naming import (
+    iter_subworkflow_instances,
     qualify_subworkflow_request_id,
     split_subworkflow_request_id,
+    validate_dts_instance_id,
     workflow_orchestrator_name,
 )
+from .protocol import validate_workflow_start_input, wrap_workflow_input
 from .serialization import (
     deserialize_workflow_event,
     deserialize_workflow_output,
@@ -113,19 +117,24 @@ class DurableWorkflowClient:
             workflow_name: The workflow to start. Optional if a default was set on
                 the client; required otherwise.
             instance_id: Optional explicit orchestration instance ID. If omitted, one
-                is generated.
+                is generated. A Scheduler client requires a nonblank ID of 1-100 printable ASCII
+                characters with no leading '@'. Other clients retain their backend's
+                input contract. Caller-supplied root IDs are never rewritten.
 
         Returns:
             The orchestration instance ID, for use with ``await_workflow_output``.
         """
         orchestration_name = workflow_orchestrator_name(self._resolve_workflow_name(workflow_name))
+        if instance_id is not None and isinstance(self._client, DurableTaskSchedulerClient):
+            validate_dts_instance_id(instance_id)
+        validate_workflow_start_input(input)
         new_instance_id = self._client.schedule_new_orchestration(
             orchestration_name,
             # Neutralize a forged sub-workflow envelope before scheduling: only an
             # internal child dispatch (post trust boundary) may carry those reserved
             # keys, so stripping them here keeps untrusted input off the orchestrator's
             # trusted-deserialization path even if start_workflow is exposed remotely.
-            input=strip_subworkflow_markers(input),
+            input=wrap_workflow_input(strip_subworkflow_markers(input)),
             instance_id=instance_id,
         )
         logger.debug("[DurableWorkflowClient] Started workflow instance: %s", new_instance_id)
@@ -364,8 +373,20 @@ class DurableWorkflowClient:
             return []
         if not self._is_owned_orchestration(state, workflow_name):
             return []
+        if self._is_terminal_hitl_state(state):
+            return []
 
         return self._collect_pending_hitl_requests(state.serialized_custom_status)
+
+    @staticmethod
+    def _is_terminal_hitl_state(state: Any) -> bool:
+        """Use an actual SDK terminal status, not absent or synthetic state."""
+        runtime_status = getattr(state, "runtime_status", None)
+        return isinstance(runtime_status, OrchestrationStatus) and runtime_status in {
+            OrchestrationStatus.COMPLETED,
+            OrchestrationStatus.FAILED,
+            OrchestrationStatus.TERMINATED,
+        }
 
     @staticmethod
     def _parse_custom_status(serialized_custom_status: str | None) -> dict[str, Any] | None:
@@ -387,7 +408,7 @@ class DurableWorkflowClient:
         """Collect an orchestration's pending requests plus any nested sub-workflow ones.
 
         Nested requests (discovered via the ``subworkflows`` map the parent records in
-        its custom status as ``{executorId: [childInstanceId, ...]}``) are qualified by
+        its custom status as ``{executorId: {ordinal: childInstanceId}}``) are qualified by
         ``(executorId, ordinal)`` so deeper requests accumulate a full
         ``{executorId}~{ordinal}~...~{requestId}`` path and a node with several children
         keeps each one addressable. Child instances are reached directly by id (already
@@ -417,12 +438,11 @@ class DurableWorkflowClient:
         subworkflows = status_dict.get("subworkflows")
         if isinstance(subworkflows, dict):
             for executor_id, child_ids in cast(dict[str, Any], subworkflows).items():
-                children: list[Any] = cast("list[Any]", child_ids) if isinstance(child_ids, list) else []
-                for ordinal, child_instance_id in enumerate(children):
-                    if not isinstance(child_instance_id, str):
-                        continue
+                for ordinal, child_instance_id in iter_subworkflow_instances(child_ids):
                     child_state = self._client.get_orchestration_state(child_instance_id)
                     if child_state is None or not child_state.serialized_custom_status:
+                        continue
+                    if self._is_terminal_hitl_state(child_state):
                         continue
                     for child_req in self._collect_pending_hitl_requests(child_state.serialized_custom_status):
                         qualified = dict(child_req)
@@ -456,11 +476,17 @@ class DurableWorkflowClient:
 
         Raises:
             ValueError: If the instance does not belong to the targeted workflow, or a
-                qualified id references a sub-workflow that is not currently active.
+                qualified id references a sub-workflow that is not currently active,
+                or an addressed instance has a terminal runtime status,
+                or the response is rejected by pickle/type-marker sanitization.
 
         Note:
             The payload is sanitized with ``strip_pickle_markers`` before delivery to
             neutralize pickle-marker injection, since the worker deserializes it.
+            Delivery does not acknowledge admission. Known fixed IDs may be sent
+            before their waits are published and buffered by the service. The
+            response activity validates non-agent replies against the recorded
+            request type and keeps invalid replies pending.
         """
         # Validate ownership before raising the event when a target is resolvable.
         if workflow_name or self._default_workflow_name:
@@ -473,6 +499,8 @@ class DurableWorkflowClient:
         target_instance_id, bare_request_id = self._resolve_hitl_target(instance_id, request_id)
 
         safe_response = strip_pickle_markers(response)
+        if safe_response is None and response is not None:
+            raise ValueError("HITL response contained disallowed pickle/type markers.")
         self._client.raise_orchestration_event(target_instance_id, event_name=bare_request_id, data=safe_response)
         logger.debug(
             "[DurableWorkflowClient] Sent HITL response for request %s on instance %s",
@@ -483,13 +511,17 @@ class DurableWorkflowClient:
     def _resolve_hitl_target(self, instance_id: str, request_id: str) -> tuple[str, str]:
         """Resolve a possibly-qualified request id to ``(owning_instance_id, bare_request_id)``.
 
-        An unqualified id (no well-formed hop) targets ``instance_id`` directly. A
+        An unqualified id (no well-formed hop) addresses ``instance_id``, including
+        an early event for a known fixed ID whose wait is not yet published. A
         qualified id ``{executorId}~{ordinal}~{rest}`` addresses a nested sub-workflow:
         the executor's child instance id is read from this instance's ``subworkflows``
-        custom-status map (a list selected by ``ordinal``) and the remainder is resolved
+        custom-status map (keyed by run-wide ``ordinal``) and the remainder is resolved
         recursively, so arbitrarily deep nesting lands on the leaf child orchestration
         and its bare request id.
         """
+        state = self._client.get_orchestration_state(instance_id)
+        if self._is_terminal_hitl_state(state):
+            raise ValueError(f"Instance '{instance_id}' has a terminal runtime status.")
         hop = split_subworkflow_request_id(request_id)
         if hop is None:
             return instance_id, request_id
@@ -506,11 +538,14 @@ class DurableWorkflowClient:
     def _lookup_subworkflow_instance(self, instance_id: str, executor_id: str, ordinal: int) -> str | None:
         """Return the child orchestration instance id for ``(executor_id, ordinal)``, if active.
 
-        Reads the ``subworkflows`` map (``{executorId: [childInstanceId, ...]}``) the
+        Reads the ``subworkflows`` map (``{executorId: {ordinal: childInstanceId}}``) the
         parent records in its custom status while dispatching sub-workflow nodes, and
-        selects the child at ``ordinal`` (its dispatch order this superstep).
+        selects the child at its run-wide ``ordinal``. Retired paths and legacy
+        list-shaped slot maps are not routable.
         """
         state = self._client.get_orchestration_state(instance_id)
+        if self._is_terminal_hitl_state(state):
+            return None
         custom_status = self._parse_custom_status(state.serialized_custom_status if state else None)
         if custom_status is None:
             return None
@@ -518,10 +553,4 @@ class DurableWorkflowClient:
         if not isinstance(subworkflows, dict):
             return None
         children_raw = cast(dict[str, Any], subworkflows).get(executor_id)
-        if not isinstance(children_raw, list):
-            return None
-        children = cast("list[Any]", children_raw)
-        if ordinal < 0 or ordinal >= len(children):
-            return None
-        child = children[ordinal]
-        return child if isinstance(child, str) else None
+        return dict(iter_subworkflow_instances(children_raw)).get(ordinal)

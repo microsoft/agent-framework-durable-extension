@@ -26,6 +26,7 @@ from agent_framework_durabletask import (
     DurableAIAgent,
     DurableAIAgentClient,
     DurableAIAgentOrchestrationContext,
+    LegacyDurableAgentState,
     SharedAgentStateReader,
     read_agent_state,
     serialize_agent_response,
@@ -198,15 +199,17 @@ def _assert_polled(rpc: Mock, sleep: Mock, count: int, *, signals: int = 1) -> N
         assert request["message"] == "question"
 
 
-def test_public_state_dispatch_does_not_change_the_mutable_writer_default() -> None:
+def test_public_state_dispatch_keeps_readers_separate_from_the_v2_writer() -> None:
     raw = _shared()
     reader = read_agent_state(_json(raw))
     assert isinstance(reader, SharedAgentStateReader)
     assert _json(reader.to_dict()) == _json(raw)
     assert reader.message_count == 1
     assert not hasattr(reader, "record_response")
-    assert DurableAgentState().schema_version == "1.1.0"
-    assert isinstance(read_agent_state("{}"), DurableAgentState)
+    assert DurableAgentState().schema_version == "2.0.0"
+    assert LegacyDurableAgentState().schema_version == "1.1.0"
+    assert type(read_agent_state("{}")) is LegacyDurableAgentState
+    assert not isinstance(reader, DurableAgentState)
 
 
 @pytest.mark.parametrize("as_json", [False, True])

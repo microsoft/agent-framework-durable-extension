@@ -22,6 +22,8 @@ from azure.durable_functions.models.actions.NoOpAction import NoOpAction
 from azure.durable_functions.models.Task import CompoundTask, TaskState
 from pydantic import BaseModel
 
+from ._workflow_af_context import json_entity_context
+
 logger = logging.getLogger("agent_framework.azurefunctions")
 
 CompoundActionConstructor: TypeAlias = Callable[[list[Any]], Any] | None
@@ -158,33 +160,13 @@ class AzureFunctionsAgentExecutor(DurableAgentExecutor[AgentTask]):
     """Executor that executes durable agents inside Azure Functions orchestrations."""
 
     def __init__(self, context: AgentOrchestrationContextType):
-        self.context = context
+        self.context = json_entity_context(context)
 
     def generate_unique_id(self) -> str:
         return str(self.context.new_uuid())
 
-    def get_run_request(
-        self,
-        message: str,
-        *,
-        options: dict[str, Any] | None = None,
-    ) -> RunRequest:
-        """Get the current run request from the orchestration context.
-
-        Args:
-            message: The message to send to the agent
-            options: Optional options dictionary. Supported keys include
-                ``response_format``, ``enable_tool_calls``, and ``wait_for_response``.
-                Additional keys are forwarded to the agent execution.
-
-        Returns:
-            RunRequest: The current run request
-        """
-        # Create a copy to avoid modifying the caller's dict
-
-        request = super().get_run_request(message, options=options)
-        request.orchestration_id = self.context.instance_id
-        return request
+    def _orchestration_id(self) -> str | None:
+        return self.context.instance_id
 
     def run_durable_agent(
         self,

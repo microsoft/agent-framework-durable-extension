@@ -1,0 +1,39 @@
+[
+  {
+    "eventId": -1,
+    "timestamp": "2026-09-20T22:10:04.139602Z",
+    "orchestratorStarted": {}
+  },
+  {
+    "eventId": -1,
+    "timestamp": "1970-01-01T00:00:00Z",
+    "executionStarted": {
+      "name": "dafx-audit-inner",
+      "input": "{\"_durable_workflow_version\": 2, \"input\": {\"__subworkflow_input__\": \"go\", \"__subworkflow_address__\": {\"root_instance_id\": \"audit-mixed\", \"root_workflow_name\": \"audit-mixed\", \"request_path_prefix\": \"sub~0~\"}}}",
+      "orchestrationInstance": {
+        "instanceId": "audit-mixed::sub::0"
+      }
+    }
+  },
+  {
+    "eventId": 1,
+    "timestamp": "1970-01-01T00:00:00Z",
+    "taskScheduled": {
+      "name": "dafx-audit-inner-b",
+      "input": "\"{\\\"executor_id\\\": \\\"b\\\", \\\"message\\\": \\\"go\\\", \\\"shared_state_snapshot\\\": {}, \\\"source_executor_ids\\\": [\\\"__workflow_start__\\\"], \\\"is_hitl_response\\\": false, \\\"host_context\\\": {\\\"instance_id\\\": \\\"audit-mixed\\\", \\\"workflow_name\\\": \\\"audit-mixed\\\", \\\"request_path_prefix\\\": \\\"sub~0~\\\"}}\""
+    }
+  },
+  {
+    "eventId": -1,
+    "timestamp": "2026-09-20T22:10:04.151237Z",
+    "orchestratorStarted": {}
+  },
+  {
+    "eventId": -1,
+    "timestamp": "1970-01-01T00:00:00Z",
+    "taskCompleted": {
+      "taskScheduledId": 1,
+      "result": "\"{\\\"sent_messages\\\": [], \\\"outputs\\\": [], \\\"events\\\": [{\\\"type\\\": \\\"executor_invoked\\\", \\\"executor_id\\\": \\\"b\\\", \\\"data\\\": \\\"go\\\"}, {\\\"type\\\": \\\"request_info\\\", \\\"data\\\": \\\"decision\\\", \\\"request_id\\\": \\\"b\\\", \\\"source_executor_id\\\": \\\"b\\\", \\\"response_type\\\": \\\"builtins:int\\\"}, {\\\"type\\\": \\\"executor_completed\\\", \\\"executor_id\\\": \\\"b\\\"}], \\\"shared_state_updates\\\": {}, \\\"shared_state_deletes\\\": [], \\\"pending_request_info_events\\\": [{\\\"request_id\\\": \\\"b\\\", \\\"source_executor_id\\\": \\\"b\\\", \\\"data\\\": \\\"decision\\\", \\\"request_type\\\": \\\"builtins:str\\\", \\\"response_type\\\": \\\"builtins:int\\\"}]}\""
+    }
+  }
+]

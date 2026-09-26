@@ -12,62 +12,115 @@ pip install agent-framework-durabletask --pre
 
 The durable task integration lets you host Microsoft Agent Framework agents using the [Durable Task](https://github.com/microsoft/durabletask-python) framework so they can persist state, replay conversation history, and recover from failures automatically.
 
-### Reader-first phased rollout
+<a id="current-runtime-contract-on-this-branch"></a>
 
-The current local implementation adds canonical `2.0.0` readers, not a released capability.
-Mutable `DurableAgentState` still defaults to `1.1.0`. Exact `1.0.0`, `1.1.0` and `1.2.0`
-inputs use the existing legacy model. This does not promise a full raw-preserving `1.2.0`
-round trip.
+### Current Runtime Contract On This Unreleased Stack
 
-Public `agent_framework_durabletask.read_agent_state(raw)` accepts a dictionary or JSON string.
-For `2.0.0`, it returns a detached `SharedAgentStateReader`. Its `to_dict()` preserves the
-original JSON, including unknown fields and profiles. `try_get_agent_response(correlation_id)`
-looks up canonical results and completion receipts without lifecycle writes. Unknown profiles
-remain inert in storage. A targeted unsupported profile projection may fail without changing
-the original snapshot. Typed shared results require a present `value` and a JSON-preserving
-projection. Consumers do not infer it from text, coerce types or discard unknown value fields.
-`serialize_agent_response()` carries these restrictions through Core JSON using the versioned
-`_durable_value_policy` marker. It does not duplicate the value, identify a runtime class or
-establish completion authority. Use the matching loader when consuming that snapshot.
+This README describes the current `python-runtime-protocol` branch. It documents unreleased
+behavior and should not be read as a released compatibility promise.
 
-Both Durable Task and Azure Functions polling consumers read canonical results and retain
-known completion outcomes when response delivery expires or is unavailable. Durable Task
+The public mutable state model is now canonical `DurableAgentState` schema `2.0.0`.
+`read_agent_state(raw)` remains explicitly backward compatible with legacy `1.x` payloads.
+It accepts a dictionary or JSON string and returns:
+
+- `LegacyDurableAgentState` for exact `1.0.0`, `1.1.0`, and `1.2.0` inputs
+- `SharedAgentStateReader` for exact `2.0.0` inputs
+
+Other schema versions are rejected. Within an accepted `2.0.0` snapshot, unknown fields and
+unknown protocol content remain preserved in detached raw JSON until a caller explicitly asks for
+a narrower projection.
+
+The v2 reader preserves the original JSON, including unknown fields, shared-value metadata,
+session state, receipts, and protocol details. `to_dict()` returns detached original JSON.
+`try_get_agent_response(correlation_id)` reads canonical results and receipts without writing
+back lifecycle changes. If the response is expired or otherwise unavailable, polling consumers
+retain the known completion outcome instead of deleting or rewriting the receipt. Durable Task
 storage reads use bounded polling retries.
 
-V2 snapshots are raw-only, read-only state. `AgentEntity.run()`, `reset()`, state assignment
-and `persist_state()` reject v2 backing state, even with empty history and result maps or a
-duplicate request. SDK, HTTP and MCP run APIs still signal a command before polling.
-**Read-only views are not read-only run APIs.** Do not use those APIs to execute against
-v2-backed entities with this implementation or to guarantee that no command was dispatched.
+Known response snapshots preserve the explicit shared-value policy. Typed projections require a
+present `value` field and a JSON-preserving decode. Consumers do not infer values from text,
+coerce missing payloads, or discard unknown structured fields. The Core transport snapshot carries
+the versioned `_durable_value_policy` marker so the matching loader can preserve the same rules
+after JSON transport. It does not prove execution authority, duplicate the value, or identify a
+runtime-native class by itself.
 
-Roll out reader support first. A matching future writer is required before targeting a v2
-deployment. Do not roll back v2 state to an older lossy reader/writer. This phase adds no
-automatic activation, deployment gate or environment switch and makes no historical workflow
-changes. V2 readers do not resume provider sessions or workflow history.
+Host construction now requires an explicit isolated v2 acknowledgement. Pass
+`deployment_mode="isolated_v2"` or set `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2`.
+There is no automatic probe and no other deployment mode is accepted. This is an operator
+acknowledgement that the task hub is isolated and the clients are upgraded. It is not runtime
+proof of isolation and it cannot detect peer workers. A new isolated hub with matching upgraded
+workers and clients is the recommended way to keep old workers and histories off this deployment.
 
-The Core requirement remains `agent-framework-core>=1.13.0,<2`. This package directly requires
-`pydantic>=2.11,<3` for structured response handling.
+**Start fresh workflow instances after this update, including upgrades from earlier v2 builds.**
+Workflow protocol `2` is unchanged, but start admission is stricter and checkpointed HITL admission
+and mixed parent/child scheduling change the replay action graph, including generated child IDs.
+Existing v2 in-flight instances and recorded histories are not supported by this runtime and may
+fail. The version marker checks start-envelope admission, not feature or replay compatibility.
+Older v2 envelopes can still pass that check. There is no replay migration or compatibility fallback.
+If old runs must finish, keep them on their original workers and hub, including published histories
+with concatenated child IDs. Do not resume them here.
 
-### Private delivery staging
+The current layer includes canonical transaction state, session capture, and the workflow
+protocol boundary. Migration and retention automation are not implemented yet. Treat any move
+from legacy hubs to isolated v2 hubs as an operator-managed upgrade path, not as proof that an
+in-place migration or replayed history is supported.
 
-The next stack layer adds private delivery operations over complete canonical v2 JSON snapshots.
-Recording stages an original result with its matching receipt. Expiry stages removal only when
-the stored deadline is due and retains the original completion outcome and timestamps. Duplicate
-correlations do not replace results or refresh their delivery window. Failed staging leaves the
-input snapshot unchanged, including unknown JSON.
+Workflow start input wrapping is not universal. `DurableWorkflowClient` and generated HTTP
+start routes wrap new inputs for host-generated workflows. Application-owned native orchestrators
+retain their original input contracts. Do not wrap every orchestration payload in this envelope.
 
-These functions do not persist state or activate a v2 entity writer. The mutable writer still
-uses legacy `1.1.0`, and v2 execution and mutation remain rejected. A later runtime layer must
-validate its complete candidate against an independent committed baseline before storage.
-Read-only consumers reuse the same lookup rules, without transcript fallback or cleanup writes.
+Generated root starts take public application JSON, not internal checkpoint data. The workflow
+client and generated HTTP routes remove reserved child markers. Application input is sanitized
+before typed reconstruction.
+At generated workflow entries, internal `__subworkflow_input__` and `__subworkflow_address__`
+markers require an actual SDK-reported parent and a child address consistent with both SDK parent
+and current instance IDs. Missing or mismatched provenance is rejected before checkpoint decoding.
+A native application parent may still call a generated workflow with ordinary application JSON
+inside `wrap_workflow_input(...)`. Without internal child markers, that payload remains application
+input, even though the SDK reports a parent.
 
-### Private canonical history bridge
+SDK parent metadata authenticates only the immediate parent/child relationship, not the full
+ancestry or claimed root's authority. It does not protect against a malicious application parent
+supplying an otherwise consistent envelope. Trusted worker and application deployments remain
+required. The internal checkpoint codec still uses pickle and is not safe for arbitrary untrusted
+input.
 
-The next private layer adds a typed canonical transcript and a Core history-provider bridge.
-It preserves unknown JSON, session state and original public message IDs separately from
-internal reconciliation identities. Delivery methods reuse the private staging operations
-without replacing typed history objects. History hooks stage appends and compaction annotations
-in memory. Excluded messages can be omitted from model input but are not physically deleted.
+Generated child-ID scheme `1` always produces a physical instance ID of exactly 74 ASCII characters,
+`dafxsw_v1_` followed by the full 64-character SHA-256 hex digest. The digest covers a domain separator
+and length-framed UTF-8 values for the parent's actual instance ID, the exact executor ID and the
+dispatch ordinal in decimal. Dispatch and provenance helpers use this same derivation at every hop.
+The hash checks address consistency, not authentication.
+Bounded physical IDs do not imply unlimited nesting, as logical paths and payloads still grow with
+depth and their limits still apply.
+
+Original executor IDs and workflow names, `~`-qualified HITL paths and the root notification address
+remain unchanged. Clients follow actual child IDs in the parent's `subworkflows` status map at each
+hop. They must not parse physical child IDs or reconstruct addresses from their names.
+
+For a known standalone `DurableTaskSchedulerClient`, an explicit root ID must be nonblank, contain
+1-100 printable ASCII characters and not start with `@`. It is validated, never rewritten or hashed. Generic
+`TaskHubGrpcClient` behavior is preserved because its backend is unknown. The Functions generic route
+validator retains its existing 100-character limit and Unicode-aware rules, not an ASCII-only rule,
+because its provider is unknown. Application-owned native orchestrator calls are unchanged.
+
+There is no automatic transcript recovery for a rejected service conversation ID. A specifically
+rejected parent response can receive up to three additional identical-request retries for a
+visibility delay, but only before any output, tool execution or session advance. The saved parent
+ID is not cleared.
+
+Retention defaults currently preserve every physical message. Response delivery availability is
+time-bounded, with a default expiry window of `60` seconds, but receipt records are retained and
+never deleted by response expiry alone. `reset` clears local transcript and session state while
+preserving completion receipts and live results. External-primary reset requires a provider-owned
+clear operation and is rejected rather than silently clearing only local state. There are no runtime retention knobs
+yet for automatic transcript pruning or receipt cleanup. The application remains responsible for
+its own maintenance policy. Per-agent and per-workflow delivery windows are configurable through
+the host registration APIs.
+
+The Durable Task SDK requirement is now `durabletask>=1.7.1,<2` for SDK parent-instance metadata.
+The existing lock already selects `1.7.2`, so this raises the supported minimum without changing
+the locked SDK version. The Core requirement remains `agent-framework-core>=1.13.0,<2`.
+This package directly requires `pydantic>=2.11,<3` for structured response handling.
 
 Append staging is atomic in memory, undoing lazy internal-ID repairs and restoring the transcript,
 working buffers, position indexes and append ordinal if staging fails. Earlier successful saves
@@ -77,7 +130,7 @@ commit to the backend or roll back external provider writes.
 Requests and responses are checked as stored transcript JSON before publication. Failed-run
 finalization retains pending tool results if filtering or staging fails, allowing a retry.
 
-The private bridge requires an exact `2.0.0` snapshot. Even `get_messages()` may repair missing
+The history bridge requires an exact `2.0.0` snapshot. Even `get_messages()` may repair missing
 or duplicate internal IDs, so it is not a read-only inspection path. Mutation-capable hooks reject
 legacy and unsupported versions before changing stored history or working state. Use
 `read_agent_state()` for legacy inspection instead.
@@ -120,21 +173,42 @@ envelope keep canonical nullable defaults. Existing shared JSON retains its raw 
 New response timestamps without an offset are interpreted as UTC. Valid stored timestamps retain
 their original offset and fractional precision.
 
-These modules are not exported or connected to either host. Public `DurableAgentState` remains
-the legacy writer, and the existing v2 mutation guards remain active. There is no new supported
-deployment mode, migration operation, retention policy or workflow engine in this layer.
-Host activation, transactional session capture and the versioned workflow start boundary must
-land together in the later runtime layer. The private model alone does not enforce a committed
-storage baseline or make provider side effects transactional.
+### Workflow HITL and Mixed Parent/Child Execution
+
+Non-agent `request_info` replies are reconstructed and validated inside the registered response
+activity against the request's recorded type. The activity result checkpoints `accepted` or
+`invalidreply`, so orchestration replay consumes that outcome instead of rerunning reply validators.
+Rejected replies leave the request pending for a correction. Handler and output-serialization
+failures remain activity failures, not invalid replies. Activity retries or redelivery can still
+rerun application code.
+
+Response-type descriptors retain declared types and generic arguments for supported `list`, `dict`,
+`tuple`, `set`, union and `Any` annotations. Coercion and type checks follow the installed Core
+version, so nested model/dataclass and tuple/set reconstruction from JSON is Core-dependent.
+Custom types must already be loaded under their recorded module and qualified name. This does not
+make every Python annotation a supported reply type.
+
+Valid replies for known fixed request IDs can arrive before their waits are published and remain
+buffered by the service. Sending a reply acknowledges event delivery, not type validation or handler
+success. Nested replies still require an active child path recorded by the parent. Pending event
+waits survive other replies and mixed waves, including valid replies already buffered for them.
+
+Parent and child HITL requests can remain active together. Ready parent handlers and downstream
+work proceed without waiting for paused children. A ready child's downstream work can answer an
+earlier paused child. Within a ready wave, results route in dispatch order and preserve each
+result's message order. Local tasks read the dispatched state snapshot, and their reported updates
+and deletes merge in dispatch order before downstream work or reply handlers run. Across waves,
+recorded readiness defines order, not original child invocation order. This preserves durable
+snapshots, not Core's in-process visibility of other executors' uncommitted writes.
 
 ### JSON runtime boundary
 
-The local runtime requires `durabletask>=1.7.1,<2`. Construct `DurableAIAgentWorker` before
-starting the SDK worker. Framework-selected reads for generated agents and workflows use plain
-JSON rather than SDK custom-object reconstruction. Native co-hosted work keeps its original
-converter behavior. See
+The unreleased runtime uses scoped plain JSON for generated agent operation inputs, backing state,
+blocking agent results, generated workflow starts, child results and external-event/HITL values.
+Construct `DurableAIAgentWorker` before starting the SDK worker, with upstream
+`durabletask>=1.7.1,<2`. Native co-hosted work keeps its original converter behavior. See
 [Python durable JSON boundaries](../../../docs/features/python-durable-json-boundaries.md) for
-covered paths, custom-converter constraints and separate checkpoint trust requirements.
+shape and profile validation, custom-converter constraints and separate checkpoint trust requirements.
 
 ### Basic Usage Example
 
@@ -146,7 +220,10 @@ from durabletask.worker import TaskHubGrpcWorker
 
 # Create the worker
 worker = TaskHubGrpcWorker(host_address="localhost:4001")
-agent_worker = DurableAIAgentWorker(worker)
+
+# Only use isolated_v2 for a new isolated hub with upgraded clients.
+# Do not point this host at an existing hub and replay historical runs after updating.
+agent_worker = DurableAIAgentWorker(worker, deployment_mode="isolated_v2")
 
 chat_client = OpenAIChatCompletionClient()
 my_agent = Agent(client=chat_client, name="assistant")

@@ -38,6 +38,7 @@ from agent_framework_durabletask import (
     MIMETYPE_APPLICATION_JSON,
     SESSION_ID_HEADER,
     DurableAgentState,
+    LegacyDurableAgentState,
     SharedAgentStateReader,
     load_agent_response,
 )
@@ -306,7 +307,7 @@ async def test_legacy_delivery_keeps_exact_base_builder_shape(
     version: str, error: bool, handlers: tuple[HttpHandler, McpHandler], sleep: AsyncMock
 ) -> None:
     raw = {"schemaVersion": version, "data": {"conversationHistory": [_history_entry(error=error)]}}
-    original = DurableAgentState.from_dict(raw).try_get_agent_response(CORRELATION_ID)
+    original = LegacyDurableAgentState.from_dict(raw).try_get_agent_response(CORRELATION_ID)
     assert original is not None
     client = _client(raw)
 
@@ -325,7 +326,7 @@ async def test_legacy_delivery_keeps_exact_base_builder_shape(
 
 
 @pytest.mark.parametrize("encoded", [False, True])
-async def test_read_cached_state_uses_shared_view_without_changing_writer_default(
+async def test_read_cached_state_uses_shared_view_with_canonical_writer_and_explicit_legacy_reader(
     encoded: bool, app: AgentFunctionApp
 ) -> None:
     raw = _shared_state()
@@ -335,10 +336,40 @@ async def test_read_cached_state_uses_shared_view_without_changing_writer_defaul
 
     assert isinstance(state, SharedAgentStateReader) and not isinstance(state, DurableAgentState)
     assert state.to_dict() == raw
-    legacy = DurableAgentState()
+    canonical = DurableAgentState()
+    assert canonical.schema_version == "2.0.0"
+    assert canonical.to_dict()["data"] == {
+        "conversationHistory": [],
+        "terminalResults": {},
+        "completionReceipts": {},
+    }
+    legacy = LegacyDurableAgentState()
     assert legacy.schema_version == "1.1.0"
     assert "terminalResults" not in legacy.to_dict()["data"]
     assert "completionReceipts" not in legacy.to_dict()["data"]
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize("encoded", [False, True])
+async def test_read_cached_legacy_state_uses_compatibility_reader_without_migration(
+    version: str, encoded: bool, app: AgentFunctionApp
+) -> None:
+    raw = {"schemaVersion": version, "data": {"conversationHistory": [_history_entry()]}}
+    stored = json.dumps(raw) if encoded else raw
+    client = _client(stored)
+
+    state = await app._read_cached_state(client, df.EntityId(f"dafx-{AGENT_NAME}", SESSION_ID))
+
+    assert isinstance(state, LegacyDurableAgentState)
+    assert not isinstance(state, (DurableAgentState, SharedAgentStateReader))
+    assert state.schema_version == version
+    response = state.try_get_agent_response(CORRELATION_ID)
+    assert response is not None and response.text == "Legacy transcript answer"
+    assert state.to_dict()["schemaVersion"] == version
+    assert "terminalResults" not in state.to_dict()["data"]
+    assert "completionReceipts" not in state.to_dict()["data"]
+    assert client.read_entity_state.return_value.entity_state == stored
+    client.signal_entity.assert_not_awaited()
 
 
 @pytest.mark.parametrize("plain_text", [False, True])

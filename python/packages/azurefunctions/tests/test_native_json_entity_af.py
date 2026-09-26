@@ -12,7 +12,7 @@ import azure.durable_functions as df
 import azure.functions as func
 import pytest
 from agent_framework import Agent, BaseChatClient, ChatResponse, Message
-from agent_framework_durabletask import RunRequest
+from agent_framework_durabletask import DurableAgentState, RunRequest
 
 from agent_framework_azurefunctions import AgentFunctionApp
 
@@ -157,25 +157,24 @@ def test_indexed_agent_reads_cold_state_before_model_execution(marked: bool) -> 
         function.get_function_name(): function.get_user_function() for function in _app(client).get_functions()
     }
     value = _payload(marked)
-    state = {
-        "schemaVersion": "1.1.0",
-        "data": {
-            "conversationHistory": [
+    # Seed a cold, writable snapshot without a model warm-up or a legacy-state write.
+    state = DurableAgentState().to_dict()
+    state["opaqueRoot"] = deepcopy(value)
+    state["data"]["conversationHistory"] = [
+        {
+            "$type": "request",
+            "correlationId": "seed",
+            "createdAt": "2024-01-03T04:05:06+00:00",
+            "messages": [
                 {
-                    "$type": "request",
-                    "correlationId": "seed",
-                    "createdAt": "2024-01-03T04:05:06+00:00",
-                    "messages": [
-                        {
-                            "role": "user",
-                            "contents": [{"$type": "text", "text": "previous"}],
-                            "extensionData": {"opaque": value},
-                        }
-                    ],
+                    "role": "user",
+                    "contents": [{"$type": "text", "text": "previous"}],
+                    "extensionData": {"opaque": value},
                 }
             ],
-        },
-    }
+        }
+    ]
+    assert client.messages == client.options == []
     request = RunRequest("next", correlation_id="next").to_dict()
     batch = json.loads(functions["dafx-json-agent"](_wire([("run", request)], json.dumps(state))))
     assert not batch["results"][0]["isError"], batch
@@ -183,6 +182,9 @@ def test_indexed_agent_reads_cold_state_before_model_execution(marked: bool) -> 
     assert len(client.messages) == 1
     assert client.messages[0][0].text == "previous"
     assert client.messages[0][0].additional_properties["opaque"] == value
+    committed = json.loads(batch["entityState"])
+    assert committed["schemaVersion"] == DurableAgentState.SCHEMA_VERSION
+    assert committed["opaqueRoot"] == value
     assert _CONSTRUCTIONS == []
 
 
