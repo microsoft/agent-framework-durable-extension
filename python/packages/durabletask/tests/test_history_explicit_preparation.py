@@ -81,7 +81,7 @@ async def test_explicit_history_preserves_before_and_after_strategy_inputs(
     history = (
         InMemoryHistoryProvider("explicit-history")
         if provider_kind == "in-memory"
-        else DurableHistoryProvider("explicit-history")
+        else DurableHistoryProvider("explicit-history", prune_excluded=False)
     )
     strategy = SimpleCallable()
     after_strategy = SimpleCallable()

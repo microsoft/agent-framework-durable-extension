@@ -244,7 +244,7 @@ The table and diagram below describe Python, not a universal provider-registrati
 
 | Configuration | Registration behavior |
 | --- | --- |
-| No load-enabled primary, including sink-only configurations | Inject durable history using core's default `source_id`. Preserve store-only sinks. |
+| No load-enabled primary, including sink-only configurations | Inject durable history using the sole configured compaction source, or Core's default `source_id` when none is configured. Preserve store-only sinks. |
 | Exact built-in `InMemoryHistoryProvider` | Replace it with durable history, preserving `source_id`, storage flags and `skip_excluded`. Preserve custom subclasses and their hooks. |
 | Hand-configured `DurableHistoryProvider` | Preserve explicit `prune_excluded`. If unset, inherit the registration retention policy. |
 | External load-enabled primary | Keep it. Do not add durable history alongside it. |
@@ -536,6 +536,10 @@ Neither control enables the other. In Python, an explicitly pinned provider `pru
 takes precedence over registration retention. The matrix assumes a supported local pruning path
 with no such provider override.
 
+The inherited policy also applies to a sole store-only canonical audit beside an external
+primary. It never prunes the external store. Physical deletion batches message identities per
+entry to avoid repeated list shifts while preserving surviving objects and list aliases.
+
 | | No pressure budget | Pressure budget set |
 | --- | --- | --- |
 | `keep_all` | Never delete transcript messages. | Do not prune because of exclusions, but evict eligible oldest groups under pressure. |
@@ -571,6 +575,9 @@ eager pruning. Configurable `high_watermark=0.85` and `low_watermark=0.70` must 
 `0 < low_watermark < high_watermark <= 1`. Below high, do nothing. At pressure, target low with
 deterministic oldest-group selection. Python uses core's fallback via
 `TokenBudgetComposedStrategy(strategies=[])`. Equivalent .NET behavior need not use that API.
+
+Python's `AgentRegistrationSettings` retains its original positional window and callback fields.
+The added retention and budget fields are keyword-only, preserving subclass positional parameters.
 
 Plan with detached messages whose exclusion flags are cleared, leaving stored annotations intact.
 All otherwise eligible old groups compete by age, including groups excluded from model context.
@@ -766,7 +773,9 @@ Registered migration inputs use the same code-selected plain-JSON decoder as age
 Source and request digests therefore include opaque SDK-shaped metadata rather than a
 custom-object projection. Unrelated native SDK registrations retain their existing decoding.
 
-#### Python runtime implementation note, 2026-09-22
+<a id="python-runtime-implementation-note-2026-09-22"></a>
+
+#### Current Python runtime
 
 The current Python runtime update deliberately retains workflow protocol `2` while tightening start
 admission and changing HITL activity checkpoints, mixed parent/child replay and generated child IDs.
@@ -781,67 +790,20 @@ incompatible peers.
 
 Generated root workflow starts take public application JSON, not internal checkpoint data. The
 workflow client and generated HTTP routes remove reserved child markers. Application input is
-sanitized before typed reconstruction. Generated Functions entries read start input as plain JSON
-without the SDK's custom-object decoder before checking provenance. Generated Functions parents
-also receive child results as plain JSON, without SDK custom-object construction or global decoder
-changes. Native orchestration input contracts are unchanged.
-Internal `__subworkflow_input__` and `__subworkflow_address__` markers require an actual SDK-reported
-parent and a child address consistent with both SDK parent and current instance IDs. Generated
-entries reject missing or mismatched provenance before checkpoint decoding. A native application
-parent may still call a generated workflow with ordinary application JSON inside the protocol-2
-start wrapper. With no internal child markers, that input remains on the application-JSON path.
+sanitized before typed reconstruction. Internal child markers require an SDK-reported immediate
+parent and a consistent child address before checkpoint decoding. This does not authenticate full
+ancestry or the claimed root's authority, or protect against a malicious application parent.
+Native orchestration contracts remain unchanged. Internal checkpoints still use pickle and require
+trusted workers, applications and storage.
 
-SDK parent metadata authenticates only the immediate parent/child relationship. It does not
-authenticate full ancestry or the claimed root's authority, or protect against a malicious
-application parent supplying an otherwise consistent envelope. Trusted worker and application
-deployments remain required. Internal checkpoint decoding still uses pickle and is not safe for
-arbitrary untrusted input.
-
-Activity state is compared with a detached encoding captured on the receiving worker, not
-producer pickle bytes. Explicit writes still win, and in-place JSON changes remain type-sensitive.
-Streaming fallback is limited to an immediate capability refusal. Exceptions from awaited setup,
-iteration or finalization never authorize a second invocation. Custom non-streaming agents must
-reject the stream argument before entering asynchronous work.
-
-HITL tuple descriptors preserve Python's argument shape, including the explicit empty-tuple
-argument exposed by Python 3.10. Admission follows the installed Core implementation rather
-than inferring that all tuple aliases accept the same JSON or native tuple values.
-
-Child-ID scheme `1` always uses 74 ASCII characters, `dafxsw_v1_` plus the full SHA-256 hex digest
-over a domain separator and length-framed UTF-8 (actual parent ID, exact executor ID, decimal ordinal).
-Dispatch and provenance helpers apply the same derivation at every hop, not an authentication check.
-Always hashing bounds physical ID length without truncating identity, restricting logical names further
-or maintaining a hybrid short-name/hash rule. Original executor/workflow names, `~` HITL paths and
-root notification addresses remain unchanged. Clients follow actual child status maps, not ID parsing.
-Bounded physical IDs do not imply unlimited nesting, as logical paths and payloads still grow with
-depth and their limits still apply.
-Known standalone `DurableTaskSchedulerClient` explicit roots require nonblank IDs of 1-100 printable
-ASCII characters and no `@` prefix, with no rewrite. Generic `TaskHubGrpcClient` behavior stays unchanged (unknown backend).
-Functions retains its 100-character Unicode-aware generic route validation because its provider is
-unknown, not an ASCII-only restriction. Application-owned native orchestrator calls remain unchanged.
-
-The standalone Durable Task SDK minimum is now `durabletask>=1.7.1,<2` for parent-instance metadata.
-The existing lock already selects `1.7.2`, so this raises the supported minimum without changing
-the locked SDK version. Functions uses its own SDK's parent metadata. This is a Python runtime
-requirement, not proof of shared-deployment or cross-runtime compatibility.
-
-Non-agent HITL reconstruction and validation run in the response activity. Its checkpointed
-`accepted` or `invalidreply` outcome lets orchestration replay avoid rerunning reply validators.
-Invalid replies leave the request pending, while handler and output-serialization failures remain
-activity failures. Activity retry or redelivery can still repeat application code. Recorded
-response types retain supported generic arguments, with JSON reconstruction and type checks
-following the installed Core version. Early valid replies for known fixed IDs and pending event
-waits are preserved. Delivery acknowledgement is not validation or handler completion, and nested
-replies still require a recorded active child path.
-
-Parent and child requests may be active together. Ready handlers and downstream work proceed
-without joining paused children, including when a later child's output enables an earlier child
-to continue. Local reported state updates and deletes merge in dispatch order. Ready results
-preserve dispatch order and each result's message order within a wave. Across waves, recorded
-readiness determines order, not original child invocation order. This retains durable snapshots,
-not Core's shared visibility of uncommitted writes. These are implementation notes, not evidence of
-passing tests, live-host validation or release readiness. Historical prototype evidence below does
-not validate this update.
+The [canonical Python runtime contract](../../python/packages/durabletask/README.md#current-runtime-contract-on-this-unreleased-stack)
+contains migration, session, child-ID, invocation and history-provider details. Its
+[HITL and scheduling contract](../../python/packages/durabletask/README.md#workflow-hitl-and-mixed-parentchild-execution)
+covers checkpointed admission, Core-dependent reply types, buffered replies and ready-wave ordering.
+The [integrated JSON boundary guide](../features/python-durable-json-boundaries.md) records scoped
+coverage and SDK constraints for both hosts, including Functions standalone agent results.
+These implementation details do not relax this ADR's policies or establish shared-deployment
+compatibility. Historical evidence below does not validate the current runtime or imply release readiness.
 
 ```mermaid
 flowchart TB
@@ -1333,35 +1295,14 @@ transcript as automatic recovery insurance.
 [prototype-docs]: https://github.com/microsoft/agent-framework-durable-extension/commit/3ad9
 [prototype-validation]: https://github.com/microsoft/agent-framework-durable-extension/blob/7926226125ca71bf9c23289adae3b9653376b6a7/python/samples/README.md#prototype-validation
 
-## Python reader-stage runtime note, 2026-09-23
+<a id="python-reader-stage-runtime-note-2026-09-23"></a>
 
-The earlier reader-first implementation in
-[PR #108](https://github.com/microsoft/agent-framework-durable-extension/pull/108) added
-registration-scoped plain-JSON SDK decoding. Its standalone integration required
-`durabletask>=1.7.1,<2` for target-aware input/result decoding and deferred state reads.
-At that stage, `AgentFunctionApp` applied the boundary only to generated agent entities, not
-Functions workflow start, child-result or event decoding.
+## Historical Python reader-stage note, 2026-09-23
 
-That stage did not activate v2 writers, migration or session restoration. Mutable state still
-defaulted to `1.1.0`, and v2 snapshots remained read-only. Those were PR #108's stage limits, not
-the current runtime contract. The checkpoint codec and this ADR's rollout gates were unchanged.
-
-The current unreleased stack through
-[PR #112](https://github.com/microsoft/agent-framework-durable-extension/pull/112) includes canonical
-v2 writes and scoped Functions workflow and standalone agent-result decoding. See the
-[current JSON boundary guide](../features/python-durable-json-boundaries.md) and
-[runtime implementation note](#python-runtime-implementation-note-2026-09-22) for the present
-contract and fresh-instance requirement under protocol `2`. This historical note makes no new
-live-host or supported-version validation claim.
-
-Delivery staging in [PR #109](https://github.com/microsoft/agent-framework-durable-extension/pull/109)
-audited unsupported live response fields before Core serialization. Rejection did not invoke their
-conversion hooks. Supported lazy values retained their existing policy, and duplicate completions
-remained no-ops without inspecting a replacement producer.
-
-History reconciliation in [PR #111](https://github.com/microsoft/agent-framework-durable-extension/pull/111)
-distinguished loaded occurrence IDs from unallocated summary IDs, allocated new/revised occurrences
-before repairing backlinks, and compared revisions with JSON-exact payloads.
-External-primary observation used the provider's storage flags without
-rebinding its custom hooks. Naive response timestamp strings received the same UTC interpretation
-on direct and history-provider append paths.
+The reader-first stage introduced registration-scoped plain-JSON SDK decoding and the
+`durabletask>=1.7.1,<2` floor. At that stage, mutable state still defaulted to `1.1.0`, v2 snapshots
+were read-only, and Functions coverage was limited to generated entity ingress. It did not activate
+v2 writers, migration or session restoration. Those were stage-specific limits, not the current
+integrated runtime. See [Current Python runtime](#current-python-runtime) and the
+[JSON boundary guide](../features/python-durable-json-boundaries.md). The checkpoint trust and
+rollout gates remained unchanged. This historical note adds no live-host validation claim.

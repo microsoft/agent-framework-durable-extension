@@ -16,8 +16,9 @@ The durable task integration lets you host Microsoft Agent Framework agents usin
 
 ### Current Runtime Contract On This Unreleased Stack
 
-This README describes the current `impl/python-evidence-migration` worktree. It documents
-unreleased behavior and should not be read as a released compatibility promise.
+This README describes the current unreleased schema-v2 runtime, not a released compatibility
+promise. It is the common runtime contract for both Python hosts. See the
+[Azure Functions guide](../azurefunctions/README.md) for host-specific routes and settings.
 
 The public mutable state model is now canonical `DurableAgentState` schema `2.0.0`.
 `read_agent_state(raw)` remains explicitly backward compatible with legacy `1.x` payloads.
@@ -59,6 +60,8 @@ fail. The version marker checks start-envelope admission, not feature or replay 
 Older v2 envelopes can still pass that check. There is no replay migration or compatibility fallback.
 If old runs must finish, keep them on their original workers and hub, including published histories
 with concatenated child IDs. Do not resume them here.
+
+#### Migration
 
 The current layer includes canonical transaction state, session capture, the workflow
 protocol boundary, and a privileged manual migration path. Migration is a backend entity
@@ -131,6 +134,13 @@ with `agent_framework_durabletask.state_snapshot_digest(source)` computed from t
 }
 ```
 
+The optional migration helper budget `max_state_bytes` is a neutral admission limit, not a
+pressure policy. If the fully staged destination exceeds that bound, migration fails with
+`StateCapacityError`. It does not prune transcript, receipts, session state, or unknown JSON to
+fit. Runtime transcript retention is configured separately below.
+
+#### Session Restoration
+
 If the legacy source carries external session state, its original `session_id` is preserved and
 used by later host runs only after the migration is committed into the destination. Migration is
 the boundary that transfers that destination binding. A nonblank saved `session_id` must match
@@ -144,6 +154,8 @@ Service IDs, state values (including registered-type JSON), and unknown session 
 preserved without trimming, Core session deserialization, provider imports or provider calls
 during migration. Cold session restoration preserves structured IDs. Continuation still requires
 a compatible agent/provider, since Core's generic chat `Agent` requires a string service ID.
+
+#### Workflow Starts and Child Identity
 
 Workflow start input wrapping is not universal. `DurableWorkflowClient` and generated HTTP
 start routes wrap new inputs for host-generated workflows. Application-owned native orchestrators
@@ -183,30 +195,25 @@ For a known standalone `DurableTaskSchedulerClient`, an explicit root ID must be
 validator retains its existing 100-character limit and Unicode-aware rules, not an ASCII-only rule,
 because its provider is unknown. Application-owned native orchestrator calls are unchanged.
 
+#### Invocation and State Boundaries
+
 There is no automatic transcript recovery for a rejected service conversation ID. A specifically
 rejected parent response can receive up to three additional identical-request retries for a
 visibility delay, but only before any output, tool execution or session advance. The saved parent
 ID is not cleared.
 
-Retention defaults currently preserve every physical message. Response delivery availability is
-time-bounded, with a default expiry window of `60` seconds, but receipt records are retained and
-never deleted by response expiry alone. `reset` clears local transcript and session state while
-preserving completion receipts and live results. External-primary reset requires a provider-owned
-clear operation and is rejected rather than silently clearing only local state.
+Streaming fallback requires an immediate capability refusal, not awaited setup, iteration or finalization errors.
+Async streaming remains supported. Activity state deltas compare a detached receiving-worker encoding, not producer
+pickle bytes. Explicit writes retain their intent, and in-place JSON changes remain type-sensitive.
 
-The optional migration helper budget `max_state_bytes` is a neutral admission limit, not a
-pressure policy. If the fully staged destination exceeds that bound, migration fails with
-`StateCapacityError`. It does not prune transcript, receipts, session state, or unknown JSON to
-fit. There is no documented runtime pressure policy yet.
+Requires Python 3.10+, `durabletask>=1.7.1,<2` for scoped JSON decoding and SDK parent metadata,
+`agent-framework-core>=1.13.0,<2` and `pydantic>=2.11,<3` for structured response handling.
 
-There are no retention controls yet for automatic transcript pruning or receipt cleanup. The
-application remains responsible for its own maintenance policy. Per-agent and per-workflow
-delivery windows are configurable through the host registration APIs.
+#### History Provider Integration
 
-The Durable Task SDK requirement is now `durabletask>=1.7.1,<2` for SDK parent-instance metadata.
-The existing lock already selects `1.7.2`, so this raises the supported minimum without changing
-the locked SDK version. The Core requirement remains `agent-framework-core>=1.13.0,<2`.
-This package directly requires `pydantic>=2.11,<3` for structured response handling.
+Ownership is resolved per run from its `store` option, then the agent's `default_options`, then
+the client's default. On client-owned runs, the active primary's load and storage flags select
+history and appends. `skip_excluded=True` omits compaction exclusions from later model context.
 
 Append staging is atomic in memory, undoing lazy internal-ID repairs and restoring the transcript,
 working buffers, position indexes and append ordinal if staging fails. Earlier successful saves
@@ -233,10 +240,13 @@ acceptance evidence contributes ingestion receipts, so an audit cannot suppress 
 On a service-owned turn, the inactive external primary's custom hooks are also suppressed because
 they may load or persist history directly. Ownership-independent work belongs in a separate context
 provider or store-only sink. Client-owned turns retain the original primary's hooks and resources.
+External-primary observation uses its current storage flags without rebinding custom hooks.
 Compaction aimed at an inactive external history source does not run its stored-history after
 hook. Its before hook still operates on unrelated current context, as Core specifies.
 Ordinary input and response IDs are preserved. Newly generated compaction summary occurrences get
 unique IDs when a strategy reuses a candidate ID, so both summary revisions and their links survive.
+Reconciliation distinguishes loaded occurrence IDs from unallocated summary IDs and compares
+summary revisions with JSON-exact payloads.
 With no primary, history is injected before a matching before-compaction provider. Core runs before
 hooks forward and after hooks in reverse, so that provider's after hook sees the previously stored
 history. After-only compaction retains the existing append-then-compact order. Per-service-call
@@ -259,6 +269,111 @@ envelope keep canonical nullable defaults. Existing shared JSON retains its raw 
 New response timestamps without an offset are interpreted as UTC. Valid stored timestamps retain
 their original offset and fractional precision.
 
+### Retention and State Budgets
+
+The defaults are `retention="keep_all"` and `max_state_bytes=None`. They preserve physical
+transcript messages and impose no local pressure cap. Backend limits still apply.
+
+Eager pruning and pressure eviction are independent opt-ins.
+
+- `retention="follow_compaction"` physically removes eligible compaction exclusions when durable
+  history is flushed, even without a pressure budget. It does not configure a compaction strategy.
+- A positive integer `max_state_bytes` enables pressure eviction, including with `keep_all`.
+  At `high_watermark=0.85`, the runtime plans removal of oldest eligible atomic message groups
+  toward `low_watermark=0.70`, or the protected floor if it is higher but still below the high
+  watermark. Watermarks must be finite and satisfy `0 < low_watermark < high_watermark <= 1`.
+- `max_state_bytes=None` disables pressure eviction, not eager pruning. Booleans, zero and
+  negative budgets are rejected.
+
+The estimate covers the whole entity using Python's default JSON serialization with ASCII
+escaping, including non-text content, delivery records, session state, metadata and truncation
+records. It excludes transport framing and is not a backend acceptance guarantee.
+`max_state_bytes="backend_limit"` is a 1 MiB (`1_048_576` bytes) convenience only when the wrapped
+worker is a `DurableTaskSchedulerWorker`. A generic `TaskHubGrpcWorker` cannot resolve it.
+`AgentFunctionApp` rejects it, even when Functions uses DTS. Use an explicit positive budget or
+`None` there.
+
+Pressure eviction leaves terminal results, completion and ingestion receipts, session/control
+state, opaque unknown entries and retained entry metadata intact. System messages and the latest
+exchange are protected, and linked tool, reasoning and persisted atomic groups are not split.
+Eager pruning also protects pending tool calls and groups with any included member. These
+protections can prevent the requested reduction. A protected floor at or above the high watermark,
+or an unreachable safe target, raises `StateCapacityError` without applying a partial pressure plan.
+The enclosing run restores its local staged/cache state on failure. This does not undo model,
+tool or external-provider side effects. If a host state write raises, backend acknowledgement is
+unknown, not proof of rollback. The next operation reloads authoritative state.
+
+#### Registration and History Ownership
+
+`DurableAIAgentWorker` sets host defaults. `add_agent()` and `configure_workflow()` accept
+`retention`, `max_state_bytes`, both watermarks and `response_delivery_window_seconds` overrides.
+Workflow settings apply to its agent entities and nested workflows, not one aggregate workflow
+budget. For budget overrides, omission or `INHERIT` from `agent_framework_durabletask` uses the
+host default, while explicit `None` disables pressure eviction. For the other overrides, `None`
+inherits. Shared workflow registrations must have matching settings.
+
+`AgentRegistrationSettings` retains its positional delivery-window and callback parameters.
+Its added retention and budget fields are keyword-only and default to non-evicting behavior.
+
+A hand-configured `DurableHistoryProvider(prune_excluded=...)` keeps its explicit value, including
+`False`, ahead of the inherited eager-pruning policy. This does not disable a pressure budget.
+An exact built-in in-memory primary is replaced with durable history while preserving its
+`source_id` and storage settings. An external primary, including an in-memory subclass, stays
+primary without a second durable primary. More than one load-enabled primary is rejected.
+Local retention does not delete external-provider history.
+
+History ownership is resolved per run. A service-owned conversation bypasses durable history
+loading and eager compaction flushes. A configured pressure budget still checks local entity
+state and can evict eligible older local transcript, but it neither compacts the remote
+conversation nor clears the saved service branch ID.
+
+#### Delivery and Maintenance
+
+Canonical `terminalResults` hold immutable original response envelopes by correlation ID,
+separately from transcript history. Matching `completionReceipts` retain `correlationId`, known
+`outcome` (`succeeded` or `failed`) and `completedAt`. Results include the full `response`, including
+messages, metadata and an optional explicit `value`, even null or falsey. Failures require `error.code`
+and `error.message`, while successes forbid `error`. `resultState="available"` requires a matching result.
+`resultState="unavailable"` forbids a result and requires `resultUnavailableAt`. Completion facts
+and any `resultExpiresAt` agree across the pair. See the
+[shared wire invariants](../../../schemas/README.md#proposed-wire-concepts-and-semantic-invariants).
+
+Staging rejects unsupported live response fields before Core serialization, without invoking their
+conversion hooks. Supported lazy values keep their existing policy. Duplicate completions remain
+no-ops without inspecting the replacement producer.
+
+Response availability has a default `response_delivery_window_seconds=60`. Transcript deletion
+does not delete the independent result or its completion outcome. Response expiry removes delivery
+payloads without deleting completion or ingestion receipts. There is no bounded receipt cleanup,
+so receipt growth alone can exhaust a configured budget. Runs perform expiry checks, but idle
+entities need application-owned maintenance to invoke `expire_responses()`. Polling reads do not
+persist cleanup. `reset` clears local transcript and session state while preserving completion
+receipts and live results. External-primary reset is rejected without a provider-owned clear
+operation.
+
+At or after a delivery deadline, lookup reports completion with its retained outcome, even before
+physical cleanup. It never returns the expired payload, reports pending work, reruns the request or
+reconstructs an original from compacted or external history. Shared v2 has no `unknown` outcome.
+
+### Retention Metrics
+
+The `agent_framework.durabletask` meter emits `durable.retention.*` metrics for evaluations,
+resolved budgets, before/after JSON size, staged message and entry removals, reclaimed bytes,
+capacity failures, write attempts and observed run operations. Labels are bounded categories,
+not agent, session, correlation or message identifiers, content or exception text.
+
+Deletion measurements describe staged local state with `commit_status="not_attempted"`.
+Write observations distinguish `stage="serialization"` from `stage="set_state"`, each with
+`outcome="returned"` or `"failed"`. Successful serialization and transition validation record
+`"returned"` with `commit_status="not_attempted"` before the host call. A serialization failure
+records only that stage. After a `set_state` attempt, write and operation observations use
+`commit_status="unknown"` even when the call returns. Neither status confirms a durable commit,
+and staged deletions may later roll back locally.
+
+Instrumentation uses only the OpenTelemetry API. The package does not configure an SDK, metric
+reader or exporter. Applications own that setup, and telemetry failures do not replace the
+operation's result or error.
+
 ### Workflow HITL and Mixed Parent/Child Execution
 
 Non-agent `request_info` replies are reconstructed and validated inside the registered response
@@ -273,6 +388,8 @@ Response-type descriptors retain declared types and generic arguments for suppor
 version, so nested model/dataclass and tuple/set reconstruction from JSON is Core-dependent.
 Custom types must already be loaded under their recorded module and qualified name. This does not
 make every Python annotation a supported reply type.
+Tuple descriptors preserve the declared argument shape, including Python 3.10's explicit empty-tuple
+argument. They do not assume all tuple aliases admit the same JSON or native tuple values.
 
 Valid replies for known fixed request IDs can arrive before their waits are published and remain
 buffered by the service. Sending a reply acknowledges event delivery, not type validation or handler
@@ -289,12 +406,13 @@ snapshots, not Core's in-process visibility of other executors' uncommitted writ
 
 ### JSON runtime boundary
 
-The unreleased runtime uses scoped plain JSON for generated agent operation inputs, backing state,
-blocking agent results, generated workflow starts, child results and external-event/HITL values.
-Construct `DurableAIAgentWorker` before starting the SDK worker, with upstream
-`durabletask>=1.7.1,<2`. Native co-hosted work keeps its original converter behavior. See
-[Python durable JSON boundaries](../../../docs/features/python-durable-json-boundaries.md) for
-shape and profile validation, custom-converter constraints and separate checkpoint trust requirements.
+The current runtime writes canonical `2.0.0` state and supports the explicit migration above.
+Construct `DurableAIAgentWorker` before starting the SDK worker. Generated entity state and
+`run`/`migrate` inputs, blocking framework agent results, generated workflow starts, child results
+and external-event values use plain JSON rather than SDK custom-object reconstruction.
+Native co-hosted work keeps its original converter behavior. The
+[integrated JSON boundary guide](../../../docs/features/python-durable-json-boundaries.md)
+details both hosts, custom-converter constraints and separate checkpoint trust requirements.
 
 ### Basic Usage Example
 

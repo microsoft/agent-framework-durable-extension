@@ -39,14 +39,15 @@ def _create_agent() -> Any:
 app = AgentFunctionApp(agents=[_create_agent()], enable_health_check=True, max_poll_retries=50)
 
 """
-Expected output when invoking `POST /api/agents/Joker/run` with plain-text input:
+Expected output when invoking `POST /api/agents/Joker/run?wait_for_response=false`
+with plain-text input and `Accept: application/json`:
 
 HTTP/1.1 202 Accepted
 {
   "status": "accepted",
   "response": "Agent request accepted",
   "message": "Tell me a short joke about cloud computing.",
-  "conversation_id": "<guid>",
+  "session_id": "<guid>",
   "correlation_id": "<guid>"
 }
 """

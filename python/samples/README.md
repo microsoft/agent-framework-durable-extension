@@ -18,8 +18,8 @@ This directory contains samples for durable agent hosting using the Durable Task
 
 ## Import convention
 
-These samples import the durable hosting types **directly from the extension packages** —
-`agent_framework_durabletask` and `agent_framework_azurefunctions`:
+These samples import the durable hosting types **directly from the extension packages**,
+`agent_framework_durabletask` and `agent_framework_azurefunctions`.
 
 ```python
 from agent_framework_durabletask import DurableAIAgentWorker, DurableWorkflowClient
@@ -29,8 +29,7 @@ from agent_framework_azurefunctions import AgentFunctionApp
 For backward compatibility these entry-point types are also re-exported from
 `agent_framework.azure` in the core `agent-framework` package, so existing
 `from agent_framework.azure import ...` code keeps working. **New and updated samples should use
-the direct package imports shown above** — the canonical, self-contained path for this repo —
-rather than routing through the `agent_framework.azure` shim.
+the direct package imports shown above** rather than the `agent_framework.azure` shim.
 
 ## Quick Prerequisites Checklist
 
@@ -87,6 +86,11 @@ az account show
 - **[11_subworkflow](11_subworkflow/)**: Compose workflows by embedding an inner `Workflow` as a node via `WorkflowExecutor`. On the durable host the inner workflow runs as its own child orchestration, and a single `configure_workflow` call registers both.
 - **[12_subworkflow_hitl](12_subworkflow_hitl/)**: A human-in-the-loop pause that lives **inside a sub-workflow**. The nested request surfaces to the client with a qualified request id (`{executor}~{ordinal}~{requestId}`) behind a single top-level addressing surface.
 
+### History and Retention
+
+- **[13_conversation_compaction](13_conversation_compaction/)** shows durable history with compaction and independent eager-pruning and pressure-budget settings.
+- **[14_external_history_redis](14_external_history_redis/)** keeps Redis as the primary history store, separate from durable response delivery and local retention.
+
 ### Azure Functions Hosting
 
 These samples host workflows and agents on Azure Durable Functions (`func start`) instead of the worker-client model above. Each has its own setup steps in its README, and shared environment setup lives in [azure_functions/README.md](azure_functions/README.md).
@@ -103,7 +107,25 @@ These samples host workflows and agents on Azure Durable Functions (`func start`
 - **[azure_functions/10_workflow_no_shared_state](azure_functions/10_workflow_no_shared_state/)**: Run a MAF `Workflow` on Azure Durable Functions without SharedState.
 - **[azure_functions/11_workflow_parallel](azure_functions/11_workflow_parallel/)**: Parallel execution of executors and agents in an Azure Durable Functions workflow.
 - **[azure_functions/12_workflow_hitl](azure_functions/12_workflow_hitl/)**: The workflow human-in-the-loop pattern on Azure Durable Functions, with the reviewer notified from inside the workflow via `WorkflowHitlContext`.
-- **[azure_functions/13_subworkflow_hitl](azure_functions/13_subworkflow_hitl/)**: A human-in-the-loop pause inside a sub-workflow on Azure Durable Functions, exposed through a single top-level respond surface.
+- **[azure_functions/13_subworkflow_hitl](azure_functions/13_subworkflow_hitl/)**: A human-in-the-loop pause inside a sub-workflow on Azure Durable Functions, exposed through a single top-level `respond` endpoint.
+- **[azure_functions/14_conversation_compaction](azure_functions/14_conversation_compaction/)** shows durable compaction on Functions with independent eager pruning and explicit local byte budgets.
+
+## Retention Defaults
+
+The runtime defaults to `retention="keep_all"` and `max_state_bytes=None`. Compaction can exclude
+messages from model context without deleting them. `follow_compaction` opts into eager pruning,
+and a positive byte budget independently enables pressure eviction at the `0.85` high watermark
+toward the `0.70` low watermark, subject to protected state. The whole-entity ASCII-escaped JSON
+estimate is local to the Python host, not a backend acceptance guarantee. `"backend_limit"` resolves
+to 1 MiB only with `DurableTaskSchedulerWorker`. Azure Functions rejects it.
+
+Completion and ingestion receipts, live results and session/control state survive transcript
+eviction. An unreachable protected floor raises `StateCapacityError`. There is no bounded receipt
+cleanup, and idle response expiry needs application-owned maintenance. Retention metrics
+describe staged changes, never confirmed commits. Per-agent and workflow budget overrides use
+`INHERIT` to inherit and `None` to disable pressure eviction. See the package's
+[retention contract](../packages/durabletask/README.md#retention-and-state-budgets) and
+[metric semantics](../packages/durabletask/README.md#retention-metrics).
 
 ## Running the Samples
 
@@ -111,9 +133,10 @@ These samples are designed to be run locally in a cloned repository.
 
 ### Prerequisites
 
-The following prerequisites are required to run the samples:
+The following prerequisites are required for the standalone samples. For Functions, use the
+[Functions prerequisites](azure_functions/README.md#quick-prerequisites-checklist).
 
-- [Python 3.9 or later](https://www.python.org/downloads/)
+- [Python 3.10 or later](https://www.python.org/downloads/)
 - [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) installed and authenticated (`az login`)
 - [Microsoft Foundry project](https://learn.microsoft.com/azure/foundry/how-to/create-projects) with a deployed model, configured through `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL` (gpt-4o-mini or better is recommended)
 - [Durable Task Scheduler](https://learn.microsoft.com/azure/azure-functions/durable/durable-task-scheduler/develop-with-durable-task-scheduler) (local emulator or Azure-hosted)
@@ -147,15 +170,19 @@ More information on how to configure RBAC permissions for Azure OpenAI can be fo
 
 ### Start Durable Task Scheduler
 
-Most samples use the Durable Task Scheduler (DTS) to support hosted agents and durable orchestrations. DTS also allows you to view the status of orchestrations and their inputs and outputs from a web UI.
+The standalone samples use the Durable Task Scheduler (DTS) to support hosted agents and durable
+orchestrations. DTS also provides a dashboard for their state. The Azure Functions samples ship
+with the default Azure Storage backend, using Azurite locally. A DTS connection string alone does
+not change that backend. See the [optional Functions DTS setup](azure_functions/README.md#optional-durable-task-scheduler-backend).
 
 To run the Durable Task Scheduler locally, you can use the following `docker` command:
 
 ```bash
-docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 mcr.microsoft.com/dts/dts-emulator:latest
+docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 -e DTS_USE_DYNAMIC_TASK_HUBS=true mcr.microsoft.com/dts/dts-emulator:latest
 ```
 
-The DTS dashboard will be available at `http://localhost:8082`.
+Dynamic task hubs allow the emulator to create the fresh named hubs used below, matching the CI
+setup. This does not verify isolation. The DTS dashboard will be available at `http://localhost:8082`.
 
 ### Environment Configuration
 
@@ -221,15 +248,19 @@ These settings supersede older instructions to leave the hub as `default`.
   "Values": {
     "DURABLE_AGENTS_DEPLOYMENT_MODE": "isolated_v2",
     "TASKHUB_NAME": "durablesamplev2UNIQUE",
-    "AzureFunctionsJobHost__extensions__durableTask__hubName": "durablesamplev2UNIQUE",
-    "DURABLE_TASK_SCHEDULER_CONNECTION_STRING": "Endpoint=http://localhost:8080;TaskHub=durablesamplev2UNIQUE;Authentication=None"
+    "AzureFunctionsJobHost__extensions__durableTask__hubName": "durablesamplev2UNIQUE"
   }
 }
 ```
 
 The host setting explicitly selects the hub even for samples without a `TASKHUB_NAME` binding.
-Keep it, `TASKHUB_NAME`, and the connection string's `TaskHub` identical. The connection string
-above is for the local emulator only, not production configuration. See the Azure Functions
+Keep it and `TASKHUB_NAME` identical. As shipped, Functions uses Azure Storage through
+`AzureWebJobsStorage`, so verify the new hub is isolated in that storage account or local Azurite
+instance. Setting `DURABLE_TASK_SCHEDULER_CONNECTION_STRING` does **not** select DTS. To opt in on a
+new deployment, configure `storageProvider.type="azureManaged"`, a supporting host extension, and
+a connection string whose `TaskHub` matches the host hub. Follow the
+[optional Functions DTS setup](azure_functions/README.md#optional-durable-task-scheduler-backend).
+Do not switch an existing hub's backend as a migration. See also the Azure Functions
 [host configuration override guidance](https://learn.microsoft.com/azure/azure-functions/functions-host-json#override-hostjson-values).
 
 ### Installing Dependencies
@@ -275,4 +306,6 @@ python sample.py
 
 The sample output is displayed directly in the terminal where you ran the Python script. Agent responses are printed to stdout with log formatting for better readability.
 
-You can also see the state of agents and orchestrations in the Durable Task Scheduler dashboard at `http://localhost:8082`.
+For standalone samples or Functions deployments explicitly using DTS, you can also see the state
+of agents and orchestrations in its dashboard at `http://localhost:8082`. Functions deployments
+using the default Azure Storage backend do not appear there.
