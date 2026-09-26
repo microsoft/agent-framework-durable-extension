@@ -5,17 +5,26 @@
 import json
 from collections.abc import Sequence
 from copy import deepcopy
-from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
 from _retention_test_support import JsonStateProvider, RecordingChatClient
+from _session_persistence_test_support import (
+    AUDIT_SOURCES,
+    EXTERNAL_SOURCE,
+    LOCAL_SOURCE,
+    PRIOR_CORRELATION,
+    PRIOR_OCCURRENCE,
+    SESSION_ID,
+    _opaque_slice,
+    _original_response,
+    _prior_input,
+)
+from _session_persistence_test_support import _reset_seed as _seed
 from agent_framework import (
     Agent,
-    AgentResponse,
     AgentSession,
-    Content,
     ContextProvider,
     HistoryProvider,
     InMemoryHistoryProvider,
@@ -25,19 +34,7 @@ from agent_framework import (
 from agent_framework_durabletask import AgentEntity
 from agent_framework_durabletask._history_provider import DurableHistoryProvider
 from agent_framework_durabletask._message_identity import message_identity
-from agent_framework_durabletask._shared_agent_state import (
-    DurableAgentState,
-    DurableAgentStateMessage,
-    DurableAgentStateRequest,
-    DurableAgentStateResponse,
-)
 
-EXTERNAL_SOURCE = "reset-external-primary"
-LOCAL_SOURCE = "reset-local-primary"
-AUDIT_SOURCES = ("reset-audit-0", "reset-audit-1")
-SESSION_ID = "revision-session"
-PRIOR_CORRELATION = "reset-prior-completion"
-PRIOR_OCCURRENCE = "reset-prior-occurrence"
 PROBE_SOURCE = "reset-final-flush-probe"
 
 
@@ -60,42 +57,6 @@ def _assert_json_equal(actual: Any, expected: Any) -> None:
 
 def _messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
     return _wire([message.to_dict() for message in messages])
-
-
-def _prior_input() -> Message:
-    return Message(
-        "user",
-        [Content.from_text("prior question", additional_properties={"content": ["original", None]})],
-        message_id="reset-prior-input",
-        additional_properties={"input": {"keep": [False, 0, "雪"]}},
-    )
-
-
-def _original_response() -> AgentResponse[Any]:
-    return AgentResponse(
-        messages=[
-            Message(
-                "assistant",
-                [Content.from_text("prior answer", additional_properties={"content": ["answer", None]})],
-                message_id="reset-prior-answer",
-                author_name="original-author",
-                additional_properties={"answer": {"keep": [True, 1, "雪"]}},
-            )
-        ],
-        response_id="reset-original-response",
-        created_at="2026-09-01T00:00:00+00:00",
-        finish_reason="stop",
-        usage_details={"input_token_count": 3, "output_token_count": 5, "total_token_count": 8},
-        additional_properties={"result": {"keep": ["original", False, 0, None]}},
-    )
-
-
-def _opaque_slice(label: str) -> dict[str, Any]:
-    return {
-        "messages": [{"opaque": [label, False, 0, None]}],
-        "_positions": {"opaque": [3, 1]},
-        "metadata": {"messages": ["nested, not transient"], "_positions": [2, 0]},
-    }
 
 
 class _Rows:
@@ -190,36 +151,6 @@ def _ordinary_audits(count: int) -> list[_ExternalHistory]:
 
 def _ordered(primary: HistoryProvider, audits: Sequence[HistoryProvider], order: str) -> list[ContextProvider]:
     return [primary, *audits] if order == "primary-first" else [*audits, primary]
-
-
-def _seed(service_session_id: str | None) -> DurableAgentState:
-    state = DurableAgentState()
-    now = datetime.now(timezone.utc)
-    state.data.conversation_history = [
-        DurableAgentStateRequest(PRIOR_CORRELATION, now, [DurableAgentStateMessage.from_chat_message(_prior_input())]),
-        DurableAgentStateResponse.from_run_response(PRIOR_CORRELATION, _original_response()),
-    ]
-    state.record_response(PRIOR_CORRELATION, _original_response(), delivery_window_seconds=86_400, now=now)
-    state.data.ingested_messages = {PRIOR_OCCURRENCE: [message_identity(_prior_input())]}
-    state.unknown_fields = {"futureRoot": {"keep": [False, 0, "雪", None]}}
-    state.data.unknown_fields = {"futureData": {"keep": [True, 1, "雪", None]}}
-    state.data.extension_data = {"metadata": {"keep": ["data", None]}}
-    session = AgentSession(session_id=SESSION_ID, service_session_id=service_session_id)
-    session.state = {
-        EXTERNAL_SOURCE: _opaque_slice("external"),
-        "unrelated": _opaque_slice("unrelated"),
-        **{
-            source: {"metadata": {"messages": ["keep", source], "_positions": [1, 0]}}
-            for source in (LOCAL_SOURCE, *AUDIT_SOURCES)
-        },
-    }
-    state.data.session = {
-        **session.to_dict(),
-        "futureSession": {"keep": [False, 0, "雪", None]},
-        "messages": [{"opaque": ["top-level", None]}],
-        "_positions": {"top-level": [2, 0]},
-    }
-    return state
 
 
 class _NoPipeline:

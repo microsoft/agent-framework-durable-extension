@@ -82,7 +82,7 @@ def test_af_entity_migrate_operation_commits_without_model_or_core_decode(
 
     monkeypatch.setattr("agent_framework_durabletask._state_migration.load_agent_response", forbidden)
     monkeypatch.setattr(AgentSession, "from_dict", forbidden)
-    monkeypatch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+    monkeypatch.setattr("agent_framework_durabletask._session_store._register_loaded_state_types", forbidden)
     client = RecordingChatClient(response_message_id="af-message")
     entity_function = create_agent_entity(
         Agent(client=client, name="af-migration-agent"), deployment_mode="isolated_v2"
@@ -230,7 +230,7 @@ def test_af_entity_migrate_rejects_invalid_session_without_side_effects(
         pytest.fail("Migration must not deserialize session values or register provider types.")
 
     monkeypatch.setattr(AgentSession, "from_dict", forbidden)
-    monkeypatch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+    monkeypatch.setattr("agent_framework_durabletask._session_store._register_loaded_state_types", forbidden)
     entity_function(context)
 
     context.set_result.assert_called_once()

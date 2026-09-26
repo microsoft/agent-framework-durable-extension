@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import pytest
 from _execution_test_support import JsonStateProvider, NonStreamingAgent, RecordingChatClient, ToolChatClient
+from _session_persistence_test_support import _cold, _request
 from agent_framework import (
     Agent,
     AgentResponse,
@@ -30,10 +31,6 @@ from agent_framework_durabletask._history_provider import current_durable_histor
 from agent_framework_durabletask._message_identity import message_identity
 
 
-def _request(correlation_id: str, message: str, **kwargs: Any) -> dict[str, Any]:
-    return {"message": message, "correlationId": correlation_id, **kwargs}
-
-
 def _committed(provider: JsonStateProvider) -> DurableAgentState:
     return DurableAgentState.from_dict(deepcopy(provider.raw))
 
@@ -42,19 +39,6 @@ def _session_payload(provider: JsonStateProvider) -> dict[str, Any]:
     payload = _committed(provider).data.session
     assert isinstance(payload, dict)
     return payload
-
-
-def _clone_provider(provider: JsonStateProvider) -> JsonStateProvider:
-    return JsonStateProvider(
-        deepcopy(provider.raw),
-        session_id=provider.session_id,
-        entity_name=provider._get_entity_name_from_entity(),
-    )
-
-
-def _cold(agent: Agent, provider: JsonStateProvider) -> tuple[AgentEntity, JsonStateProvider]:
-    cold_provider = _clone_provider(provider)
-    return AgentEntity(agent, state_provider=cold_provider), cold_provider
 
 
 def _snapshot_session(session: AgentSession) -> AgentSession:

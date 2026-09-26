@@ -1015,6 +1015,28 @@ finalization retains pending tool results if filtering or staging fails, allowin
 
 ### 2. Append, lifecycle and snapshot capabilities
 
+#### Entity-backed session snapshots
+
+The Python implementation uses a private adapter implementing Core's experimental `SessionStore`
+contract. Session load/save uses the existing entity `session` field. The adapter is scoped to
+current staged data and does not commit, cache across operations, replace the agent's session
+factory, or change history ownership. Its access key
+is the physical entity identity, while migration can retain a distinct logical session identity.
+Public reset remains synchronous and clears the same local state through its existing transaction.
+
+JSON snapshot copies isolate working state without persisting the durable history bridge's temporary
+buffers. Copies before decoding keep a failing custom decoder from mutating the saved session.
+Copies after serialization prevent retained working sessions from changing a reused entity's
+cached snapshot and normalize valid JSON serializer output before the next turn.
+The adapter retains unknown session fields and the existing serialization format. The alternative
+is to keep the inline restore/capture helpers. A separate external session store was not
+chosen because it adds a persistence boundary requiring coordination with completion records.
+The benefit is a testable persistence boundary and explicit snapshot ownership, not fewer
+durability rules or automatic transcript migration. The entity still owns load/save ordering and
+the final commit. This is not a public storage configuration API.
+
+#### Provider lifecycle requirements
+
 `save_messages()` receives new messages rather than a replacement transcript. In the evaluated Redis
 provider, `rpush` appends content and `max_messages`/`ltrim` bounds it independently. A Cosmos
 container can use TTL. Neither mechanism is a core compaction rewrite contract.

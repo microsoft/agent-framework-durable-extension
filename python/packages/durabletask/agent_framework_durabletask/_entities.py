@@ -21,14 +21,12 @@ from agent_framework import (
     Agent,
     AgentResponse,
     AgentResponseUpdate,
-    AgentSession,
     ChatResponse,
     Content,
     HistoryProvider,
     Message,
     ResponseStream,
     SupportsAgentRun,
-    register_state_type,
 )
 from agent_framework._sessions import is_local_history_conversation_id
 from durabletask.entities import DurableEntity
@@ -65,6 +63,7 @@ from ._retention import (
     validate_retention,
 )
 from ._retention_telemetry import record_write, retention_operation
+from ._session_store import EntitySessionStore
 from ._shared_agent_state import (
     DurableAgentState,
     DurableAgentStateEntry,
@@ -100,7 +99,6 @@ try:
 except ImportError:  # pragma: no cover - depends on the installed core version
     _SerializableStateRoot = None
 
-_registered_state_types: set[type] = set()
 _MISSING_PREVIOUS_RESPONSE_CODE = "previous_response_not_found"
 _REJECTED_ID_RETRIES = 3
 _REJECTED_ID_BACKOFF_SECONDS = 0.5
@@ -209,27 +207,6 @@ def _validation_diagnostic(exc: BaseException) -> str | None:
         if current.__cause__ is not None:
             pending.append(current.__cause__)
     return None
-
-
-def _register_loaded_state_types() -> None:
-    if _SerializableStateRoot is None:
-        return
-
-    seen: set[type] = set()
-    pending: list[type] = [_SerializableStateRoot]
-    while pending:
-        for subclass in pending.pop().__subclasses__():
-            if subclass in seen:
-                continue
-            seen.add(subclass)
-            pending.append(subclass)
-            if subclass in _registered_state_types:
-                continue
-            _registered_state_types.add(subclass)
-            try:
-                register_state_type(subclass)
-            except Exception:
-                logger.debug("Could not register session state type %s", subclass, exc_info=True)
 
 
 class AgentEntityStateProviderMixin:
@@ -836,7 +813,7 @@ class AgentEntity:
                 options["tools"] = []
                 options["tool_choice"] = "none"
             if uses_context_pipeline:
-                session = self._create_session()
+                session = await self._create_session()
                 if not service_owns_history:
                     inactive_service_id = getattr(session, "service_session_id", None)
                     session.service_session_id = None
@@ -1037,7 +1014,8 @@ class AgentEntity:
             self.state.data.conversation_history.append(
                 DurableAgentStateResponse.from_run_response(correlation_id, agent_run_response)
             )
-        self._capture_session(session)
+        if session is not None:
+            await self._session_store().set(self._state_provider.core_session_id, session)
         # First completion and duplicate delivery use the same canonical result
         # projection, including explicit approval/value transport classifications.
         delivered = self.state.try_get_agent_response(correlation_id)
@@ -1365,49 +1343,14 @@ class AgentEntity:
     def _has_context_pipeline(self) -> bool:
         return isinstance(getattr(self.agent, "context_providers", None), (list, tuple))
 
-    def _capture_session(self, session: Any) -> None:
-        if session is None:
-            return
-        to_dict = getattr(session, "to_dict", None)
-        if not callable(to_dict):
-            return
-
-        durable_history = self._find_durable_history_provider()
-        session_state = getattr(session, "state", None)
-        transient: Any = None
-        has_transient = False
-        if durable_history is not None and isinstance(session_state, dict):
-            bag = cast("dict[str, Any]", session_state)
-            if durable_history.source_id in bag:
-                transient = bag.pop(durable_history.source_id)
-                has_transient = True
-                if isinstance(transient, dict):
-                    persistent = {
-                        key: value
-                        for key, value in cast("dict[str, Any]", transient).items()
-                        if key not in ("messages", "_positions")
-                    }
-                    if persistent:
-                        bag[durable_history.source_id] = persistent
-        try:
-            payload = cast("dict[str, Any]", to_dict())
-        finally:
-            if has_transient:
-                cast("dict[str, Any]", session_state)[durable_history.source_id] = transient  # type: ignore[union-attr]
-
-        try:
-            json.dumps(payload, allow_nan=False)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Agent session state is not JSON-compatible; the operation cannot commit.") from exc
-        previous = self.state.data.session
-        if isinstance(previous, dict):
-            opaque = {
-                key: deepcopy(value)
-                for key, value in previous.items()
-                if key not in {"type", "session_id", "service_session_id", "state"} and key not in payload
-            }
-            payload = {**opaque, **payload}
-        self.state.data.session = payload
+    def _session_store(self) -> EntitySessionStore:
+        """Bind session persistence to the current staged data, not a stale cached copy."""
+        history = self._find_durable_history_provider()
+        return EntitySessionStore(
+            self.state.data,
+            self._state_provider.core_session_id,
+            transient_history_source=history.source_id if history is not None else None,
+        )
 
     def _drop_already_stored(
         self, messages: list[DurableAgentStateMessage], *, occurrence_ids: list[str] | None = None
@@ -1436,27 +1379,19 @@ class AgentEntity:
                 return provider
         return None
 
-    def _create_session(self) -> Any:
+    async def _create_session(self) -> Any:
         create_session = getattr(self.agent, "create_session", None)
         if not callable(create_session):
             raise TypeError(
                 f"Agent {type(self.agent).__name__} exposes context providers but does not support create_session()."
             )
         session: Any = create_session(session_id=self._state_provider.migration_session_id())
-        self._restore_session(session)
+        restored = await self._session_store().get(self._state_provider.core_session_id)
+        if restored is not None:
+            session.state.update(restored.state)
+            if getattr(session, "service_session_id", None) is None:
+                session.service_session_id = restored.service_session_id
         return session
-
-    def _restore_session(self, session: Any) -> None:
-        stored = self.state.data.session
-        if not stored or _SESSION_ID_KEY not in stored:
-            return
-
-        _register_loaded_state_types()
-
-        restored = AgentSession.from_dict(dict(stored))
-        session.state.update(restored.state)
-        if getattr(session, "service_session_id", None) is None:
-            session.service_session_id = restored.service_session_id
 
     def _replay_all_messages(self) -> list[Message]:
         return [
