@@ -47,6 +47,7 @@ dev = [
 ]
 test = [
     "azure-monitor-opentelemetry",
+    "jsonschema",
     "mcp[ws]",
     "redis",
     # Model provider packages used by the sample workers that the integration

@@ -10,7 +10,7 @@ as durable orchestrations with automatically generated activity functions.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from agent_framework import SupportsAgentRun, Workflow
 from agent_framework._telemetry import mark_feature_used
@@ -19,8 +19,9 @@ from durabletask.worker import TaskHubGrpcWorker
 
 from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentResponseCallbackProtocol
-from ._entities import AgentEntity, DurableTaskEntityStateProvider
+from ._entities import AgentEntity, AgentEntityStateProviderMixin, DurableTaskEntityStateProvider
 from ._feature_usage import FeatureIndex
+from ._json_payload import JsonPayload, install_json_payload_converter
 from ._workflows.activity import execute_workflow_activity
 from ._workflows.dt_context import DurableTaskWorkflowContext
 from ._workflows.naming import (
@@ -87,6 +88,7 @@ class DurableAIAgentWorker:
             worker: The durabletask worker instance to wrap
             callback: Optional callback for agent response notifications
         """
+        install_json_payload_converter(worker)
         self._worker = worker
         self._callback = callback
         self._registered_agents: dict[str, SupportsAgentRun] = {}
@@ -337,7 +339,7 @@ class DurableAIAgentWorker:
         captured_workflow = workflow
         orchestrator_name = workflow_orchestrator_name(workflow.name)
 
-        def workflow_orchestrator(context: OrchestrationContext, input_data: Any) -> Any:
+        def workflow_orchestrator(context: OrchestrationContext, input_data: JsonPayload) -> Any:
             # Pass the deserialized client input straight to the shared engine, which
             # reconstructs the start executor's declared type (see _coerce_initial_input).
             initial_message = input_data
@@ -395,7 +397,7 @@ class DurableAIAgentWorker:
                     entity_name,
                 )
 
-            def run(self, request: Any) -> Any:
+            def run(self, request: JsonPayload) -> Any:
                 """Handle run requests from clients or orchestrations.
 
                 Args:
@@ -408,13 +410,13 @@ class DurableAIAgentWorker:
                 # Run on the shared persistent loop so async resources created by
                 # shared agent clients/credentials stay bound to a live loop across
                 # successive entity invocations (avoids cross-loop hangs).
-                response = run_agent_coroutine(self._agent_entity.run(request))
+                response = run_agent_coroutine(self._agent_entity.run(cast(Any, request)))
                 return response.to_dict()
 
             def reset(self) -> None:
                 """Reset the agent's conversation history."""
                 logger.debug("[ConfiguredAgentEntity.reset] Resetting agent: %s", agent_name)
-                self._agent_entity.reset()
+                AgentEntityStateProviderMixin.reset(self)
 
         # Set the entity name to match the prefixed agent name
         # This is used by durabletask to register the entity

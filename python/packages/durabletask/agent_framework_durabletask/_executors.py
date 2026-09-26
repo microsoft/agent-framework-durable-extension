@@ -15,7 +15,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 from agent_framework import AgentResponse, AgentSession, Content, Message
 from durabletask.client import TaskHubGrpcClient
@@ -24,9 +24,10 @@ from durabletask.task import CompletableTask, CompositeTask, OrchestrationContex
 from pydantic import BaseModel
 
 from ._constants import DEFAULT_MAX_POLL_RETRIES, DEFAULT_POLL_INTERVAL_SECONDS
-from ._durable_agent_state import DurableAgentState
+from ._json_payload import JsonPayload
 from ._models import AgentSessionId, DurableAgentSession, RunRequest
 from ._response_utils import ensure_response_format, load_agent_response
+from ._state_reader import read_agent_state
 
 logger = logging.getLogger("agent_framework.durabletask")
 
@@ -366,19 +367,11 @@ class ClientAgentExecutor(DurableAgentExecutor[AgentResponse]):
 
                 return agent_response
 
-            except Exception as e:
-                logger.exception(
-                    "[ClientAgentExecutor] Error converting response for correlation: %s",
+            except Exception:
+                return self._response_error(
                     correlation_id,
-                )
-                error_message = Message(
-                    role="system",
-                    contents=[
-                        Content.from_error(
-                            message=f"Error processing agent response: {e}",
-                            error_code="response_processing_error",
-                        )
-                    ],
+                    "response_processing_error",
+                    "Failed to process the agent response.",
                 )
         else:
             logger.warning(
@@ -413,7 +406,7 @@ class ClientAgentExecutor(DurableAgentExecutor[AgentResponse]):
             correlation_id: Correlation ID to search for
 
         Returns:
-            Response AgentResponse, None otherwise
+            A response or terminal state-read error, None if pending or the SDK read failed
         """
         try:
             entity_metadata = self._client.get_entity(entity_id, include_state=True)
@@ -422,20 +415,39 @@ class ClientAgentExecutor(DurableAgentExecutor[AgentResponse]):
                 return None
 
             state_json = entity_metadata.get_state()
-            if not state_json:
-                return None
-
-            state = DurableAgentState.from_json(state_json)
-
-            # Use the helper method to get response by correlation ID
-            return state.try_get_agent_response(correlation_id)
-
         except Exception as e:
+            # SDK retrieval failures remain retryable, including ValueError while
+            # constructing EntityMetadata. Classify by boundary, not exception type.
             logger.warning(
                 "[ClientAgentExecutor] Error reading entity state: %s",
                 e,
             )
             return None
+
+        if not state_json:
+            return None
+
+        try:
+            state = read_agent_state(state_json)
+        except Exception:
+            return self._response_error(correlation_id, "state_read_error", "Failed to read the stored agent response.")
+
+        try:
+            return state.try_get_agent_response(correlation_id)
+        except Exception:
+            return self._response_error(
+                correlation_id, "response_projection_error", "Failed to project the stored agent response."
+            )
+
+    @staticmethod
+    def _response_error(correlation_id: str, error_code: str, message: str) -> AgentResponse:
+        """Report a terminal boundary failure without rendering stored values or exceptions."""
+        logger.warning("[ClientAgentExecutor] %s", message)
+        return AgentResponse(
+            messages=[Message(role="system", contents=[Content.from_error(message=message, error_code=error_code)])],
+            created_at=datetime.now(timezone.utc).isoformat(),
+            additional_properties={"durable_status": "error", "correlation_id": correlation_id},
+        )
 
 
 class OrchestrationAgentExecutor(DurableAgentExecutor[DurableAgentTask]):
@@ -517,7 +529,9 @@ class OrchestrationAgentExecutor(DurableAgentExecutor[DurableAgentTask]):
             entity_task.complete(acceptance_response)
         else:
             # Blocking mode: call entity and wait for response
-            entity_task = self._context.call_entity(entity_id, "run", run_request.to_dict())
+            entity_task = self._context.call_entity(
+                entity_id, "run", run_request.to_dict(), return_type=cast(Any, JsonPayload)
+            )
 
         # Wrap in DurableAgentTask for response transformation
         return DurableAgentTask(
