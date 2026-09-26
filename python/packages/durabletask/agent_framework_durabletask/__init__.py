@@ -67,6 +67,8 @@ from ._shared_agent_state import (
     DurableAgentStateUsageContent,
 )
 from ._shim import DurableAIAgent, build_agent_task
+from ._state_capacity import StateCapacityError
+from ._state_migration import migrate_legacy_state, state_snapshot_digest
 from ._state_reader import SharedAgentStateReader, read_agent_state
 from ._worker import DurableAIAgentWorker
 from ._workflows.activity import execute_workflow_activity
@@ -193,6 +195,7 @@ __all__ = [
     "RegistrationIdentity",
     "RunRequest",
     "SharedAgentStateReader",
+    "StateCapacityError",
     "WorkflowOrchestrationContext",
     "WorkflowRegistrationPlan",
     "__version__",
@@ -203,11 +206,13 @@ __all__ = [
     "execute_workflow_activity",
     "is_auto_generated_workflow_name",
     "load_agent_response",
+    "migrate_legacy_state",
     "plan_workflow_registration",
     "read_agent_state",
     "run_agent_coroutine",
     "run_workflow_orchestrator",
     "serialize_agent_response",
+    "state_snapshot_digest",
     "unwrap_workflow_input",
     "validate_agent_configuration",
     "validate_executor_id",

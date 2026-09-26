@@ -1,0 +1,665 @@
+# Copyright (c) Microsoft. All rights reserved.
+
+"""Real host-boundary tests for explicit legacy migration."""
+
+from __future__ import annotations
+
+import json
+from copy import deepcopy
+from typing import Any
+
+import pytest
+from _execution_test_support import JsonStateProvider, LostAcknowledgementJsonStateProvider, RecordingChatClient
+from _migration_test_support import (
+    ENTITY_NAME,
+    SOURCE_SESSION_ID,
+    _completion_journal,
+    _error_response_entry,
+    _json_provider_entity,
+    _legacy_source,
+    _migration_request,
+    _ObservedExternalHistory,
+    _original_result,
+    _sdk_registered_entity,
+)
+from agent_framework import Agent, AgentSession
+
+from agent_framework_durabletask import AgentEntity, DurableAgentState
+from agent_framework_durabletask._history_provider import service_stores_history
+
+
+class _LiteralStateProvider(JsonStateProvider):
+    def __init__(self, raw: Any, *, session_id: str = "dest-session", entity_name: str = ENTITY_NAME) -> None:
+        super().__init__(None, session_id=session_id, entity_name=entity_name)
+        self.raw = deepcopy(raw)
+
+    def _get_state_dict(self) -> dict[str, Any]:
+        return deepcopy(self.raw)
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    "service_session_id",
+    [
+        None,
+        "",
+        " \t\n",
+        " provider-id ",
+        {},
+        {"conversation": "provider-id"},
+        {
+            "conversation_id": "c",
+            "response_id": "r",
+            "future_id": "opaque",
+            "metadata": {"type": "message", "values": [None, False, 0, 1.5, {}, [], "雪"]},
+        },
+    ],
+)
+def test_registered_dt_factory_migrate_uses_real_entity_boundary_without_model_or_core_decode(
+    version: str, service_session_id: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Migration must retain canonical result JSON and never decode through Core.")
+
+    monkeypatch.setattr("agent_framework_durabletask._state_migration.load_agent_response", forbidden)
+    monkeypatch.setattr(AgentSession, "from_dict", forbidden)
+    monkeypatch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+    source = _legacy_source(_error_response_entry(), version=version)
+    source["data"]["session"] = {
+        "session_id": SOURCE_SESSION_ID,
+        "service_session_id": deepcopy(service_session_id),
+        "state": {"typed": {"type": "message", "opaque": [None, False, 0]}},
+        "futureSession": {"keep": [1]},
+    }
+    request = _migration_request(
+        source,
+        "@dafx-migration-agent@sdk-destination",
+        completionEvidence=_completion_journal(source, _original_result()),
+    )
+    before = deepcopy((source, request))
+    entity, shim, client, native = _sdk_registered_entity()
+
+    result = entity.migrate(request)
+
+    assert result == {
+        "status": "migrated",
+        "migrationId": "migration-1",
+        "sessionId": "@dafx-migration-agent@sdk-destination",
+    }
+    assert client.received_messages == []
+    assert native.add_entity.call_count == 1
+    encoded_state = shim.encode_state()
+    assert encoded_state is not None
+    payload = json.loads(encoded_state)
+    assert payload["data"]["migration"]["destinationSessionId"] == "@dafx-migration-agent@sdk-destination"
+    assert payload["data"]["migration"]["sourceSessionId"] == SOURCE_SESSION_ID
+    assert payload["data"]["terminalResults"]["done"]["response"] == _original_result()["response"]
+    assert payload["data"]["session"] == source["data"]["session"]
+    assert json.dumps(payload["data"]["session"], sort_keys=True) == json.dumps(
+        source["data"]["session"], sort_keys=True
+    )
+    assert (source, request) == before
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        pytest.param(
+            lambda request, destination: request.update({"destinationSessionId": destination + "-wrong"}),
+            "destinationSessionId does not match",
+            id="wrong-destination",
+        ),
+        pytest.param(
+            lambda request, destination: request.update({"sourceSessionId": destination}),
+            "requires a separately addressed destination",
+            id="in-place-rewrite",
+        ),
+        pytest.param(
+            lambda request, destination: request.update({"migrationId": ""}),
+            "migrationId must be a nonblank string",
+            id="blank-migration-id",
+        ),
+        pytest.param(
+            lambda request, destination: request.update({"unexpected": True}),
+            "complete explicit source and destination request",
+            id="extra-field",
+        ),
+    ],
+)
+def test_agent_entity_migrate_rejects_identity_mismatches_before_write(mutate: Any, message: str) -> None:
+    entity, provider, client = _json_provider_entity()
+    source = _legacy_source()
+    request = _migration_request(source, provider.core_session_id)
+    before = deepcopy(provider.raw)
+
+    mutate(request, provider.core_session_id)
+
+    with pytest.raises(ValueError, match=message):
+        entity.migrate(request)
+
+    assert provider.attempted_writes == 0
+    assert provider.successful_writes == 0
+    assert provider.raw == before == {}
+    assert client.received_messages == []
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize("entry", [{}, {"$type": "future-entry"}], ids=["missing-type", "unknown-type"])
+def test_migration_rejects_legacy_entry_discriminator_without_repair(version: str, entry: dict[str, Any]) -> None:
+    external = _ObservedExternalHistory()
+    client = RecordingChatClient()
+    entity, provider, _ = _json_provider_entity(
+        agent=Agent(client=client, name="migration-agent", context_providers=[external])
+    )
+    source = _legacy_source(entry, version=version)
+    request = _migration_request(source, provider.core_session_id, completionEvidence=_completion_journal(source))
+    before = deepcopy((source, request, provider.raw))
+    warm = provider.state
+    state_before = warm.to_dict()
+
+    with pytest.raises(ValueError, match=r"entry\.\$type is missing or unsupported"):
+        entity.migrate(request)
+
+    assert (source, request, provider.raw) == before
+    assert provider.state is warm
+    assert warm.to_dict() == state_before
+    assert provider.attempted_writes == provider.successful_writes == 0
+    assert external.calls == client.received_messages == []
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    "marker",
+    [
+        None,
+        {},
+        {"profile": "foreign", "version": 1, "messages": {"accepted": ["a" * 64]}},
+        {"profile": "agent-framework-python.ingestion", "version": 1, "messages": {"accepted": ["a" * 64]}},
+    ],
+)
+def test_agent_entity_migrate_rejects_reserved_ingestion_without_write(version: str, marker: Any) -> None:
+    entity, provider, client = _json_provider_entity()
+    source = _legacy_source(version=version)
+    source["data"]["pythonIngestion"] = deepcopy(marker)
+    request = _migration_request(source, provider.core_session_id)
+    before = deepcopy((source, request))
+    warm = provider.state
+
+    with pytest.raises(ValueError, match="Legacy data contains reserved pythonIngestion metadata"):
+        entity.migrate(request)
+
+    assert provider.state is warm
+    assert warm.to_dict() == DurableAgentState().to_dict()
+    assert provider.raw == {}
+    assert provider.attempted_writes == provider.successful_writes == 0
+    assert (source, request) == before
+    assert client.received_messages == []
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("state", []),
+        ("state", None),
+        ("state", 7),
+        ("state", False),
+        ("state", "opaque"),
+        ("service_session_id", []),
+        ("service_session_id", ["provider-id"]),
+        ("service_session_id", 7),
+        ("service_session_id", 1.5),
+        ("service_session_id", False),
+        ("service_session_id", True),
+    ],
+)
+def test_agent_entity_migrate_rejects_invalid_session_without_side_effects(
+    version: str, field: str, value: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    external = _ObservedExternalHistory()
+    client = RecordingChatClient()
+    entity, provider, _ = _json_provider_entity(
+        agent=Agent(client=client, name="migration-agent", context_providers=[external])
+    )
+    source = _legacy_source(version=version)
+    source["data"]["session"] = {"session_id": SOURCE_SESSION_ID, field: deepcopy(value)}
+    request = _migration_request(source, provider.core_session_id, completionEvidence=_completion_journal(source))
+    before = deepcopy((source, request))
+    warm = provider.state
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Migration must not deserialize session values or register provider types.")
+
+    monkeypatch.setattr(AgentSession, "from_dict", forbidden)
+    monkeypatch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+    with pytest.raises(ValueError, match=rf"Legacy session\.{field} must be"):
+        entity.migrate(request)
+
+    assert provider.state is warm
+    assert warm.to_dict() == DurableAgentState().to_dict()
+    assert provider.raw == {}
+    assert provider.attempted_writes == provider.successful_writes == 0
+    assert (source, request) == before
+    assert external.calls == []
+    assert client.received_messages == []
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    "service_session_id",
+    [
+        {},
+        {
+            "conversation_id": "c",
+            "response_id": "r",
+            "future_id": "opaque",
+            "metadata": {"type": "message", "values": [None, False, 0, 1.5, {}, [], "雪"]},
+        },
+    ],
+)
+def test_migration_cold_host_restores_structured_service_id_without_provider_io(
+    version: str, service_session_id: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _legacy_source(version=version)
+    source["data"]["session"] = {
+        "session_id": SOURCE_SESSION_ID,
+        "service_session_id": deepcopy(service_session_id),
+        "state": {"external-store": {"provider-key": "original", "nested": [None, False, 0]}},
+        "futureSession": {"keep": [1]},
+    }
+    external = _ObservedExternalHistory()
+    client = RecordingChatClient()
+    entity, provider, _ = _json_provider_entity(
+        agent=Agent(client=client, name="migration-agent", context_providers=[external])
+    )
+    request = _migration_request(source, provider.core_session_id, completionEvidence=_completion_journal(source))
+    before = deepcopy((source, request))
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Migration must not deserialize session values or register provider types.")
+
+    with monkeypatch.context() as migration_patch:
+        migration_patch.setattr(AgentSession, "from_dict", forbidden)
+        migration_patch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+        assert entity.migrate(request) == {
+            "status": "migrated",
+            "migrationId": "migration-1",
+            "sessionId": provider.core_session_id,
+        }
+    assert provider.attempted_writes == provider.successful_writes == 1
+    assert provider.raw["data"]["session"] == source["data"]["session"]
+    assert external.calls == []
+    assert client.received_messages == []
+
+    committed = json.loads(json.dumps(provider.raw, allow_nan=False))
+    cold_external = _ObservedExternalHistory()
+    cold_client = RecordingChatClient()
+    cold_entity, cold_provider, _ = _json_provider_entity(
+        raw=committed,
+        agent=Agent(
+            client=cold_client,
+            name="migration-agent",
+            context_providers=[cold_external],
+            default_options={"store": True},
+        ),
+    )
+    # The real service-owned run path restores this session without clearing its ID.
+    # Generic Core Agent continuation rejects mappings, so do not substitute a run mock.
+    assert service_stores_history(cold_entity.agent, {})
+    restored = cold_entity._create_session()
+
+    assert isinstance(restored, AgentSession)
+    assert restored.session_id == SOURCE_SESSION_ID
+    assert restored.service_session_id == service_session_id
+    assert json.dumps(restored.service_session_id, sort_keys=True) == json.dumps(service_session_id, sort_keys=True)
+    assert restored.state == source["data"]["session"]["state"]
+    assert cold_provider.raw == committed
+    assert cold_provider.attempted_writes == cold_provider.successful_writes == 0
+    assert cold_external.calls == []
+    assert cold_client.received_messages == []
+    assert (source, request) == before
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        pytest.param(False, "JSON object", id="bool"),
+        pytest.param([], "JSON object", id="list"),
+        pytest.param(
+            {"schemaVersion": "1.1.0", "data": {"conversationHistory": []}}, "Legacy state is read-only", id="legacy"
+        ),
+        pytest.param(
+            {"schemaVersion": "2.0.0", "data": {"conversationHistory": []}},
+            "terminalResults",
+            id="malformed-v2",
+        ),
+    ],
+)
+def test_agent_entity_migrate_rejects_malformed_existing_backing_before_write(raw: Any, message: str) -> None:
+    entity, provider, client = _json_provider_entity(agent=Agent(client=RecordingChatClient(), name="migration-agent"))
+    provider = _LiteralStateProvider(raw)
+    entity = AgentEntity(Agent(client=client, name="migration-agent"), state_provider=provider)
+    request = _migration_request(_legacy_source(), provider.core_session_id)
+    snapshot = deepcopy(provider.raw)
+
+    with pytest.raises(ValueError, match=message):
+        entity.migrate(request)
+
+    assert provider.attempted_writes == 0
+    assert provider.successful_writes == 0
+    assert provider.raw == snapshot
+    assert client.received_messages == []
+
+
+def test_agent_entity_migrate_failed_commit_rolls_back_empty_destination() -> None:
+    source = _legacy_source(_error_response_entry())
+    request = _migration_request(
+        source, "@dafx-migration-agent@dest-session", completionEvidence=_completion_journal(source, _original_result())
+    )
+    entity, provider, _client = _json_provider_entity()
+    provider.fail_before_write = True
+
+    with pytest.raises(OSError, match="commit failure"):
+        entity.migrate(request)
+
+    assert provider.attempted_writes == 1
+    assert provider.successful_writes == 0
+    assert provider.raw == {}
+    assert provider.state.to_dict() == DurableAgentState().to_dict()
+
+    provider.fail_before_write = False
+    committed = entity.migrate(request)
+    assert committed["status"] == "migrated"
+    assert provider.attempted_writes == 2
+    assert provider.successful_writes == 1
+
+
+def test_agent_entity_migrate_unknown_acknowledgement_refreshes_same_provider_without_refreshing_grace() -> None:
+    source = _legacy_source(_error_response_entry())
+    request = _migration_request(
+        source, "@dafx-migration-agent@dest-session", completionEvidence=_completion_journal(source, _original_result())
+    )
+    entity, provider, client = _json_provider_entity(provider_cls=LostAcknowledgementJsonStateProvider)
+
+    with pytest.raises(OSError, match="acknowledgement lost"):
+        entity.migrate(request)
+
+    committed_once = deepcopy(provider.raw)
+    expiry = committed_once["data"]["terminalResults"]["done"]["resultExpiresAt"]
+    repeated = entity.migrate(request)
+
+    assert repeated == {
+        "status": "migrated",
+        "migrationId": "migration-1",
+        "sessionId": "@dafx-migration-agent@dest-session",
+    }
+    assert provider.attempted_writes == 1
+    assert provider.successful_writes == 1
+    assert provider.raw == committed_once
+    assert provider.raw["data"]["terminalResults"]["done"]["resultExpiresAt"] == expiry
+    assert client.received_messages == []
+
+
+def test_identical_migration_retry_rejects_warm_receipt_outcome_mismatch_without_repair() -> None:
+    entity, provider, client = _json_provider_entity()
+    source = _legacy_source(_error_response_entry())
+    request = _migration_request(
+        source, provider.core_session_id, completionEvidence=_completion_journal(source, _original_result())
+    )
+    original_request = deepcopy(request)
+    assert entity.migrate(request)["status"] == "migrated"
+    committed = deepcopy(provider.raw)
+    writes = (provider.attempted_writes, provider.successful_writes)
+    warm = provider.state
+    assert warm.to_dict() == committed
+    assert writes == (1, 1)
+
+    # Only the cache is corrupt. The JSON provider still returns valid committed state.
+    receipt = warm.data.completed_correlations["done"]
+    assert receipt["outcome"] == warm.data.response_mailbox["done"]["outcome"] == "failed"
+    receipt["outcome"] = "succeeded"
+    mutated_receipts = deepcopy(warm.data.completed_correlations)
+    with pytest.raises(ValueError, match="Result and receipt must agree"):
+        warm.to_dict()
+
+    with pytest.raises(ValueError, match="Result and receipt must agree"):
+        entity.migrate(request)
+
+    assert entity.state is provider.state is warm
+    assert warm.data.completed_correlations["done"] is receipt
+    assert warm.data.completed_correlations == mutated_receipts
+    assert warm.data.response_mailbox == committed["data"]["terminalResults"]
+    assert warm.data.unknown_fields["migration"] == committed["data"]["migration"]
+    assert provider.raw == committed
+    assert (provider.attempted_writes, provider.successful_writes) == writes
+    assert request == original_request
+    assert client.received_messages == []
+
+
+def test_identical_migration_retry_rejects_warm_non_json_root_field_without_repair() -> None:
+    entity, provider, client = _json_provider_entity()
+    source = _legacy_source(_error_response_entry())
+    request = _migration_request(
+        source, provider.core_session_id, completionEvidence=_completion_journal(source, _original_result())
+    )
+    original_request = deepcopy(request)
+    assert entity.migrate(request)["status"] == "migrated"
+    committed = deepcopy(provider.raw)
+    writes = (provider.attempted_writes, provider.successful_writes)
+    warm = provider.state
+    assert warm.to_dict() == committed
+    assert writes == (1, 1)
+
+    root_extension = {"opaque": b"not-json"}
+    warm.unknown_fields["extensionData"] = root_extension
+    mutated_root_fields = deepcopy(warm.unknown_fields)
+    assert warm.data.to_dict() == committed["data"]
+    with pytest.raises(ValueError, match="State must be strict JSON"):
+        warm.to_dict()
+
+    with pytest.raises(ValueError, match="State must be strict JSON"):
+        entity.migrate(request)
+
+    assert entity.state is provider.state is warm
+    assert warm.unknown_fields["extensionData"] is root_extension
+    assert warm.unknown_fields == mutated_root_fields
+    assert warm.data.to_dict() == committed["data"]
+    assert provider.raw == committed
+    assert (provider.attempted_writes, provider.successful_writes) == writes
+    assert request == original_request
+    assert client.received_messages == []
+
+
+async def test_migration_idempotency_survives_cold_reload_without_refreshing_receipt_grace() -> None:
+    source = _legacy_source(_error_response_entry())
+    request = _migration_request(
+        source, "@dafx-migration-agent@dest-session", completionEvidence=_completion_journal(source, _original_result())
+    )
+    entity, provider, _client = _json_provider_entity()
+    entity.migrate(request)
+    migrated_payload = deepcopy(provider.raw)
+    original_expiry = migrated_payload["data"]["terminalResults"]["done"]["resultExpiresAt"]
+
+    cold_entity, cold_provider, client = _json_provider_entity(raw=deepcopy(provider.raw))
+    repeated = cold_entity.migrate(request)
+    fresh = await cold_entity.run({"message": "follow-up", "correlationId": "fresh-1x"})
+
+    assert repeated == {
+        "status": "migrated",
+        "migrationId": "migration-1",
+        "sessionId": "@dafx-migration-agent@dest-session",
+    }
+    assert fresh.text == "reply-1"
+    assert cold_provider.raw["data"]["terminalResults"]["done"]["resultExpiresAt"] == original_expiry
+    assert cold_provider.raw["data"]["completionReceipts"]["done"]["outcome"] == "failed"
+    assert cold_provider.raw["data"]["terminalResults"]["fresh-1x"]["outcome"] == "succeeded"
+    assert len(client.received_messages) == 1
+
+    changed = _migration_request(
+        source,
+        cold_provider.core_session_id,
+        completionEvidence=_completion_journal(source, _original_result()),
+        ownershipTransferId="transfer-2",
+    )
+    with pytest.raises(ValueError, match="destination must be empty"):
+        cold_entity.migrate(changed)
+
+
+async def test_migration_preserves_source_session_identity_for_later_external_history_runs() -> None:
+    source = _legacy_source()
+    source["data"]["session"] = {
+        "session_id": SOURCE_SESSION_ID,
+        "state": {"external-store": {"provider-key": "original", "nested": [1]}},
+    }
+    request = _migration_request(
+        source, "@dafx-migration-agent@dest-session", completionEvidence=_completion_journal(source)
+    )
+    entity, provider, _client = _json_provider_entity()
+    entity.migrate(request)
+
+    external = _ObservedExternalHistory()
+    client = RecordingChatClient(response_message_id="follow-up-message")
+    first_provider = JsonStateProvider(deepcopy(provider.raw), session_id="dest-session", entity_name=ENTITY_NAME)
+    cold_entity = AgentEntity(
+        Agent(client=client, name="migration-agent", context_providers=[external]),
+        state_provider=first_provider,
+    )
+
+    response = await cold_entity.run({"message": "question", "correlationId": "fresh-1x"})
+
+    assert response.text == "reply-1"
+    assert external.calls == [("load", SOURCE_SESSION_ID), ("save", SOURCE_SESSION_ID)]
+    assert cold_entity.state.data.session is not None
+    assert cold_entity.state.data.session["session_id"] == SOURCE_SESSION_ID
+
+    second_external = _ObservedExternalHistory()
+    second_client = RecordingChatClient()
+    second_provider = JsonStateProvider(
+        deepcopy(first_provider.raw), session_id="dest-session", entity_name=ENTITY_NAME
+    )
+    second_entity = AgentEntity(
+        Agent(client=second_client, name="migration-agent", context_providers=[second_external]),
+        state_provider=second_provider,
+    )
+    second_response = await second_entity.run({"message": "another question", "correlationId": "fresh-2x"})
+    assert second_response.text == "reply-1"
+    assert second_external.calls == [("load", SOURCE_SESSION_ID), ("save", SOURCE_SESSION_ID)]
+    assert second_provider.raw["data"]["session"]["session_id"] == SOURCE_SESSION_ID
+    before_retry = deepcopy(second_provider.raw)
+    writes = second_provider.attempted_writes
+    assert second_entity.migrate(request)["status"] == "migrated"
+    assert second_provider.raw == before_retry
+    assert second_provider.attempted_writes == writes
+
+
+@pytest.mark.parametrize(
+    "field,value", [("destinationSessionId", "@other@entity"), ("sourceSessionId", ""), ("sourceSessionId", None)]
+)
+async def test_invalid_committed_migration_binding_blocks_provider_access(field: str, value: Any) -> None:
+    entity, provider, _ = _json_provider_entity()
+    source = _legacy_source()
+    entity.migrate(_migration_request(source, provider.core_session_id))
+    raw = deepcopy(provider.raw)
+    raw["data"]["migration"][field] = value
+    external = _ObservedExternalHistory()
+    client = RecordingChatClient()
+    restored = AgentEntity(
+        Agent(client=client, name="migration-agent", context_providers=[external]),
+        state_provider=JsonStateProvider(raw, session_id="dest-session", entity_name=ENTITY_NAME),
+    )
+    with pytest.raises(ValueError, match="migration session binding"):
+        await restored.run({"message": "question", "correlationId": "invalid-binding"})
+    assert external.calls == []
+    assert client.received_messages == []
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "id",
+        "sourceDigest",
+        "sourceSessionId",
+        "ownershipTransferId",
+        "createdAt",
+        "requestDigest",
+        "destinationSessionId",
+    ],
+)
+@pytest.mark.parametrize("replacement", [None, "", " "])
+async def test_malformed_migration_binding_rejects_before_any_turn_write(field: str, replacement: Any) -> None:
+    entity, provider, _ = _json_provider_entity()
+    entity.migrate(_migration_request(_legacy_source(), provider.core_session_id))
+    raw = deepcopy(provider.raw)
+    raw["data"]["migration"][field] = replacement
+    restored, backing, client = _json_provider_entity(raw)
+    with pytest.raises(ValueError, match="migration session binding"):
+        await restored.run({"message": "question", "correlationId": "bad-binding"})
+    assert client.received_messages == []
+    assert backing.attempted_writes == 0
+    assert backing.raw == raw
+
+
+@pytest.mark.parametrize("metadata", [None, [], "not-an-object", {}, {"sourceSessionId": SOURCE_SESSION_ID}])
+async def test_partial_or_non_object_migration_metadata_fails_closed(metadata: Any) -> None:
+    raw = DurableAgentState().to_dict()
+    raw["data"]["migration"] = metadata
+    restored, backing, client = _json_provider_entity(raw)
+    with pytest.raises(ValueError, match="migration session binding"):
+        await restored.run({"message": "question", "correlationId": "bad-binding"})
+    assert client.received_messages == []
+    assert backing.attempted_writes == 0
+    assert backing.raw == raw
+
+
+@pytest.mark.parametrize("digest", ["A" * 64, "g" * 64, "a" * 63, "a" * 65, 7, True])
+async def test_request_digest_must_be_lowercase_sha256(digest: Any) -> None:
+    entity, provider, _ = _json_provider_entity()
+    entity.migrate(_migration_request(_legacy_source(), provider.core_session_id))
+    raw = deepcopy(provider.raw)
+    raw["data"]["migration"]["requestDigest"] = digest
+    restored, backing, client = _json_provider_entity(raw)
+    with pytest.raises(ValueError, match="migration session binding"):
+        await restored.run({"message": "question", "correlationId": "bad-binding"})
+    assert client.received_messages == []
+    assert backing.attempted_writes == 0
+
+
+@pytest.mark.parametrize("operation", ["reset", "expire_responses", "migrate"])
+def test_malformed_binding_blocks_control_operations(operation: str) -> None:
+    raw = DurableAgentState().to_dict()
+    raw["data"]["migration"] = {"sourceSessionId": SOURCE_SESSION_ID}
+    restored, backing, client = _json_provider_entity(raw)
+    request = _migration_request(_legacy_source(), backing.core_session_id)
+    with pytest.raises(ValueError, match="migration session binding"):
+        if operation == "migrate":
+            restored.migrate(request)
+        else:
+            getattr(restored, operation)()
+    assert backing.raw == raw
+    assert backing.attempted_writes == 0
+    assert client.received_messages == []
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "id",
+        "sourceDigest",
+        "sourceSessionId",
+        "ownershipTransferId",
+        "createdAt",
+        "requestDigest",
+        "destinationSessionId",
+    ],
+)
+async def test_missing_committed_binding_field_blocks_run(field: str) -> None:
+    entity, provider, _ = _json_provider_entity()
+    entity.migrate(_migration_request(_legacy_source(), provider.core_session_id))
+    raw = deepcopy(provider.raw)
+    del raw["data"]["migration"][field]
+    restored, backing, client = _json_provider_entity(raw)
+    with pytest.raises(ValueError, match="migration session binding"):
+        await restored.run({"message": "question", "correlationId": "bad-binding"})
+    assert backing.raw == raw
+    assert backing.attempted_writes == 0
+    assert client.received_messages == []
