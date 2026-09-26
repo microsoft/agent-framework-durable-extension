@@ -956,6 +956,15 @@ must be isolated and tested. It does not give Redis, Cosmos, file or other provi
 rewrite capability. Core should expose store-rewrite capabilities and diagnose a configured hook
 that cannot reach its store.
 
+In the private Python history bridge, append staging is atomic in memory, undoing lazy internal-ID
+repairs and restoring the transcript, working buffers, position indexes and append ordinal if
+staging fails. Earlier successful saves and flushes, including the preliminary flush in
+`save_messages()`, remain intact. This does not commit to the backend or roll back external
+provider writes.
+
+Requests and responses are checked as stored transcript JSON before publication. Failed-run
+finalization retains pending tool results if filtering or staging fails, allowing a retry.
+
 ### 2. Append, lifecycle and snapshot capabilities
 
 `save_messages()` receives new messages rather than a replacement transcript. In the evaluated Redis
@@ -1253,3 +1262,9 @@ are unchanged. This source-level note adds no live-host validation claim.
 Delivery staging audits unsupported live response fields before Core serialization. Rejection
 does not invoke their conversion hooks. Supported lazy values retain their existing policy,
 and duplicate completions remain no-ops without inspecting a replacement producer.
+
+History reconciliation distinguishes loaded occurrence IDs from unallocated summary IDs and
+allocates all new or revised occurrences before repairing summary backlinks. Revisions compare
+JSON-exact payloads. External-primary observation uses the
+provider's current storage flags, without rebinding its custom hooks. Naive response timestamp
+strings receive the same UTC interpretation on direct and history-provider append paths.
