@@ -78,7 +78,7 @@ def test_two_nonwriting_durable_adapters_are_still_unsupported(all_load_disabled
 
 
 async def test_single_zero_store_durable_adapter_remains_supported() -> None:
-    history = DurableHistoryProvider("primary", store_inputs=False, store_outputs=False)
+    history = DurableHistoryProvider("primary", store_inputs=False, store_outputs=False, prune_excluded=False)
     client = _PassiveChatClient()
     agent = Agent(client=client, context_providers=[history])
     prepared = ensure_durable_history(agent)
@@ -98,7 +98,8 @@ async def test_single_zero_store_durable_adapter_remains_supported() -> None:
 async def test_one_durable_owner_and_ordinary_audit_append_once_on_each_cold_turn(
     audit_kind: str, per_call: bool
 ) -> None:
-    history = DurableHistoryProvider("primary")
+    # Pin the policy so preparation preserves the adapter whose identity and flush we assert.
+    history = DurableHistoryProvider("primary", prune_excluded=False)
     audit = (
         OrdinaryExternalHistory("audit", load_messages=False)
         if audit_kind == "external"

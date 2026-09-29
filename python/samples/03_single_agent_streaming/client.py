@@ -124,8 +124,8 @@ async def stream_from_redis(session_id: str, cursor: str | None = None) -> None:
                     break
 
                 if chunk.is_done:
-                    print("\n✓ Response complete!", flush=True)
-                    logger.info(f"Stream completed after {chunk_count} chunks")
+                    print("\nGeneration complete. Durable commit pending verification.", flush=True)
+                    logger.info(f"Redis stream ended after {chunk_count} chunks, not a durable commit acknowledgement")
                     break
 
                 if chunk.text:

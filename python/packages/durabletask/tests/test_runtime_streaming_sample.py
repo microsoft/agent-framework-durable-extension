@@ -1,11 +1,13 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Exercise the real workflow streaming sample client offline."""
+"""Exercise workflow and HTTP streaming sample contracts offline."""
 
+import ast
 import asyncio
 import importlib.util
 import json
 import logging
+import re
 import sys
 import threading
 from pathlib import Path
@@ -15,12 +17,58 @@ from unittest.mock import Mock
 import pytest
 from _execution_test_support import RecordingChatClient
 from agent_framework import WorkflowEvent
+from packaging.requirements import Requirement
 
 from agent_framework_durabletask._workflows.naming import validate_workflow_name, workflow_orchestrator_name
 from agent_framework_durabletask._workflows.protocol import wrap_workflow_input
 from agent_framework_durabletask._workflows.serialization import serialize_workflow_event
 
 SAMPLES = Path(__file__).resolve().parents[3] / "samples"
+
+
+def test_external_history_sample_declares_its_direct_authentication_dependency():
+    sample = SAMPLES / "14_external_history_redis"
+    for name in ("worker.py", "client.py"):
+        tree = ast.parse((sample / name).read_text(encoding="utf-8"))
+        assert any(
+            isinstance(node, ast.ImportFrom) and node.module in ("azure.identity", "azure.identity.aio")
+            for node in ast.walk(tree)
+        )
+    requirements = {
+        Requirement(line.split("#", 1)[0].strip()).name
+        for line in (sample / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", "-e"))
+    }
+    assert "azure-identity" in requirements
+
+
+def test_reliable_streaming_http_demo_uses_accepted_session_id():
+    demo = (SAMPLES / "azure_functions" / "03_reliable_streaming" / "demo.http").read_text(encoding="utf-8")
+    start_request = demo.split("# @name trip\n", 1)[1].split("\n###", 1)[0].splitlines()
+
+    assert "@sessionId = {{trip.response.body.$.session_id}}" in demo.splitlines()
+    # A plain-text POST needs both settings for a non-blocking JSON response.
+    assert start_request[0] == "POST {{baseUrl}}/api/agents/{{agentName}}/run?wait_for_response=false"
+    assert "Content-Type: text/plain" in start_request
+    assert "Accept: application/json" in start_request
+    assert [line for line in demo.splitlines() if line.startswith("GET {{baseUrl}}/api/agent/stream/")] == [
+        "GET {{baseUrl}}/api/agent/stream/{{sessionId}}",
+        "GET {{baseUrl}}/api/agent/stream/{{sessionId}}",
+        "GET {{baseUrl}}/api/agent/stream/{{sessionId}}?cursor={cursor_id}",
+    ]
+
+
+@pytest.mark.parametrize(("sample", "expected_count"), [("01_single_agent", 1), ("02_multi_agent", 2)])
+def test_agent_http_sample_accepted_examples_use_session_id(sample, expected_count):
+    source = (SAMPLES / "azure_functions" / sample / "function_app.py").read_text(encoding="utf-8")
+    examples = re.findall(r"HTTP/1\.1 202 Accepted\n(\{.*?\n\})", source, re.DOTALL)
+    assert len(examples) == expected_count
+    for example in examples:
+        payload = json.loads(example)
+        assert payload["status"] == "accepted"
+        assert "session_id" in payload
+        assert payload["session_id"] == "<guid>"
+        assert "conversation_id" not in payload
 
 
 def _load(path: Path, name: str, monkeypatch: pytest.MonkeyPatch):

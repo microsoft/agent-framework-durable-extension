@@ -29,6 +29,8 @@ WORKER_MODULES = [
     ("10_workflow_streaming", "worker.py"),
     ("11_subworkflow", "worker.py"),
     ("12_subworkflow_hitl", "worker.py"),
+    ("13_conversation_compaction", "worker.py"),
+    ("14_external_history_redis", "worker.py"),
 ]
 
 CLIENT_MODULES = [
@@ -44,6 +46,8 @@ CLIENT_MODULES = [
     ("10_workflow_streaming", "client.py", "workflow"),
     ("11_subworkflow", "client.py", "workflow"),
     ("12_subworkflow_hitl", "client.py", "workflow"),
+    ("13_conversation_compaction", "client.py", "agent"),
+    ("14_external_history_redis", "client.py", "agent"),
 ]
 
 INVALID_TASKHUBS = [
@@ -62,7 +66,7 @@ INVALID_TASKHUBS = [
 
 
 def test_guard_cases_cover_all_standalone_workers_and_clients() -> None:
-    assert len(WORKER_MODULES) == len(CLIENT_MODULES) == 12
+    assert len(WORKER_MODULES) == len(CLIENT_MODULES) == 14
     assert {SAMPLES_ROOT / sample / module for sample, module in WORKER_MODULES} == set(
         SAMPLES_ROOT.glob("[0-9]*/worker.py")
     )
@@ -89,16 +93,23 @@ def _load_sample_module(sample_name: str, module_file: str) -> ModuleType:
 
 
 @pytest.mark.parametrize(("sample_name", "module_file"), WORKER_MODULES)
-def test_worker_requires_non_default_taskhub_before_constructing_scheduler(sample_name: str, module_file: str) -> None:
+@pytest.mark.parametrize("taskhub", [None, ""], ids=["missing", "blank"])
+def test_worker_requires_non_default_taskhub_before_constructing_scheduler(
+    sample_name: str, module_file: str, taskhub: str | None
+) -> None:
     module = _load_sample_module(sample_name, module_file)
 
     with (
-        patch.dict(os.environ, {"TASKHUB": "", "ENDPOINT": "http://localhost:8080"}, clear=False),
+        patch.dict(os.environ, {"TASKHUB": "", "ENDPOINT": "https://scheduler.example.invalid"}, clear=False),
+        patch.object(module, "AzureCliCredential") as credential,
         patch.object(module, "DurableTaskSchedulerWorker") as scheduler_worker,
-        pytest.raises(ValueError, match="non-default, non-blank hub name"),
     ):
-        module.get_worker()
+        if taskhub is None:
+            os.environ.pop("TASKHUB", None)
+        with pytest.raises(ValueError, match="non-default, non-blank hub name"):
+            module.get_worker()
 
+    credential.assert_not_called()
     scheduler_worker.assert_not_called()
 
 
@@ -110,12 +121,27 @@ def test_worker_rejects_invalid_taskhub(sample_name: str, module_file: str, task
 
     with (
         patch.dict(os.environ, {"TASKHUB": taskhub if from_env else "EnvHub"}, clear=False),
+        patch.object(module, "AzureCliCredential") as credential,
         patch.object(module, "DurableTaskSchedulerWorker") as scheduler_worker,
         pytest.raises(ValueError, match="non-default, non-blank hub name"),
     ):
-        module.get_worker(taskhub=None if from_env else taskhub)
+        module.get_worker(taskhub=None if from_env else taskhub, endpoint="https://scheduler.example.invalid")
 
+    credential.assert_not_called()
     scheduler_worker.assert_not_called()
+
+
+@pytest.mark.parametrize(("sample_name", "module_file"), WORKER_MODULES)
+def test_worker_accepts_env_taskhub(sample_name: str, module_file: str) -> None:
+    module = _load_sample_module(sample_name, module_file)
+
+    with (
+        patch.dict(os.environ, {"TASKHUB": "EnvHub", "ENDPOINT": "http://localhost:8080"}, clear=False),
+        patch.object(module, "DurableTaskSchedulerWorker") as scheduler_worker,
+    ):
+        assert module.get_worker() is scheduler_worker.return_value
+
+    assert scheduler_worker.call_args.kwargs["taskhub"] == "EnvHub"
 
 
 @pytest.mark.parametrize(("sample_name", "module_file"), WORKER_MODULES)
@@ -138,13 +164,15 @@ def test_client_requires_non_default_taskhub_before_constructing_scheduler(
     module = _load_sample_module(sample_name, module_file)
 
     with (
-        patch.dict(os.environ, {}, clear=False),
+        patch.dict(os.environ, {"ENDPOINT": "https://scheduler.example.invalid"}, clear=False),
+        patch.object(module, "AzureCliCredential") as credential,
         patch.object(module, "DurableTaskSchedulerClient") as scheduler_client,
     ):
         os.environ.pop("TASKHUB", None)
         with pytest.raises(ValueError, match="non-default, non-blank hub name"):
             module.get_client()
 
+    credential.assert_not_called()
     scheduler_client.assert_not_called()
 
 
@@ -158,11 +186,13 @@ def test_client_rejects_invalid_taskhub(
 
     with (
         patch.dict(os.environ, {"TASKHUB": taskhub if from_env else "EnvHub"}, clear=False),
+        patch.object(module, "AzureCliCredential") as credential,
         patch.object(module, "DurableTaskSchedulerClient") as scheduler_client,
         pytest.raises(ValueError, match="non-default, non-blank hub name"),
     ):
-        module.get_client(taskhub=None if from_env else taskhub)
+        module.get_client(taskhub=None if from_env else taskhub, endpoint="https://scheduler.example.invalid")
 
+    credential.assert_not_called()
     scheduler_client.assert_not_called()
 
 

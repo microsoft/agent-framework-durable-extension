@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+from collections import deque
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -36,6 +37,7 @@ from agent_framework import (
 )
 
 from ._response_utils import is_terminal_agent_response, serialize_input_message
+from ._retention_telemetry import eager_state_size, record_retention
 from ._shared_agent_state import (
     DurableAgentState,
     DurableAgentStateCompaction,
@@ -206,7 +208,10 @@ class DurableHistoryProvider(HistoryProvider):
 
     Attributes:
         skip_excluded: When True, messages marked ``_excluded`` by compaction are omitted
-            from the context loaded for the model. The messages remain in durable storage.
+            from the context loaded for the model, independently of storage retention.
+        prune_excluded: When True, excluded messages are physically removed on flush,
+            preserving protected messages and complete atomic groups. This is lossy and
+            opt-in, independently of any configured pressure budget.
     """
 
     DEFAULT_SOURCE_ID = "durable_history"
@@ -220,7 +225,14 @@ class DurableHistoryProvider(HistoryProvider):
         store_context_messages: bool = False,
         store_context_from: set[str] | None = None,
         skip_excluded: bool = True,
+        prune_excluded: bool | None = None,
     ) -> None:
+        """Initialize history with an optional explicit eager-pruning policy.
+
+        Leaving ``prune_excluded`` unset inherits the owning runtime's retention policy
+        during preparation. Explicit True or False overrides that policy. An unset,
+        unprepared provider does not prune.
+        """
         super().__init__(
             source_id=source_id or self.DEFAULT_SOURCE_ID,
             load_messages=True,
@@ -230,6 +242,8 @@ class DurableHistoryProvider(HistoryProvider):
             store_context_from=set(store_context_from) if store_context_from is not None else None,
         )
         self.skip_excluded = skip_excluded
+        self.prune_excluded = prune_excluded
+        self._prune_excluded_explicit = prune_excluded is not None
 
     def _binding(self) -> DurableHistoryBinding | None:
         binding = current_durable_history_binding()
@@ -609,7 +623,8 @@ class DurableHistoryProvider(HistoryProvider):
 
         Reconciliation is by ``message_id`` rather than position, so strategies that insert
         messages are handled as well as ones that only annotate. Messages removed from the
-        working buffer become excluded, not physically deleted.
+        working buffer become excluded. Only opt-in pruning can physically delete them,
+        subject to the protected-message and atomic-group floors.
 
         Failure restores this flush's entry state, including retained public references.
         Earlier successful saves are not undone and no backend write is performed here.
@@ -743,6 +758,17 @@ class DurableHistoryProvider(HistoryProvider):
                 _json_snapshot(annotations)
                 stored.extension_data = annotations
 
+        if self.prune_excluded:
+            # Resolve owners after insertions, including messages moved into split tails.
+            self._prune(
+                binding,
+                [
+                    (entry, entry.messages[index])
+                    for entry, index in stored_by_id.values()
+                    if (entry.messages[index].extension_data or {}).get(EXCLUDED_KEY)
+                ],
+            )
+
         # Synchronize transient references if the owner replaced its staged history.
         # This removes no stored messages and prevents a later flush from resurrecting
         # entries that no longer belong to the current snapshot.
@@ -855,6 +881,102 @@ class DurableHistoryProvider(HistoryProvider):
             index[cast(str, stored[0].message_id)] = (entry, 0)
         return entry, 0
 
+    @staticmethod
+    def _prune(
+        binding: DurableHistoryBinding,
+        pruned: list[tuple[DurableAgentStateEntry, DurableAgentStateMessage]],
+    ) -> None:
+        """Remove eligible exclusions and record only actual removals.
+
+        Removal is by identity, since insertions can move messages within their entry.
+        System messages, pending tool calls and the newest/current exchange are a floor.
+        Included members protect their entire tool, reasoning or persisted atomic group.
+        """
+        if not pruned:
+            return
+
+        from ._retention import (
+            _annotate_retention_groups,  # pyright: ignore[reportPrivateUsage]
+            _detached_message,  # pyright: ignore[reportPrivateUsage]
+            _link_atomic_groups,  # pyright: ignore[reportPrivateUsage]
+            _newest_exchange,  # pyright: ignore[reportPrivateUsage]
+            _saved_group_id,  # pyright: ignore[reportPrivateUsage]
+            _tool_call_links,  # pyright: ignore[reportPrivateUsage]
+            record_truncation,
+        )
+
+        state = binding.state_provider.state
+        history = state.data.conversation_history
+        protected = {id(entry) for entry in _newest_exchange(history)}
+        protected.update(
+            id(entry)
+            for entry in history
+            if binding.correlation_id is not None and entry.correlation_id == binding.correlation_id
+        )
+        replayable = {id(entry.messages[index]) for entry, index in replayable_entries(history)}
+        originals = [(entry, stored) for entry in history for stored in entry.messages]
+        # Skipped entries still own persisted group links. Keep them as opaque
+        # placeholders, never projecting hidden content or its Python profiles.
+        messages = [
+            _detached_message(stored)
+            if id(stored) in replayable
+            else Message(
+                "system",
+                [],
+                additional_properties={GROUP_ANNOTATION_KEY: {GROUP_ID_KEY: f"retention_opaque_{index}"}},
+            )
+            for index, (_, stored) in enumerate(originals)
+        ]
+        _annotate_retention_groups(
+            [message for message, (_, stored) in zip(messages, originals) if id(stored) in replayable],
+        )
+        links, pending = _tool_call_links(messages)
+        groups = _link_atomic_groups(
+            messages, [_saved_group_id(stored) for _, stored in originals], additional_links=links
+        )
+        protected_flags = [
+            id(stored) not in replayable or id(entry) in protected or stored.role == "system"
+            for entry, stored in originals
+        ]
+        for index in pending:
+            protected_flags[index] = True
+        protected_groups = {group for group, held in zip(groups, protected_flags) if held}
+        # Eager pruning cannot delete included partners. Defer the whole group until
+        # every member is excluded, including non-contiguous persisted atomic links.
+        excluded_messages = {
+            id(stored)
+            for _, stored in pruned
+            if id(stored) in replayable and (stored.extension_data or {}).get(EXCLUDED_KEY)
+        }
+        protected_groups.update(
+            group for (_, stored), group in zip(originals, groups) if id(stored) not in excluded_messages
+        )
+        protected_messages = {id(stored) for (_, stored), group in zip(originals, groups) if group in protected_groups}
+        eligible = [
+            (entry, stored)
+            for entry, stored in pruned
+            if id(stored) in excluded_messages
+            and id(entry) not in protected
+            and stored.role != "system"
+            and id(stored) not in protected_messages
+        ]
+        before = sum(len(entry.messages) for entry in history)
+        before_entries = len(history)
+        before_bytes = eager_state_size(state) if eligible else None
+        prune_messages(history, eligible)
+        removed = before - sum(len(entry.messages) for entry in history)
+        if removed:
+            record_truncation(state, removed)
+        record_retention(
+            state,
+            mechanism="eager",
+            outcome="staged" if removed else "protected",
+            before_bytes=before_bytes,
+            after_bytes=eager_state_size(state) if before_bytes is not None else None,
+            removed_messages=removed,
+            removed_entries=before_entries - len(history),
+        )
+
 
 def replayable_entries(
     history: list[DurableAgentStateEntry],
@@ -879,6 +1001,53 @@ def replayable_entries(
             continue
         for index in range(len(entry.messages)):
             yield entry, index
+
+
+def prune_messages(
+    history: list[DurableAgentStateEntry],
+    pruned: list[tuple[DurableAgentStateEntry, DurableAgentStateMessage]],
+) -> None:
+    """Remove messages, dropping only changed, bare, known transcript envelopes.
+
+    Removal is by identity rather than index, since an insertion elsewhere in the same pass may
+    have moved messages within their entry.
+
+    Args:
+        history: The owner's conversation history, modified in place.
+        pruned: The messages to remove, each with the entry that owns it.
+    """
+    from ._retention import _can_drop_entry  # pyright: ignore[reportPrivateUsage]
+
+    live_entries = {id(entry) for entry in history}
+    batches: dict[int, tuple[list[DurableAgentStateMessage], dict[int, deque[int]]]] = {}
+    for entry, stored in pruned:
+        if (
+            id(entry) not in live_entries
+            or isinstance(entry, DurableAgentStateUnknownEntry)
+            or entry.json_type not in tuple(DurableAgentStateEntryJsonType)
+        ):
+            continue
+        # Count identity occurrences, not equal payloads. Shared message lists
+        # also share a batch, with selection order deciding which owner actually
+        # removed each occurrence and may therefore lose its empty envelope.
+        _, victims = batches.setdefault(id(entry.messages), (entry.messages, {}))
+        victims.setdefault(id(stored), deque()).append(id(entry))
+
+    changed: set[int] = set()
+    for messages, victims in batches.values():
+        retained: list[DurableAgentStateMessage] = []
+        for message in messages:
+            owners = victims.get(id(message))
+            if owners:
+                changed.add(owners.popleft())
+            else:
+                retained.append(message)
+        if len(retained) != len(messages):
+            messages[:] = retained
+
+    remaining = [entry for entry in history if entry.messages or id(entry) not in changed or not _can_drop_entry(entry)]
+    if len(remaining) != len(history):
+        history[:] = remaining
 
 
 def service_stores_history(agent: Any, options: Mapping[str, Any] | None = None) -> bool:
@@ -1208,7 +1377,7 @@ def _copy_with_history_providers(agent: SupportsAgentRun, providers: list[Any]) 
     return clone
 
 
-def ensure_durable_history(agent: SupportsAgentRun) -> SupportsAgentRun:
+def ensure_durable_history(agent: SupportsAgentRun, *, prune_excluded: bool = False) -> SupportsAgentRun:
     """Back an agent's conversation history with canonical durable state.
 
     With no load-enabled primary, inject a :class:`DurableHistoryProvider` using core's
@@ -1219,6 +1388,12 @@ def ensure_durable_history(agent: SupportsAgentRun) -> SupportsAgentRun:
     Explicit provider order is preserved for both before and after hooks. Other primaries, including
     in-memory subclasses, keep their original hooks and state without an additional durable
     provider. Service ownership is resolved per run.
+
+    Hand-configured durable providers retain explicit pruning preferences. Otherwise a
+    shallow copy inherits ``prune_excluded``, including when preparing an already prepared
+    agent under a different policy. This also applies to a store-only canonical audit.
+    An unset audit already disables pruning, so preparing it with the non-deleting default
+    remains a no-op. Caller-owned providers are never mutated.
     """
     validate_history_providers(agent)
     providers = getattr(agent, "context_providers", None)
@@ -1244,9 +1419,9 @@ def ensure_durable_history(agent: SupportsAgentRun) -> SupportsAgentRun:
             len(provider_list),
         )
         updated = list(provider_list)
-        updated.insert(insertion, DurableHistoryProvider(source_id=source_id))
-    elif isinstance(existing, DurableHistoryProvider):
-        updated = list(provider_list)
+        replacement = DurableHistoryProvider(source_id=source_id)
+        replacement.prune_excluded = prune_excluded
+        updated.insert(insertion, replacement)
     elif type(existing) is InMemoryHistoryProvider:
         replacement = DurableHistoryProvider(
             source_id=existing.source_id,
@@ -1256,13 +1431,32 @@ def ensure_durable_history(agent: SupportsAgentRun) -> SupportsAgentRun:
             store_context_from=existing.store_context_from,
             skip_excluded=existing.skip_excluded,
         )
+        replacement.prune_excluded = prune_excluded
         if hasattr(existing, "after_run_once_per_turn"):
             replacement.after_run_once_per_turn = existing.after_run_once_per_turn
         updated = [replacement if provider is existing else provider for provider in provider_list]
     else:
-        # Keep the external primary untouched, but still adapt compaction for an
-        # explicitly configured canonical audit below.
+        # Preserve configured providers before applying canonical retention and
+        # adapting compaction below. External primary hooks remain untouched.
         updated = list(provider_list)
+
+    # Loading ownership does not determine the sole canonical adapter's retention.
+    # Keep an unset, non-deleting audit's existing no-op preparation, but reapply
+    # inherited policy in either direction without touching explicit pins or hooks.
+    for index, provider in enumerate(updated):
+        if not isinstance(provider, DurableHistoryProvider):
+            continue
+        if provider._prune_excluded_explicit:  # pyright: ignore[reportPrivateUsage]
+            continue
+        if provider.prune_excluded is prune_excluded:
+            continue
+        if provider.prune_excluded is None and not prune_excluded and not provider.load_messages:
+            continue
+        replacement = copy.copy(provider)
+        replacement.prune_excluded = prune_excluded
+        if provider.store_context_from is not None:
+            replacement.store_context_from = set(provider.store_context_from)
+        updated[index] = replacement
 
     durable_sources = {provider.source_id for provider in updated if isinstance(provider, DurableHistoryProvider)}
     updated = [

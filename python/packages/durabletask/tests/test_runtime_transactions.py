@@ -188,7 +188,7 @@ class BoundaryHistory(DurableHistoryProvider):
 
 class _FinalFlushFailureHistory(DurableHistoryProvider):
     def __init__(self) -> None:
-        super().__init__(skip_excluded=False)
+        super().__init__(skip_excluded=False, prune_excluded=False)
         self.fail_final_flush = False
         self.after_run_finished = False
         self.failed_snapshot: dict[str, Any] | None = None

@@ -230,6 +230,7 @@ async def test_all_store_flags_survive_substitution_and_control_real_core_hooks(
             store_context_messages=store_context_messages,
             store_context_from=store_context_from,
             skip_excluded=False,
+            prune_excluded=False,
         )
     )
     client = ToolChatClient(tool_calls=False)
