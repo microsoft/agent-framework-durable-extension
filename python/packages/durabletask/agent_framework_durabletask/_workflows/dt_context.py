@@ -20,6 +20,7 @@ from durabletask.task import (
 )
 
 from .._executors import OrchestrationAgentExecutor
+from .._json_payload import JsonPayload
 from .._models import AgentSessionId, DurableAgentSession
 from .._shim import DurableAIAgent
 from .context import WorkflowOrchestrationContext
@@ -67,7 +68,12 @@ class DurableTaskWorkflowContext:
         return cast(Any, self._context.call_activity(activity_name, input=input_json))
 
     def call_sub_orchestrator(self, name: str, input: Any, instance_id: str | None = None) -> Any:
-        return cast(Any, self._context.call_sub_orchestrator(name, input=input, instance_id=instance_id))
+        return cast(
+            Any,
+            self._context.call_sub_orchestrator(
+                name, input=input, instance_id=instance_id, return_type=cast(Any, JsonPayload)
+            ),
+        )
 
     # -- Composite tasks ------------------------------------------------------
 
@@ -80,7 +86,7 @@ class DurableTaskWorkflowContext:
     # -- External events / timers ---------------------------------------------
 
     def wait_for_external_event(self, name: str) -> Any:
-        return cast(Any, self._context).wait_for_external_event(name)
+        return cast(Any, self._context).wait_for_external_event(name, data_type=JsonPayload)
 
     def create_timer(self, fire_at: datetime) -> Any:
         return cast(Any, self._context).create_timer(fire_at)

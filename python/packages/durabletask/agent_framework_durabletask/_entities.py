@@ -27,7 +27,9 @@ from ._durable_agent_state import (
     DurableAgentStateMessage,
     DurableAgentStateRequest,
     DurableAgentStateResponse,
+    _validate_legacy_state_layout,  # pyright: ignore[reportPrivateUsage]
 )
+from ._json_payload import JsonPayload
 from ._models import RunRequest
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -81,24 +83,62 @@ class AgentEntityStateProviderMixin:
     def state(self) -> DurableAgentState:
         if self._state_cache is None:
             raw_state = self._get_state_dict()
+            _validate_legacy_state_layout(raw_state)
             self._state_cache = DurableAgentState.from_dict(raw_state) if raw_state else DurableAgentState()
         return self._state_cache
 
     @state.setter
     def state(self, value: DurableAgentState) -> None:
+        self.ensure_legacy_writable()
+        _validate_legacy_state_layout(value.to_dict())
+        original = self._state_cache
         self._state_cache = value
-        self.persist_state()
+        try:
+            self.persist_state()
+        except BaseException:
+            self._state_cache = original
+            raise
+
+    def ensure_legacy_writable(self) -> dict[str, Any] | None:
+        """Check backing-state provenance before execution, cache replacement or writing.
+
+        A fresh or relabeled candidate cannot grant permission to overwrite an
+        existing shared snapshot. This guard deliberately does not load v2 state
+        into the legacy mutable model or restore a provider session from it.
+
+        Return the validated cache snapshot for immediate persistence, or None
+        when cold. It is not authorization to skip admission on a later operation.
+        Serializing here also preserves rejection of malformed live cache entries
+        before execution or replacement.
+        """
+        _validate_legacy_state_layout(self._get_state_dict())
+        if self._state_cache is not None:
+            snapshot = self._state_cache.to_dict()
+            _validate_legacy_state_layout(snapshot)
+            return snapshot
+        return None
 
     def persist_state(self) -> None:
         """Persist the current state to the underlying storage provider."""
-        if self._state_cache is None:
-            self._state_cache = DurableAgentState()
-        self._set_state_dict(self._state_cache.to_dict())
+        snapshot = self.ensure_legacy_writable()
+        if snapshot is None:
+            # Keep cold-state behavior and guard overrides that return None.
+            if self._state_cache is None:
+                self._state_cache = DurableAgentState()
+            snapshot = self._state_cache.to_dict()
+            _validate_legacy_state_layout(snapshot)
+        self._set_state_dict(snapshot)
 
     def reset(self) -> None:
-        """Clear conversation history by resetting state to a fresh DurableAgentState."""
+        """Reset to fresh legacy state. Overrides must retain admission before mutation."""
+        self.ensure_legacy_writable()
+        original = self._state_cache
         self._state_cache = DurableAgentState()
-        self.persist_state()
+        try:
+            self.persist_state()
+        except BaseException:
+            self._state_cache = original
+            raise
         logger.debug("[AgentEntityStateProviderMixin.reset] State reset complete")
 
 
@@ -136,6 +176,7 @@ class AgentEntity:
         self._state_provider.persist_state()
 
     def reset(self) -> None:
+        # The provider owns admission, including direct provider reset calls.
         self._state_provider.reset()
 
     def _is_error_response(self, entry: DurableAgentStateEntry) -> bool:
@@ -149,6 +190,7 @@ class AgentEntity:
         request: RunRequest | dict[str, Any] | str,
     ) -> AgentResponse:
         """Execute the agent with a message."""
+        self._state_provider.ensure_legacy_writable()
         if isinstance(request, str):
             run_request = RunRequest.from_json(request)
         elif isinstance(request, dict):
@@ -364,7 +406,14 @@ class DurableTaskEntityStateProvider(DurableEntity, AgentEntityStateProviderMixi
         super().__init__()
 
     def _get_state_dict(self) -> dict[str, Any]:
-        raw = self.get_state(dict, default={})
+        # A requested dict type lets the SDK coerce arrays or strings into a
+        # dictionary before admission. The non-class tag selects plain JSON
+        # decoding, leaving the actual wire shape for the check below.
+        raw = self.get_state(intended_type=cast(Any, JsonPayload), default={})
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise ValueError("Durable entity state must be a JSON object.")
         return cast(dict[str, Any], raw)
 
     def _set_state_dict(self, state: dict[str, Any]) -> None:
