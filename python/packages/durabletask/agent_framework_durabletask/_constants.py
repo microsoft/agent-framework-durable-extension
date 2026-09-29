@@ -131,6 +131,20 @@ class DurableStateFields:
     # History field
     CONVERSATION_HISTORY: Final[str] = "conversationHistory"
 
+    # Canonical shared-state history, session and delivery fields.
+    MESSAGE_ID: Final[str] = "messageId"
+    SESSION: Final[str] = "session"
+    INGESTED_POSITIONS: Final[str] = "ingestedPositions"
+    INGESTED_MESSAGES: Final[str] = "ingestedMessages"
+    RESPONSE_MAILBOX: Final[str] = "terminalResults"
+    COMPLETED_CORRELATIONS: Final[str] = "completionReceipts"
+    RESPONSE: Final[str] = "response"
+    COMPLETED_AT: Final[str] = "completedAt"
+    OUTCOME: Final[str] = "outcome"
+
+    # Preserve existing truncation metadata without enabling any deletion policy.
+    TRUNCATION: Final[str] = "truncation"
+
 
 class ContentTypes:
     """Content type discriminator values for the $type field.
