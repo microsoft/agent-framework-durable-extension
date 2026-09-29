@@ -79,9 +79,10 @@ setup and execution in the worker's context manager so it stops on normal exit o
 Portable durable `reset` is unsupported for this external provider. Clearing its history requires a
 provider-owned operation and coordination with the caller. The sample does not implement one.
 
-The default `retention="keep_all"` and `max_state_bytes=None` do not prune Redis and do not enable
-local pressure eviction. `follow_compaction` or an explicit local byte budget does not manage Redis
-retention either. Live responses, session state and unbounded receipts still consume entity capacity.
+`retention="keep_all"` does not prune Redis. A standalone DTS host now enables a local pressure
+budget when `max_state_bytes` is omitted; explicit `None` disables it. Neither `follow_compaction`
+nor a local pressure budget manages Redis retention. Live responses, session state and unbounded
+receipts still consume entity capacity and can make the non-evictable floor exceed the budget.
 Existing local history is not erased when ownership changes. See the
 [shared retention contract](../../packages/durabletask/README.md#retention-and-state-budgets).
 

@@ -112,12 +112,14 @@ These samples host workflows and agents on Azure Durable Functions (`func start`
 
 ## Retention Defaults
 
-The runtime defaults to `retention="keep_all"` and `max_state_bytes=None`. Compaction can exclude
-messages from model context without deleting them. `follow_compaction` opts into eager pruning,
-and a positive byte budget independently enables pressure eviction at the `0.85` high watermark
-toward the `0.70` low watermark, subject to protected state. The whole-entity ASCII-escaped JSON
-estimate is local to the Python host, not a backend acceptance guarantee. `"backend_limit"` resolves
-to 1 MiB only with `DurableTaskSchedulerWorker`. Azure Functions rejects it.
+The retention default is `retention="keep_all"`. Standalone `DurableTaskSchedulerWorker` hosts
+use a 1 MiB pressure budget when `max_state_bytes` is omitted. Explicit `None` opts out. Generic
+workers and Azure Functions remain disabled by default. Compaction does not itself delete stored
+messages unless `follow_compaction` is enabled. Pressure eviction independently triggers at the
+`0.85` high watermark toward `0.70`, subject to protected state. The whole-entity ASCII-escaped
+JSON estimate is not a backend acceptance guarantee. `"backend_limit"` resolves to 1 MiB only
+with `DurableTaskSchedulerWorker`. Azure Functions rejects it. Samples that explicitly pass
+`max_state_bytes=None` continue to disable pressure eviction.
 
 Completion and ingestion receipts, live results and session/control state survive transcript
 eviction. An unreachable protected floor raises `StateCapacityError`. There is no bounded receipt
