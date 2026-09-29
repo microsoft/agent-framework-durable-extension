@@ -12,12 +12,43 @@ from unittest.mock import patch
 
 import _workflow_admission_test_support as admission
 import pytest
+from _execution_test_support import RecordingChatClient
 from _workflow_protocol_test_support import _host
-from agent_framework import Executor, Workflow, WorkflowBuilder, WorkflowContext, handler, response_handler
+from agent_framework import (
+    Agent,
+    AgentExecutor,
+    Content,
+    Executor,
+    Workflow,
+    WorkflowBuilder,
+    WorkflowContext,
+    handler,
+    response_handler,
+)
 from durabletask.task import CompletableTask
 from typing_extensions import Never
 
 from agent_framework_durabletask._json_payload import JsonPayload
+
+_INVALID_AGENT_APPROVAL_REPLIES = [
+    pytest.param("yes", id="string"),
+    pytest.param({"type": "text", "text": "yes"}, id="text-content"),
+    pytest.param({"type": "function_result", "call_id": "a", "result": "yes"}, id="function-result"),
+    pytest.param({"type": "function_approval_request", "id": "a"}, id="approval-request"),
+    pytest.param({"type": "function_approval_response", "id": "b", "approved": True}, id="wrong-id"),
+    pytest.param({"type": "function_approval_response", "approved": True}, id="missing-id"),
+]
+
+
+def _agent_approval_workflow(request_ids: tuple[str, ...] = ("a", "b")) -> tuple[Workflow, dict[str, Content]]:
+    agent = AgentExecutor(Agent(client=RecordingChatClient(), name="agent"), id="agent")
+    workflow = WorkflowBuilder(
+        name="lifecycle-agent", start_executor=agent, output_from=[agent], max_iterations=3
+    ).build()
+    approvals = {
+        key: Content.from_function_approval_request(key, Content.from_function_call(key, "tool")) for key in request_ids
+    }
+    return workflow, approvals
 
 
 @dataclass
