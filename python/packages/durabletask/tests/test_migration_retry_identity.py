@@ -278,7 +278,7 @@ async def test_stored_session_binding_rejects_before_operation_without_mutation(
         if operation in ("run", "run-no-context"):
             await entity.run({"message": "follow-up", "correlationId": "invalid-session"})
         elif operation == "create-session":
-            entity._create_session()
+            await entity._create_session()
         elif operation == "migrate":
             entity.migrate(request)
         else:
@@ -336,7 +336,7 @@ async def test_reset_clears_local_session_but_preserves_migration_identity(cold:
     writes = (provider.attempted_writes, provider.successful_writes)
     assert entity.expire_responses() == 0
     assert entity.migrate(request)["status"] == "migrated"
-    assert entity._create_session().session_id == SOURCE_SESSION_ID
+    assert (await entity._create_session()).session_id == SOURCE_SESSION_ID
     assert provider.state.data.session is None
     assert provider.raw == reset_state
     assert (provider.attempted_writes, provider.successful_writes) == writes

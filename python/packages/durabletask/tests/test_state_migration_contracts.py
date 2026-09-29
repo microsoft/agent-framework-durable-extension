@@ -764,7 +764,7 @@ def test_migration_rejects_invalid_session_fields_without_mutating_inputs(
         pytest.fail("Migration must validate session JSON without Core deserialization or provider registration.")
 
     monkeypatch.setattr(AgentSession, "from_dict", forbidden)
-    monkeypatch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+    monkeypatch.setattr("agent_framework_durabletask._session_store._register_loaded_state_types", forbidden)
     with pytest.raises(ValueError, match=rf"Legacy session\.{field} must be"):
         _migrate(source, completion_evidence=evidence)
     assert source == before_source
@@ -819,7 +819,7 @@ def test_migration_preserves_session_json_without_core_deserialization(
         pytest.fail("Migration must not deserialize typed session values or register provider types.")
 
     monkeypatch.setattr(AgentSession, "from_dict", forbidden)
-    monkeypatch.setattr("agent_framework_durabletask._entities._register_loaded_state_types", forbidden)
+    monkeypatch.setattr("agent_framework_durabletask._session_store._register_loaded_state_types", forbidden)
     staged = _migrate(source, completion_evidence=evidence)
     assert staged.data.session is not source["data"]["session"]
     result = _cold(staged)

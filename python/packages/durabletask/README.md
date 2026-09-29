@@ -223,6 +223,15 @@ commit to the backend or roll back external provider writes.
 Requests and responses are checked as stored transcript JSON before publication. Failed-run
 finalization retains pending tool results if filtering or staging fails, allowing a retry.
 
+Core sessions are loaded and staged through a private entity-backed `SessionStore` adapter.
+It uses the existing entity session field, not a separate backend or commit. The agent still
+creates its working session, and only the durable history adapter's temporary message/index
+buffers are omitted from its snapshot. Snapshot copies isolate saved state from failing custom
+decoders and retained working-session references. External history providers keep their own transcripts
+and provider state. This does not make external writes transactional or migrate history between
+providers. The adapter relies on Core's experimental store contract and is not a public storage
+configuration API.
+
 The history bridge requires an exact `2.0.0` snapshot. Even `get_messages()` may repair missing
 or duplicate internal IDs, so it is not a read-only inspection path. Mutation-capable hooks reject
 legacy and unsupported versions before changing stored history or working state. Use

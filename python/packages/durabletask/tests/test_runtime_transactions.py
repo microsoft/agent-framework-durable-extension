@@ -20,15 +20,14 @@ from _execution_test_support import (
     RecordingChatClient,
     ToolChatClient,
 )
+from _session_persistence_test_support import _ControlProvider
 from agent_framework import (
     Agent,
     AgentResponse,
     AgentResponseUpdate,
     AgentSession,
     ChatResponse,
-    ContextProvider,
     Message,
-    SessionContext,
 )
 
 from agent_framework_durabletask import AgentEntity, DurableAgentState, DurableHistoryProvider
@@ -56,35 +55,6 @@ def _error_codes(response: AgentResponse) -> list[str]:
         for content in message.contents
         if content.type == "error" and content.error_code is not None
     ]
-
-
-class _ControlProvider(ContextProvider):
-    def __init__(self) -> None:
-        super().__init__("control")
-        self.loaded: list[dict[str, Any]] = []
-        self.responses: list[AgentResponse] = []
-        self.sessions: list[AgentSession] = []
-        self.agents: list[Any] = []
-
-    async def before_run(
-        self,
-        *,
-        agent: Any,
-        session: AgentSession,
-        context: SessionContext,
-        state: dict[str, Any],
-    ) -> None:
-        del context
-        self.loaded.append(deepcopy(state))
-        self.sessions.append(session)
-        self.agents.append(agent)
-        state["before_runs"] = state.get("before_runs", 0) + 1
-
-    async def after_run(self, *, context: SessionContext, state: dict[str, Any], **kwargs: Any) -> None:
-        del kwargs
-        assert isinstance(context.response, AgentResponse)
-        self.responses.append(context.response)
-        state["after_runs"] = state.get("after_runs", 0) + 1
 
 
 class _RecordingCallback:
