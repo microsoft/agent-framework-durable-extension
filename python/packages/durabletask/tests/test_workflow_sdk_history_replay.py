@@ -36,10 +36,18 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
-from _workflow_lifecycle_test_support import _Transport, _typed_workflow
+from _workflow_lifecycle_test_support import (
+    _INVALID_AGENT_APPROVAL_REPLIES,
+    _agent_approval_workflow,
+    _Transport,
+    _typed_workflow,
+)
 from _workflow_replay_test_support import _LOGGER, _af_replay, _replay, _worker
 from agent_framework import (
+    AgentResponse,
+    Content,
     Executor,
+    Message,
     Workflow,
     WorkflowBuilder,
     WorkflowContext,
@@ -54,7 +62,7 @@ from durabletask.worker import _ActivityExecutor
 from google.protobuf.json_format import ParseDict
 from typing_extensions import Never
 
-from agent_framework_durabletask import DurableWorkflowClient, wrap_workflow_input
+from agent_framework_durabletask import DurableWorkflowClient, serialize_agent_response, wrap_workflow_input
 from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "workflow_replay"
@@ -437,6 +445,98 @@ def test_service_shaped_all_completed_transition_retires_child_address() -> None
     assert set(status["pending_requests"]) == {"a"}
     assert "subworkflows" not in status
     assert [gate.seen for gate in gates] == [[], [22]]
+
+
+@pytest.mark.parametrize("invalid_reply", _INVALID_AGENT_APPROVAL_REPLIES)
+@pytest.mark.parametrize("sibling_first", [False, True])
+def test_cold_sdk_replay_preserves_invalid_agent_approval_and_correction(
+    invalid_reply: Any, sibling_first: bool
+) -> None:
+    workflow, approvals = _agent_approval_workflow()
+    native = _worker(workflow)
+    instance = "approval-replay"
+    history: list[Any] = []
+
+    def advance(*events: Any) -> Any:
+        new = [helpers.new_orchestrator_started_event(), *events]
+        result = _replay(native, instance, history, new)
+        history.extend(new)
+        return result
+
+    def cold_status(expected: dict[str, Any]) -> None:
+        cold = _replay(_worker(workflow), instance, history)
+        assert list(cold.actions) == []
+        assert json.loads(cold.encoded_custom_status) == expected
+
+    scheduled = advance(
+        helpers.new_execution_started_event(f"dafx-{workflow.name}", instance, json.dumps(wrap_workflow_input("go")))
+    )
+    assert len(scheduled.actions) == 1 and scheduled.actions[0].HasField("sendEntityMessage")
+    action = scheduled.actions[0]
+    called = pb.HistoryEvent(eventId=action.id)
+    called.entityOperationCalled.CopyFrom(action.sendEntityMessage.entityOperationCalled)
+    history.append(called)
+    completed = pb.HistoryEvent(eventId=-1)
+    completed.entityOperationCompleted.requestId = called.entityOperationCalled.requestId
+    completed.entityOperationCompleted.output.value = json.dumps(
+        serialize_agent_response(AgentResponse(messages=[Message("assistant", list(approvals.values()))]))
+    )
+    ready = advance(completed)
+    assert list(ready.actions) == []
+    status = json.loads(ready.encoded_custom_status)
+    pending = deepcopy(status["pending_requests"])
+    assert set(pending) == {"a", "b"}
+    cold_status(status)
+
+    for _ in range(2):
+        rejected = advance(helpers.new_event_raised_event("a", json.dumps(invalid_reply)))
+        assert len(rejected.actions) == 1 and rejected.actions[0].HasField("scheduleTask")
+        checkpoint = rejected.actions[0]
+        task = checkpoint.scheduleTask
+        assert json.loads(json.loads(task.input.value)) == {"request_id": "a", "status": "invalidreply"}
+        history.append(helpers.new_task_scheduled_event(checkpoint.id, task.name, task.input.value))
+        cold_status(json.loads(rejected.encoded_custom_status))
+        acknowledgement = _ActivityExecutor(native._registry, _LOGGER, native._data_converter).execute(
+            instance, task.name, checkpoint.id, task.input.value
+        )
+        assert acknowledgement is not None and json.loads(acknowledgement) == "null"
+        waiting = advance(helpers.new_task_completed_event(checkpoint.id, acknowledgement))
+        assert list(waiting.actions) == []
+        status = json.loads(waiting.encoded_custom_status)
+        assert status["pending_requests"] == pending
+        cold_status(status)
+
+    order = ("b", "a") if sibling_first else ("a", "b")
+    for index, key in enumerate(order):
+        resumed = advance(
+            helpers.new_event_raised_event(
+                key, json.dumps(approvals[key].to_function_approval_response(key == "b").to_dict())
+            )
+        )
+        if index == 0:
+            assert list(resumed.actions) == []
+            status = json.loads(resumed.encoded_custom_status)
+            assert set(status["pending_requests"]) == {order[1]}
+            cold_status(status)
+    assert len(resumed.actions) == 1 and resumed.actions[0].HasField("sendEntityMessage")
+    action = resumed.actions[0]
+    payload = json.loads(action.sendEntityMessage.entityOperationCalled.input.value)
+    assert [(item["type"], item["id"], item["approved"]) for item in payload["contextMessages"][0]["contents"]] == [
+        ("function_approval_response", key, key == "b") for key in order
+    ]
+    called = pb.HistoryEvent(eventId=action.id)
+    called.entityOperationCalled.CopyFrom(action.sendEntityMessage.entityOperationCalled)
+    history.append(called)
+    completed = pb.HistoryEvent(eventId=-1)
+    completed.entityOperationCompleted.requestId = called.entityOperationCalled.requestId
+    completed.entityOperationCompleted.output.value = json.dumps(
+        serialize_agent_response(AgentResponse(messages=[Message("assistant", [Content.from_text("done")])]))
+    )
+    final = advance(completed)
+    assert len(final.actions) == 1 and final.actions[0].HasField("completeOrchestration")
+    assert final.actions[0].completeOrchestration.orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
+    cold = _replay(_worker(workflow), instance, history)
+    assert cold.actions == final.actions
 
 
 def test_generic_response_rejection_is_checkpointed_by_registered_activity() -> None:

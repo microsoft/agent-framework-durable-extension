@@ -1543,6 +1543,8 @@ def _load_agent_hitl_content(request_id: str, original_request: Content, raw_res
     if not isinstance(response, Content):
         raise TypeError("Agent user input responses must be Content objects or Content mappings.")
     _validate_hitl_response_json(response)
+    if original_request.type == "function_approval_request" and response.type != "function_approval_response":
+        raise ValueError("Agent approval requests require an approval response.")
     if response.type == "function_approval_response" and response.id != request_id:
         raise ValueError("Agent approval response does not match the pending request id.")
     if response.type == "function_result":

@@ -16,12 +16,15 @@ from unittest.mock import AsyncMock, Mock
 
 import _workflow_admission_test_support as admission
 import pytest
-from _execution_test_support import RecordingChatClient
-from _workflow_lifecycle_test_support import _siblings, _Transport, _typed_workflow
+from _workflow_lifecycle_test_support import (
+    _INVALID_AGENT_APPROVAL_REPLIES,
+    _agent_approval_workflow,
+    _siblings,
+    _Transport,
+    _typed_workflow,
+)
 from _workflow_protocol_test_support import _complete
 from agent_framework import (
-    Agent,
-    AgentExecutor,
     AgentResponse,
     Content,
     Executor,
@@ -442,14 +445,7 @@ def test_old_slot_and_retired_path_never_route_to_current_child(children: Any) -
 
 @pytest.mark.parametrize("order", [("first", "second"), ("second", "first"), tuple(f"approval-{i}" for i in range(12))])
 def test_agent_approval_ledger_still_waits_for_every_approval(order: tuple[str, ...]) -> None:
-    agent = AgentExecutor(Agent(client=RecordingChatClient(), name="agent"), id="agent")
-    workflow = WorkflowBuilder(
-        name="lifecycle-agent", start_executor=agent, output_from=[agent], max_iterations=3
-    ).build()
-    approvals = {
-        key: Content.from_function_approval_request(key, Content.from_function_call(key, "tool"))
-        for key in sorted(order)
-    }
+    workflow, approvals = _agent_approval_workflow(tuple(sorted(order)))
     requests: list[Any] = []
 
     def entity_call(entity_id: Any, operation: str, request: Any) -> Any:
@@ -468,6 +464,51 @@ def test_agent_approval_ledger_still_waits_for_every_approval(order: tuple[str, 
         contents = requests[1]["contextMessages"][0]["contents"]
         assert [item["id"] for item in contents] == list(order)
         assert all(item["type"] == "function_approval_response" for item in contents)
+    finally:
+        transport.close()
+
+
+@pytest.mark.parametrize("invalid_reply", _INVALID_AGENT_APPROVAL_REPLIES)
+@pytest.mark.parametrize("sibling_first", [False, True])
+def test_public_agent_invalid_approval_remains_pending_and_correctable(invalid_reply: Any, sibling_first: bool) -> None:
+    workflow, approvals = _agent_approval_workflow()
+    requests: list[Any] = []
+
+    def entity_call(entity_id: Any, operation: str, request: Any) -> Any:
+        requests.append(deepcopy(request))
+        contents = list(approvals.values()) if len(requests) == 1 else [Content.from_text("done")]
+        return _complete(serialize_agent_response(AgentResponse(messages=[Message("assistant", contents)])))
+
+    transport = _Transport()
+    try:
+        run = transport.start(workflow, entity_call)
+        native = Mock(spec=TaskHubGrpcClient)
+        native.get_orchestration_state.side_effect = transport.state
+        native.raise_orchestration_event.side_effect = lambda instance, event_name, data: transport.event(
+            event_name, data, instance_id=instance
+        )
+        client = DurableWorkflowClient(native)
+        pending = deepcopy(client.get_pending_hitl_requests("root-run"))
+        sibling_wait = transport.events["root-run"]["b"][-1]
+        for _ in range(2):
+            client.send_hitl_response("root-run", "a", deepcopy(invalid_reply))
+            assert client.get_pending_hitl_requests("root-run") == pending
+            assert transport.events["root-run"]["b"] == [sibling_wait]
+            assert len(requests) == 1 and not run.done
+        order = ("b", "a") if sibling_first else ("a", "b")
+        for index, key in enumerate(order):
+            client.send_hitl_response(
+                "root-run", key, approvals[key].to_function_approval_response(key == "b").to_dict()
+            )
+            if index == 0:
+                assert {item["request_id"] for item in client.get_pending_hitl_requests("root-run")} == {order[1]}
+                assert len(requests) == 1 and not run.done
+        assert run.done and len(requests) == 2
+        assert client.get_pending_hitl_requests("root-run") == []
+        contents = requests[1]["contextMessages"][0]["contents"]
+        assert [(item["type"], item["id"], item["approved"]) for item in contents] == [
+            ("function_approval_response", key, key == "b") for key in order
+        ]
     finally:
         transport.close()
 
@@ -695,6 +736,81 @@ def test_af_http_schedules_opaque_json_and_worker_validates_recorded_type(answer
         assert not run.statuses[-1].get("pending_requests")
     finally:
         generator.close()
+
+
+@pytest.mark.parametrize("invalid_reply", _INVALID_AGENT_APPROVAL_REPLIES)
+@pytest.mark.parametrize("sibling_first", [False, True])
+def test_af_http_invalid_agent_approval_remains_pending_and_correctable(
+    invalid_reply: Any, sibling_first: bool
+) -> None:
+    workflow, approvals = _agent_approval_workflow()
+    run = _af_run(workflow)
+    import azure.functions as func
+    from azure.durable_functions.models.actions.NoOpAction import NoOpAction
+    from azure.durable_functions.models.Task import AtomicTask
+
+    requests: list[Any] = []
+
+    def entity_call(entity_id: Any, operation: str, request: Any) -> Any:
+        requests.append(deepcopy(request))
+        contents = list(approvals.values()) if len(requests) == 1 else [Content.from_text("done")]
+        task = AtomicTask(0, NoOpAction())
+        task.set_value(
+            is_error=False, value=serialize_agent_response(AgentResponse(messages=[Message("assistant", contents)]))
+        )
+        return task
+
+    def advance(value: Any = None) -> Any:
+        for _ in range(128):
+            try:
+                task = run.generator.send(value)
+            except StopIteration:
+                return None
+            if not task.is_completed:
+                return task
+            value = task.result
+        pytest.fail("Exceeded bounded Functions approval progression")
+
+    def reply(request_id: str, value: Any, waiting: Any) -> Any:
+        request = func.HttpRequest(
+            method="POST",
+            url=f"https://example.test/api/workflow/{workflow.name}/respond/root-run/{request_id}",
+            headers={"Content-Type": "application/json"},
+            params={},
+            route_params={"instanceId": "root-run", "requestId": request_id},
+            body=json.dumps(value).encode("utf-8"),
+        )
+        response = asyncio.run(run.respond(request, run.client))
+        assert response.status_code == 200
+        wire = run.client.raise_event.await_args.kwargs["event_data"]
+        assert wire == value
+        run.events[request_id][-1].set_value(is_error=False, value=wire)
+        return advance(waiting.result)
+
+    run.host.call_entity.side_effect = entity_call
+    try:
+        waiting = advance()
+        pending = deepcopy(run.statuses[-1]["pending_requests"])
+        sibling_wait = run.events["b"][-1]
+        for _ in range(2):
+            waiting = reply("a", deepcopy(invalid_reply), waiting)
+            assert waiting is not None and len(requests) == 1
+            assert run.statuses[-1]["pending_requests"] == pending
+            assert run.events["b"] == [sibling_wait]
+        order = ("b", "a") if sibling_first else ("a", "b")
+        for index, key in enumerate(order):
+            waiting = reply(key, approvals[key].to_function_approval_response(key == "b").to_dict(), waiting)
+            if index == 0:
+                assert waiting is not None and len(requests) == 1
+                assert set(run.statuses[-1]["pending_requests"]) == {order[1]}
+        assert waiting is None and len(requests) == 2
+        assert not run.statuses[-1].get("pending_requests")
+        contents = requests[1]["contextMessages"][0]["contents"]
+        assert [(item["type"], item["id"], item["approved"]) for item in contents] == [
+            ("function_approval_response", key, key == "b") for key in order
+        ]
+    finally:
+        run.generator.close()
 
 
 def test_af_any_reply_preserves_older_wait_through_new_request_and_replay() -> None:
