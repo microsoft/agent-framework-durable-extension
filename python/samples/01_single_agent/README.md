@@ -17,14 +17,14 @@ See the [README.md](../README.md) file in the parent directory for more informat
 
 With the environment setup, you can run the sample using the combined approach or separate worker and client processes:
 
-**Option 1: Combined (Recommended for Testing)**
+### Option 1: Combined (Recommended for Testing)
 
 ```bash
 cd samples/01_single_agent
 python sample.py
 ```
 
-**Option 2: Separate Processes**
+### Option 2: Separate Processes
 
 Start the worker in one terminal:
 
@@ -40,9 +40,9 @@ python client.py
 
 The client will interact with the Joker agent:
 
-```
+```text
 Starting Durable Task Agent Client...
-Using taskhub: default
+Using taskhub: durablesamplev2UNIQUE
 Using endpoint: http://localhost:8080
 
 Getting reference to Joker agent...
@@ -59,6 +59,9 @@ Joker: Why do Python programmers prefer dark mode?
 Because light attracts bugs!
 ```
 
+If `TASKHUB` is missing, blank, or set to `default`, the sample raises `ValueError`
+before connecting to the scheduler. Set the same unique non-default hub name in both terminals.
+
 ## Viewing Agent State
 
 You can view the state of the agent in the Durable Task Scheduler dashboard:
@@ -68,6 +71,3 @@ You can view the state of the agent in the Durable Task Scheduler dashboard:
    - The state of the Joker agent entity (dafx-Joker)
    - Conversation history and current state
    - How the durable agents extension manages conversation context
-
-
-

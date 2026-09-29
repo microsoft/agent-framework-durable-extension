@@ -60,6 +60,7 @@ def __getattr__(name: str) -> str:
 # Polling configuration
 DEFAULT_MAX_POLL_RETRIES: int = 30
 DEFAULT_POLL_INTERVAL_SECONDS: float = 1.0
+DELIVERY_WINDOW_SECONDS: int = 60
 
 
 # =============================================================================

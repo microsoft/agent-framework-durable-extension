@@ -33,6 +33,14 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _resolve_taskhub(taskhub: str | None) -> str:
+    taskhub_name = taskhub if taskhub is not None else os.getenv("TASKHUB")
+    if not taskhub_name or taskhub_name != taskhub_name.strip() or taskhub_name.strip().casefold() == "default":
+        raise ValueError("Set TASKHUB to a non-default, non-blank hub name before starting this sample.")
+    return taskhub_name
+
+
 # Agent name
 WRITER_AGENT_NAME = "WriterAgent"
 
@@ -134,14 +142,14 @@ def get_worker(
     """Create a configured DurableTaskSchedulerWorker.
 
     Args:
-        taskhub: Task hub name (defaults to TASKHUB env var or "default")
+        taskhub: Task hub name, or TASKHUB from the environment
         endpoint: Scheduler endpoint (defaults to ENDPOINT env var or "http://localhost:8080")
         log_handler: Optional logging handler for worker logging
 
     Returns:
         Configured DurableTaskSchedulerWorker instance
     """
-    taskhub_name = taskhub or os.getenv("TASKHUB", "default")
+    taskhub_name = _resolve_taskhub(taskhub)
     endpoint_url = endpoint or os.getenv("ENDPOINT", "http://localhost:8080")
 
     logger.debug(f"Using taskhub: {taskhub_name}")

@@ -63,7 +63,10 @@ _HISTORY_ID_ATTRIBUTE = "_durable_history_id"
 class _DurableStateProvider(Protocol):
     """Minimal binding surface for shared durable history ownership."""
 
-    state: DurableAgentState
+    @property
+    def state(self) -> DurableAgentState:
+        """Return the currently staged canonical state."""
+        ...
 
 
 def _history_message_id(message: Message) -> str | None:

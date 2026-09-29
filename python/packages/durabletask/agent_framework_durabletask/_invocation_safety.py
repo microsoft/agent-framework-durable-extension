@@ -6,8 +6,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from inspect import getattr_static, isawaitable
+from math import isfinite
 from typing import Any, cast
 
 from agent_framework import (
@@ -17,6 +18,7 @@ from agent_framework import (
     ChatMiddlewareLayer,
     ChatResponse,
     ChatResponseUpdate,
+    Content,
     FunctionInvocationContext,
     FunctionInvocationLayer,
     FunctionMiddleware,
@@ -25,6 +27,7 @@ from agent_framework import (
 )
 from agent_framework._compaction import project_included_messages
 from agent_framework.observability import ChatTelemetryLayer
+from pydantic import BaseModel
 
 
 @dataclass
@@ -68,9 +71,71 @@ class DurableServiceAcceptance(ChatMiddleware):
         )
 
 
+def _request_value(value: Any) -> Any:
+    """Freeze only known values, without invoking lossy serializers or user equality."""
+    kind = cast("type[Any]", type(value))
+    if value is None or kind in (str, bool, int):
+        return kind, value
+    if kind is float and isfinite(value):
+        return kind, value.hex()
+    if kind in (list, tuple):
+        return kind, tuple(_request_value(item) for item in value)
+    if kind is dict:
+        values = cast("dict[Any, Any]", value)
+        if all(type(key) is str for key in values):
+            return kind, tuple((key, _request_value(values[key])) for key in sorted(values))
+    if kind in (Message, Content):
+        # Include actual fields, including opaque/raw data when comparable. Core
+        # to_dict() may omit values, and subclasses may hide request-bearing state.
+        return kind, _request_value(vars(value))
+    # FunctionTool and other live tool objects are deliberately unsupported. Their
+    # serializers omit configuration/behavior. Plain tool dictionaries retain ALL
+    # fields, including nested schema, approval and provider-specific settings.
+    raise TypeError("Request contains a non-comparable value.")
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class _PreparedRequestSnapshot:
+    values: Any
+    response_format: type[BaseModel] | None
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, _PreparedRequestSnapshot)
+            and self.response_format is other.response_format
+            and self.values == other.values
+        )
+
+
+def _prepared_request_snapshot(
+    messages: Sequence[Message], options: Mapping[str, Any] | None, stream: bool, provider_kwargs: dict[str, Any]
+) -> _PreparedRequestSnapshot | None:
+    try:
+        if options is not None and type(options) is not dict:
+            return None
+        effective_options: dict[str, Any] = dict(cast("dict[str, Any]", options)) if options is not None else {}
+        response_format = effective_options.get("response_format")
+        schema: type[BaseModel] | None = None
+        if isinstance(response_format, type) and issubclass(response_format, BaseModel):
+            schema = effective_options.pop("response_format")
+        return _PreparedRequestSnapshot(
+            _request_value((list(messages), effective_options, stream, provider_kwargs)), schema
+        )
+    except (TypeError, ValueError, RecursionError):
+        # Do not render values or serializer exceptions into logs or durable errors.
+        return None
+
+
+class _RetryRequestChanged(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("Whole-agent retry stopped: the prepared service request changed or could not be compared.")
+
+
 @dataclass
 class _RequestObservation:
     observed: bool = False
+    snapshot: _PreparedRequestSnapshot | None = field(default=None, repr=False)
+    expected: _PreparedRequestSnapshot | None = field(default=None, repr=False)
 
 
 class DurableServiceClient:
@@ -122,6 +187,7 @@ class DurableServiceClient:
         retry. False means unknown, including short circuits and failed compaction.
         True describes prepared Core inputs, not remote receipt or wire encoding.
         A completed response is separately required before accepting those inputs.
+        Retry also requires a comparable effective request, checked by _expect_retry.
         """
         return self._request.observed
 
@@ -135,14 +201,22 @@ class DurableServiceClient:
 
         Agent middleware can fail before the client is reached. Resetting only
         inside get_response would then leave stale evidence from an earlier try.
+        An explicitly armed retry expectation survives, but is not new evidence.
         """
-        self._request = _RequestObservation()
+        self._request = _RequestObservation(expected=self._request.expected)
+
+    def _expect_retry(self) -> bool:
+        """Arm an identical first-leaf requirement after the entity's progress checks."""
+        if not self._request.observed or self._request.snapshot is None:
+            return False
+        self._request.expected = self._request.snapshot
+        return True
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.__wrapped__, name)
 
     def get_response(self, messages: Sequence[Message], **kwargs: Any) -> Any:
-        request = self._request = _RequestObservation()
+        request = self._request = _RequestObservation(expected=self._request.expected)
         client = self.__wrapped__
         layout = _core_layout(client)
         raw_runtime = kwargs.get("client_kwargs")
@@ -192,11 +266,22 @@ class DurableServiceClient:
                 if plain_dispatch and (not has_functions or configuration.get("enabled", True) is False):
                     receipt = _ServiceReceipt(request, self._accept, self._on_completed)
                     prepared_kwargs = dict(kwargs)
-                    receipt.prepare(client, messages, prepared_kwargs, kwargs.get("options"))
+                    receipt.prepare(
+                        client,
+                        messages,
+                        prepared_kwargs,
+                        kwargs.get("options"),
+                        stream=bool(kwargs.get("stream")),
+                        provider_kwargs={
+                            key: value for key, value in runtime.items() if key not in {"session", "middleware"}
+                        },
+                    )
                     return receipt.observe(
                         client.get_response(messages=messages, **prepared_kwargs), stream=bool(kwargs.get("stream"))
                     )
 
+        if request.expected is not None:
+            raise _RetryRequestChanged from None
         # Preserve original arguments, scalar state, aliases, and return behavior.
         result = client.get_response(messages=messages, **kwargs)
         return _observe_completion(result, stream=bool(kwargs.get("stream")), on_completed=self._on_completed)
@@ -291,9 +376,17 @@ class _ServiceReceipt:
         self._retrieval = False
 
     def prepare(
-        self, client: Any, messages: Sequence[Message], kwargs: dict[str, Any], options: Mapping[str, Any] | None
+        self,
+        client: Any,
+        messages: Sequence[Message],
+        kwargs: dict[str, Any],
+        options: Mapping[str, Any] | None,
+        *,
+        stream: bool,
+        provider_kwargs: dict[str, Any],
     ) -> None:
         self._request.observed = False
+        self._request.snapshot = None
         self._retrieval = options is not None and options.get("continuation_token") is not None
         strategy, tokenizer = _effective_preparation(client, kwargs)
         if strategy is not None:
@@ -303,25 +396,42 @@ class _ServiceReceipt:
                 changed = await original_strategy(working_messages)
                 # Core repeats this pure projection immediately after the strategy
                 # returns. Snapshot now, before provider or outer middleware writes.
-                self._snapshot(project_included_messages(working_messages))
+                self._snapshot(project_included_messages(working_messages), options, stream, provider_kwargs)
                 return cast(bool, changed)
 
             kwargs["compaction_strategy"] = tapped_strategy
         elif tokenizer is None:
             # Core skips preparation entirely here, INCLUDING exclusion filtering.
-            self._snapshot(messages)
+            self._snapshot(messages, options, stream, provider_kwargs)
+        elif self._request.expected is not None:
+            raise _RetryRequestChanged from None
         # Tokenizer-only preparation mutates annotations after this seam. Do not
         # insert a strategy or manufacture an "exact" pre-annotation snapshot.
 
-    def _snapshot(self, messages: Sequence[Message]) -> None:
+    def _snapshot(
+        self,
+        messages: Sequence[Message],
+        options: Mapping[str, Any] | None,
+        stream: bool,
+        provider_kwargs: dict[str, Any],
+    ) -> None:
+        snapshot = _prepared_request_snapshot(messages, options, stream, provider_kwargs)
+        if self._request.expected is not None and snapshot != self._request.expected:
+            # This executes before the underlying request, including after actual
+            # compaction. Never restore caller mutations or manufacture acceptance.
+            raise _RetryRequestChanged from None
         if not self._retrieval:
             self._inputs = deepcopy(list(messages))
+        self._request.snapshot = snapshot
         self._request.observed = True
 
     def observe(self, result: Any, *, stream: bool) -> Any:
         return _observe_completion(result, stream=stream, on_completed=self._completed)
 
     def _completed(self, response: ChatResponse) -> None:
+        # A matched retry can legitimately continue a tool loop after completion.
+        # Entity progress prevents restarting that whole invocation again.
+        self._request.expected = None
         try:
             if self._inputs is not None:
                 self._accept(self._inputs)
@@ -345,11 +455,23 @@ class _FinalServiceObserver(ChatMiddleware):
 
     async def process(self, context: ChatContext, call_next: Callable[[], Awaitable[None]]) -> None:
         self._request.observed = False
+        self._request.snapshot = None
         if context.client is not self._client or _core_layout(context.client) is None:
+            if self._request.expected is not None:
+                raise _RetryRequestChanged from None
             await call_next()
             return
         receipt = _ServiceReceipt(self._request, self._accept, self._on_completed)
-        receipt.prepare(context.client, context.messages, context.kwargs, context.options)
+        receipt.prepare(
+            context.client,
+            context.messages,
+            context.kwargs,
+            context.options,
+            stream=context.stream,
+            provider_kwargs={
+                key: value for key, value in context.kwargs.items() if key not in {"compaction_strategy", "tokenizer"}
+            },
+        )
         await call_next()
         context.result = receipt.observe(context.result, stream=context.stream)
         # Resolve only stream setup, never drain. Already-finalized streams use a

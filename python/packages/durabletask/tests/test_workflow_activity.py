@@ -143,6 +143,7 @@ def test_hitl_response_handler_receives_typed_original_request() -> None:
         "message": serialize_value(hitl_message),
         "shared_state_snapshot": {},
         "source_executor_ids": [f"{SOURCE_HITL_RESPONSE}_request-1"],
+        "is_hitl_response": True,
     })
 
     handler = AsyncMock()

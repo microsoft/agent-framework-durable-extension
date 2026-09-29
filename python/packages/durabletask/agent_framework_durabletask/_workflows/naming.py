@@ -25,18 +25,27 @@ reuse an executor id cannot collide.
 
 from __future__ import annotations
 
+import hashlib
 import re
+from collections.abc import Iterator
+from typing import Any, cast
 
 __all__ = [
     "DURABLE_NAME_PREFIX",
     "MAX_EXECUTOR_ID_LENGTH",
     "SUBWORKFLOW_REQUEST_SEPARATOR",
+    "WORKFLOW_INPUT_EXECUTOR_ID",
     "is_auto_generated_workflow_name",
+    "iter_subworkflow_instances",
+    "parse_workflow_message_id",
     "qualify_subworkflow_request_id",
     "split_subworkflow_request_id",
+    "subworkflow_instance_id",
+    "validate_dts_instance_id",
     "validate_executor_id",
     "validate_workflow_name",
     "workflow_executor_activity_name",
+    "workflow_message_id",
     "workflow_name_from_orchestrator",
     "workflow_orchestrator_name",
     "workflow_scoped_executor_id",
@@ -46,6 +55,50 @@ __all__ = [
 # .NET's ``WorkflowNamingHelper.OrchestrationFunctionPrefix`` and the existing
 # ``AgentSessionId.ENTITY_NAME_PREFIX``.
 DURABLE_NAME_PREFIX = "dafx-"
+
+# Identifies the workflow's own input in the conversation chained between agent nodes. It has no
+# producing executor, so it carries a reserved id in that position.
+WORKFLOW_INPUT_EXECUTOR_ID = "input"
+
+_WORKFLOW_MESSAGE_ID_PREFIX = "wf_"
+_WORKFLOW_MESSAGE_ID_RE = re.compile(rf"^{_WORKFLOW_MESSAGE_ID_PREFIX}(?P<executor>.+)_(?P<position>\d+)$")
+
+
+def workflow_message_id(executor_id: str, position: int) -> str:
+    """Build the id for a message the workflow itself puts in the chained conversation.
+
+    Core leaves ``message_id`` unset, so without this an agent node cannot tell context it has
+    already recorded from genuinely new input. The position is the message's index in the chained
+    conversation, which is fixed once the message joins it and is reproduced identically when the
+    orchestrator replays.
+
+    Args:
+        executor_id: The node that produced the message, or ``WORKFLOW_INPUT_EXECUTOR_ID``.
+        position: The message's index in the chained conversation.
+
+    Returns:
+        An id unique within one workflow run.
+    """
+    return f"{_WORKFLOW_MESSAGE_ID_PREFIX}{executor_id}_{position}"
+
+
+def parse_workflow_message_id(message_id: str | None) -> tuple[str, int] | None:
+    """Recover the producing executor and conversation position from a message id.
+
+    Args:
+        message_id: The id to parse, if the message has one.
+
+    Returns:
+        The executor id and position, or None when the id was not produced by
+        :func:`workflow_message_id`.
+    """
+    if not message_id:
+        return None
+    match = _WORKFLOW_MESSAGE_ID_RE.match(message_id)
+    if match is None:
+        return None
+    return match.group("executor"), int(match.group("position"))
+
 
 # Separator used to qualify a nested sub-workflow's pending HITL request when it is
 # bubbled up to the top-level instance (one top-level addressing surface). A qualified id
@@ -61,13 +114,53 @@ DURABLE_NAME_PREFIX = "dafx-"
 # :func:`validate_executor_id`), so only the structural hops carry the separator.
 SUBWORKFLOW_REQUEST_SEPARATOR = "~"
 
-# Upper bound on an executor id's length when a workflow is hosted durably. The id is
-# interpolated into durable activity/entity names (``dafx-{workflow}-{executor}``) and,
-# for sub-workflow nodes, into recursively-nested child orchestration instance ids
-# (``{parent}::{executor}::{n}``). Capping it keeps those derived strings within typical
-# durable backend name/id limits; combined with the workflow-name cap, the worst-case
-# instance id stays bounded even for deeply-nested sub-workflows.
+# Executor IDs remain in registered names and semantic HITL paths. This limit is
+# independent of backend instance-ID constraints. Generated children use a bounded
+# physical identity instead of concatenating the entire ancestry.
 MAX_EXECUTOR_ID_LENGTH = 128
+
+_SUBWORKFLOW_INSTANCE_DOMAIN = "dafx/subworkflow-instance/v1"
+_SUBWORKFLOW_INSTANCE_PREFIX = "dafxsw_v1_"
+
+
+def subworkflow_instance_id(parent_instance_id: str, executor_id: str, ordinal: int) -> str:
+    """Derive a replay-stable 74-character ASCII identity for a generated child.
+
+    Scheme 1 hashes four UTF-8 fields in order: the fixed domain, exact immediate
+    parent ID, exact executor ID, and canonical decimal ordinal. Each field is
+    prefixed by its byte length as an unsigned eight-byte big-endian integer.
+    Length framing avoids delimiter ambiguity. Never normalize names or truncate
+    the digest. These bytes are a replay contract, not an authorization mechanism.
+    """
+    if not isinstance(parent_instance_id, str) or not parent_instance_id:
+        raise ValueError("Parent instance ID must be a non-empty string.")
+    if not isinstance(executor_id, str):
+        raise ValueError("Executor ID must be a string.")
+    validate_executor_id(executor_id)
+    if type(ordinal) is not int or ordinal < 0:
+        raise ValueError("Child dispatch ordinal must be a nonnegative integer.")
+    digest = hashlib.sha256()
+    try:
+        for field in (_SUBWORKFLOW_INSTANCE_DOMAIN, parent_instance_id, executor_id, str(ordinal)):
+            encoded = field.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+    except UnicodeEncodeError as exc:
+        raise ValueError("Child identity components must be valid UTF-8 strings.") from exc
+    return _SUBWORKFLOW_INSTANCE_PREFIX + digest.hexdigest()
+
+
+def validate_dts_instance_id(instance_id: str) -> None:
+    """Validate an explicit Scheduler root ID without changing the caller's ID."""
+    if (
+        not isinstance(instance_id, str)
+        or not 1 <= len(instance_id) <= 100
+        or not instance_id.strip()
+        or instance_id.startswith("@")
+        or any(not 0x20 <= ord(character) <= 0x7E for character in instance_id)
+    ):
+        raise ValueError("DTS instance ID must be nonblank, 1-100 printable ASCII characters and not start with '@'.")
+
 
 # A workflow name is interpolated into durable orchestration/activity/entity names
 # *and* into HTTP route segments (``workflow/{workflowName}/run``), so it must be
@@ -208,26 +301,18 @@ def is_auto_generated_workflow_name(workflow_name: str) -> bool:
 
 
 def validate_executor_id(executor_id: str) -> None:
-    """Validate that an executor id is safe to host durably.
+    """Validate a stable executor ID for durable hosting.
 
-    An executor id is interpolated into durable activity/entity names and, for
-    sub-workflow nodes, into nested child-orchestration instance ids and the
-    qualified ids used to address nested human-in-the-loop requests. Two properties
-    must hold:
-
-    * It must not contain :data:`SUBWORKFLOW_REQUEST_SEPARATOR`. That sequence
-      separates the structural hops of a qualified nested-HITL request id, so an id
-      containing it would make a qualified id ambiguous and mis-route a response.
-    * It must be at most :data:`MAX_EXECUTOR_ID_LENGTH` characters, so the durable
-      names and (recursively nested) instance ids derived from it stay within typical
-      durable backend limits.
+    Executor IDs must be nonempty and at most MAX_EXECUTOR_ID_LENGTH characters.
+    They must not contain the '~' separator used by qualified nested-HITL request
+    IDs. Physical child IDs are
+    derived separately, so this does not validate backend instance-ID limits.
 
     Args:
         executor_id: The executor's id within a hosted workflow.
 
     Raises:
-        ValueError: If the id is empty, contains the reserved separator, or is too
-            long.
+        ValueError: If the executor ID is not valid for durable hosting.
     """
     if not executor_id:
         raise ValueError("Executor id must be a non-empty string.")
@@ -240,7 +325,7 @@ def validate_executor_id(executor_id: str) -> None:
     if len(executor_id) > MAX_EXECUTOR_ID_LENGTH:
         raise ValueError(
             f"Executor id '{executor_id[:32]}...' is too long ({len(executor_id)} > "
-            f"{MAX_EXECUTOR_ID_LENGTH}). Durable activity/entity names and nested instance ids are "
+            f"{MAX_EXECUTOR_ID_LENGTH}). Durable registered names and logical request paths are "
             "derived from it; use a shorter id."
         )
 
@@ -249,15 +334,15 @@ def qualify_subworkflow_request_id(executor_id: str, ordinal: int, inner_request
     """Prepend one sub-workflow hop to a (possibly already-qualified) request id.
 
     Produces ``{executor_id}~{ordinal}~{inner_request_id}``. ``ordinal`` selects the
-    specific child orchestration among several a single ``WorkflowExecutor`` node may
-    dispatch in one superstep, so two children of the same executor stay distinctly
-    addressable. ``inner_request_id`` is the child's bare leaf request id or its own
+    specific child orchestration using the parent's run-wide dispatch ordinal,
+    so later invocations cannot reuse retired public addresses.
+    ``inner_request_id`` is the child's bare leaf request id or its own
     already-qualified path for deeper nesting.
 
     Args:
         executor_id: The sub-workflow node's executor id (separator-free; see
             :func:`validate_executor_id`).
-        ordinal: The child's index in the parent's ``subworkflows`` status list.
+        ordinal: The child's never-reused key in the parent's ``subworkflows`` status map.
         inner_request_id: The request id (bare or qualified) within the child.
 
     Returns:
@@ -265,6 +350,25 @@ def qualify_subworkflow_request_id(executor_id: str, ordinal: int, inner_request
     """
     sep = SUBWORKFLOW_REQUEST_SEPARATOR
     return f"{executor_id}{sep}{ordinal}{sep}{inner_request_id}"
+
+
+def iter_subworkflow_instances(children: Any) -> Iterator[tuple[int, str]]:
+    """Read active children keyed by global dispatch ordinal, never legacy slots.
+
+    Old list-shaped status cannot establish a stable address and is deliberately
+    unsupported. Falling back to enumerate would reroute a retired path to a new child.
+    """
+    if not isinstance(children, dict):
+        return
+    for key, child in cast(dict[Any, Any], children).items():
+        if not isinstance(key, str) or not isinstance(child, str) or not child:
+            continue
+        try:
+            ordinal = int(key)
+        except ValueError:
+            continue
+        if ordinal >= 0 and str(ordinal) == key:
+            yield ordinal, child
 
 
 def split_subworkflow_request_id(request_id: str) -> tuple[str, int, str] | None:

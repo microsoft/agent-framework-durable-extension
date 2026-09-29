@@ -142,6 +142,9 @@ min-file-size = 1
 
 [tool.pytest.ini_options]
 testpaths = ["packages/durabletask/tests", "packages/azurefunctions/tests"]
+# Functions tests reuse Durable Task test helpers. Declare the path rather than
+# relying on Durable Task tests being collected first.
+pythonpath = ["packages/durabletask/tests"]
 norecursedirs = ["**/lab/**"]
 addopts = "-ra -q -r fEX"
 asyncio_mode = "auto"

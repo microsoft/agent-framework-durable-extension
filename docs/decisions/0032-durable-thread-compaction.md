@@ -757,6 +757,83 @@ gaps in delivery evidence. If evidence is missing, reject or defer migration rat
 delivered prefix. A matching `2.x` version does not certify mixed-format compatibility. These are
 prototype deployment constraints, not a mandate for its private APIs or exact final common schema.
 
+#### Python runtime implementation note, 2026-09-22
+
+The current Python runtime update deliberately retains workflow protocol `2` while tightening start
+admission and changing HITL activity checkpoints, mixed parent/child replay and generated child IDs.
+Users must start fresh workflow instances, including when upgrading from an earlier v2 build.
+Existing v2 in-flight instances and recorded histories are unsupported and may fail on the new
+runtime. The unchanged marker checks start-envelope admission only, not feature or replay
+compatibility. Older v2 envelopes can still pass that check. There is no replay migration or
+fallback. A new isolated hub with matching workers and clients is recommended.
+Keep old runs, including published concatenated-child-ID histories, on their original workers and
+hub if they must finish. The `isolated_v2` acknowledgement does not prove isolation or detect
+incompatible peers.
+
+Generated root workflow starts take public application JSON, not internal checkpoint data. The
+workflow client and generated HTTP routes remove reserved child markers. Application input is
+sanitized before typed reconstruction. Generated Functions entries read start input as plain JSON
+without the SDK's custom-object decoder before checking provenance. Generated Functions parents
+also receive child results as plain JSON, without SDK custom-object construction or global decoder
+changes. Native orchestration input contracts are unchanged.
+Internal `__subworkflow_input__` and `__subworkflow_address__` markers require an actual SDK-reported
+parent and a child address consistent with both SDK parent and current instance IDs. Generated
+entries reject missing or mismatched provenance before checkpoint decoding. A native application
+parent may still call a generated workflow with ordinary application JSON inside the protocol-2
+start wrapper. With no internal child markers, that input remains on the application-JSON path.
+
+SDK parent metadata authenticates only the immediate parent/child relationship. It does not
+authenticate full ancestry or the claimed root's authority, or protect against a malicious
+application parent supplying an otherwise consistent envelope. Trusted worker and application
+deployments remain required. Internal checkpoint decoding still uses pickle and is not safe for
+arbitrary untrusted input.
+
+Activity state is compared with a detached encoding captured on the receiving worker, not
+producer pickle bytes. Explicit writes still win, and in-place JSON changes remain type-sensitive.
+Streaming fallback is limited to an immediate capability refusal. Exceptions from awaited setup,
+iteration or finalization never authorize a second invocation. Custom non-streaming agents must
+reject the stream argument before entering asynchronous work.
+
+HITL tuple descriptors preserve Python's argument shape, including the explicit empty-tuple
+argument exposed by Python 3.10. Admission follows the installed Core implementation rather
+than inferring that all tuple aliases accept the same JSON or native tuple values.
+
+Child-ID scheme `1` always uses 74 ASCII characters, `dafxsw_v1_` plus the full SHA-256 hex digest
+over a domain separator and length-framed UTF-8 (actual parent ID, exact executor ID, decimal ordinal).
+Dispatch and provenance helpers apply the same derivation at every hop, not an authentication check.
+Always hashing bounds physical ID length without truncating identity, restricting logical names further
+or maintaining a hybrid short-name/hash rule. Original executor/workflow names, `~` HITL paths and
+root notification addresses remain unchanged. Clients follow actual child status maps, not ID parsing.
+Bounded physical IDs do not imply unlimited nesting, as logical paths and payloads still grow with
+depth and their limits still apply.
+Known standalone `DurableTaskSchedulerClient` explicit roots require nonblank IDs of 1-100 printable
+ASCII characters and no `@` prefix, with no rewrite. Generic `TaskHubGrpcClient` behavior stays unchanged (unknown backend).
+Functions retains its 100-character Unicode-aware generic route validation because its provider is
+unknown, not an ASCII-only restriction. Application-owned native orchestrator calls remain unchanged.
+
+The standalone Durable Task SDK minimum is now `durabletask>=1.7.1,<2` for parent-instance metadata.
+The existing lock already selects `1.7.2`, so this raises the supported minimum without changing
+the locked SDK version. Functions uses its own SDK's parent metadata. This is a Python runtime
+requirement, not proof of shared-deployment or cross-runtime compatibility.
+
+Non-agent HITL reconstruction and validation run in the response activity. Its checkpointed
+`accepted` or `invalidreply` outcome lets orchestration replay avoid rerunning reply validators.
+Invalid replies leave the request pending, while handler and output-serialization failures remain
+activity failures. Activity retry or redelivery can still repeat application code. Recorded
+response types retain supported generic arguments, with JSON reconstruction and type checks
+following the installed Core version. Early valid replies for known fixed IDs and pending event
+waits are preserved. Delivery acknowledgement is not validation or handler completion, and nested
+replies still require a recorded active child path.
+
+Parent and child requests may be active together. Ready handlers and downstream work proceed
+without joining paused children, including when a later child's output enables an earlier child
+to continue. Local reported state updates and deletes merge in dispatch order. Ready results
+preserve dispatch order and each result's message order within a wave. Across waves, recorded
+readiness determines order, not original child invocation order. This retains durable snapshots,
+not Core's shared visibility of uncommitted writes. These are implementation notes, not evidence of
+passing tests, live-host validation or release readiness. Historical prototype evidence below does
+not validate this update.
+
 ```mermaid
 flowchart TB
   MODE{"Deployment mode?"}
@@ -1249,22 +1326,33 @@ transcript as automatic recovery insurance.
 
 ## Python reader-stage runtime note, 2026-09-23
 
-The local reader-first implementation adds registration-scoped plain-JSON SDK decoding.
-The standalone integration requires `durabletask>=1.7.1,<2` at this stage for target-aware
-input/result decoding and deferred state reads. `AgentFunctionApp` applies its new boundary
-only to generated agent entities, not Functions workflow start, child-result or event decoding.
-See [Python durable JSON boundaries](../features/python-durable-json-boundaries.md).
+The earlier reader-first implementation in
+[PR #108](https://github.com/microsoft/agent-framework-durable-extension/pull/108) added
+registration-scoped plain-JSON SDK decoding. Its standalone integration required
+`durabletask>=1.7.1,<2` for target-aware input/result decoding and deferred state reads.
+At that stage, `AgentFunctionApp` applied the boundary only to generated agent entities, not
+Functions workflow start, child-result or event decoding.
 
-This does not activate v2 writers, migration or session restoration. Mutable state still defaults
-to `1.1.0`, and v2 snapshots remain read-only. The checkpoint codec and this ADR's rollout gates
-are unchanged. This source-level note adds no live-host validation claim.
+That stage did not activate v2 writers, migration or session restoration. Mutable state still
+defaulted to `1.1.0`, and v2 snapshots remained read-only. Those were PR #108's stage limits, not
+the current runtime contract. The checkpoint codec and this ADR's rollout gates were unchanged.
 
-Delivery staging audits unsupported live response fields before Core serialization. Rejection
-does not invoke their conversion hooks. Supported lazy values retain their existing policy,
-and duplicate completions remain no-ops without inspecting a replacement producer.
+The current unreleased stack through
+[PR #112](https://github.com/microsoft/agent-framework-durable-extension/pull/112) includes canonical
+v2 writes and scoped Functions workflow and standalone agent-result decoding. See the
+[current JSON boundary guide](../features/python-durable-json-boundaries.md) and
+[runtime implementation note](#python-runtime-implementation-note-2026-09-22) for the present
+contract and fresh-instance requirement under protocol `2`. This historical note makes no new
+live-host or supported-version validation claim.
 
-History reconciliation distinguishes loaded occurrence IDs from unallocated summary IDs and
-allocates all new or revised occurrences before repairing summary backlinks. Revisions compare
-JSON-exact payloads. External-primary observation uses the
-provider's current storage flags, without rebinding its custom hooks. Naive response timestamp
-strings receive the same UTC interpretation on direct and history-provider append paths.
+Delivery staging in [PR #109](https://github.com/microsoft/agent-framework-durable-extension/pull/109)
+audited unsupported live response fields before Core serialization. Rejection did not invoke their
+conversion hooks. Supported lazy values retained their existing policy, and duplicate completions
+remained no-ops without inspecting a replacement producer.
+
+History reconciliation in [PR #111](https://github.com/microsoft/agent-framework-durable-extension/pull/111)
+distinguished loaded occurrence IDs from unallocated summary IDs, allocated new/revised occurrences
+before repairing backlinks, and compared revisions with JSON-exact payloads.
+External-primary observation used the provider's storage flags without
+rebinding its custom hooks. Naive response timestamp strings received the same UTC interpretation
+on direct and history-provider append paths.

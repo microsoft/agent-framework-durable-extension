@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import agent_framework
 import pytest
+from _invocation_test_support import ToolChatClient, lookup
 from agent_framework import (
     Agent,
     AgentContext,
@@ -31,7 +32,6 @@ from agent_framework import (
 )
 from agent_framework import chat_middleware as as_chat_middleware
 from agent_framework.observability import ChatTelemetryLayer
-from test_invocation_safety import ToolChatClient, lookup
 
 from agent_framework_durabletask._invocation_safety import (
     DurableServiceAcceptance,
