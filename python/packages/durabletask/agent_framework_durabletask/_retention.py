@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Independent eager-pruning policy and opt-in whole-entity pressure eviction."""
+"""Independent eager-pruning policy and whole-entity pressure eviction."""
 
 from __future__ import annotations
 

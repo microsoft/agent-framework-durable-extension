@@ -36,14 +36,11 @@ from ._feature_usage import FeatureIndex
 from ._json_payload import JsonPayload, install_json_payload_converter
 from ._response_utils import serialize_agent_response
 from ._retention import (
-    DEFAULT_MAX_STATE_BYTES,
     DEFAULT_RETENTION,
     DTS_MAX_STATE_BYTES,
     HIGH_WATERMARK,
     LOW_WATERMARK,
     RetentionMode,
-    StateBudget,
-    resolve_state_budget,
     validate_retention,
 )
 from ._workflows.activity import execute_workflow_activity
@@ -115,7 +112,7 @@ class DurableAIAgentWorker:
         *,
         deployment_mode: str | None = None,
         retention: RetentionMode = DEFAULT_RETENTION,
-        max_state_bytes: StateBudget = DEFAULT_MAX_STATE_BYTES,
+        max_state_bytes: StateBudgetOverride = INHERIT,
         high_watermark: float = HIGH_WATERMARK,
         low_watermark: float = LOW_WATERMARK,
         response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
@@ -129,9 +126,11 @@ class DurableAIAgentWorker:
                 deployment with upgraded clients. None reads ``DURABLE_AGENTS_DEPLOYMENT_MODE``.
             retention: Eager pruning policy, defaulting to ``keep_all``. ``follow_compaction``
                 prunes compaction exclusions independently of the pressure budget.
-            max_state_bytes: Optional serialized-state budget. None disables pressure eviction.
-                ``backend_limit`` requires a DurableTaskSchedulerWorker with its known 1 MiB limit.
-                An explicit positive integer works with any backend.
+            max_state_bytes: Serialized-state pressure budget. Omission or INHERIT uses the
+                known 1 MiB limit for DurableTaskSchedulerWorker and leaves other backends
+                disabled. Explicit None disables pressure eviction on any backend.
+                ``backend_limit`` requires DurableTaskSchedulerWorker. An explicit positive
+                integer works with any backend. This budget excludes transport framing.
             high_watermark: Budget fraction at which pressure eviction starts, defaulting to 0.85.
             low_watermark: Target budget fraction after pressure eviction, defaulting to 0.70.
             response_delivery_window_seconds: Positive integer response delivery window in seconds.
@@ -139,7 +138,9 @@ class DurableAIAgentWorker:
         validate_runtime_deployment(deployment_mode)
         validate_retention(retention, high_watermark, low_watermark)
         self._backend_limit = DTS_MAX_STATE_BYTES if isinstance(worker, DurableTaskSchedulerWorker) else None
-        resolved_max_state_bytes = resolve_state_budget(max_state_bytes, backend_limit=self._backend_limit)
+        resolved_max_state_bytes = resolve_state_budget_override(
+            max_state_bytes, self._backend_limit, backend_limit=self._backend_limit
+        )
         validate_response_delivery_window(response_delivery_window_seconds)
         install_json_payload_converter(worker)
         self._worker = worker

@@ -37,7 +37,12 @@ from durabletask.entities import EntityInstanceId
 from live_retention_worker import AGENT_NAME, DELIVERY_WINDOW_SECONDS, MAX_STATE_BYTES
 
 import agent_framework_durabletask
-from agent_framework_durabletask import DurableAgentState, DurableHistoryProvider, serialize_agent_response
+from agent_framework_durabletask import (
+    DTS_MAX_STATE_BYTES,
+    DurableAgentState,
+    DurableHistoryProvider,
+    serialize_agent_response,
+)
 from agent_framework_durabletask._shared_response import load_terminal_response
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_dts, pytest.mark.timeout(150)]
@@ -93,7 +98,9 @@ def live_client(dts_available: bool, dts_endpoint: str, live_taskhub: str) -> It
 
 
 class _WorkerProcess:
-    def __init__(self, endpoint: str, taskhub: str, artifacts: Path, block_message_id: str) -> None:
+    def __init__(
+        self, endpoint: str, taskhub: str, artifacts: Path, block_message_id: str, *, budget_policy: str = "small"
+    ) -> None:
         artifacts.mkdir()
         self.artifacts = artifacts
         self.events: Queue[dict[str, Any]] = Queue(maxsize=128)
@@ -122,6 +129,8 @@ class _WorkerProcess:
                     str(artifacts),
                     "--block-message-id",
                     block_message_id,
+                    "--budget-policy",
+                    budget_policy,
                 ],
                 cwd=artifacts,
                 env=env,
@@ -227,8 +236,10 @@ class _WorkerProcess:
 
 
 @contextmanager
-def _worker(endpoint: str, hub: str, artifacts: Path, block: str = "") -> Iterator[_WorkerProcess]:
-    worker = _WorkerProcess(endpoint, hub, artifacts, block)
+def _worker(
+    endpoint: str, hub: str, artifacts: Path, block: str = "", *, budget_policy: str = "small"
+) -> Iterator[_WorkerProcess]:
+    worker = _WorkerProcess(endpoint, hub, artifacts, block, budget_policy=budget_policy)
     try:
         worker.event("started")
         yield worker
@@ -460,6 +471,173 @@ def test_live_media_pressure_cold_read_and_exact_model_input(
                 datetime.fromisoformat(mailbox["resultExpiresAt"]) - datetime.fromisoformat(mailbox["completedAt"])
             ).total_seconds() == DELIVERY_WINDOW_SECONDS
         assert set(final["data"]["terminalResults"]) == {*raw["data"]["terminalResults"], "cold"}
+
+
+@pytest.mark.parametrize("kind", ["ascii", "unicode", "escaped", "tool-result"])
+@pytest.mark.parametrize("budget_policy", ["default", "disabled"])
+def test_live_dts_default_pressure_and_opt_out_near_backend_limit(
+    kind: str,
+    budget_policy: str,
+    live_client: DurableTaskSchedulerClient,
+    dts_endpoint: str,
+    live_taskhub: str,
+    tmp_path: Path,
+) -> None:
+    entity = EntityInstanceId(entity=f"dafx-{AGENT_NAME}", key=uuid.uuid4().hex)
+    chunk = {
+        "ascii": "x" * 200_000,
+        "unicode": "\u754c" * 33_333,
+        "escaped": '"\\\n' * 33_333,
+        "tool-result": "x" * 100_000,
+    }[kind]
+    high = int(DTS_MAX_STATE_BYTES * 0.85)
+    expected_messages: list[dict[str, Any]] = []
+    retained: list[dict[str, Any]] = []
+    committed: dict[str, Any] = {}
+    with _worker(dts_endpoint, live_taskhub, tmp_path / "warm", budget_policy=budget_policy) as warm:
+        for index in range(5):
+            correlation = f"boundary-{index}"
+            current_id = f"{correlation}-input"
+            inputs = [Message("user", [chunk if kind != "tool-result" else "tool boundary"], message_id=current_id)]
+            if kind == "tool-result":
+                inputs.extend([
+                    Message(
+                        "assistant",
+                        [Content.from_function_call(f"{correlation}-call", "lookup", arguments={})],
+                        message_id=f"{correlation}-call-message",
+                    ),
+                    Message(
+                        "tool",
+                        [Content.from_function_result(f"{correlation}-call", result={"data": chunk})],
+                        message_id=f"{correlation}-result-message",
+                    ),
+                ])
+            request = _request(correlation, inputs)
+            assert len(json.dumps(request).encode("utf-8")) < DTS_MAX_STATE_BYTES
+            live_client.signal_entity(entity, "run", request)
+            _equal(
+                warm.captured(current_id),
+                [*_model_history(retained), *[item.to_dict() for item in inputs]],
+                "model input",
+            )
+            committed = _committed(live_client, entity, correlation, warm)
+            expected_messages.extend([*[item.to_dict() for item in inputs], _answer(current_id)])
+            retained = _stored(committed)
+            retained_ids = {item["message_id"] for item in retained}
+            _equal(
+                retained,
+                [item for item in expected_messages if item["message_id"] in retained_ids],
+                "pressure preserves retained values and ordering",
+            )
+            assert current_id in retained_ids and f"{current_id}-answer" in retained_ids
+            metadata = live_client.get_entity(entity)
+            assert metadata is not None
+            serialized = metadata.get_state()
+            assert isinstance(serialized, str)
+            actual_bytes = len(serialized.encode("utf-8"))
+            assert actual_bytes == len(json.dumps(committed))
+            assert actual_bytes < DTS_MAX_STATE_BYTES
+            if budget_policy == "default":
+                assert actual_bytes < high
+            for previous in range(index + 1):
+                if kind == "tool-result":
+                    pair = {f"boundary-{previous}-call-message", f"boundary-{previous}-result-message"}
+                    assert pair <= retained_ids or pair.isdisjoint(retained_ids)
+            if index < 4:
+                assert not committed["data"].get("truncation")
+        removed = len(expected_messages) - len(retained)
+        if budget_policy == "default":
+            assert removed > 0
+            assert committed["data"]["truncation"]["evictedMessageCount"] == removed
+            assert warm.removed_measurement() == removed
+        else:
+            assert removed == 0 and high < actual_bytes < DTS_MAX_STATE_BYTES
+            assert not committed["data"].get("truncation")
+        assert len(committed["data"]["completionReceipts"]) == len(committed["data"]["terminalResults"]) == 5
+
+    with _worker(dts_endpoint, live_taskhub, tmp_path / "cold", budget_policy=budget_policy) as cold:
+        _equal(_snapshot(live_client, entity)["state"], committed, "cold read preserves pressure result")
+        current = Message("user", ["cold continuation"], message_id="cold-input")
+        live_client.signal_entity(entity, "run", _request("cold", [current]))
+        _equal(cold.captured("cold-input"), [*_model_history(retained), current.to_dict()], "cold model input")
+        final = _committed(live_client, entity, "cold", cold)
+        assert len(json.dumps(final)) < (high if budget_policy == "default" else DTS_MAX_STATE_BYTES)
+        _equal(
+            {key: final["data"]["completionReceipts"][key] for key in committed["data"]["completionReceipts"]},
+            committed["data"]["completionReceipts"],
+            "pressure preserves completion receipts",
+        )
+
+
+@pytest.mark.parametrize("kind", ["ascii", "unicode", "escaped"])
+@pytest.mark.parametrize("delta", [-1, 0, 1], ids=["below", "at", "above"])
+def test_live_entity_input_serialization_boundary(
+    kind: str, delta: int, live_client: DurableTaskSchedulerClient
+) -> None:
+    unit = {"ascii": "x", "unicode": "\u754c", "escaped": '"\\\n'}[kind]
+    encoded_unit_size = len(json.dumps(unit).encode("utf-8")) - 2
+    size = DTS_MAX_STATE_BYTES + delta
+    repetitions, remainder = divmod(size - len(json.dumps({"payload": ""})), encoded_unit_size)
+    payload = {"payload": unit * repetitions + "x" * remainder}
+    assert len(json.dumps(payload).encode("utf-8")) == size
+    entity = EntityInstanceId(entity="retention-input-boundary", key=uuid.uuid4().hex)
+    if delta <= 0:
+        live_client.signal_entity(entity, "probe", payload)
+    else:
+        with pytest.raises(grpc.RpcError) as rejected:
+            live_client.signal_entity(entity, "probe", payload)
+        assert rejected.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+        assert "1048576 UTF8-encoded bytes" in rejected.value.details()
+
+
+def test_live_default_pressure_rejects_protected_state_without_losing_previous_commit(
+    live_client: DurableTaskSchedulerClient, dts_endpoint: str, live_taskhub: str, tmp_path: Path
+) -> None:
+    entity = EntityInstanceId(entity=f"dafx-{AGENT_NAME}", key=uuid.uuid4().hex)
+    with _worker(dts_endpoint, live_taskhub, tmp_path / "protected", budget_policy="default") as worker:
+        seed = Message("user", ["preserve this commit"], message_id="seed-input")
+        live_client.signal_entity(entity, "run", _request("seed", [seed]))
+        worker.captured("seed-input")
+        baseline = _committed(live_client, entity, "seed", worker)
+        oversized = Message("user", ["x" * 920_000], message_id="protected-input")
+        payload = {"key": entity.key, "request": _request("protected", [oversized])}
+        assert len(json.dumps(payload).encode("utf-8")) < DTS_MAX_STATE_BYTES
+        instance = live_client.schedule_new_orchestration("live_retention_call", input=payload)
+        finished = False
+        try:
+            worker.captured("protected-input")
+
+            def terminal() -> Any:
+                state = live_client.get_orchestration_state(instance)
+                return (
+                    state
+                    if state is not None
+                    and state.runtime_status in (OrchestrationStatus.COMPLETED, OrchestrationStatus.FAILED)
+                    else None
+                )
+
+            failed = _poll(worker, terminal, "protected-state capacity failure")
+            finished = True
+            assert failed.runtime_status == OrchestrationStatus.FAILED
+            assert failed.failure_details is not None and "capacity" in failed.failure_details.message
+            _equal(_snapshot(live_client, entity)["state"], baseline, "capacity failure preserves committed state")
+            smaller = Message("user", ["retry with a smaller input"], message_id="protected-input")
+            live_client.signal_entity(entity, "run", _request("protected", [smaller]))
+            _equal(
+                worker.captured("protected-input"),
+                [*_model_history(_stored(baseline)), smaller.to_dict()],
+                "failed oversized input does not enter retry history",
+            )
+            final = _committed(live_client, entity, "protected", worker)
+            _equal(
+                _stored(final),
+                [*_stored(baseline), smaller.to_dict(), _answer("protected-input")],
+                "smaller retry commits normally",
+            )
+        finally:
+            if not finished:
+                with suppress(grpc.RpcError):
+                    live_client.terminate_orchestration(instance)
 
 
 def test_live_hard_stop_before_commit_repeats_effect_but_committed_duplicate_does_not(

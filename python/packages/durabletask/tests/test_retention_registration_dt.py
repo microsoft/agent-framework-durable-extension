@@ -81,6 +81,7 @@ def test_public_inheritance_contract_is_typed_and_exported() -> None:
     assert isinstance(INHERIT, Enum)
     assert INHERIT is Inherit.INHERIT
     assert Inherit in get_args(StateBudgetOverride)
+    assert signature(DurableAIAgentWorker).parameters["max_state_bytes"].default is INHERIT
     assert signature(DurableAIAgentWorker.add_agent).parameters["max_state_bytes"].default is INHERIT
     assert signature(DurableAIAgentWorker.configure_workflow).parameters["max_state_bytes"].default is INHERIT
     for name in _configuration.__all__:
@@ -112,6 +113,42 @@ def test_worker_defaults_reach_the_entity_consumer() -> None:
         high_watermark=HIGH_WATERMARK,
         low_watermark=LOW_WATERMARK,
         response_delivery_window_seconds=DELIVERY_WINDOW_SECONDS,
+    )
+
+
+@pytest.mark.parametrize("surface", ["agent", "workflow"])
+@pytest.mark.parametrize(
+    "scheduler,settings,expected",
+    [
+        pytest.param(True, {}, DTS_MAX_STATE_BYTES, id="dts-omitted"),
+        pytest.param(True, {"max_state_bytes": INHERIT}, DTS_MAX_STATE_BYTES, id="dts-inherited"),
+        pytest.param(True, {"max_state_bytes": None}, None, id="dts-disabled"),
+        pytest.param(True, {"max_state_bytes": 8192}, 8192, id="dts-explicit"),
+        pytest.param(False, {}, None, id="generic-omitted"),
+        pytest.param(False, {"max_state_bytes": INHERIT}, None, id="generic-inherited"),
+        pytest.param(False, {"max_state_bytes": None}, None, id="generic-disabled"),
+        pytest.param(False, {"max_state_bytes": 8192}, 8192, id="generic-explicit"),
+    ],
+)
+def test_host_budget_default_is_backend_aware(
+    surface: str, scheduler: bool, settings: dict[str, Any], expected: int | None
+) -> None:
+    grpc_worker = (
+        Mock(spec=DurableTaskSchedulerWorker, _data_converter=JsonDataConverter(), _is_running=False)
+        if scheduler
+        else create_registration_worker()
+    )
+    worker = DurableAIAgentWorker(grpc_worker, **settings)
+    if surface == "agent":
+        worker.add_agent(_agent())
+    else:
+        worker.configure_workflow(_workflow("flow", _agent()))
+    _assert_settings(
+        _consumer_settings(grpc_worker),
+        retention="keep_all",
+        max_state_bytes=expected,
+        high_watermark=0.85,
+        low_watermark=0.70,
     )
 
 

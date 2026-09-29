@@ -112,12 +112,20 @@ def live_retention_duplicate(context: OrchestrationContext, payload: dict[str, A
     return result  # noqa: B901
 
 
+def live_retention_call(context: OrchestrationContext, payload: dict[str, Any]) -> Generator[Any, Any, Any]:
+    """Expose a single entity operation's success or failure through an orchestration."""
+    entity = EntityInstanceId(entity=f"dafx-{AGENT_NAME}", key=payload["key"])
+    result = yield context.call_entity(entity, "run", payload["request"])
+    return result  # noqa: B901
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--taskhub", required=True)
     parser.add_argument("--artifacts", required=True, type=Path)
     parser.add_argument("--block-message-id", default="")
+    parser.add_argument("--budget-policy", choices=("small", "default", "disabled"), default="small")
     args = parser.parse_args()
     expected_package = Path(__file__).resolve().parents[2] / "agent_framework_durabletask"
     if Path(agent_framework_durabletask.__file__).resolve().parent != expected_package:
@@ -132,11 +140,14 @@ def main() -> None:
     )
     # Inherit the parent test's explicit acknowledgement for its newly generated hub.
     # Do not grant isolated mode to arbitrary direct launches of this worker.
+    budget_settings: dict[str, Any] = {}
+    if args.budget_policy != "default":
+        budget_settings["max_state_bytes"] = MAX_STATE_BYTES if args.budget_policy == "small" else None
     host = DurableAIAgentWorker(
         worker,
         retention="keep_all",
-        max_state_bytes=MAX_STATE_BYTES,
         response_delivery_window_seconds=DELIVERY_WINDOW_SECONDS,
+        **budget_settings,
     )
     host.add_agent(
         Agent(
@@ -148,6 +159,7 @@ def main() -> None:
         )
     )
     worker.add_orchestrator(live_retention_duplicate)
+    worker.add_orchestrator(live_retention_call)
     try:
         host.start()
         # start() launches the SDK background thread. Only a backend receipt proves readiness.

@@ -25,8 +25,9 @@ delivery independent of transcript ownership.
 - The outgoing workflow conversation preserves the full logical selection, separately from the
   target's new-message delta. Position monotonicity is a cursor optimization condition, not a
   requirement on custom filters.
-- Core compaction controls model input. Eager transcript pruning and pressure eviction are separate
-  opt-ins. The proposed shared defaults are non-deleting `keep_all` and no pressure budget (`None`).
+- Core compaction controls model input and does not authorize eager transcript deletion. Eager
+  pruning remains opt-in. A host may enable independent pressure eviction against a known budget,
+  with an explicit opt-out. Runtime-specific defaults are stated below.
 - All entity-local slices share one size budget and commit at one operation boundary. External
   writes and tool side effects are outside that transaction.
 - Shared rollout requires proven reader, writer, client and orchestration-history compatibility,
@@ -43,7 +44,7 @@ Shared invariants do not require identical core APIs or the prototype's private 
 | Ownership policy | Per-run `store`, including `True -> False -> True` | Initially session-stable proposal, not a core API limit. Honor supported overrides, reject unsupported transitions. |
 | Eager pruning | `follow_compaction` on supported `DurableHistoryProvider`, not external stores | Defer `FollowCompaction` pending safe exclusion, summary, cadence and decorator handling. |
 | Pressure retention | Independent of compaction | Independent of compaction. `Auto` denotes pressure behavior, not automatic core compaction. |
-| Defaults and budget | `keep_all` and `None` by default. An explicit positive byte budget enables pressure eviction. | Require aligned non-deleting defaults and equivalent explicit-budget semantics. Do not assume they have shipped. |
+| Defaults and budget | `keep_all`. Standalone `DurableTaskSchedulerWorker` defaults to a 1 MiB pressure budget. Explicit `None` disables it. Functions and unknown backends remain disabled by default. | Keep pressure independent of core compaction and support explicit opt-out. This Python amendment does not establish or change shipped .NET defaults. |
 
 Architectural decisions remain in [ADR PR #88][adr-pr]. Coverage and limitations of the published
 Python prototype are recorded in [Prototype Evidence](#prototype-evidence), separately from the
@@ -515,14 +516,15 @@ storage trade-off are recorded in [Prototype Evidence](#prototype-evidence).
 Two independent registration controls govern transcript deletion. Application defaults may be
 overridden per agent. They do not change the agent's compaction configuration or an external
 provider's storage policy. The table uses Python configuration spellings. The shared contract is
-non-deleting defaults, an optional explicit byte budget and independent eager pruning where
-supported, not identical API names in both runtimes.
+independent eager pruning, explicit pressure-budget control and protection of execution state,
+not identical API names or implicit backend discovery in both runtimes.
 
 | Control | Value | Behavior |
 | --- | --- | --- |
 | `retention` | `keep_all` **(default)** | Do not delete merely because compaction excluded a message. |
 | `retention` | `follow_compaction` | Prune exclusions on the supported Python durable-provider path. Not a rewrite policy for external stores. Without compaction there are no exclusions to prune. |
-| `max_state_bytes` | `None` **(default)** | Disable pressure eviction. The backend can still reject an oversized write. |
+| `max_state_bytes` | omitted or `INHERIT` on `DurableAIAgentWorker` **(default)** | Use 1 MiB for a wrapped `DurableTaskSchedulerWorker`. Leave unknown backends disabled. Functions retains its separate `None` default. |
+| `max_state_bytes` | explicit `None` | Disable pressure eviction. The backend can still reject an oversized write. |
 | `max_state_bytes` | `"backend_limit"` | Optional Python host convenience for a known DTS/Scheduler limit. Reject if unresolved. Not a transport-size guarantee. |
 | `max_state_bytes` | positive integer | Use that explicit serialized-state budget. |
 
@@ -547,11 +549,20 @@ entry to avoid repeated list shifts while preserving surviving objects and list 
 
 ### Defaults and scope
 
-Deletion is opt-in because a model-input exclusion should not silently become irreversible storage
-loss. Both durable runtimes must align on `keep_all` and no pressure budget by default. This is a
-requirement, not a claim about shipped defaults. In .NET, `Auto` pressure semantics must not be
-presented as enabling core compaction. Defer `FollowCompaction` until exclusion, summary, cadence
-and decorator paths support safe deletion. Pressure retention need not wait for that work.
+The 2026-09-29 amendment changes the standalone Python DTS host default from disabled pressure
+eviction to its known 1 MiB budget, retaining the 0.85 high and 0.70 low watermarks. This is a
+behavioral compatibility change: omitting the budget can now remove eligible old transcript
+groups under pressure, even without a compaction strategy. Users requiring the previous behavior
+must pass `max_state_bytes=None`. Agent and workflow overrides retain their existing `INHERIT`
+versus `None` distinction, including nested workflows.
+
+Eager pruning remains opt-in because a model-input exclusion is not itself permission for
+irreversible deletion. `retention="keep_all"` does not disable an independently configured
+pressure budget. Unknown standalone backends and Azure Functions remain disabled by default
+because this integration cannot infer their limits. An explicit positive budget enables pressure
+eviction there. This amendment changes no .NET implementation. In .NET, `Auto` must not be
+presented as enabling core compaction, and `FollowCompaction` remains gated on safe exclusion,
+summary, cadence and decorator paths.
 
 The Python core configuration examined for this ADR leaves in-memory history unbounded,
 defaults `RedisHistoryProvider.max_messages` and `compaction_strategy` to `None`, and requires an
@@ -562,6 +573,13 @@ Without pressure eviction, an oversized write can fail while the last committed 
 available. Recovery requires an applicable configuration change, such as enabling pruning or using
 supported offload. Raising an application budget alone does not raise a backend's hard limit.
 Neither offload nor an external history provider removes the cost of entity delivery/control state.
+
+The local DTS boundary tests compare persisted serialized bytes with budget measurements for
+plain text, Unicode, escaping and tool results, including cold restart and protected-state failure.
+The tested emulator rejects entity-operation inputs above 1,048,576 serialized UTF-8 bytes but
+accepted an oversized entity state when budgeting was explicitly disabled. Therefore these tests
+do not prove Azure's entity-state rejection boundary or a universal transport-size guarantee.
+An input or result can exceed its own transport limit before transcript pruning can help.
 
 ### Whole-entity pressure budget
 
@@ -874,8 +892,9 @@ Python/.NET read/write round-trips and unknown-data preservation.
 
 - Agents reuse core compaction configuration. Execution/delivery semantics remain consistent across
   durable, external and service-owned history, without a required external message mirror.
-- Eager pruning and pressure eviction can be enabled separately. Both remain non-deleting by
-  default, so an unconfigured session can still reach its backend limit.
+- Eager pruning and pressure eviction remain independent. Known standalone Python DTS workers
+  enable pressure budgeting by default, with explicit `None` as the opt-out. Functions and unknown
+  backends need an explicit budget. Protected state can still exhaust capacity in every mode.
 - Pruning cannot change an original result or erase completion evidence. Revised receipts retain
   the invocation outcome after delivery expiry without retaining the payload. Completion tombstones
   accumulate throughout an active entity's lifetime and can prevent further writes even when
@@ -919,7 +938,8 @@ does not waive these implementation requirements or require every optional capab
    result.
 3. **Retention matrix.** Exercise all four combinations of eager pruning and pressure budget,
    supported runtime-specific provider overrides, Python's optional `"backend_limit"`, custom
-   watermarks and unresolved host limits. Require aligned non-deleting defaults in both runtimes.
+  watermarks and unresolved host limits. Check the known-host default, explicit opt-out, and
+  unchanged defaults where the host limit is unknown. Python tests do not establish .NET behavior.
    Test system messages, newest exchanges, atomic tool/reasoning groups, metadata-only floors,
    growing completion/ingestion receipts, oversized results, unreachable targets and truncation
    evidence. Add live inline-file and multimodal pressure cases, not only synthetic payloads or text.
@@ -1088,6 +1108,13 @@ to a duplicate request after its receipt expires without silently allowing compl
 again. Idle-session TTL does not bound an entity kept active by new requests. This work does not
 block the initial implementation. Until a replacement protocol is defined, tombstones remain until
 entity deletion and their growth remains an explicit capacity limitation.
+
+Address this capacity limitation with the planned blob-offloading work, including receipt/index
+growth and blob lifetimes rather than moving only transcript payloads. Define reference ownership,
+replay and delivery windows, late-duplicate handling, and cleanup after expiry, failure or abandoned
+writes. A blob must not be deleted while a live reference or a supported replay/deduplication
+contract still needs it. Offloading alone is not bounded bookkeeping. Until that work is implemented
+and validated, this retention change does not complete issue #4 or guarantee indefinite conversations.
 
 ### 8. Retry-safe external history writes
 

@@ -271,10 +271,14 @@ their original offset and fractional precision.
 
 ### Retention and State Budgets
 
-The defaults are `retention="keep_all"` and `max_state_bytes=None`. They preserve physical
-transcript messages and impose no local pressure cap. Backend limits still apply.
+The retention default is `retention="keep_all"`. When wrapping `DurableTaskSchedulerWorker`,
+an omitted `max_state_bytes` now enables its known 1 MiB pressure budget. Old eligible transcript
+groups are removed only under pressure, not merely because model compaction excluded them.
+Pass `max_state_bytes=None` to preserve the previous disabled-budget behavior. Generic workers
+and Azure Functions remain disabled by default and require an explicit budget.
 
-Eager pruning and pressure eviction are independent opt-ins.
+This default change can delete stored history in existing standalone DTS applications that omit
+the budget. Eager pruning remains opt-in and independent of pressure eviction.
 
 - `retention="follow_compaction"` physically removes eligible compaction exclusions when durable
   history is flushed, even without a pressure budget. It does not configure a compaction strategy.
@@ -282,7 +286,7 @@ Eager pruning and pressure eviction are independent opt-ins.
   At `high_watermark=0.85`, the runtime plans removal of oldest eligible atomic message groups
   toward `low_watermark=0.70`, or the protected floor if it is higher but still below the high
   watermark. Watermarks must be finite and satisfy `0 < low_watermark < high_watermark <= 1`.
-- `max_state_bytes=None` disables pressure eviction, not eager pruning. Booleans, zero and
+- Explicit `max_state_bytes=None` disables pressure eviction, not eager pruning. Booleans, zero and
   negative budgets are rejected.
 
 The estimate covers the whole entity using Python's default JSON serialization with ASCII
@@ -292,6 +296,12 @@ records. It excludes transport framing and is not a backend acceptance guarantee
 worker is a `DurableTaskSchedulerWorker`. A generic `TaskHubGrpcWorker` cannot resolve it.
 `AgentFunctionApp` rejects it, even when Functions uses DTS. Use an explicit positive budget or
 `None` there.
+
+The local emulator tests compare actual persisted JSON bytes with the estimate, exercise
+near-limit default/opt-out behavior, and verify incoming entity-operation payload rejection.
+The tested emulator did not reject oversized entity state with budgeting disabled. These tests
+do not establish Azure's hard state-rejection boundary, and a state budget cannot prevent an
+oversized input or output from exceeding its separate transport limit.
 
 Pressure eviction leaves terminal results, completion and ingestion receipts, session/control
 state, opaque unknown entries and retained entry metadata intact. System messages and the latest
@@ -305,7 +315,9 @@ unknown, not proof of rollback. The next operation reloads authoritative state.
 
 #### Registration and History Ownership
 
-`DurableAIAgentWorker` sets host defaults. `add_agent()` and `configure_workflow()` accept
+`DurableAIAgentWorker` sets host defaults. At construction, omission or `INHERIT` uses the known
+DTS budget when available, otherwise no budget. Explicit `None` always disables pressure eviction.
+`add_agent()` and `configure_workflow()` accept
 `retention`, `max_state_bytes`, both watermarks and `response_delivery_window_seconds` overrides.
 Workflow settings apply to its agent entities and nested workflows, not one aggregate workflow
 budget. For budget overrides, omission or `INHERIT` from `agent_framework_durabletask` uses the
