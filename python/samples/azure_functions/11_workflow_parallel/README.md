@@ -89,8 +89,7 @@ responses = yield when_all(agent_tasks)
 ## Prerequisites
 
 1. **Azure AI Foundry** - Project endpoint and model configured
-2. **DTS Emulator** - For durable task scheduling (recommended)
-3. **Azurite** - For Azure Functions internal storage
+2. **Azurite** - For Azure Functions and Durable Functions storage
 
 ## Setup
 
@@ -138,17 +137,12 @@ The sample can run locally without Azure Functions infrastructure using DevUI:
    pip install -r requirements.txt
    ```
 
-4. Start DTS Emulator:
+4. Start Azurite (or use VS Code extension):
    ```bash
-   docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 mcr.microsoft.com/dts/dts-emulator:latest
+   azurite --silent --skipApiVersionCheck
    ```
 
-5. Start Azurite (or use VS Code extension):
-   ```bash
-   azurite --silent
-   ```
-
-6. Run the function app (ensure `durable=True` in `function_app.py`):
+5. Run the function app (ensure `durable=True` in `function_app.py`):
    ```bash
    func start
    ```
@@ -174,7 +168,9 @@ curl http://localhost:7071/api/workflow/parallel_review/status/{instanceId}
 
 ## Observing Parallel Execution
 
-Open the DTS Dashboard at `http://localhost:8082` to observe:
+If you run the sample on the
+[optional Durable Task Scheduler backend](../README.md#optional-durable-task-scheduler-backend),
+open the DTS dashboard at `http://localhost:8082` to observe:
 
 1. **Activity Execution Timeline** - You'll see `word_count_processor` and `format_analyzer_processor` starting at approximately the same time
 2. **Agent Execution Timeline** - `SentimentAnalysisAgent` and `KeywordExtractionAgent` also start concurrently

@@ -81,7 +81,7 @@ Follow the [common setup steps](../README.md) to install tooling, configure Foun
 credentials, and install the Python dependencies for this sample. This sample uses
 `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`.
 
-As shipped, [host.json](host.json) has no `storageProvider` selection, so this sample uses the
+As shipped, [host.json](host.json) sets `storageProvider` to `AzureStorage`, so this sample uses the
 **Azure Storage backend**, with local Azurite through `AzureWebJobsStorage`. The DTS connection
 string in [local.settings.json.template](local.settings.json.template) does not select DTS.
 No DTS emulator is required for this default configuration.

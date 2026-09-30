@@ -99,13 +99,16 @@ az account show
 Start Azurite before `func start` when using the supplied `UseDevelopmentStorage=true` setting:
 
 ```bash
-azurite
+azurite --skipApiVersionCheck
 ```
 
-The samples' host configurations omit `storageProvider`, so Durable Functions uses **Azure Storage
-by default**, with `AzureWebJobsStorage` pointing to Azurite locally. The supplied
+`--skipApiVersionCheck` is required because the preview extension bundle's durable
+extension uses a newer Azure Storage API version than Azurite currently recognizes.
+
+The samples' host configurations set `storageProvider` to `AzureStorage`, so Durable Functions
+uses **Azure Storage**, with `AzureWebJobsStorage` pointing to Azurite locally. The supplied
 `DURABLE_TASK_SCHEDULER_CONNECTION_STRING` value does not select a backend and is unused by that
-default provider. These deployments do not appear in the DTS dashboard.
+provider. These deployments do not appear in the DTS dashboard.
 
 ## Environment Setup
 
@@ -177,15 +180,17 @@ source .venv/bin/activate
 
 This is an explicit choice for a **new deployment**, not the default and not a migration of existing
 state. Before starting that deployment, merge this configuration into its host configuration,
-preserving other settings. Use a host extension bundle that supports `azureManaged`. The
+preserving other settings. Keep the preview extension bundle the samples use. The durable extension
+in the current GA bundle advertises its gRPC endpoint in a form azure-functions-durable 2.x cannot
+parse. Check that the bundle's durable extension supports `azureManaged`, and see the
 [DTS quickstart](https://learn.microsoft.com/azure/durable-task/scheduler/quickstart-durable-task-scheduler?pivots=python)
-requires bundle version 4.32.0 or later for Python.
+for the scheduler settings.
 
 ```json
 {
   "extensionBundle": {
-    "id": "Microsoft.Azure.Functions.ExtensionBundle",
-    "version": "[4.32.0, 5.0.0)"
+    "id": "Microsoft.Azure.Functions.ExtensionBundle.Preview",
+    "version": "[4.*, 5.0.0)"
   },
   "extensions": {
     "durableTask": {

@@ -10,15 +10,15 @@ Tests the parallel workflow execution sample demonstrating:
 The function app is automatically started by the test fixture.
 
 Prerequisites:
-- Azure OpenAI credentials configured (see packages/azurefunctions/tests/integration_tests/.env.example)
+- Azure OpenAI credentials configured (see tests/integration_tests/.env.example)
 - Azurite running for durable orchestrations (or Azure Storage account configured)
 
 Usage:
     # Start Azurite (if not already running)
-    azurite &
+    azurite --skipApiVersionCheck &
 
-    # Run tests
-    uv run pytest packages/azurefunctions/tests/integration_tests/test_11_workflow_parallel.py -v
+    # Run tests from python/packages/azurefunctions
+    uv run pytest tests/integration_tests/test_11_workflow_parallel.py -v
 """
 
 import pytest

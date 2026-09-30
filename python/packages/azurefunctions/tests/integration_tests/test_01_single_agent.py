@@ -7,11 +7,11 @@ Tests the single agent sample with various message formats and session managemen
 The function app is automatically started by the test fixture.
 
 Prerequisites:
-- Azure OpenAI credentials configured (see packages/azurefunctions/tests/integration_tests/.env.example)
+- Azure OpenAI credentials configured (see tests/integration_tests/.env.example)
 - Azurite or Azure Storage account configured
 
-Usage:
-    uv run pytest packages/azurefunctions/tests/integration_tests/test_01_single_agent.py -v
+Usage (from python/packages/azurefunctions):
+    uv run pytest tests/integration_tests/test_01_single_agent.py -v
 """
 
 import uuid
