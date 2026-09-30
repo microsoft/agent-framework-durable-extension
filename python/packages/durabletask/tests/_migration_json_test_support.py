@@ -10,6 +10,7 @@ are imported. Baseline collection does not require the new JSON adapters.
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -122,55 +123,21 @@ class _CountedState(StateShim):
         super().set_state(state)
 
 
-def _af_batch(function: Any, operation: str, value: Any, raw: str | None) -> dict[str, Any]:
-    wire = _json({
-        "self": {"name": _NAME, "key": "dest"},
-        "exists": raw is not None,
-        "state": raw,
-        # Both native input layers are required before the SDK decoder is reached.
-        "batch": [{"name": operation, "input": _json(_json(value))}],
-    })
-    batch = json.loads(function(wire))
-    assert len(batch["results"]) == 1 and batch["results"][0]["isError"] is False, batch
-    assert batch["entityExists"] is True and batch["signals"] == []
-    return batch
-
-
 class _EntityHost:
-    def __init__(self, backend: str) -> None:
-        self.backend = backend
+    def __init__(self, register: Callable[[Agent], Any] | None = None) -> None:
         self.raw: str | None = None
         self.client = _NoModelClient()
         agent = Agent(client=self.client, name="json-agent")
-        if backend == "dt":
+        if register is None:
             self.worker: Any = TaskHubGrpcWorker(channel=Mock())  # Never started, no network.
             DurableAIAgentWorker(
                 self.worker, deployment_mode="isolated_v2", response_delivery_window_seconds=3600
             ).add_agent(agent)
         else:
-            assert backend == "af"
-            # AF-only cases need this sibling package, DT-only collection does not.
-            from agent_framework_azurefunctions import AgentFunctionApp
-
-            app: Any = AgentFunctionApp(
-                agents=[agent],
-                enable_health_check=False,
-                enable_http_endpoints=False,
-                deployment_mode="isolated_v2",
-                response_delivery_window_seconds=3600,
-            )
-            functions = {function.get_function_name(): function for function in app.get_functions()}
-            registered = functions[_NAME]  # Index once, retain the real df.Entity factory result.
-            binding = registered.get_bindings_dict()["bindings"][0]
-            assert binding["type"] == "entityTrigger" and binding["entityName"] == _NAME
-            self.function = registered.get_user_function()
-            assert callable(self.function.entity_function)
+            # Another host registers the agent and returns a worker holding its entity.
+            self.worker = register(agent)
 
     def call(self, operation: str, value: Any = None) -> Any:
-        if self.backend == "af":
-            batch = _af_batch(self.function, operation, value, self.raw)
-            self.raw = batch["entityState"]
-            return json.loads(batch["results"][0]["result"])
         self.shim = _CountedState(self.raw, self.worker._data_converter)
         executor = _EntityExecutor(self.worker._registry, logging.getLogger(__name__), self.worker._data_converter)
         result = executor.execute("migration-json", EntityInstanceId(_NAME, "dest"), operation, self.shim, _json(value))
@@ -187,9 +154,7 @@ class _EntityHost:
         assert _CONSTRUCTIONS == [], "SDK constructed opaque migration JSON"
 
     def assert_writes(self, expected: int) -> None:
-        # Functions returns final state, not a storage-write count or acknowledgement.
-        if self.backend == "dt":
-            assert self.shim.writes == expected
+        assert self.shim.writes == expected
 
 
 def _assert_ingress_and_retry(host: _EntityHost, case: str, location: str, clock: Any) -> None:
@@ -237,7 +202,7 @@ def _assert_cold_reset(host: _EntityHost, case: str, clock: Any) -> None:
     assert state["data"]["terminalResults"]["done"]["resultExpiresAt"] == _EXPIRES
     host.raw = _json(state)
     clock.current += timedelta(minutes=5)  # Reset stays strictly inside the delivery window.
-    assert _json(host.call("reset")) == _json(None if host.backend == "dt" else {"status": "reset"})
+    assert host.call("reset") is None
     host.assert_idle()
     host.assert_writes(1)
     expected = deepcopy(state)

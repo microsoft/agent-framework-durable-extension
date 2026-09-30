@@ -25,8 +25,6 @@ CONSUMERS = [
     ("direct", False),
     ("durabletask", False),
     ("durabletask", True),
-    ("azurefunctions", False),
-    ("azurefunctions", True),
 ]
 MALFORMED: tuple[Any, ...] = (
     None,
@@ -74,42 +72,23 @@ def _consume(
         response = load_agent_response(raw)
         ensure_response_format(response_format, "approval-transport", response)
         return response
-    if consumer == "durabletask":
-        child: CompletableTask[Any] = CompletableTask()
-        if precompleted:
-            child.complete(raw)
-        task = DurableAgentTask(child, response_format, "approval-transport")
-        if not precompleted:
-            assert not task.is_complete
-            child.complete(raw)
-        assert task.is_complete and child.get_result() is raw
-        if task.is_failed:
-            failure = task.get_exception()
-            assert isinstance(failure, TaskFailedError)
-            assert failure.details.error_type in ("ValueError", "ValidationError")
-            # SDK tasks expose a TaskFailedError, while direct and AF consumers
-            # retain the original ValueError. Compare the real diagnostic below.
-            raise ValueError(failure.details.message) from failure
-        return task.get_result()
-
-    # Exercise the real AF consumer too. This test requires both workspace packages.
-    from agent_framework_azurefunctions._orchestration import AgentTask
-    from azure.durable_functions.models.actions.NoOpAction import NoOpAction
-    from azure.durable_functions.models.Task import AtomicTask, TaskState
-
-    af_child = AtomicTask(7, NoOpAction())
+    assert consumer == "durabletask"
+    child: CompletableTask[Any] = CompletableTask()
     if precompleted:
-        af_child.set_value(is_error=False, value=raw)
-    af_task = AgentTask(af_child, response_format, "approval-transport")
+        child.complete(raw)
+    task = DurableAgentTask(child, response_format, "approval-transport")
     if not precompleted:
-        assert af_task.state is TaskState.RUNNING
-        af_child.set_value(is_error=False, value=raw)
-    assert af_child.result is raw
-    if af_task.state is TaskState.FAILED:
-        raise af_task.result
-    assert af_task.state is TaskState.SUCCEEDED
-    assert isinstance(af_task.result, AgentResponse)
-    return af_task.result
+        assert not task.is_complete
+        child.complete(raw)
+    assert task.is_complete and child.get_result() is raw
+    if task.is_failed:
+        failure = task.get_exception()
+        assert isinstance(failure, TaskFailedError)
+        assert failure.details.error_type in ("ValueError", "ValidationError")
+        # SDK tasks expose a TaskFailedError, while the direct consumer retains
+        # the original ValueError. Compare the real diagnostic below.
+        raise ValueError(failure.details.message) from failure
+    return task.get_result()
 
 
 @pytest.mark.parametrize(("consumer", "precompleted"), CONSUMERS)

@@ -12,11 +12,10 @@ import asyncio
 import json
 from copy import deepcopy
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 from _workflow_mixed_test_support import _mixed
-from _workflow_replay_test_support import _af_replay, _atomic_actions, _Episodes, _replay
+from _workflow_replay_test_support import _Episodes, _replay
 from agent_framework import (
     Executor,
     Workflow,
@@ -133,15 +132,8 @@ def _downstream(*, nested: bool, child_first: bool, twice: bool = True) -> tuple
     return workflow, controls
 
 
-def _cold_both(transport: _Episodes, workflow: Workflow) -> dict[str, Any]:
+def _cold_replay(transport: _Episodes, workflow: Workflow) -> None:
     transport.cold("root")
-    before = deepcopy(transport.executed)
-    result = _af_replay(transport.histories["root"], workflow, instance="root")
-    assert not result["isDone"]
-    expected = {key: value for key, value in transport.statuses["root"].items() if key != "events"}
-    assert result["customStatus"] == expected
-    assert transport.executed == before
-    return result
 
 
 @pytest.mark.parametrize("nested", [False, True])
@@ -177,15 +169,10 @@ def test_real_downstream_signaler_advances_two_waves_before_child_join_and_cold_
     for owner in owners:
         transport.complete_named(owner, "child")
         transport.cold(owner)
-        child_replay = _af_replay(transport.histories[owner], workflow, instance=owner)
-        assert not child_replay["isDone"]
-        assert child_replay["customStatus"] == {
-            key: value for key, value in transport.statuses[owner].items() if key != "events"
-        }
     local_order = ["parent", "writer"] if early else ["writer", "parent"]
     transport.complete_named("root", local_order[0])
     assert controls["seen"] == []
-    _cold_both(transport, workflow)
+    _cold_replay(transport, workflow)
     transport.complete_named("root", local_order[1])
     if not early:
         transport.reply("a", 10)
@@ -195,17 +182,9 @@ def test_real_downstream_signaler_advances_two_waves_before_child_join_and_cold_
     # returned, no child has completed, yet a real bridge activity must exist.
     assert [action.scheduleTask.name for action in transport.actions["root"].values()] == ["dafx-causal-root-bridge"]
     assert not transport.completions
-    _cold_both(transport, workflow)
+    _cold_replay(transport, workflow)
     transport.complete_named("root", "bridge")
-    replay = _cold_both(transport, workflow)
-    actions = _atomic_actions(replay["actions"])
-    assert [action["externalEventName"] for action in actions if action["actionType"] == 6] == ["a"]
-    assert len([action for action in actions if action["actionType"] == 2]) == 2
-    assert [action["functionName"] for action in actions if action["actionType"] == 0][-3:] == [
-        "dafx-causal-root-parent",
-        "dafx-causal-root-bridge",
-        "dafx-causal-root-signaler",
-    ]
+    _cold_replay(transport, workflow)
     transport.complete_named("root", "signaler")
     assert controls["seen"] == [("parent", 10), ("bridge", 10), ("signaler", 11)]
     assert not transport.completions and not transport.actions["root"]
@@ -213,12 +192,12 @@ def test_real_downstream_signaler_advances_two_waves_before_child_join_and_cold_
     # alone does not retire the child's still-unvalidated pending request.
     suffix = "leaf~0~b" if nested else "b"
     assert transport.pending() == {f"sub~0~{suffix}", f"sub~1~{suffix}"}
-    _cold_both(transport, workflow)
+    _cold_replay(transport, workflow)
     first, second = (1, 0) if reverse_children else (0, 1)
     transport.complete_named(owners[first], "child")
     assert transport.statuses["root"]["subworkflows"] == {"sub": {str(second): children[second]}}
     transport.complete_named("root", "collector")
-    _cold_both(transport, workflow)
+    _cold_replay(transport, workflow)
     transport.complete_named(owners[second], "child")
     # A ready child's output may drive work needed by another pending child.
     # Preserve send order within each result, not the original invocation order
@@ -229,8 +208,6 @@ def test_real_downstream_signaler_advances_two_waves_before_child_join_and_cold_
     assert completion.orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
     assert json.loads(completion.result.value) == expected
     assert "subworkflows" not in transport.statuses["root"]
-    final = _af_replay(transport.histories["root"], workflow, instance="root")
-    assert final["isDone"] and final["output"] == expected
     assert len(transport.executed) == 12
     parent_payloads = [payload for instance, _, payload in transport.executed if instance == "root"]
     assert [payload["shared_state_snapshot"].get("conflict") for payload in parent_payloads[3:6]] == [
@@ -258,13 +235,12 @@ def test_ready_later_child_routes_to_collector_that_answers_earlier_child() -> N
     assert transport.pending() == {"sub~0~b"}
     assert transport.statuses["root"]["subworkflows"] == {"sub": {"0": children[0]}}
     # Original-invocation ordered buffering would deadlock right here.
-    _cold_both(transport, workflow)
+    _cold_replay(transport, workflow)
     transport.complete_named("root", "collector")
     transport.complete_named(children[0], "child")
     transport.complete_named("root", "collector")
     expected = [{"signal": 11}, {"child": 12}, {"child": 11}]
     assert json.loads(transport.completions["root"].result.value) == expected
-    assert _af_replay(transport.histories["root"], workflow, instance="root")["output"] == expected
 
 
 def test_waiting_for_child_at_wave_budget_does_not_spend_another_iteration() -> None:
@@ -285,7 +261,7 @@ def test_waiting_for_child_at_wave_budget_does_not_spend_another_iteration() -> 
     transport.reply("c", 12)
     transport.complete_named("root", "parent")
     transport.complete_named("root", "sink")
-    _cold_both(transport, workflow)
+    _cold_replay(transport, workflow)
     transport.reply("sub~0~b", 11)
     transport.complete_named(subworkflow_instance_id("root", "sub", 0), "child")
     assert transport.completions["root"].orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
@@ -294,7 +270,7 @@ def test_waiting_for_child_at_wave_budget_does_not_spend_another_iteration() -> 
 @pytest.mark.parametrize("early", [False, True])
 @pytest.mark.parametrize("typed_rejection", [False, True], ids=["malformed-envelope", "activity-rejection"])
 def test_rejected_event_is_consumed_once_before_corrected_reply_on_cold_sdks(
-    early: bool, typed_rejection: bool, monkeypatch: pytest.MonkeyPatch
+    early: bool, typed_rejection: bool
 ) -> None:
     workflow, controls = _mixed(sibling_request=True)
     transport = _Episodes(workflow)
@@ -330,7 +306,6 @@ def test_rejected_event_is_consumed_once_before_corrected_reply_on_cold_sdks(
     assert transport.statuses["root"]["pending_requests"] == pending
     transport.cold("root")
     rejected_history = deepcopy(transport.histories["root"])
-    rejected_status = deepcopy(transport.statuses["root"])
     recorded = [
         json.loads(json.loads(event.taskCompleted.result.value))
         for event in rejected_history
@@ -372,44 +347,6 @@ def test_rejected_event_is_consumed_once_before_corrected_reply_on_cold_sdks(
         if event.HasField("taskCompleted")
         and "hitl_admission" in json.loads(json.loads(event.taskCompleted.result.value))
     ] == [{"request_id": "a", "status": "invalidreply"}, {"request_id": "a", "status": "accepted"}]
-
-    pytest.importorskip("agent_framework_azurefunctions")
-    from agent_framework_azurefunctions._workflow_af_context import AzureFunctionsWorkflowContext
-
-    original_wait = AzureFunctionsWorkflowContext.wait_for_external_event
-    registrations: list[str] = []
-
-    def observe_wait(context: AzureFunctionsWorkflowContext, name: str) -> Any:
-        registrations.append(name)
-        # Bound malformed-event replay too: repeating a consumed deferred event
-        # would otherwise keep re-registering synchronously inside the AF SDK.
-        assert registrations.count(name) <= (2 if name == "a" else 1), registrations
-        return original_wait(context, name)
-
-    monkeypatch.setattr(AzureFunctionsWorkflowContext, "wait_for_external_event", observe_wait)
-    for history, status, corrected in (
-        (rejected_history, rejected_status, False),
-        (transport.histories["root"], transport.statuses["root"], True),
-    ):
-        registrations.clear()
-        replay = _af_replay(history, workflow, instance="root")
-        assert not replay["isDone"]
-        assert replay["customStatus"] == {key: value for key, value in status.items() if key != "events"}
-        assert registrations == ["a", "d", "a", *(["c"] if corrected else [])]
-        actions = _atomic_actions(replay["actions"])
-        # Compare the full activity schedule, not just pending status. Reusing
-        # the buffered invalid reply can schedule an extra validation activity
-        # while leaving the visible request/status snapshot unchanged.
-        assert [
-            (action["functionName"], json.loads(json.loads(action["input"])))
-            for action in actions
-            if action["actionType"] == 0
-        ] == [
-            (event.taskScheduled.name, json.loads(json.loads(event.taskScheduled.input.value)))
-            for event in history
-            if event.HasField("taskScheduled")
-        ]
-        assert controls["seen"] == [("a", 10)]
 
 
 @pytest.mark.parametrize("nested", [False, True])
@@ -457,10 +394,6 @@ def test_downstream_failure_or_termination_does_not_dispatch_signaler(failure: s
     if failure != "terminated":
         assert transport.statuses["root"]["pending_requests"] == {}
         assert "subworkflows" not in transport.statuses["root"]
-        with pytest.raises(Exception, match="downstream failure") as raised:
-            _af_replay(transport.histories["root"], workflow, instance="root")
-        state = json.loads(str(raised.value).split("$OutOfProcData$:", 1)[1])
-        assert state["customStatus"] == {"state": "failed", "pending_requests": {}}
 
 
 @pytest.mark.parametrize("child_first", [False, True])
@@ -595,40 +528,6 @@ def test_mixed_sdk_failure_does_not_schedule_or_run_a_pending_reply(failure: str
         assert "subworkflows" not in transport.statuses["root"]
 
 
-def test_functions_replay_services_parent_reply_while_child_is_pending() -> None:
-    workflow, controls = _mixed()
-    transport = _Episodes(workflow)
-    transport.client.start_workflow("go", instance_id="root")
-    transport.complete_named("root", "seed")
-    transport.complete_named("root", "parent")
-    transport.complete_named("root", "writer")
-    transport.complete_named("root", "sink")
-    transport.complete_named(subworkflow_instance_id("root", "sub", 0), "child")
-    transport.reply("a", 10)
-    controls["send"] = lambda value: transport.client.send_hitl_response("root", "sub~0~b", value)
-    transport.complete_named("root", "parent")
-    transport.complete_named("root", "sink")
-    expected = deepcopy(controls["seen"])
-    result = _af_replay(transport.histories["root"], workflow, instance="root")
-    assert not result["isDone"]
-    assert set(result["customStatus"]["pending_requests"]) == {"c"}
-    assert result["customStatus"]["subworkflows"] == {"sub": {"0": subworkflow_instance_id("root", "sub", 0)}}
-    assert "events" not in result["customStatus"]
-    assert controls["seen"] == expected == [("a", 10)]
-
-    actions = _atomic_actions(result["actions"])
-    assert [action["externalEventName"] for action in actions if action["actionType"] == 6] == ["a", "c"]
-    assert len([action for action in actions if action["actionType"] == 2]) == 1
-    assert [action["functionName"] for action in actions if action["actionType"] == 0] == [
-        "dafx-mixed-root-seed",
-        "dafx-mixed-root-parent",
-        "dafx-mixed-root-writer",
-        "dafx-mixed-root-sink",
-        "dafx-mixed-root-parent",
-        "dafx-mixed-root-sink",
-    ]
-
-
 def test_ready_sibling_wait_survives_parent_handler_and_child_completion() -> None:
     workflow, controls = _mixed(sibling_request=True)
     transport = _Episodes(workflow)
@@ -664,49 +563,6 @@ def test_ready_sibling_wait_survives_parent_handler_and_child_completion() -> No
     transport.complete_named("root", "sink")
     assert transport.completions["root"].orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
     assert controls["seen"] == [("a", 10), ("b", 11), ("d", 13), ("c", 12)]
-
-
-def test_functions_wait_any_failed_winner_is_raised_not_returned_as_output() -> None:
-    pytest.importorskip("agent_framework_azurefunctions")
-    from agent_framework_azurefunctions._workflow_af_context import AzureFunctionsWorkflowContext
-    from azure.durable_functions.models.actions.NoOpAction import NoOpAction
-    from azure.durable_functions.models.ReplaySchema import ReplaySchema
-    from azure.durable_functions.models.Task import AtomicTask, WhenAnyTask
-
-    waiting, failed = AtomicTask("waiting", NoOpAction()), AtomicTask("failed", NoOpAction())
-    any_task = WhenAnyTask([waiting, failed], ReplaySchema.V3)
-    error = RuntimeError("child failed")
-    failed.set_value(is_error=True, value=error)
-    adapter = AzureFunctionsWorkflowContext(Mock())
-    winner = adapter.get_task_result(any_task)
-    assert winner is failed and not waiting.is_completed
-    with pytest.raises(RuntimeError, match="child failed") as raised:
-        adapter.get_task_result(winner)
-    assert raised.value is error
-
-
-@pytest.mark.parametrize("failure", ["child", "response"])
-def test_functions_sdk_mixed_failure_ends_the_shared_orchestrator(failure: str) -> None:
-    workflow, controls = _mixed()
-    transport = _Episodes(workflow)
-    transport.client.start_workflow("go", instance_id="root")
-    transport.complete_named("root", "seed")
-    transport.complete_named("root", "parent")
-    transport.complete_named("root", "writer")
-    transport.complete_named("root", "sink")
-    if failure == "child":
-        _, task_id = transport.parents[subworkflow_instance_id("root", "sub", 0)]
-        failed = helpers.new_sub_orchestration_failed_event(task_id, RuntimeError("mixed failure"))
-    else:
-        transport.reply("a", 10)
-        task_id = next(iter(transport.actions["root"]))
-        failed = helpers.new_task_failed_event(task_id, RuntimeError("mixed failure"))
-    history = [*transport.histories["root"], helpers.new_orchestrator_started_event(), failed]
-    with pytest.raises(Exception, match="mixed failure") as raised:
-        _af_replay(history, workflow, instance="root")
-    state = json.loads(str(raised.value).split("$OutOfProcData$:", 1)[1])
-    assert state["customStatus"] == {"state": "failed", "pending_requests": {}}
-    assert controls["seen"] == []
 
 
 @pytest.mark.parametrize("nested", [False, True])
