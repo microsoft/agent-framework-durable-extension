@@ -45,7 +45,7 @@ class _GenericClientSubclass(TaskHubGrpcClient):
 
 @pytest.fixture
 def inert_channel() -> Iterator[Mock]:
-    # Inject the SDK's public channel argument, never create a socket/channel.
+    # Supply an inert channel without creating a socket/channel.
     # Stub construction binds RPC callables, but no test may invoke one.
     channel = Mock(spec=grpc.Channel)
     rpc = Mock(side_effect=AssertionError("Unexpected RPC in an offline client test"))
@@ -58,9 +58,9 @@ def inert_channel() -> Iterator[Mock]:
 @pytest.fixture(params=[DurableTaskSchedulerClient, _SchedulerSubclass], ids=["scheduler", "scheduler-subclass"])
 def scheduler_client(request: pytest.FixtureRequest, inert_channel: Mock) -> Iterator[DurableTaskSchedulerClient]:
     client_type: type[DurableTaskSchedulerClient] = request.param
-    native = client_type(
-        host_address="unused.invalid:1", taskhub="unit-tests", token_credential=None, channel=inert_channel
-    )
+    with patch("durabletask.client.shared.get_grpc_channel", return_value=inert_channel) as create_channel:
+        native = client_type(host_address="unused.invalid:1", taskhub="unit-tests", token_credential=None)
+        create_channel.assert_called_once()
     assert type(native) is client_type
     with native:
         yield native
