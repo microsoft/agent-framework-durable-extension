@@ -103,16 +103,22 @@ Functions exposes status and final output, not the standalone workflow event-str
 
 ### JSON runtime boundary
 
-Generated entities decode state and `run`/`migrate` inputs as plain JSON. Framework agent results,
-generated workflow starts, child results and HITL values also use scoped JSON decoding. Start,
-agent-result and child-result guards reject unsupported SDK layouts rather than use native decoding.
-Unrelated native calls retain SDK behavior. Manually wrapping an entity factory does not install
-the generated-entity boundary, and internal checkpoints still require trusted workers and storage.
+Every orchestrator and entity worker the app registers, including your own functions and
+blueprints, decodes framework payloads as plain JSON. That covers agent state and `run`/`migrate`
+inputs, framework agent results, generated workflow starts, child results and HITL values. The
+generated agent entity also decodes untagged operation input as plain JSON, matching the 1.x host.
+Other functions keep the Functions converter's behavior, so an unannotated native input still gets
+its object reconstruction. Registration fails if a function's durable worker can't be located.
+Internal checkpoints still require trusted workers and storage.
 See the [host coverage and SDK constraints](../../../docs/features/python-durable-json-boundaries.md#covered-host-paths).
 
-Requires Python 3.10+, `agent-framework-core>=1.19.0,<2`, `azure-functions>=1.24.0,<2` and
-`azure-functions-durable>=1.3.1,<2`. The shared dependency requires `durabletask>=1.7.1,<2`
-and `pydantic>=2.11,<3`. Functions uses its own SDK's parent metadata.
+Requires Python 3.13+, `agent-framework-core>=1.19.0,<2`, `azure-functions>=2.3.0,<3` and
+`azure-functions-durable>=2.0.0rc2,<3`, which brings `durabletask>=1.11.0`. The shared dependency
+requires `durabletask>=1.7.1,<2` and `pydantic>=2.11,<3`.
+
+`get_agent()` needs a two-argument `(context, input)` orchestrator. A one-argument orchestrator
+receives the 1.x compatibility context, which cannot call agents. Session keys can't contain `@`,
+because durabletask rejects it in entity keys.
 
 ### Basic Usage Example
 

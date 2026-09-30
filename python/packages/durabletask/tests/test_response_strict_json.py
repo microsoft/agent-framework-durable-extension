@@ -245,10 +245,9 @@ def test_retained_encoding_errors_have_a_stable_private_diagnostic(kind: str) ->
     assert observed == [] and response.value is retained
 
 
-@pytest.mark.parametrize("consumer", ["durabletask", "azurefunctions"])
 @pytest.mark.parametrize("precompleted", [False, True], ids=["delayed", "precompleted"])
 def test_real_tasks_report_encoding_failure_without_private_input(
-    consumer: str, precompleted: bool, caplog: pytest.LogCaptureFixture
+    precompleted: bool, caplog: pytest.LogCaptureFixture
 ) -> None:
     observed: list[Any] = []
 
@@ -265,35 +264,18 @@ def test_real_tasks_report_encoding_failure_without_private_input(
         "type": "agent_response",
         "value": {"answer": 7, "ignored": {"private": PRIVATE_INPUT, "number": float("nan")}},
     }
-    if consumer == "durabletask":
-        child: CompletableTask[Any] = CompletableTask()
-        if precompleted:
-            child.complete(raw)
-        task = DurableAgentTask(child, RequestedValue, "strict-json")
-        if not precompleted:
-            assert not task.is_complete
-            child.complete(raw)
-        assert task.is_complete and task.is_failed
-        assert child.get_result() is raw
-        failure = task.get_exception()
-        assert failure.details.error_type == "ValueError"
-        diagnostic = failure.details.message
-    else:
-        from agent_framework_azurefunctions._orchestration import AgentTask
-        from azure.durable_functions.models.actions.NoOpAction import NoOpAction
-        from azure.durable_functions.models.Task import AtomicTask, TaskState
-
-        af_child = AtomicTask(7, NoOpAction())
-        if precompleted:
-            af_child.set_value(is_error=False, value=raw)
-        af_task = AgentTask(af_child, RequestedValue, "strict-json")
-        if not precompleted:
-            assert af_task.state is TaskState.RUNNING
-            af_child.set_value(is_error=False, value=raw)
-        assert af_task.state is TaskState.FAILED
-        assert af_child.result is raw
-        assert type(af_task.result) is ValueError
-        diagnostic = str(af_task.result)
+    child: CompletableTask[Any] = CompletableTask()
+    if precompleted:
+        child.complete(raw)
+    task = DurableAgentTask(child, RequestedValue, "strict-json")
+    if not precompleted:
+        assert not task.is_complete
+        child.complete(raw)
+    assert task.is_complete and task.is_failed
+    assert child.get_result() is raw
+    failure = task.get_exception()
+    assert failure.details.error_type == "ValueError"
+    diagnostic = failure.details.message
     assert diagnostic == "Structured response value must be JSON serializable with finite numbers."
     assert PRIVATE_INPUT not in caplog.text
     assert observed == []

@@ -25,44 +25,43 @@ transport can resolve module-qualified models. The SDK boundary does not replace
 
 | Read boundary | Standalone Durable Task | Azure Functions |
 | --- | --- | --- |
-| Generated agent state and operation inputs | Plain JSON for state and registered `run`/`migrate` inputs. | Plain state and two-layer operation JSON through the generated entity wrapper, including `migrate`. |
-| Blocking framework agent results | `OrchestrationAgentExecutor` selects a JSON result target. | Scoped result guard for standalone framework agent calls and generated workflows, before Core response loading. |
-| Generated workflow starts | Registered input target selects JSON before provenance checks. | Raw SDK input is parsed as JSON before provenance checks. |
-| Generated parent receiving a child result | Child call selects a JSON result target. | Selected successful child `Result` is protected before SDK decoding. |
-| Generated workflow HITL values | Event wait selects a JSON target. | Matching event values use the scoped JSON guard, including buffered events. |
-| Unrelated native co-hosted calls | Original converter behavior. | Original SDK decoding, including native orchestrator inputs and unrelated entity, activity, child and event results. |
+| Generated agent state and operation inputs | Plain JSON for state and registered `run`/`migrate` inputs. | The same entity class and JSON targets, plus plain JSON for its untagged operation inputs. |
+| Blocking framework agent results | `OrchestrationAgentExecutor` selects a JSON result target. | The same executor through `AgentFunctionApp.get_agent()` and generated workflows. |
+| Generated workflow starts | Registered input target selects JSON before provenance checks. | The same registered input target. |
+| Generated parent receiving a child result | Child call selects a JSON result target. | The same child call target. |
+| Generated workflow HITL values | Event wait selects a JSON target. | The same event wait target, including buffered events. |
+| Unrelated native co-hosted calls | Original converter behavior. | The Functions converter's behavior, including object reconstruction for unannotated native inputs. |
 
 ## Standalone Durable Task
 
 `DurableAIAgentWorker` installs a worker-local decoder during construction, before SDK startup.
-Framework annotations and explicit task/state calls select its private `JsonPayload` target.
+Framework annotations and explicit task/state calls select its private `JsonPayload` target, or
+`JsonState` and `JsonMigration` for entity state and migration input, which keep exact counters.
 Payload metadata cannot select that target. Other target types, serialization and value-level
 coercion delegate to the original converter. Sharing the worker does not change native decoding.
 
 ## Azure Functions
 
-`AgentFunctionApp` selects the entity ingress boundary only for generated agents, including workflow
-executors. State is parsed before constructing the SDK context. Operation input unwraps both SDK
-JSON layers without custom-object hooks, then the SDK batch executor processes the operations.
-Unmarked native entity registrations retain the SDK path. Manually wrapping `create_agent_entity()`
-with the native SDK does not install this ingress boundary.
+azure-functions-durable 2.x runs each orchestrator and entity function on its own durabletask
+worker. That worker's converter rebuilds objects from `__class__`, `__module__` and `__data__`
+envelopes. `AgentFunctionApp` wraps it with the same framework decoder on every durable function
+it registers, including user functions, blueprints and the SDK's built-in functions. The generated
+agent entity also decodes untagged operation input as plain JSON, matching the 1.x host. Other
+functions change only for `JsonPayload`, `JsonState` and `JsonMigration` targets, so their native
+payload types keep the Functions converter's behavior.
 
-The exported handler matches the native SDK's unannotated rich-binding input and optional
-`body` wrapper. Direct batch tests and Python worker indexing test different boundaries.
-
-The separate orchestration result guard also covers standalone framework agent calls through
-`AgentFunctionApp.get_agent()` or `AzureFunctionsAgentExecutor`. It protects the entity envelope
-and inner result before SDK object construction, without adapting unrelated native waits.
-Generated workflow start, agent-result and child-result guards reject unsupported SDK layouts.
-These context-local adapters rely on raw input/history and task-registry contracts, not an
-app-wide or global SDK decoder replacement.
+The worker is found in the generated invocation handler. Registration fails if it can't be found,
+rather than falling back to object reconstruction. The workflow HTTP endpoints read serialized
+orchestration output and custom status as plain JSON instead of through the Functions converter.
+`get_agent()` needs a two-argument `(context, input)` orchestrator, which receives the durabletask
+`OrchestrationContext`.
 
 ## Dependencies and custom converters
 
-Durable Task requires `durabletask>=1.7.1,<2` for target-aware decoding, deferred state reads and
-parent-instance metadata, plus `pydantic>=2.11,<3`. Both packages require Python 3.10+ and
-`agent-framework-core>=1.19.0,<2`. Functions requires `azure-functions>=1.24.0,<2` and
-`azure-functions-durable>=1.3.1,<2` and uses its own SDK's parent metadata.
+Durable Task requires Python 3.10+ and `durabletask>=1.7.1,<2` for target-aware decoding, deferred
+state reads and parent-instance metadata, plus `pydantic>=2.11,<3`. Both packages require
+`agent-framework-core>=1.19.0,<2`. Functions requires Python 3.13+, `azure-functions>=2.3.0,<3`
+and `azure-functions-durable>=2.0.0rc2,<3`, which brings `durabletask>=1.11.0`.
 
 Custom converters can still serve native co-hosted work. For framework traffic, serializers must
 preserve the expected JSON wire shape. Non-JSON encodings and custom rewrites of that shape are

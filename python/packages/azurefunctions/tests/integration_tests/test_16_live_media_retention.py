@@ -289,8 +289,9 @@ def _capture(host: _Host, boot: str, calls: int, current_id: str, session: str, 
     _equal(
         capture["context"],
         {
-            "provider": "AzureFunctionEntityStateProvider",
-            "type": "_JsonEntityContext",
+            # create_agent_entity_class names the configured class after its entity.
+            "provider": AgentSessionId.to_entity_name(AGENT),
+            "type": "EntityContext",
             "entity_name": AgentSessionId.to_entity_name(AGENT),
             "entity_key": session,
             "operation": "run",

@@ -9,7 +9,7 @@ from collections.abc import Callable, Generator
 from typing import Any
 from unittest.mock import Mock
 
-from _workflow_protocol_test_support_af import _host
+from _workflow_protocol_test_support import _host
 from agent_framework import Workflow
 from agent_framework_durabletask import wrap_workflow_input
 
@@ -39,5 +39,5 @@ def _registered_af_run(
         return json.loads(activities[name](json.dumps(payload, allow_nan=False)))
 
     calls: list[dict[str, Any]] = []
-    host = _host(wrap_workflow_input("go"), calls, activity)
-    return orchestrator.orchestrator_function(host), host, calls, responder.client_function
+    host = _host(calls, activity)
+    return orchestrator.orchestrator_function(host, wrap_workflow_input("go")), host, calls, responder.client_function

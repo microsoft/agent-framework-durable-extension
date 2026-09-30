@@ -8,11 +8,12 @@ import asyncio
 import json
 from copy import deepcopy
 from typing import Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import azure.durable_functions as df
 import azure.functions as func
 import pytest
+from _af_worker_test_support import _event_wire_value, _orchestration_state
 from _workflow_admission_test_support import _hitl_workflow, _Relay, _Sink
 from _workflow_admission_test_support_af import _registered_af_run
 from _workflow_protocol_test_support_af import _drain
@@ -62,12 +63,12 @@ def test_http_hitl_rejects_root_marker_before_event_and_accepts_corrected_reply(
     workflow = _hitl_workflow()
     generator, host, calls, respond = _registered_af_run(workflow)
     batch = next(generator)
-    waiting = generator.send(batch.result)
-    assert not waiting.is_completed and len(calls) == 1
-    client = AsyncMock(spec=df.DurableOrchestrationClient)
-    client.get_status.return_value = Mock(name="status")
-    client.get_status.return_value.name = f"dafx-{workflow.name}"
-    client.get_status.return_value.custom_status = deepcopy(host.statuses[-1])
+    waiting = generator.send(batch.get_result())
+    assert not waiting.is_complete and len(calls) == 1
+    client = AsyncMock(spec=df.DurableFunctionsClient)
+    client.get_orchestration_state.return_value = _orchestration_state(
+        "root-run", f"dafx-{workflow.name}", custom_status=deepcopy(host.statuses[-1])
+    )
 
     def submit(payload: Any) -> Any:
         request = func.HttpRequest(
@@ -83,15 +84,16 @@ def test_http_hitl_rejects_root_marker_before_event_and_accepts_corrected_reply(
     rejected = submit(marker)
     assert rejected.status_code == 400
     assert "disallowed pickle/type markers" in json.loads(rejected.get_body())["error"]
-    client.raise_event.assert_not_awaited()
-    assert not waiting.is_completed and len(calls) == 1
+    client.raise_orchestration_event.assert_not_awaited()
+    assert not waiting.is_complete and len(calls) == 1
     assert set(host.statuses[-1]["pending_requests"]) == {"approval"}
 
     before = deepcopy(answer)
     accepted = submit(answer)
     assert accepted.status_code == 200 and answer == before
-    client.raise_event.assert_awaited_once_with(instance_id="root-run", event_name="approval", event_data=expected)
-    waiting.set_value(is_error=False, value=client.raise_event.await_args.kwargs["event_data"])
-    output = deserialize_workflow_output(_drain(generator, waiting.result))
+    client.raise_orchestration_event.assert_awaited_once_with("root-run", "approval", data=expected)
+    # Deliver what the orchestration receives: the client's encoding, decoded as framework JSON.
+    waiting.complete(_event_wire_value(client.raise_orchestration_event.await_args.kwargs["data"]))
+    output = deserialize_workflow_output(_drain(generator, waiting.get_result()))
     assert output == [{"response": expected, "response_type": type(expected).__name__}]
     assert len(calls) == 2

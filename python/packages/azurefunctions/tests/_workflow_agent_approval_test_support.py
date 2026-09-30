@@ -8,9 +8,9 @@ from copy import deepcopy
 from typing import Any
 from unittest.mock import patch
 
+from _af_worker_test_support import _af_worker
 from _execution_test_support import NonStreamingAgent
-from _workflow_event_test_support_af import _event
-from _workflow_replay_test_support import _LOGGER, _atomic_actions, _replay, _worker
+from _workflow_replay_test_support import _LOGGER, _replay, _worker
 from agent_framework import (
     AgentExecutor,
     BaseChatClient,
@@ -25,9 +25,6 @@ from agent_framework import (
 )
 from agent_framework_durabletask import wrap_workflow_input
 from agent_framework_durabletask._workflows.dt_context import DurableTaskWorkflowContext
-from azure.durable_functions import DurableOrchestrationContext
-from azure.durable_functions.models.ReplaySchema import ReplaySchema
-from azure.durable_functions.models.TaskOrchestrationExecutor import TaskOrchestrationExecutor
 from durabletask.entities import EntityContext, EntityInstanceId
 from durabletask.internal import helpers
 from durabletask.internal import orchestrator_service_pb2 as pb
@@ -36,7 +33,6 @@ from durabletask.serialization import JsonDataConverter
 from durabletask.worker import _ActivityExecutor
 
 from agent_framework_azurefunctions import AgentFunctionApp
-from agent_framework_azurefunctions._workflow_af_context import AzureFunctionsWorkflowContext
 
 CHECKPOINT = "dafx__hitl-agent-backlog"
 ENTITY = "dafx-agent-backlog-agent"
@@ -102,25 +98,25 @@ def _functions(workflow: Workflow) -> dict[str, Any]:
 class _History:
     def __init__(self, functions_host: bool, workflow: Workflow) -> None:
         self.functions_host = functions_host
-        self.functions = _functions(workflow) if functions_host else {}
-        self.native: Any = None if functions_host else _worker(workflow)
+        # Both hosts run the shared engine on durabletask executors. The Functions
+        # variant replays the app's registered functions with the app's converter.
+        self.native: Any = (
+            _af_worker(AgentFunctionApp(workflow=workflow, enable_health_check=False, deployment_mode="isolated_v2"))
+            if functions_host
+            else _worker(workflow)
+        )
         self.entity_state: str | None = None
         self.entity_inputs: list[dict[str, Any]] = []
         self.checkpoints = 0
         self.waits: dict[str, list[Any]] = {}
         start = json.dumps(wrap_workflow_input("go"))
-        self.rows: list[Any] = (
-            [_event(12), _event(0, Name="dafx-agent-backlog", Input=start)]
-            if functions_host
-            else [
-                helpers.new_orchestrator_started_event(),
-                helpers.new_execution_started_event("dafx-agent-backlog", "root", start),
-            ]
-        )
+        self.rows: list[Any] = [
+            helpers.new_orchestrator_started_event(),
+            helpers.new_execution_started_event("dafx-agent-backlog", "root", start),
+        ]
 
     def replay(self) -> dict[str, Any]:
-        adapter: Any = AzureFunctionsWorkflowContext if self.functions_host else DurableTaskWorkflowContext
-        original = adapter.wait_for_external_event
+        original = DurableTaskWorkflowContext.wait_for_external_event
         self.waits = {}
 
         def observe(context: Any, name: str) -> Any:
@@ -129,25 +125,7 @@ class _History:
             return waiting
 
         # Pass-through observation of real waits, not replacement tasks.
-        with patch.object(adapter, "wait_for_external_event", observe):
-            if self.functions_host:
-                context = DurableOrchestrationContext(
-                    self.rows,
-                    instanceId="root",
-                    isReplaying=True,
-                    parentInstanceId=None,
-                    input=json.dumps(wrap_workflow_input("go")),
-                    upperSchemaVersion=ReplaySchema.V3.value,
-                )
-                result = json.loads(
-                    TaskOrchestrationExecutor().execute(
-                        context, context.histories, self.functions["dafx-agent-backlog"].orchestrator_function
-                    )
-                )
-                result["scheduled"] = [
-                    action for action in _atomic_actions(result["actions"]) if action["actionType"] in (0, 7)
-                ]
-                return result
+        with patch.object(DurableTaskWorkflowContext, "wait_for_external_event", observe):
             native_result = _replay(self.native, "root", self.rows)
         actions = list(native_result.actions)
         result = {
@@ -162,38 +140,11 @@ class _History:
         return result
 
     def event(self, name: str, value: Any, event_id: int) -> None:
-        wire = json.dumps(value)
-        if self.functions_host:
-            self.rows.append(_event(15, event_id, Name=name, Input=wire))
-        else:
-            event = helpers.new_event_raised_event(name, wire)
-            event.eventId = event_id
-            self.rows.append(event)
+        event = helpers.new_event_raised_event(name, json.dumps(value))
+        event.eventId = event_id
+        self.rows.append(event)
 
     def complete_entity(self, state: dict[str, Any]) -> dict[str, Any]:
-        if self.functions_host:
-            action = state["scheduled"][-1]
-            task_id = len(state["scheduled"]) - 1
-            assert action["actionType"] == 7 and action["instanceId"] == f"@{ENTITY}@root"
-            assert action["operation"] == "run"
-            self.entity_inputs.append(json.loads(action["input"]))
-            batch_input = {
-                "self": {"name": ENTITY, "key": "root"},
-                "exists": self.entity_state is not None,
-                "state": self.entity_state,
-                "batch": [{"name": "run", "input": json.dumps(action["input"])}],
-            }
-            batch = json.loads(self.functions[ENTITY](json.dumps(batch_input)))
-            assert len(batch["results"]) == 1 and batch["results"][0]["isError"] is False
-            self.entity_state = batch["entityState"]
-            wire_result = batch["results"][0]["result"]
-            request_id = f"entity-call-{task_id}"
-            self.rows.extend([
-                _event(14, task_id, Name="op", Input=json.dumps({"id": request_id})),
-                _event(15, Name=request_id, Input=json.dumps({"result": wire_result})),
-            ])
-            return json.loads(wire_result)
-
         assert len(state["actions"]) == 1
         action = state["actions"][0]
         assert action.HasField("sendEntityMessage")
@@ -202,7 +153,8 @@ class _History:
         assert entity_id.entity == ENTITY and entity_id.key == "root" and call.operation == "run"
         request = json.loads(call.input.value)
         self.entity_inputs.append(deepcopy(request))
-        converter = JsonDataConverter()
+        # The Functions entity decodes with its own worker's converter.
+        converter: Any = self.native._data_converter if self.functions_host else JsonDataConverter()
         shim = StateShim(self.entity_state, converter, is_serialized=True)
         factory = self.native._registry.get_entity(entity_id.entity)
         entity = factory()
@@ -221,11 +173,6 @@ class _History:
         return result
 
     def checkpoint_input(self, state: dict[str, Any], index: int) -> str:
-        if self.functions_host:
-            assert len(state["scheduled"]) == index + 1
-            action = state["scheduled"][-1]
-            assert action["actionType"] == 0 and action["functionName"] == CHECKPOINT
-            return str(action["input"])
         assert len(state["actions"]) == 1
         action = state["actions"][0]
         assert action.id == index + 1 and action.HasField("scheduleTask")
@@ -233,20 +180,12 @@ class _History:
         return str(action.scheduleTask.input.value)
 
     def complete_checkpoint(self, index: int, wire: str) -> None:
-        if self.functions_host:
-            result = self.functions[CHECKPOINT](json.loads(wire))
-            assert result == "null"
-            self.rows.extend([
-                _event(4, index, Name=CHECKPOINT, Input=wire),
-                _event(5, TaskScheduledId=index, Result=json.dumps(result)),
-            ])
-        else:
-            result = _ActivityExecutor(self.native._registry, _LOGGER, self.native._data_converter).execute(
-                "root", CHECKPOINT, index + 1, wire
-            )
-            assert result is not None and json.loads(result) == "null"
-            self.rows.extend([
-                helpers.new_task_scheduled_event(index + 1, CHECKPOINT, wire),
-                helpers.new_task_completed_event(index + 1, result),
-            ])
+        result = _ActivityExecutor(self.native._registry, _LOGGER, self.native._data_converter).execute(
+            "root", CHECKPOINT, index + 1, wire
+        )
+        assert result is not None and json.loads(result) == "null"
+        self.rows.extend([
+            helpers.new_task_scheduled_event(index + 1, CHECKPOINT, wire),
+            helpers.new_task_completed_event(index + 1, result),
+        ])
         self.checkpoints += 1

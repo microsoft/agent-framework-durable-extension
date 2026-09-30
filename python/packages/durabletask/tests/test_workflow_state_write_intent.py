@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from _workflow_replay_test_support import _af_replay, _Episodes, _replay
+from _workflow_replay_test_support import _Episodes, _replay
 from _workflow_state_test_support import _core_committed_state, _registered_result
 from agent_framework import (
     Executor,
@@ -527,12 +527,6 @@ def test_sdk_dispatch_order_merge_reaches_message_pipeline_independent_of_comple
         expected, sort_keys=True
     )
     assert json.dumps(seen, sort_keys=True) == json.dumps(before_replay, sort_keys=True)
-    # The AF SDK consumes these checkpointed results too. This is translated
-    # SDK history, not a live Functions-host test or old-history compatibility.
-    af = _af_replay(transport.histories["root"], workflow, instance="root")
-    assert af["isDone"]
-    assert json.dumps(af["output"], sort_keys=True) == json.dumps(expected, sort_keys=True)
-    assert json.dumps(seen, sort_keys=True) == json.dumps(before_replay, sort_keys=True)
 
 
 def test_hitl_admission_keeps_rejected_state_empty_and_journals_the_accepted_handler() -> None:
@@ -578,5 +572,4 @@ def test_hitl_admission_keeps_rejected_state_empty_and_journals_the_accepted_han
     transport.cold("root")
     transport.complete_named("root", "sink")
     assert json.loads(transport.completions["root"].result.value) == ["writer"]
-    assert _af_replay(transport.histories["root"], workflow, instance="root")["output"] == ["writer"]
     assert seen == [[7]]

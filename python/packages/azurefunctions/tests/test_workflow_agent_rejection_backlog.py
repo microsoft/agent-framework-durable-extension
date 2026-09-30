@@ -69,12 +69,8 @@ def test_native_agent_rejection_backlog_keeps_approvals_and_replays_without_exec
         history.event(a.id, invalid, 10000 + index)
     history.event(a.id, answer_a, 10000 + count)
     backlog = history.rows[backlog_start : backlog_start + count]
-    if functions_host:
-        assert len({row["EventId"] for row in backlog}) == count
-        assert len({row["Input"] for row in backlog}) == 1
-    else:
-        assert len({row.eventId for row in backlog}) == count
-        assert len({row.eventRaised.input.value for row in backlog}) == 1
+    assert len({row.eventId for row in backlog}) == count
+    assert len({row.eventRaised.input.value for row in backlog}) == 1
     history.rows.append(completion)
 
     no_decode = Mock(side_effect=AssertionError("Agent rejection must not decode arbitrary response classes"))
@@ -106,10 +102,7 @@ def test_native_agent_rejection_backlog_keeps_approvals_and_replays_without_exec
         assert len(client.calls) == len(history.entity_inputs) == 1 and effects == []
         if not sibling_first:
             assert ready["customStatus"]["pending_requests"] == {b.id: pending[b.id]}
-            if functions_host:
-                assert len(ready["scheduled"]) == count + 1
-            else:
-                assert ready["actions"] == []
+            assert ready["actions"] == []
             history.event(b.id, answer_b, 20000)
             ready = history.replay()
         no_decode.assert_not_called()
@@ -133,14 +126,14 @@ def test_native_agent_rejection_backlog_keeps_approvals_and_replays_without_exec
             assert cold["isDone"] and not cold["customStatus"].get("pending_requests")
             assert deserialize_workflow_output(cold["output"])[0].text == "done"
             assert len(history.waits[a.id]) == count + 1 and len(history.waits[b.id]) == 1
+            scheduled = [event.taskScheduled for event in history.rows if event.HasField("taskScheduled")]
+            assert [task.name for task in scheduled] == [CHECKPOINT] * count
+            assert all(task.input.value == wire for task in scheduled)
+            assert sum(event.HasField("taskCompleted") for event in history.rows) == count
             if functions_host:
-                assert [action["actionType"] for action in cold["scheduled"]] == [7, *([0] * count), 7]
-                assert all(action["input"] == wire for action in cold["scheduled"][1:-1])
+                # Functions custom status is capped, so the host publishes no event log.
+                assert "events" not in cold["customStatus"]
             else:
-                scheduled = [event.taskScheduled for event in history.rows if event.HasField("taskScheduled")]
-                assert [task.name for task in scheduled] == [CHECKPOINT] * count
-                assert all(task.input.value == wire for task in scheduled)
-                assert sum(event.HasField("taskCompleted") for event in history.rows) == count
                 invoked = [e for e in cold["customStatus"]["events"] if e["type"] == "executor_invoked"]
                 assert [event["iteration"] for event in invoked] == [0, 1]
             assert history.entity_state == committed and history.checkpoints == count
@@ -168,10 +161,7 @@ def test_valid_agent_approval_batch_keeps_entity_only_schedule(functions_host: b
     final = history.replay()
     assert final["isDone"] and history.checkpoints == 0
     assert len(history.entity_inputs) == len(client.calls) == 2 and sorted(effects) == ["a", "b"]
-    if functions_host:
-        assert [action["actionType"] for action in final["scheduled"]] == [7, 7]
-    else:
-        assert not any(event.HasField("taskScheduled") for event in history.rows)
+    assert not any(event.HasField("taskScheduled") for event in history.rows)
 
 
 @pytest.mark.parametrize("functions_host", [False, True], ids=["dt", "af"])
