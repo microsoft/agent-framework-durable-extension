@@ -181,7 +181,23 @@ internal sealed class DurableExecutorOutput
         return !found ||
             sentMessages.ValueKind == JsonValueKind.Null ||
             sentMessages.ValueKind == JsonValueKind.Array &&
-            sentMessages.EnumerateArray().All(HasValidTypedMessage);
+            sentMessages.EnumerateArray().All(HasValidChildTypedMessage);
+    }
+
+    internal static void NormalizeLegacyChildTypedMessages(List<TypedPayload>? messages)
+    {
+        if (messages is null)
+        {
+            return;
+        }
+
+        foreach (TypedPayload message in messages)
+        {
+            if (message.TypeName is null)
+            {
+                message.TypeName = typeof(string).AssemblyQualifiedName;
+            }
+        }
     }
 
     internal static string? GetRawResult(JsonElement result)
@@ -233,6 +249,37 @@ internal sealed class DurableExecutorOutput
             && IsValidList(output.ClearedScopes, presentProperties, nameof(ClearedScopes))
             && IsValidList(output.Events, presentProperties, nameof(Events))
             && IsValidList(output.SentMessages, presentProperties, nameof(SentMessages));
+    }
+
+    private static bool HasValidChildTypedMessage(JsonElement message)
+    {
+        if (!HasUnambiguousProperties(message, s_messageProperties, out HashSet<string> presentProperties) ||
+            !presentProperties.Contains(nameof(TypedPayload.Data)))
+        {
+            return false;
+        }
+
+        JsonElement typeName = default;
+        JsonElement data = default;
+        foreach (JsonProperty property in message.EnumerateObject())
+        {
+            if (property.Name.Equals(nameof(TypedPayload.TypeName), StringComparison.OrdinalIgnoreCase))
+            {
+                typeName = property.Value;
+            }
+            else if (property.Name.Equals(nameof(TypedPayload.Data), StringComparison.OrdinalIgnoreCase))
+            {
+                data = property.Value;
+            }
+        }
+
+        bool validTypeName = !presentProperties.Contains(nameof(TypedPayload.TypeName)) ||
+            typeName.ValueKind == JsonValueKind.Null ||
+            typeName.ValueKind == JsonValueKind.String &&
+            !string.IsNullOrWhiteSpace(typeName.GetString());
+        return validTypeName &&
+            data.ValueKind == JsonValueKind.String &&
+            !string.IsNullOrWhiteSpace(data.GetString());
     }
 
     private static bool IsValidList<T>(List<T>? values, HashSet<string> presentProperties, string propertyName)

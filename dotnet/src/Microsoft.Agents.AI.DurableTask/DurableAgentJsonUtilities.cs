@@ -87,9 +87,18 @@ internal static partial class DurableAgentJsonUtilities
     internal static JsonElement? GetRetainedResult(AgentResponse response)
     {
         ArgumentNullException.ThrowIfNull(response);
-        return s_retainedResultsByResponse.TryGetValue(response, out RetainedResultHolder? retained)
-            ? retained.Value
-            : null;
+        HashSet<AgentResponse> visited = new(ReferenceEqualityComparer.Instance);
+        for (AgentResponse? current = response;
+            current is not null && visited.Add(current);
+            current = current.RawRepresentation as AgentResponse)
+        {
+            if (s_retainedResultsByResponse.TryGetValue(current, out RetainedResultHolder? retained))
+            {
+                return retained.Value;
+            }
+        }
+
+        return null;
     }
 
     internal static DurableAgentFailureData? GetCommittedFailure(AgentResponse response)

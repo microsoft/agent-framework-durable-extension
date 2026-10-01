@@ -208,6 +208,7 @@ internal static class DurableExecutorDispatcher
         {
             DurableWorkflowResult? workflowResult = resultElement.Deserialize(
                 DurableWorkflowJsonContext.Default.DurableWorkflowResult);
+            DurableExecutorOutput.NormalizeLegacyChildTypedMessages(workflowResult?.SentMessages);
             return ConvertWorkflowResultToExecutorOutput(workflowResult);
         }
         catch (JsonException)

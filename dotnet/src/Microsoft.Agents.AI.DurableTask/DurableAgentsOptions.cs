@@ -83,6 +83,8 @@ public sealed class DurableAgentsOptions
     /// When persistent request outcomes are enabled, committed runs schedule entity-local payload cleanup.
     /// Physical removal may lag expiry; polling reports unavailable without modifying state.
     /// Imported states without a scheduled check need an explicit cleanup operation or a successful new run.
+    /// The schema-2 mailbox writer remains an internal, default-off rollout capability in this release, so this
+    /// public setting does not activate mailbox persistence by itself.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The retention period is not positive.</exception>
     public TimeSpan? ResultRetentionPeriod

@@ -65,6 +65,9 @@ By default, each agent can be invoked via a built-in HTTP trigger function at th
 
 HTTP fire-and-forget calls return `202 Accepted`; this acknowledges dispatch, not successful execution.
 Calls that wait return `200` only for an available successful result. With `Accept: application/json`,
+successful responses use string `status: "success"` and numeric `status_code: 200`; accepted responses
+use `status: "accepted"` and `status_code: 202`. Clients upgrading from the earlier .NET preview must move
+numeric comparisons from `status` to `status_code`.
 the native `response` shape remains compatible, and the additive `result` contains canonical retained
 terminal-response JSON. Use `result` for optional `value` (absent and explicit null remain distinct),
 opaque content, and unknown metadata that the native response cannot represent. Legacy plain-text

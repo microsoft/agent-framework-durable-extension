@@ -56,6 +56,9 @@ payload is **completed but result unavailable**, not pending and not a new invoc
 These failure semantics also apply to direct orchestration calls and workflow agent executors.
 A committed duplicate failure (including a legacy `errorResponse` and an empty retry) throws before
 validation, agent construction, history/tool work, or migration; it cannot become downstream success.
+This intentionally changes mixed-runtime schema-1 delivery: a Python-written `errorResponse` is surfaced
+as `DurableAgentTerminalException` instead of an HTTP 200/ordinary response, and duplicate correlated
+legacy responses fail closed as corrupt rather than selecting the first entry.
 The Durable Task SDK serializes exception type, message, and inner failures, but drops custom exception
 properties. The entity therefore includes a versioned metadata snapshot in a
 `DurableAgentFailureMetadataException` inner exception. `DurableAIAgent` restores the typed terminal or

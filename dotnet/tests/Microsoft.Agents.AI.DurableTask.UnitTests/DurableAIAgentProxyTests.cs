@@ -86,6 +86,47 @@ public sealed class DurableAIAgentProxyTests
             new AgentResponse(new ChatMessage(ChatRole.Assistant, "null"))));
     }
 
+    [Fact]
+    public async Task TypedProxyResponseThroughBaseReferenceRetainsCanonicalResultAsync()
+    {
+        AgentSessionId sessionId = new("agentA", "session");
+        DateTimeOffset completedAt = DateTimeOffset.UtcNow;
+        AgentResponse nativeResponse =
+            new(new ChatMessage(ChatRole.Assistant, """{"answer":42}"""));
+        DurableAgentStateTerminalResult result = DurableAgentStateTerminalResult.FromResponse(
+            "correlation",
+            nativeResponse,
+            completedAt,
+            structuredValue: JsonSerializer.SerializeToElement(new { answer = 42 }));
+        result.Response!.UnknownProperties = new Dictionary<string, JsonElement>
+        {
+            ["futureResponseField"] = JsonSerializer.SerializeToElement(new { preserve = true }),
+        };
+        DurableAgentState state = CreateRevisedState(
+            result,
+            new DurableAgentStateCompletionReceipt
+            {
+                CorrelationId = "correlation",
+                Outcome = result.Outcome,
+                CompletedAt = completedAt,
+                ResultState = DurableAgentStateCompletionReceipt.AvailableResult,
+            });
+        AIAgent proxy = new DurableAIAgentProxy(
+            "agentA",
+            new HandleDurableAgentClient(CreateHandle(sessionId, state)));
+
+        AgentResponse<Dictionary<string, int>> response =
+            await proxy.RunAsync<Dictionary<string, int>>(
+                new ChatMessage(ChatRole.User, "request"),
+                new DurableAgentSession(sessionId));
+
+        Assert.Equal(42, response.Result["answer"]);
+        JsonElement retained = Assert.IsType<JsonElement>(response.GetDurableResult());
+        Assert.Equal(42, retained.GetProperty("value").GetProperty("answer").GetInt32());
+        Assert.True(retained.GetProperty("futureResponseField").GetProperty("preserve").GetBoolean());
+        Assert.IsType<AgentResponse>(response.RawRepresentation);
+    }
+
     // Verifies the proxy rejects a session whose agent name differs from its own,
     // and that the durable client is never called when this happens.
     [Fact]

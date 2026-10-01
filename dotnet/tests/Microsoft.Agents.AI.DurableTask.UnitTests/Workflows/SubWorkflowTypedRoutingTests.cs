@@ -37,10 +37,8 @@ public sealed class SubWorkflowTypedRoutingTests
             string[] messages =
             [
                 "null",
-                        "{}",
-                        """{"data":"{}"}""",
-                        """{"typeName":null,"data":"{}"}""",
-                        """{"typeName":"","data":"{}"}""",
+                "{}",
+                """{"typeName":"","data":"{}"}""",
                         """{"typeName":" \t\r\n ","data":"{}"}""",
                         """{"typeName":"System.String"}""",
                         """{"typeName":"System.String","data":null}""",
@@ -107,6 +105,54 @@ public sealed class SubWorkflowTypedRoutingTests
         }
 
         await AssertOpaqueChildAndReplayAsync(result.ToJsonString(), WorkflowExecutionTestHelper.ControlEnvelope, preserveEvent: true, halt);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task LegacyChildMessageWithoutTypeNamePreservesControlsAndStringRoutingAsync(
+        bool explicitNullTypeName,
+        bool halt)
+    {
+        JsonObject message = new()
+        {
+            ["data"] = "legacy payload",
+        };
+        if (explicitNullTypeName)
+        {
+            message["typeName"] = null;
+        }
+
+        RoutingHarness original = new(
+            "activity",
+            "seed",
+            childOutputWire: ChildResult([message], "not a fallback", halt));
+        DurableWorkflowResult result = await original.RunAsync();
+
+        Assert.Equal(halt ? "not a fallback" : "legacy payload", result.Result);
+        Assert.Contains("child-event", result.Events);
+        Assert.Equal(halt, result.HaltRequested);
+        if (halt)
+        {
+            Assert.Empty(original.Successor.HandledTypes);
+            Assert.Empty(original.Successor.StringInputs);
+        }
+        else
+        {
+            Assert.Equal([typeof(string)], original.Successor.HandledTypes);
+            Assert.Equal(["legacy payload"], original.Successor.StringInputs);
+            DurableActivityInput input = Assert.Single(original.SuccessorInputs);
+            Assert.Equal(typeof(string).AssemblyQualifiedName, input.InputTypeName);
+            Assert.Equal("legacy payload", input.Input);
+        }
+
+        RoutingHarness replay = new("activity", "seed", replayCalls: ColdHistory(original));
+        Assert.Equal(Serialize(result), Serialize(await replay.RunAsync()));
+        Assert.Empty(replay.Successor.HandledTypes);
+        Assert.Equal(0, replay.ExecutedActivities);
+        replay.AssertHistoryConsumed();
     }
 
     [Fact]
