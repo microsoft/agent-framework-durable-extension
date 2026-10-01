@@ -41,6 +41,55 @@ public sealed class AgentEntityHistoryTests
             persisted.Data.Session.Value.GetProperty("stateBag").EnumerateObject().Select(property => property.Name));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DurableAdapterExcludesStaleInMemoryHistoryOnSuccessAndCertifiedFailureAsync(
+        bool certifiedFailure)
+    {
+        InvalidOperationException failure = new("provider-private-message");
+        RecordingChatClient client = new() { Exception = certifiedFailure ? failure : null };
+        ChatClientAgent agent = new(client, name: "agent");
+        AgentSession session = await agent.CreateSessionAsync();
+        InMemoryChatHistoryProvider provider =
+            Assert.IsType<InMemoryChatHistoryProvider>(agent.ChatHistoryProvider);
+        provider.SetMessages(session, [new ChatMessage(ChatRole.User, "stale provider transcript")]);
+        session.StateBag.SetValue("other-state", new ExternalHistoryState { Count = 1 });
+        DurableAgentState initialState = await RunEntityAsync(
+            new ChatClientAgent(new RecordingChatClient(), name: "agent"),
+            new DurableAgentState(),
+            new RunRequest("old request") { CorrelationId = "old" });
+        initialState.Data.Session = await agent.SerializeSessionAsync(session);
+        foreach (string key in provider.StateKeys)
+        {
+            Assert.True(initialState.Data.Session.Value.GetProperty("stateBag").TryGetProperty(key, out _));
+        }
+
+        EntityHarness harness = CreateHarness(
+            agent,
+            initialState,
+            enableProviderFailureFinalization: certifiedFailure,
+            providerFailureAttestor: new RecordingProviderFailureAttestor(failure));
+
+        _ = await harness.RunAsync(
+            new RunRequest("new request") { CorrelationId = "new" });
+
+        DurableAgentState persisted = DeserializeState(
+            SerializeState(Assert.IsType<DurableAgentState>(harness.PersistedState)));
+        Assert.Equal(["old request", "response", "new request"], client.LastMessages.Select(message => message.Text));
+        Assert.Equal(DurableAgentStateHistoryBinding.DurableStateOwner, GetBinding(persisted)?.OwnerKind);
+        Assert.Equal(
+            certifiedFailure ? DurableAgentStateCompletionReceipt.FailedOutcome : DurableAgentStateCompletionReceipt.SucceededOutcome,
+            persisted.Data.TerminalResults!["new"].Outcome);
+        Assert.Equal(certifiedFailure ? 3 : 4, persisted.Data.ConversationHistory.Count);
+        JsonElement stateBag = persisted.Data.Session!.Value.GetProperty("stateBag");
+        Assert.True(stateBag.TryGetProperty("other-state", out _));
+        foreach (string key in provider.StateKeys)
+        {
+            Assert.False(stateBag.TryGetProperty(key, out _));
+        }
+    }
+
     [Fact]
     public async Task WrappedAgentDoesNotReplayTranscriptOutsideProviderAsync()
     {
@@ -1448,6 +1497,92 @@ public sealed class AgentEntityHistoryTests
         Assert.Equal(1, client.InvocationCount);
         Assert.Equal(2, persisted.Data.ConversationHistory.Count);
         Assert.Equal(JsonValueKind.Undefined, persisted.Data.HistoryBinding.ValueKind);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("configured-history")]
+    public async Task LegacyInMemoryProviderPreservesReducedFilteredHistoryAcrossColdTurnsAsync(
+        string? stateKey)
+    {
+        DurableAgentState state = new();
+        string? previousRequest = null;
+        for (int turn = 1; turn <= 3; turn++)
+        {
+            RecordingChatClient client = new();
+            SummarizingChatReducer reducer = new();
+            InMemoryChatHistoryProvider provider = new(
+                new InMemoryChatHistoryProviderOptions
+                {
+                    StateKey = stateKey,
+                    StateInitializer = _ => new InMemoryChatHistoryProvider.State
+                    {
+                        Messages = [new ChatMessage(ChatRole.Assistant, "provider initialization")],
+                    },
+                    ChatReducer = reducer,
+                    ReducerTriggerEvent =
+                        InMemoryChatHistoryProviderOptions.ChatReducerTriggerEvent.AfterMessageAdded,
+                    StorageInputRequestMessageFilter = messages => messages.TakeLast(1),
+                    ProvideOutputMessageFilter = messages =>
+                        messages.Where(message => message.Role == ChatRole.System),
+                });
+            ChatClientAgent agent = new(
+                client,
+                new ChatClientAgentOptions
+                {
+                    Name = "agent",
+                    ChatHistoryProvider = provider,
+                });
+            EntityHarness harness = CreateHarness(
+                agent,
+                state,
+                enableMailboxWrites: false);
+            string request = $"request {turn}";
+
+            await harness.RunAsync(
+                new RunRequest(
+                    [
+                        new ChatMessage(ChatRole.User, $"filtered request {turn}"),
+                        new ChatMessage(ChatRole.User, request),
+                    ])
+                {
+                    CorrelationId = $"turn-{turn}",
+                });
+
+            state = DeserializeState(
+                SerializeState(Assert.IsType<DurableAgentState>(harness.PersistedState)));
+            Assert.Equal(DurableAgentState.CurrentSchemaVersion, state.SchemaVersion);
+            Assert.Equal(JsonValueKind.Undefined, state.Data.HistoryBinding.ValueKind);
+            Assert.Equal(turn * 2, state.Data.ConversationHistory.Count);
+            Assert.Null(state.Data.TerminalResults);
+            Assert.Null(state.Data.CompletionReceipts);
+            Assert.Equal(
+                previousRequest is null
+                    ? ["provider initialization", request, "response"]
+                    : [$"summary: {previousRequest}", "response", request, "response"],
+                reducer.LastMessages.Select(message => message.Text));
+            Assert.DoesNotContain(
+                client.LastMessages,
+                message => message.Text == "provider initialization");
+            if (previousRequest is not null)
+            {
+                Assert.Single(
+                    client.LastMessages,
+                    message => message.Text == $"summary: {previousRequest}");
+            }
+
+            JsonElement sessionState = state.Data.Session!.Value;
+            foreach (string key in provider.StateKeys)
+            {
+                Assert.True(sessionState.GetProperty("stateBag").TryGetProperty(key, out _));
+            }
+
+            AgentSession restored = await agent.DeserializeSessionAsync(sessionState);
+            Assert.Equal(
+                [$"summary: {request}", "response"],
+                provider.GetMessages(restored).Select(message => message.Text));
+            previousRequest = request;
+        }
     }
 
     [Fact]
@@ -3148,6 +3283,25 @@ public sealed class AgentEntityHistoryTests
             }
 
             yield return new ChatResponseUpdate(ChatRole.Assistant, "final response");
+        }
+    }
+
+    private sealed class SummarizingChatReducer : IChatReducer
+    {
+        public IReadOnlyList<ChatMessage> LastMessages { get; private set; } = [];
+
+        public Task<IEnumerable<ChatMessage>> ReduceAsync(
+            IEnumerable<ChatMessage> messages,
+            CancellationToken cancellationToken)
+        {
+            this.LastMessages = messages.ToList();
+            return Task.FromResult<IEnumerable<ChatMessage>>(
+                [
+                    new ChatMessage(
+                        ChatRole.System,
+                        $"summary: {this.LastMessages.Last(message => message.Role == ChatRole.User).Text}"),
+                    this.LastMessages[^1],
+                ]);
         }
     }
 

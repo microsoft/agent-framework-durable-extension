@@ -643,6 +643,7 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                 agent,
                 session,
                 chatClientAgent,
+                durableHistoryProvider,
                 finalOwnership,
                 this._cancellationToken).ConfigureAwait(false);
         if (fixedOwnershipContractActive)
@@ -876,13 +877,19 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         AIAgent agent,
         AgentSession session,
         ChatClientAgent? chatClientAgent,
+        DurableChatHistoryProvider? durableHistoryProvider,
         DurableAgentHistoryOwnership ownership,
         CancellationToken cancellationToken)
     {
-        // InMemoryChatHistoryProvider state can contain a full transcript already retained by the
-        // entity. Exclude only that provider's declared keys; custom, compaction, and opaque
-        // server-session state remains authoritative and is preserved.
+        // A configured legacy provider remains authoritative unless the invocation replaces it
+        // with the durable adapter. The implicit default still mirrors entity replay or service history.
+#pragma warning disable MAAI001
+        bool configuredProviderOwnsHistory =
+            durableHistoryProvider is null &&
+            chatClientAgent?.GetService<ChatClientAgentOptions>()?.ChatHistoryProvider is not null;
+#pragma warning restore MAAI001
         IEnumerable<string> excludedStateKeys =
+            !configuredProviderOwnsHistory &&
             chatClientAgent?.ChatHistoryProvider is InMemoryChatHistoryProvider inMemoryHistoryProvider &&
             ownership is DurableAgentHistoryOwnership.Entity or DurableAgentHistoryOwnership.Service
                 ? inMemoryHistoryProvider.StateKeys
