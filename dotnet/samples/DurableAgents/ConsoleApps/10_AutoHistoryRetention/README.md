@@ -7,11 +7,10 @@
 > mixed-runtime production until Python, the dashboard, pollers, rollback tooling, and every other
 > reader meet the schema 2 rollout floor.
 
-This sample source demonstrates a durable Azure OpenAI agent that explicitly selects
-`DurableAgentHistoryRetentionMode.Auto` with a deliberately small `MaxStateBytes` budget.
-`KeepAll` is the public default and does not proactively delete model transcript under pressure.
-Selecting `Auto` configures retention policy only; it does not activate schema 2 mailbox writes.
-Deterministic tests use the runtime's existing internal, default-disabled test hook.
+The public sample source preserves the intended prompts, bounded model options, marker diagnostic,
+and OpenTelemetry registration. It does **not** configure a retention mode or state budget because
+those activation settings are internal. The real package unit tests apply the draft profile through
+the existing internal, default-disabled test hook.
 
 ## Scenario
 
@@ -33,9 +32,10 @@ The random-marker answer is illustrative only:
 - Only `UNKNOWN` with optional final punctuation is classified as `Unavailable`.
 - Every other response is `Inconclusive`.
 
-Deterministic tests provide the correctness proof. They capture later model input, inspect
-persisted and reloaded entity state, retrieve the original completed result from the mailbox, and
-redeliver the original correlation while checking that the model is not executed again.
+The real `Microsoft.Agents.AI.DurableTask.UnitTests` project provides the white-box correctness
+proof. It captures later model input, inspects persisted and reloaded entity state, retrieves the
+original completed result from the mailbox, and redelivers the original correlation while checking
+that the model is not executed again.
 
 ## What Auto retains
 
@@ -49,9 +49,8 @@ This is durable entity **pressure retention**, not Microsoft Agent Framework sta
 compaction or `FollowCompaction`. It does not summarize old messages. It removes old transcript
 from later model input while durable execution and delivery evidence remains available.
 
-Choose `KeepAll` when preserving the complete transcript is more important than proactive state
-bounding. With `KeepAll`, `MaxStateBytes` is inactive and state can continue growing toward backend
-limits.
+This release exposes no public retention-mode selection. Internal `KeepAll` remains the
+default-off policy and performs no proactive transcript deletion.
 
 `Auto` cannot make every payload fit. A single oversized protected newest inline `DataContent`,
 tool result, terminal result, or other protected state can still exceed the high watermark. The
@@ -70,10 +69,24 @@ services.AddOpenTelemetry()
         .AddConsoleExporter(...));
 ```
 
-The meter is `Microsoft.Agents.AI.DurableTask`. It reports retention operations, evicted transcript
-entries and messages, reclaimed bytes, and state size before and after a pressure-retention
-attempt. The eviction reason is `transcript_pressure`. Outcomes are `no_action`,
-`transcript_evicted`, and `protected_state_capacity_failure`.
+The shared meter is `agent_framework.durabletask`, exposed through
+`DurableAgentTelemetry.MeterName`. Corrected retention builds emit the cross-runtime
+`durable.retention.*` instruments:
+
+- `durable.retention.evaluations`
+- `durable.retention.budget`
+- `durable.retention.state.size`
+- `durable.retention.removed_messages`
+- `durable.retention.removed_entries`
+- `durable.retention.reclaimed_bytes`
+- `durable.retention.capacity_failures`
+- `durable.retention.write_attempts`
+- `durable.retention.operations`
+
+Retention dimensions are bounded operational fields such as `mechanism`, `outcome`,
+`commit_status`, `phase`, `stage`, and `deletion_staged`. They do not include agent, session,
+correlation, message, or content dimensions. Outcomes include `below_threshold`, `staged`,
+`protected_floor`, `returned`, and `failed`.
 
 These measurements are emitted for attempts before entity commit. A later persistence failure or
 retry can roll back or duplicate what telemetry observed. Metrics are operational evidence, not
@@ -82,18 +95,15 @@ behavior when correctness matters.
 
 ## Run the sample
 
-The production entry point is intentionally gated and exits before accessing credentials or
-services. Once the cross-runtime rollout gate is approved, see the [ConsoleApps README](../README.md)
-for Foundry, authentication, and Durable Task Scheduler setup. The intended command is:
+The entry point is intentionally unsupported and exits before accessing credentials or services:
 
 ```bash
 cd dotnet/samples/DurableAgents/ConsoleApps/10_AutoHistoryRetention
 dotnet run --framework net10.0
 ```
 
-Enter a project topic of 80 characters or fewer. The sample prints the original random marker,
-concise progress for each turn, the diagnostic question and response, an honest observation, and
-standard OpenTelemetry console-exporter output when metrics flush.
+It prints the draft-gate explanation and exits with code 2. A future public activation design must
+be reviewed before this becomes runnable.
 
 ## Tests
 
@@ -101,17 +111,19 @@ standard OpenTelemetry console-exporter output when metrics flush.
 dotnet test --project tests\10_AutoHistoryRetention.Tests.csproj -c Release -f net10.0
 ```
 
-The sample-local tests use the same entity execution seam as the durable-agent product tests, with
-an in-memory fake model and opaque state persisted and reloaded between operations. They do not use
-credentials, a DTS service, private reflection, or the private retention algorithm. The tests prove
-that:
+The sample-local tests use only public APIs. They cover bounded agent options, prompt construction,
+the no-wait marker diagnostic, conservative result classification, and real OpenTelemetry meter
+registration/export.
 
-- `Auto` is explicitly configured while `KeepAll` remains the default.
-- The first marker and connected tool group leave model transcript, while the newest transcript
-  remains.
-- The original mailbox result and completion receipt remain available after eviction.
-- Redelivery of the completed correlation returns the original result without another model call.
-- The same pressure under `KeepAll` does not proactively delete transcript.
-- An oversized protected newest payload fails without committing state.
-- Real product retention metrics are exported alongside the persisted-state assertions.
-- The production OpenTelemetry console registration observes the durable meter.
+The white-box retention regression lives in the real package unit-test project, which legitimately
+has friend access:
+
+```powershell
+dotnet test --project ..\..\..\..\tests\Microsoft.Agents.AI.DurableTask.UnitTests\Microsoft.Agents.AI.DurableTask.UnitTests.csproj `
+    -c Release -f net10.0 `
+    --filter-method "*DraftSampleProfileEvictsTranscriptButPreservesCompletionAndIdempotencyAsync"
+```
+
+That regression applies the draft profile through the internal test gate and proves transcript
+eviction, connected tool grouping, mailbox and receipt preservation, persisted-state reload,
+idempotent duplicate delivery, later model-input removal, and product retention telemetry.

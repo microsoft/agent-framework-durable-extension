@@ -2,8 +2,6 @@
 
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.DurableTask;
-using Microsoft.DurableTask.Client.AzureManaged;
-using Microsoft.DurableTask.Worker.AzureManaged;
 using Microsoft.Extensions.DependencyInjection;
 using OpenTelemetry.Metrics;
 
@@ -60,33 +58,9 @@ public sealed class HistoryRetentionScenario
     }
 }
 
-public static class HistoryRetentionHost
-{
-    public static IServiceCollection ConfigureServices(
-        IServiceCollection services,
-        AIAgent agent,
-        string dtsConnectionString,
-        Action<MeterProviderBuilder>? configureMetricExporter = null)
-    {
-        services.AddRetentionMetrics(configureMetricExporter);
-        services.ConfigureDurableAgents(
-            options =>
-            {
-                options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
-                options.MaxStateBytes = HistoryRetentionDemo.MaxStateBytes;
-                options.AddAIAgent(agent);
-            },
-            workerBuilder: builder => builder.UseDurableTaskScheduler(dtsConnectionString),
-            clientBuilder: builder => builder.UseDurableTaskScheduler(dtsConnectionString));
-
-        return services;
-    }
-}
-
 public static class HistoryRetentionDemo
 {
-    // Eight bounded results, receipts, history binding, session state, and bookkeeping fit below
-    // this budget while seven 4 KiB inputs force the oldest transcript groups to be evicted.
+    // This draft profile is exercised by the product unit tests through the internal rollout gate.
     public const int MaxStateBytes = 32 * 1024;
     public const int ScenarioTurns = 7;
     public const int NotesPerTurn = 4 * 1024;
