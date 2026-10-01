@@ -2639,18 +2639,7 @@ public sealed class AgentEntityHistoryTests
             }
         };
         listener.SetMeasurementEventCallback<long>(
-            (instrument, _, tags, _) =>
-            {
-                foreach (KeyValuePair<string, object?> tag in tags)
-                {
-                    if (tag.Key == DurableAgentTelemetry.AgentNameTagName &&
-                        string.Equals(tag.Value as string, "agent", StringComparison.Ordinal))
-                    {
-                        measuredInstruments.Enqueue(instrument.Name);
-                        break;
-                    }
-                }
-            });
+            (instrument, _, _, _) => measuredInstruments.Enqueue(instrument.Name));
         listener.Start();
 
         DurableAgentState persisted = await RunEntityAsync(
@@ -2660,7 +2649,7 @@ public sealed class AgentEntityHistoryTests
             configureOptions: options =>
             {
                 options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
-                options.MaxStateBytes = 5_000;
+                options.MaxStateBytes = 9_000;
             });
 
         Assert.NotNull(persisted.Data.Truncation);
@@ -2669,7 +2658,10 @@ public sealed class AgentEntityHistoryTests
         Assert.Contains("oldest", persisted.Data.TerminalResults!.Keys);
         Assert.Contains("oldest", persisted.Data.CompletionReceipts!.Keys);
         Assert.Contains(
-            DurableAgentTelemetry.RetentionOperationsInstrumentName,
+            DurableAgentTelemetry.OperationsInstrumentName,
+            measuredInstruments);
+        Assert.Contains(
+            DurableAgentTelemetry.WriteAttemptsInstrumentName,
             measuredInstruments);
 
         DurableAgentState reloaded = DeserializeState(SerializeState(persisted));
@@ -2826,21 +2818,23 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
-    public async Task DefaultKeepAllDoesNotEvictTranscriptUnderConfiguredPressureAsync()
+    public async Task KeepAllRejectsInapplicableBudgetBeforeModelExecutionAsync()
     {
         RecordingChatClient client = new();
         DurableAgentState initialState = CreateLargeState();
-
-        DurableAgentState persisted = await RunEntityAsync(
+        EntityHarness harness = CreateHarness(
             new ChatClientAgent(client, name: "agent"),
             initialState,
-            new RunRequest("new request") { CorrelationId = "new" },
             configureOptions: options => options.MaxStateBytes = 500);
 
-        Assert.Null(persisted.Data.Truncation);
-        Assert.Contains(
-            persisted.Data.ConversationHistory,
-            entry => entry.CorrelationId == "oldest");
+        InvalidOperationException exception =
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => harness.RunAsync(
+                    new RunRequest("new request") { CorrelationId = "new" }));
+
+        Assert.Contains("only valid", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(0, client.InvocationCount);
+        Assert.False(harness.StateWasPersisted);
     }
 
     [Fact]
@@ -2974,6 +2968,7 @@ public sealed class AgentEntityHistoryTests
             () => harness.RunAsync(
                 new RunRequest(new string('x', 2_000)) { CorrelationId = "new" }));
 
+        Assert.Equal(0, client.InvocationCount);
         Assert.False(harness.StateWasPersisted);
         Assert.Equal(originalState, SerializeState(initialState));
     }

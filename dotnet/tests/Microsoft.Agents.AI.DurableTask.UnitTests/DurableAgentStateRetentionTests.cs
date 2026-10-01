@@ -1,5 +1,8 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Globalization;
+using System.Numerics;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Agents.AI.DurableTask.State;
 using Microsoft.Extensions.AI;
@@ -18,7 +21,7 @@ public sealed class DurableAgentStateRetentionTests
         int removed = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.KeepAll,
-            500,
+            maxStateBytes: null,
             DateTimeOffset.UtcNow,
             NullLogger.Instance,
             new AgentSessionId("agent", "session"));
@@ -35,7 +38,7 @@ public sealed class DurableAgentStateRetentionTests
         Assert.Equal(
             DurableAgentHistoryRetentionMode.KeepAll,
             options.HistoryRetentionMode);
-        Assert.Equal(1_048_576, options.MaxStateBytes);
+        Assert.Null(options.MaxStateBytes);
     }
 
     [Theory]
@@ -47,6 +50,79 @@ public sealed class DurableAgentStateRetentionTests
 
         _ = Assert.Throws<ArgumentOutOfRangeException>(
             () => options.MaxStateBytes = value);
+    }
+
+    [Fact]
+    public void AutoRequiresExplicitPositiveBudget()
+    {
+        DurableAgentsOptions options = new()
+        {
+            HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto,
+        };
+
+        InvalidOperationException exception =
+            Assert.Throws<InvalidOperationException>(
+                () => _ = options.GetRetentionSettings());
+
+        Assert.Contains("explicit positive", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void KeepAllRejectsInapplicableRetentionConfiguration()
+    {
+        DurableAgentsOptions options = new()
+        {
+            MaxStateBytes = 1_000,
+        };
+
+        _ = Assert.Throws<InvalidOperationException>(
+            () => _ = options.GetRetentionSettings());
+        _ = Assert.Throws<InvalidOperationException>(
+            () => DurableAgentStateRetention.Enforce(
+                CreateRevisedState(),
+                DurableAgentHistoryRetentionMode.KeepAll,
+                1_000,
+                DateTimeOffset.UtcNow,
+                NullLogger.Instance,
+                new AgentSessionId("agent", "session")));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-0.1)]
+    [InlineData(1.1)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    public void WatermarksMustBeFiniteFractions(double value)
+    {
+        DurableAgentsOptions options = new();
+
+        _ = Assert.Throws<ArgumentOutOfRangeException>(
+            () => options.HistoryRetentionHighWatermark = value);
+        _ = Assert.Throws<ArgumentOutOfRangeException>(
+            () => options.HistoryRetentionLowWatermark = value);
+    }
+
+    [Fact]
+    public void AutoUsesValidatedConfigurableWatermarks()
+    {
+        DurableAgentsOptions options = new()
+        {
+            HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto,
+            MaxStateBytes = 10_000,
+            HistoryRetentionHighWatermark = 0.9,
+            HistoryRetentionLowWatermark = 0.6,
+        };
+
+        DurableAgentRetentionSettings settings = options.GetRetentionSettings();
+
+        Assert.Equal(10_000, settings.MaxStateBytes);
+        Assert.Equal(0.9, settings.HighWatermark);
+        Assert.Equal(0.6, settings.LowWatermark);
+
+        options.HistoryRetentionLowWatermark = 0.95;
+        _ = Assert.Throws<InvalidOperationException>(
+            () => _ = options.GetRetentionSettings());
     }
 
     [Fact]
@@ -77,7 +153,7 @@ public sealed class DurableAgentStateRetentionTests
         int removed = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.Auto,
-            2_500,
+            4_000,
             now,
             NullLogger.Instance,
             new AgentSessionId("agent", "session"));
@@ -86,10 +162,48 @@ public sealed class DurableAgentStateRetentionTests
         Assert.DoesNotContain(state.Data.ConversationHistory, entry => entry.CorrelationId == "oldest");
         Assert.Contains(state.Data.ConversationHistory, entry => entry.CorrelationId == "newest");
         Assert.NotNull(state.Data.Truncation);
-        Assert.Equal(removed, state.Data.Truncation.EvictedMessageCount);
+        Assert.Equal(removed, ReadCount(state.Data.Truncation.EvictedMessageCount));
         Assert.True(
             DurableAgentStateRetention.GetSerializedSize(state) <
-            2_500 * DurableAgentStateRetention.HighWatermark);
+            4_000 * DurableAgentStateRetention.HighWatermark);
+    }
+
+    [Fact]
+    public void ConfiguredWatermarksControlPressureThresholdAndTarget()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState baseline = CreateLargeState(now);
+        DurableAgentState belowHigh = baseline.Clone();
+        DurableAgentState underPressure = baseline.Clone();
+        int initialSize = DurableAgentStateRetention.GetSerializedSize(belowHigh);
+        int budget = (int)Math.Ceiling(initialSize / 0.85);
+
+        RetentionResult? noAction = DurableAgentStateRetention.EnforceForCommit(
+            belowHigh,
+            new(
+                DurableAgentHistoryRetentionMode.Auto,
+                budget,
+                HighWatermark: 0.90,
+                LowWatermark: 0.80),
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+        RetentionResult? evicted = DurableAgentStateRetention.EnforceForCommit(
+            underPressure,
+            new(
+                DurableAgentHistoryRetentionMode.Auto,
+                budget,
+                HighWatermark: 0.80,
+                LowWatermark: 0.60),
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.Equal(RetentionOutcome.NoAction, noAction?.Outcome);
+        Assert.Equal(RetentionOutcome.TranscriptEvicted, evicted?.Outcome);
+        Assert.True(
+            DurableAgentStateRetention.GetSerializedSize(underPressure) <=
+            budget * 0.60);
     }
 
     [Fact]
@@ -101,7 +215,7 @@ public sealed class DurableAgentStateRetentionTests
         DurableAgentState state = CreateLargeState(now);
         state.Data.Truncation = new DurableAgentStateTruncation
         {
-            EvictedMessageCount = 4,
+            EvictedMessageCount = Count(4),
             FirstEvictedAt = firstEviction,
             LastEvictedAt = lastEviction,
         };
@@ -109,7 +223,7 @@ public sealed class DurableAgentStateRetentionTests
         int removed = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.Auto,
-            2_500,
+            4_000,
             now,
             NullLogger.Instance,
             new AgentSessionId("agent", "session"));
@@ -117,7 +231,7 @@ public sealed class DurableAgentStateRetentionTests
         Assert.True(removed > 0);
         Assert.Equal(firstEviction, state.Data.Truncation?.FirstEvictedAt);
         Assert.Equal(lastEviction, state.Data.Truncation?.LastEvictedAt);
-        Assert.Equal(4 + removed, state.Data.Truncation?.EvictedMessageCount);
+        Assert.Equal(4 + removed, ReadCount(state.Data.Truncation!.EvictedMessageCount));
     }
 
     [Fact]
@@ -127,7 +241,7 @@ public sealed class DurableAgentStateRetentionTests
         DurableAgentState state = CreateLargeState(now);
         state.Data.Truncation = new DurableAgentStateTruncation
         {
-            EvictedMessageCount = int.MaxValue,
+            EvictedMessageCount = Count(int.MaxValue),
             FirstEvictedAt = now.AddMinutes(-20),
             LastEvictedAt = now.AddMinutes(-10),
         };
@@ -135,23 +249,55 @@ public sealed class DurableAgentStateRetentionTests
         int removed = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.Auto,
-            2_500,
+            4_000,
             now,
             NullLogger.Instance,
             new AgentSessionId("agent", "session"));
 
         Assert.True(removed > 0);
-        Assert.Equal((long)int.MaxValue + removed, state.Data.Truncation?.EvictedMessageCount);
+        Assert.Equal(
+            (long)int.MaxValue + removed,
+            ReadCount(state.Data.Truncation!.EvictedMessageCount));
     }
 
     [Fact]
-    public void AutoSaturatesEvictedMessageCountAtInt64Maximum()
+    public void AutoIncrementsEvictedMessageCountBeyondInt64()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateLargeState(now);
+        BigInteger initialCount = (BigInteger)long.MaxValue + 1;
+        state.Data.Truncation = new DurableAgentStateTruncation
+        {
+            EvictedMessageCount = Count(initialCount),
+            FirstEvictedAt = now.AddMinutes(-20),
+            LastEvictedAt = now.AddMinutes(-10),
+        };
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            4_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(removed > 0);
+        Assert.Equal(
+            initialCount + removed,
+            ReadBigCount(state.Data.Truncation!.EvictedMessageCount));
+    }
+
+    [Theory]
+    [InlineData("9223372036854775808")]
+    [InlineData("9.223372036854775808e18")]
+    [InlineData("9.223372036854775808e+0000000018")]
+    public void AutoIncrementsEquivalentJsonIntegersBeyondInt64(string countJson)
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
         DurableAgentState state = CreateLargeState(now);
         state.Data.Truncation = new DurableAgentStateTruncation
         {
-            EvictedMessageCount = long.MaxValue - 1,
+            EvictedMessageCount = JsonDocument.Parse(countJson).RootElement.Clone(),
             FirstEvictedAt = now.AddMinutes(-20),
             LastEvictedAt = now.AddMinutes(-10),
         };
@@ -159,13 +305,264 @@ public sealed class DurableAgentStateRetentionTests
         int removed = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.Auto,
-            2_500,
+            4_000,
             now,
             NullLogger.Instance,
             new AgentSessionId("agent", "session"));
 
         Assert.True(removed > 0);
-        Assert.Equal(long.MaxValue, state.Data.Truncation?.EvictedMessageCount);
+        Assert.Equal(
+            BigInteger.Parse("9223372036854775808") + removed,
+            ReadBigCount(state.Data.Truncation!.EvictedMessageCount));
+    }
+
+    [Fact]
+    public void AutoIncrementsCounterAtExpansionSafetyBoundary()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateLargeState(now);
+        state.Data.ConversationHistory.Insert(
+            0,
+            CreateResponse("extra-old", new string('x', 5_000), now.AddMinutes(-30)));
+        state.Data.ConversationHistory.Insert(
+            0,
+            CreateRequest("extra-old", ChatRole.User, new string('x', 5_000), now.AddMinutes(-30)));
+        string countJson =
+            $"1e{DurableAgentStateContract.MaxExpandedIntegerDigits - 1}";
+        state.Data.Truncation = new DurableAgentStateTruncation
+        {
+            EvictedMessageCount = JsonDocument.Parse(countJson).RootElement.Clone(),
+            FirstEvictedAt = now.AddMinutes(-20),
+            LastEvictedAt = now.AddMinutes(-10),
+        };
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            12_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(removed > 0);
+        Assert.Equal(
+            BigInteger.Pow(
+                10,
+                DurableAgentStateContract.MaxExpandedIntegerDigits - 1) + removed,
+            ReadBigCount(state.Data.Truncation!.EvictedMessageCount));
+    }
+
+    [Fact]
+    public void AutoCarriesBeyondExpansionSafetyBoundaryAndKeepsIncrementing()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateRevisedState();
+        state.Data.ConversationHistory.Add(
+            CreateRequest("old", ChatRole.User, new string('x', 5_000), now.AddMinutes(-30)));
+        AddExchange(state, "newest", "newest", now);
+        string countJson = new('9', DurableAgentStateContract.MaxExpandedIntegerDigits);
+        state.Data.Truncation = new DurableAgentStateTruncation
+        {
+            EvictedMessageCount = JsonDocument.Parse(countJson).RootElement.Clone(),
+            FirstEvictedAt = now.AddMinutes(-20),
+            LastEvictedAt = now.AddMinutes(-10),
+        };
+
+        int firstRemoved = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            10_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.Equal(1, firstRemoved);
+        BigInteger expected = BigInteger.Parse(countJson) + firstRemoved;
+        Assert.Equal(
+            expected.ToString(CultureInfo.InvariantCulture),
+            state.Data.Truncation!.EvictedMessageCount.GetRawText());
+        Assert.Equal(
+            DurableAgentStateContract.MaxExpandedIntegerDigits + 1,
+            state.Data.Truncation.EvictedMessageCount.GetRawText().Length);
+
+        state.Data.ConversationHistory.Insert(
+            0,
+            CreateRequest("next-old", ChatRole.User, new string('y', 5_000), now.AddMinutes(-40)));
+
+        int secondRemoved = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            10_000,
+            now.AddMinutes(1),
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.Equal(1, secondRemoved);
+        expected += secondRemoved;
+        Assert.Equal(
+            expected.ToString(CultureInfo.InvariantCulture),
+            state.Data.Truncation.EvictedMessageCount.GetRawText());
+    }
+
+    [Fact]
+    public void AutoCanonicalizesContractingNegativeExponentBeyondExpansionBound()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateLargeState(now);
+        state.Data.ConversationHistory.Insert(
+            0,
+            CreateResponse("extra-old", new string('x', 5_000), now.AddMinutes(-30)));
+        state.Data.ConversationHistory.Insert(
+            0,
+            CreateRequest("extra-old", ChatRole.User, new string('x', 5_000), now.AddMinutes(-30)));
+        const int Contraction = DurableAgentStateContract.MaxExpandedIntegerDigits + 1;
+        string countJson = $"1{new string('0', Contraction)}e-{Contraction:D6}";
+        state.Data.Truncation = new DurableAgentStateTruncation
+        {
+            EvictedMessageCount = JsonDocument.Parse(countJson).RootElement.Clone(),
+            FirstEvictedAt = now.AddMinutes(-20),
+            LastEvictedAt = now.AddMinutes(-10),
+        };
+
+        int firstRemoved = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            10_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(firstRemoved > 0);
+        Assert.Equal(
+            BigInteger.One + firstRemoved,
+            ReadBigCount(state.Data.Truncation!.EvictedMessageCount));
+
+        state.Data.ConversationHistory.Insert(
+            0,
+            CreateResponse("next-old", new string('y', 5_000), now.AddMinutes(-40)));
+        state.Data.ConversationHistory.Insert(
+            0,
+            CreateRequest("next-old", ChatRole.User, new string('y', 5_000), now.AddMinutes(-40)));
+
+        int secondRemoved = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            10_000,
+            now.AddMinutes(1),
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(secondRemoved > 0);
+        Assert.Equal(
+            BigInteger.One + firstRemoved + secondRemoved,
+            ReadBigCount(state.Data.Truncation!.EvictedMessageCount));
+    }
+
+    [Theory]
+    [InlineData("1e4096")]
+    [InlineData("1e5000")]
+    public void AutoRejectsRetentionWhenExponentExpansionExceedsSafetyBound(
+        string countJson)
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateLargeState(now);
+        state.Data.Truncation = new DurableAgentStateTruncation
+        {
+            EvictedMessageCount = JsonDocument.Parse(countJson).RootElement.Clone(),
+            FirstEvictedAt = now.AddMinutes(-20),
+            LastEvictedAt = now.AddMinutes(-10),
+        };
+        string originalState = JsonSerializer.Serialize(
+            state,
+            DurableAgentStateJsonContext.Default.DurableAgentState);
+
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+            () => DurableAgentStateRetention.Enforce(
+                state,
+                DurableAgentHistoryRetentionMode.Auto,
+                4_000,
+                now,
+                NullLogger.Instance,
+                new AgentSessionId("agent", "session")));
+
+        Assert.Contains("expansion safety bound", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(
+            originalState,
+            JsonSerializer.Serialize(
+                state,
+                DurableAgentStateJsonContext.Default.DurableAgentState));
+    }
+
+    [Fact]
+    public void AutoIncrementsRawDigitsBeyondExpansionSafetyBound()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateLargeState(now);
+        state.Data.ConversationHistory.Insert(
+            0,
+            CreateResponse("extra-old", new string('x', 5_000), now.AddMinutes(-30)));
+        state.Data.ConversationHistory.Insert(
+            0,
+            CreateRequest("extra-old", ChatRole.User, new string('x', 5_000), now.AddMinutes(-30)));
+        string countJson = $"1{new string('0', 4_096)}";
+        state.Data.Truncation = new DurableAgentStateTruncation
+        {
+            EvictedMessageCount = JsonDocument.Parse(countJson).RootElement.Clone(),
+            FirstEvictedAt = now.AddMinutes(-20),
+            LastEvictedAt = now.AddMinutes(-10),
+        };
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            10_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(removed > 0);
+        Assert.Equal(
+            (BigInteger.Parse(countJson) + removed).ToString(CultureInfo.InvariantCulture),
+            state.Data.Truncation!.EvictedMessageCount.GetRawText());
+    }
+
+    [Fact]
+    public void AutoRejectsRetentionWithHugeExponentSpelling()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateLargeState(now);
+        state.Data.ConversationHistory.Insert(
+            0,
+            CreateResponse("extra-old", new string('x', 5_000), now.AddMinutes(-30)));
+        state.Data.ConversationHistory.Insert(
+            0,
+            CreateRequest("extra-old", ChatRole.User, new string('x', 5_000), now.AddMinutes(-30)));
+        string countJson = $"1e{new string('9', 5_000)}";
+        state.Data.Truncation = new DurableAgentStateTruncation
+        {
+            EvictedMessageCount = JsonDocument.Parse(countJson).RootElement.Clone(),
+            FirstEvictedAt = now.AddMinutes(-20),
+            LastEvictedAt = now.AddMinutes(-10),
+        };
+        string originalState = JsonSerializer.Serialize(
+            state,
+            DurableAgentStateJsonContext.Default.DurableAgentState);
+
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+            () => DurableAgentStateRetention.Enforce(
+                state,
+                DurableAgentHistoryRetentionMode.Auto,
+                12_000,
+                now,
+                NullLogger.Instance,
+                new AgentSessionId("agent", "session")));
+
+        Assert.Contains("expansion safety bound", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(
+            originalState,
+            JsonSerializer.Serialize(
+                state,
+                DurableAgentStateJsonContext.Default.DurableAgentState));
     }
 
     [Fact]
@@ -180,12 +577,98 @@ public sealed class DurableAgentStateRetentionTests
         _ = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.Auto,
-            3_200,
+            5_200,
             now,
             NullLogger.Instance,
             new AgentSessionId("agent", "session"));
 
         Assert.Contains(state.Data.ConversationHistory, entry => entry.CorrelationId == "system");
+    }
+
+    [Fact]
+    public void AutoPreservesWholeSameCorrelationSystemExchange()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateRevisedState();
+        state.Data.ConversationHistory.Add(
+            CreateRequest("system", ChatRole.System, new string('s', 500), now.AddMinutes(-20)));
+        state.Data.ConversationHistory.Add(
+            CreateResponse("system", new string('a', 500), now.AddMinutes(-20)));
+        AddExchange(state, "evictable", new string('e', 4_000), now.AddMinutes(-10));
+        AddExchange(state, "newest", "newest", now);
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            4_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(removed > 0);
+        Assert.Equal(
+            2,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "system"));
+        Assert.DoesNotContain(
+            state.Data.ConversationHistory,
+            entry => entry.CorrelationId == "evictable");
+        Assert.Contains(
+            state.Data.ConversationHistory,
+            entry => entry.CorrelationId == "newest");
+    }
+
+    [Fact]
+    public void AutoPreservesSystemCorrelationBridgedThroughNewestToolOccurrence()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateRevisedState();
+        AddExchange(state, "filler", new string('f', 5_000), now.AddMinutes(-30));
+        state.Data.ConversationHistory.Add(
+            CreateRequest("call", ChatRole.User, "call request", now.AddMinutes(-20)));
+        state.Data.ConversationHistory.Add(
+            CreateToolCallResponse("call", "shared-call", "invoke", now.AddMinutes(-20)));
+        state.Data.ConversationHistory.Add(
+            new DurableAgentStateRequest
+            {
+                CorrelationId = "system",
+                CreatedAt = now.AddMinutes(-10),
+                Messages =
+                [
+                    DurableAgentStateMessage.FromChatMessage(
+                        new ChatMessage(
+                            ChatRole.System,
+                            [new FunctionResultContent("shared-call", "system result")])
+                        {
+                            CreatedAt = now.AddMinutes(-10),
+                        }),
+                ],
+            });
+        state.Data.ConversationHistory.Add(
+            CreateResponse("system", "system response", now.AddMinutes(-10)));
+        state.Data.ConversationHistory.Add(
+            CreateToolResultRequest("newest", "shared-call", "latest result", now));
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            5_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(removed > 0);
+        Assert.DoesNotContain(
+            state.Data.ConversationHistory,
+            entry => entry.CorrelationId == "filler");
+        Assert.Equal(
+            2,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "system"));
+        Assert.Equal(
+            2,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "call"));
+        Assert.Contains(
+            state.Data.ConversationHistory,
+            entry => entry.CorrelationId == "newest");
     }
 
     [Fact]
@@ -197,7 +680,7 @@ public sealed class DurableAgentStateRetentionTests
         _ = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.Auto,
-            2_500,
+            4_000,
             now,
             NullLogger.Instance,
             new AgentSessionId("agent", "session"));
@@ -218,7 +701,7 @@ public sealed class DurableAgentStateRetentionTests
         _ = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.Auto,
-            2_600,
+            4_500,
             now,
             NullLogger.Instance,
             new AgentSessionId("agent", "session"));
@@ -234,7 +717,7 @@ public sealed class DurableAgentStateRetentionTests
     }
 
     [Fact]
-    public void AutoFindsZeroMessagePrefixBeforeTruncationSizeJump()
+    public void AutoCanRemoveZeroMessagePrefixWithoutTruncationEvidence()
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
         DurableAgentState state = CreateRevisedState();
@@ -270,26 +753,27 @@ public sealed class DurableAgentStateRetentionTests
                 ],
             });
 
-        int sizeAfterTwo = MeasureProjectedPrefix(state, 2, now);
-        int sizeAfterThree = MeasureProjectedPrefix(state, 3, now);
-        int sizeAfterFour = MeasureProjectedPrefix(state, 4, now);
+        int sizeAfterTwo = MeasureProjectedPrefix(state.Clone(), 2, now);
+        int sizeAfterThree = MeasureProjectedPrefix(state.Clone(), 3, now);
         Assert.True(sizeAfterThree < sizeAfterTwo);
-        Assert.True(sizeAfterThree < sizeAfterFour);
         int maxStateBytes = (int)Math.Ceiling(
             sizeAfterThree / DurableAgentStateRetention.LowWatermark);
         int lowWatermark = (int)(
             maxStateBytes * DurableAgentStateRetention.LowWatermark);
-        Assert.InRange(lowWatermark, sizeAfterThree, Math.Min(sizeAfterTwo, sizeAfterFour) - 1);
+        Assert.InRange(lowWatermark, sizeAfterThree, sizeAfterTwo - 1);
 
-        int removedMessages = DurableAgentStateRetention.Enforce(
+        RetentionResult? result = DurableAgentStateRetention.EnforceForCommit(
             state,
-            DurableAgentHistoryRetentionMode.Auto,
-            maxStateBytes,
+            new(
+                DurableAgentHistoryRetentionMode.Auto,
+                maxStateBytes,
+                HighWatermark: 0.71,
+                LowWatermark: DurableAgentStateRetention.LowWatermark),
             now,
             NullLogger.Instance,
             new AgentSessionId("agent", "session"));
 
-        Assert.Equal(0, removedMessages);
+        Assert.Equal(0, result?.RemovedMessageCount);
         Assert.Equal(2, state.Data.ConversationHistory.Count);
         Assert.Null(state.Data.Truncation);
         Assert.Equal(sizeAfterThree, DurableAgentStateRetention.GetSerializedSize(state));
@@ -372,7 +856,7 @@ public sealed class DurableAgentStateRetentionTests
         _ = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.Auto,
-            2_000,
+            3_500,
             now,
             NullLogger.Instance,
             new AgentSessionId("agent", "session"));
@@ -479,9 +963,248 @@ public sealed class DurableAgentStateRetentionTests
             new AgentSessionId("agent", "session"));
 
         Assert.DoesNotContain(state.Data.ConversationHistory, entry => entry.CorrelationId == "filler");
-        Assert.Contains(state.Data.ConversationHistory, entry => entry.CorrelationId == "call");
-        Assert.Contains(state.Data.ConversationHistory, entry => entry.CorrelationId == "newest");
+        Assert.Equal(
+            2,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "call"));
+        Assert.Equal(
+            2,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "newest"));
         Assert.True(ContainsToolCallId(state, "protected-call"));
+    }
+
+    [Fact]
+    public void AutoProtectsMultiHopCorrelationAndToolChain()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateRevisedState();
+        AddExchange(state, "filler", new string('f', 7_000), now.AddMinutes(-30));
+        state.Data.ConversationHistory.Add(
+            CreateRequest("first", ChatRole.User, "first request", now.AddMinutes(-20)));
+        state.Data.ConversationHistory.Add(
+            CreateToolCallResponse("first", "call-a", "first call", now.AddMinutes(-20)));
+        state.Data.ConversationHistory.Add(
+            CreateToolResultRequest("middle", "call-a", "first result", now.AddMinutes(-10)));
+        state.Data.ConversationHistory.Add(
+            CreateToolCallResponse("middle", "call-b", "second call", now.AddMinutes(-10)));
+        state.Data.ConversationHistory.Add(
+            CreateToolResultRequest("newest", "call-b", "second result", now));
+        state.Data.ConversationHistory.Add(
+            CreateResponse("newest", "final", now));
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            5_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(removed > 0);
+        Assert.DoesNotContain(state.Data.ConversationHistory, entry => entry.CorrelationId == "filler");
+        Assert.Equal(
+            2,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "first"));
+        Assert.Equal(
+            2,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "middle"));
+        Assert.Equal(
+            2,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "newest"));
+    }
+
+    [Fact]
+    public void AutoProtectsCorrelationReachedThroughReverseOrderedToolLink()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateRevisedState();
+        AddExchange(state, "filler", new string('f', 7_000), now.AddMinutes(-30));
+        DurableAgentStateRequest linkedResult =
+            CreateToolResultRequest("linked", "reverse-call", "result first", now.AddMinutes(-20));
+        DurableAgentStateRequest linkedRequest =
+            CreateRequest("linked", ChatRole.User, "same correlation", now.AddMinutes(-20));
+        DurableAgentStateResponse linkedCall =
+            CreateToolCallResponse("linked", "reverse-call", "call later", now.AddMinutes(-10));
+        state.Data.ConversationHistory.Add(linkedResult);
+        state.Data.ConversationHistory.Add(linkedRequest);
+        state.Data.ConversationHistory.Add(linkedCall);
+        state.Data.ConversationHistory.Add(
+            CreateToolCallResponse("newest", "reverse-call", "latest occurrence", now));
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            5_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(removed > 0);
+        Assert.DoesNotContain(state.Data.ConversationHistory, entry => entry.CorrelationId == "filler");
+        Assert.Equal(
+            3,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "linked"));
+        Assert.Contains(
+            state.Data.ConversationHistory,
+            entry => entry.Messages.Any(message => message.ToChatMessage().Text == "same correlation"));
+        Assert.True(ContainsToolCallId(state, "reverse-call"));
+    }
+
+    [Fact]
+    public void AutoProtectsTwelveCallNewestConnectedComponent()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateRevisedState();
+        const int ToolCount = 12;
+        AddExchange(state, "filler", new string('f', 30_000), now.AddMinutes(-30));
+        state.Data.ConversationHistory.Add(
+            CreateRequest("turn-0", ChatRole.User, "start", now.AddMinutes(-ToolCount)));
+        for (int index = 0; index < ToolCount; index++)
+        {
+            state.Data.ConversationHistory.Add(
+                CreateToolCallResponse(
+                    $"turn-{index}",
+                    $"call-{index}",
+                    new string('c', 150),
+                    now.AddMinutes(index - ToolCount)));
+            state.Data.ConversationHistory.Add(
+                CreateToolResultRequest(
+                    $"turn-{index + 1}",
+                    $"call-{index}",
+                    new string('r', 150),
+                    now.AddMinutes(index - ToolCount + 1)));
+        }
+
+        state.Data.ConversationHistory.Add(
+            CreateResponse($"turn-{ToolCount}", "final", now));
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            25_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(removed > 0);
+        Assert.DoesNotContain(
+            state.Data.ConversationHistory,
+            entry => entry.CorrelationId == "filler");
+        Assert.Equal(
+            (ToolCount * 2) + 2,
+            state.Data.ConversationHistory.Count);
+        Assert.All(
+            GetToolCallIdCounts(state),
+            pair => Assert.Equal(2, pair.Value));
+    }
+
+    [Fact]
+    public void AutoEvictsDisconnectedTwelveCallComponent()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateRevisedState();
+        const int ToolCount = 12;
+        state.Data.ConversationHistory.Add(
+            CreateRequest("turn-0", ChatRole.User, "start", now.AddMinutes(-ToolCount)));
+        for (int index = 0; index < ToolCount; index++)
+        {
+            state.Data.ConversationHistory.Add(
+                CreateToolCallResponse(
+                    $"turn-{index}",
+                    $"call-{index}",
+                    new string('c', 900),
+                    now.AddMinutes(index - ToolCount)));
+            state.Data.ConversationHistory.Add(
+                CreateToolResultRequest(
+                    $"turn-{index + 1}",
+                    $"call-{index}",
+                    new string('r', 900),
+                    now.AddMinutes(index - ToolCount + 1)));
+        }
+
+        state.Data.ConversationHistory.Add(
+            CreateResponse($"turn-{ToolCount}", "old final", now.AddMinutes(-1)));
+        AddExchange(state, "newest", "newest", now);
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            9_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(removed > 0);
+        Assert.DoesNotContain(
+            state.Data.ConversationHistory,
+            entry => entry.CorrelationId?.StartsWith(
+                "turn-",
+                StringComparison.Ordinal) == true);
+        Assert.Empty(GetToolCallIdCounts(state));
+        Assert.Equal(
+            2,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "newest"));
+        Assert.True(
+            DurableAgentStateRetention.GetSerializedSize(state) <=
+            9_000 * DurableAgentStateRetention.LowWatermark);
+    }
+
+    [Fact]
+    public void AutoEvictsDisconnectedCyclicToolComponent()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateRevisedState();
+        state.Data.ConversationHistory.Add(
+            CreateToolCallResponse("cycle-a", "call-a", new string('a', 2_000), now.AddMinutes(-20)));
+        state.Data.ConversationHistory.Add(
+            CreateToolResultRequest("cycle-b", "call-a", new string('b', 2_000), now.AddMinutes(-15)));
+        state.Data.ConversationHistory.Add(
+            CreateToolCallResponse("cycle-b", "call-b", new string('c', 2_000), now.AddMinutes(-10)));
+        state.Data.ConversationHistory.Add(
+            CreateToolResultRequest("cycle-a", "call-b", new string('d', 2_000), now.AddMinutes(-5)));
+        AddExchange(state, "newest", "newest", now);
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            5_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(removed > 0);
+        Assert.DoesNotContain(
+            state.Data.ConversationHistory,
+            entry => entry.CorrelationId is "cycle-a" or "cycle-b");
+        Assert.Empty(GetToolCallIdCounts(state));
+        Assert.Equal(
+            2,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "newest"));
+    }
+
+    [Fact]
+    public void ProtectedFloorPreflightSkipsCloneWhenNoTranscriptCanBeEvicted()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateRevisedState();
+        DurableAgentStateRequest pending =
+            CreateRequest("newest", ChatRole.System, new string('s', 2_000), now);
+        DurableAgentStateRetention.ExecutionStatistics statistics = new();
+
+        _ = Assert.Throws<DurableAgentStateSizeLimitExceededException>(
+            () => DurableAgentStateRetention.ValidateProtectedFloor(
+                state,
+                new(
+                    DurableAgentHistoryRetentionMode.Auto,
+                    MaxStateBytes: 500,
+                    DurableAgentStateRetention.DefaultHighWatermark,
+                    DurableAgentStateRetention.DefaultLowWatermark),
+                now,
+                pending,
+                statistics));
+
+        Assert.Empty(state.Data.ConversationHistory);
+        Assert.Equal(0, statistics.ProtectedFloorCloneCount);
+        Assert.Equal(1, statistics.SerializedStateMeasurementCount);
     }
 
     [Fact]
@@ -491,7 +1214,11 @@ public sealed class DurableAgentStateRetentionTests
         DurableAgentState state = CreateRevisedState();
         AddExchange(state, "filler", new string('f', 7_000), now.AddMinutes(-20));
         state.Data.ConversationHistory.Add(
+            CreateRequest("first", ChatRole.User, "first request", now.AddMinutes(-10)));
+        state.Data.ConversationHistory.Add(
             CreateToolCallResponse("first", "duplicate", new string('a', 500), now.AddMinutes(-10)));
+        state.Data.ConversationHistory.Add(
+            CreateRequest("second", ChatRole.User, "second request", now.AddMinutes(-5)));
         state.Data.ConversationHistory.Add(
             CreateToolCallResponse("second", "duplicate", new string('b', 500), now.AddMinutes(-5)));
         state.Data.ConversationHistory.Add(
@@ -502,15 +1229,21 @@ public sealed class DurableAgentStateRetentionTests
         _ = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.Auto,
-            5_000,
+            6_500,
             now,
             NullLogger.Instance,
             new AgentSessionId("agent", "session"));
 
         Assert.DoesNotContain(state.Data.ConversationHistory, entry => entry.CorrelationId == "filler");
-        Assert.Contains(state.Data.ConversationHistory, entry => entry.CorrelationId == "first");
-        Assert.Contains(state.Data.ConversationHistory, entry => entry.CorrelationId == "second");
-        Assert.Contains(state.Data.ConversationHistory, entry => entry.CorrelationId == "newest");
+        Assert.Equal(
+            2,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "first"));
+        Assert.Equal(
+            2,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "second"));
+        Assert.Equal(
+            2,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "newest"));
     }
 
     [Fact]
@@ -529,7 +1262,7 @@ public sealed class DurableAgentStateRetentionTests
         _ = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.Auto,
-            4_000,
+            7_000,
             now,
             NullLogger.Instance,
             new AgentSessionId("agent", "session"));
@@ -555,13 +1288,42 @@ public sealed class DurableAgentStateRetentionTests
         _ = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.Auto,
-            4_000,
+            7_000,
             now,
             NullLogger.Instance,
             new AgentSessionId("agent", "session"));
 
         Assert.DoesNotContain(state.Data.ConversationHistory, entry => entry.CorrelationId == "missing-call");
         Assert.Contains(state.Data.ConversationHistory, entry => entry.CorrelationId == "missing-result");
+    }
+
+    [Fact]
+    public void AutoDoesNotConnectToolContentWithWhitespaceIds()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateRevisedState();
+        state.Data.ConversationHistory.Add(
+            CreateToolCallResponse("malformed-call", " ", new string('a', 5_000), now.AddMinutes(-10)));
+        state.Data.ConversationHistory.Add(
+            CreateToolResultRequest("malformed-result", " ", new string('b', 500), now.AddMinutes(-5)));
+        state.Data.ConversationHistory.Add(
+            CreateResponse("malformed-result", "after malformed", now.AddMinutes(-5)));
+        AddExchange(state, "newest", new string('c', 400), now);
+
+        _ = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            7_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.DoesNotContain(
+            state.Data.ConversationHistory,
+            entry => entry.CorrelationId == "malformed-call");
+        Assert.Equal(
+            2,
+            state.Data.ConversationHistory.Count(entry => entry.CorrelationId == "malformed-result"));
     }
 
     [Fact]
@@ -572,7 +1334,7 @@ public sealed class DurableAgentStateRetentionTests
         state.Data.Session = JsonSerializer.SerializeToElement(new { conversationId = new string('c', 100) });
         state.Data.Truncation = new DurableAgentStateTruncation
         {
-            EvictedMessageCount = 2,
+            EvictedMessageCount = Count(2),
             FirstEvictedAt = DateTimeOffset.UtcNow,
             LastEvictedAt = DateTimeOffset.UtcNow,
         };
@@ -580,6 +1342,29 @@ public sealed class DurableAgentStateRetentionTests
         int completeSize = DurableAgentStateRetention.GetSerializedSize(state);
 
         Assert.True(completeSize > emptySize + 100);
+    }
+
+    [Fact]
+    public void SerializedSizeMeasuresEscapedStorageEnvelope()
+    {
+        DurableAgentState state = CreateRevisedState();
+        AddExchange(
+            state,
+            "quoted",
+            string.Concat(Enumerable.Repeat("\"é漢\\", 300)),
+            DateTimeOffset.UtcNow);
+        string converterPayload = JsonSerializer.Serialize(
+            state,
+            DurableAgentStateJsonContext.Default.DurableAgentState);
+        int rawPayloadBytes = Encoding.UTF8.GetByteCount(converterPayload);
+        int escapedEnvelopeBytes = JsonSerializer.SerializeToUtf8Bytes(
+            converterPayload,
+            DurableAgentStateJsonContext.Default.String).Length;
+
+        Assert.Equal(
+            escapedEnvelopeBytes,
+            DurableAgentStateRetention.GetSerializedSize(state));
+        Assert.True(escapedEnvelopeBytes > rawPayloadBytes);
     }
 
     [Fact]
@@ -593,9 +1378,9 @@ public sealed class DurableAgentStateRetentionTests
         state.Data.Session = JsonSerializer.SerializeToElement(
             new { continuation = new string('s', 2_000) });
         state.Data.ExpirationTimeUtc = now.AddDays(1).UtcDateTime;
-        state.Data.IngestedPositions = new Dictionary<string, long>
+        state.Data.IngestedPositions = new Dictionary<string, JsonElement>
         {
-            ["workflow"] = 42,
+            ["workflow"] = Count(42),
         };
         state.Data.UnknownProperties = new Dictionary<string, JsonElement>
         {
@@ -620,7 +1405,7 @@ public sealed class DurableAgentStateRetentionTests
             DurableAgentHistoryBinding.Parse(state.Data.HistoryBinding)?.ProviderKey);
         Assert.NotNull(state.Data.Session);
         Assert.NotNull(state.Data.ExpirationTimeUtc);
-        Assert.Equal(42, state.Data.IngestedPositions?["workflow"]);
+        Assert.Equal(42, ReadCount(state.Data.IngestedPositions!["workflow"]));
         Assert.True(exception.StateSizeBytes > exception.MaxStateBytes);
     }
 
@@ -721,7 +1506,7 @@ public sealed class DurableAgentStateRetentionTests
     }
 
     [Fact]
-    public void PublicRetentionModesAreOnlyKeepAllAndAuto()
+    public void RetentionModesAreOnlyKeepAllAndAuto()
     {
         Assert.Equal(
             [nameof(DurableAgentHistoryRetentionMode.KeepAll), nameof(DurableAgentHistoryRetentionMode.Auto)],
@@ -795,6 +1580,42 @@ public sealed class DurableAgentStateRetentionTests
         DurableAgentStateCompaction remaining =
             Assert.IsType<DurableAgentStateCompaction>(Assert.Single(state.Data.ConversationHistory));
         Assert.Equal("newest", remaining.Messages[0].ToChatMessage().Text);
+    }
+
+    [Fact]
+    public void AutoRemovesOnlyOneOfDuplicateEqualCorrelationlessEntriesByIdentity()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateRevisedState();
+        for (int index = 0; index < 2; index++)
+        {
+            state.Data.ConversationHistory.Add(
+                new DurableAgentStateCompaction
+                {
+                    CreatedAt = now,
+                    Messages =
+                    [
+                        DurableAgentStateMessage.FromChatMessage(
+                            new ChatMessage(
+                                ChatRole.Assistant,
+                                new string('d', 1_000))),
+                    ],
+                });
+        }
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            3_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.Equal(1, removed);
+        Assert.Single(state.Data.ConversationHistory);
+        Assert.Equal(
+            new string('d', 1_000),
+            state.Data.ConversationHistory[0].Messages[0].ToChatMessage().Text);
     }
 
     [Fact]
@@ -951,7 +1772,7 @@ public sealed class DurableAgentStateRetentionTests
                 ? null
                 : new DurableAgentStateTruncation
                 {
-                    EvictedMessageCount = removedMessages,
+                    EvictedMessageCount = Count(removedMessages),
                     FirstEvictedAt = now,
                     LastEvictedAt = now,
                 };
@@ -1089,5 +1910,45 @@ public sealed class DurableAgentStateRetentionTests
                 DurableAgentStateFunctionResultContent functionResult => functionResult.CallId == callId,
                 _ => false,
             });
+    }
+
+    private static Dictionary<string, int> GetToolCallIdCounts(
+        DurableAgentState state) =>
+        state.Data.ConversationHistory
+            .SelectMany(entry => entry.Messages)
+            .SelectMany(message => message.Contents)
+            .Select(content => content switch
+            {
+                DurableAgentStateFunctionCallContent functionCall => functionCall.CallId,
+                DurableAgentStateFunctionResultContent functionResult => functionResult.CallId,
+                _ => null,
+            })
+            .Where(static callId => !string.IsNullOrWhiteSpace(callId))
+            .GroupBy(static callId => callId!, StringComparer.Ordinal)
+            .ToDictionary(
+                static group => group.Key,
+                static group => group.Count(),
+                StringComparer.Ordinal);
+
+    private static JsonElement Count(long value) =>
+        JsonSerializer.SerializeToElement(value);
+
+    private static JsonElement Count(BigInteger value)
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            value.ToString(CultureInfo.InvariantCulture));
+        return document.RootElement.Clone();
+    }
+
+    private static long ReadCount(JsonElement value)
+    {
+        Assert.True(DurableAgentStateContract.TryGetInt64(value, out long count));
+        return count;
+    }
+
+    private static BigInteger ReadBigCount(JsonElement value)
+    {
+        Assert.True(DurableAgentStateContract.TryGetBigInteger(value, out BigInteger count));
+        return count;
     }
 }

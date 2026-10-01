@@ -2,6 +2,8 @@
 
 using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
+using System.Globalization;
+using System.Numerics;
 using System.Text.Json;
 using Microsoft.Agents.AI.DurableTask.State;
 using Microsoft.Extensions.AI;
@@ -9,183 +11,117 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Microsoft.Agents.AI.DurableTask.Tests.Unit;
 
+[CollectionDefinition("Durable retention telemetry", DisableParallelization = true)]
+public sealed class DurableAgentTelemetrySerialGroup;
+
+[Collection("Durable retention telemetry")]
 public sealed class DurableAgentTelemetryTests
 {
-    private static readonly string[] s_allowedTagNames = ["agent.name", "outcome", "reason"];
+    [Fact]
+    public void SharedMeterAndInstrumentNamesMatchPythonContract()
+    {
+        Assert.Equal("agent_framework.durabletask", DurableAgentTelemetry.MeterName);
+        Assert.Equal(
+            [
+                "durable.retention.evaluations",
+                "durable.retention.budget",
+                "durable.retention.state.size",
+                "durable.retention.removed_messages",
+                "durable.retention.removed_entries",
+                "durable.retention.reclaimed_bytes",
+                "durable.retention.capacity_failures",
+                "durable.retention.write_attempts",
+                "durable.retention.operations",
+            ],
+            new[]
+            {
+                DurableAgentTelemetry.EvaluationsInstrumentName,
+                DurableAgentTelemetry.BudgetInstrumentName,
+                DurableAgentTelemetry.StateSizeInstrumentName,
+                DurableAgentTelemetry.RemovedMessagesInstrumentName,
+                DurableAgentTelemetry.RemovedEntriesInstrumentName,
+                DurableAgentTelemetry.ReclaimedBytesInstrumentName,
+                DurableAgentTelemetry.CapacityFailuresInstrumentName,
+                DurableAgentTelemetry.WriteAttemptsInstrumentName,
+                DurableAgentTelemetry.OperationsInstrumentName,
+            });
+    }
 
     [Fact]
-    public void NormalEvictionRecordsCountsBytesSizesAndBoundedTags()
+    public void NormalEvictionRecordsSharedMeasurementsWithoutIdentifiers()
     {
-        const string AgentName = "metric-normal";
-        const string SessionKey = "do-not-export-session";
-        const string Content = "do-not-export-content";
         DateTimeOffset now = DateTimeOffset.UtcNow;
-        DurableAgentState state = CreateLargeState(now, Content);
+        DurableAgentState state = CreateLargeState(now, "do-not-export-content");
         int initialSize = DurableAgentStateRetention.GetSerializedSize(state);
-        using RetentionMetricListener listener = new(AgentName);
+        using RetentionMetricListener listener = new();
 
         int removed = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.Auto,
-            2_500,
+            4_000,
             now,
             NullLogger.Instance,
-            new AgentSessionId(AgentName, SessionKey));
+            new AgentSessionId("do-not-export-agent", "do-not-export-session"));
 
         int finalSize = DurableAgentStateRetention.GetSerializedSize(state);
-        MetricMeasurement operation = listener.Single(
-            DurableAgentTelemetry.RetentionOperationsInstrumentName);
-        MetricMeasurement evictedEntries = listener.Single(
-            DurableAgentTelemetry.EvictedEntriesInstrumentName);
-        MetricMeasurement evicted = listener.Single(
-            DurableAgentTelemetry.EvictedMessagesInstrumentName);
+        MetricMeasurement evaluation = listener.Single(
+            DurableAgentTelemetry.EvaluationsInstrumentName);
+        MetricMeasurement budget = listener.Single(
+            DurableAgentTelemetry.BudgetInstrumentName);
+        List<MetricMeasurement> sizes = listener.Find(
+            DurableAgentTelemetry.StateSizeInstrumentName);
+        MetricMeasurement removedMessages = listener.Single(
+            DurableAgentTelemetry.RemovedMessagesInstrumentName);
+        MetricMeasurement removedEntries = listener.Single(
+            DurableAgentTelemetry.RemovedEntriesInstrumentName);
         MetricMeasurement reclaimed = listener.Single(
             DurableAgentTelemetry.ReclaimedBytesInstrumentName);
-        MetricMeasurement before = listener.Single(
-            DurableAgentTelemetry.StateSizeBeforeInstrumentName);
-        MetricMeasurement after = listener.Single(
-            DurableAgentTelemetry.StateSizeAfterInstrumentName);
 
-        Assert.Equal(DurableAgentTelemetry.TranscriptEvictedOutcome, operation.Tags["outcome"]);
-        Assert.Equal(DurableAgentTelemetry.TranscriptPressureReason, evicted.Tags["reason"]);
-        Assert.Equal("{operation}", operation.Unit);
-        Assert.Equal("{entry}", evictedEntries.Unit);
-        Assert.Equal("{message}", evicted.Unit);
-        Assert.Equal("By", reclaimed.Unit);
-        Assert.Equal("By", before.Unit);
-        Assert.Equal("By", after.Unit);
-        Assert.Equal(removed, evicted.Value);
-        Assert.Equal(removed, evictedEntries.Value);
+        Assert.Equal(DurableAgentTelemetry.StagedOutcome, evaluation.Tags["outcome"]);
+        Assert.Equal(DurableAgentTelemetry.PressureMechanism, evaluation.Tags["mechanism"]);
+        Assert.Equal(
+            DurableAgentTelemetry.NotAttemptedCommitStatus,
+            evaluation.Tags["commit_status"]);
+        Assert.Equal(4_000, budget.Value);
+        Assert.Equal(2, sizes.Count);
+        Assert.Equal(
+            initialSize,
+            Assert.Single(sizes, value => Equals(value.Tags["phase"], "before")).Value);
+        Assert.Equal(
+            finalSize,
+            Assert.Single(sizes, value => Equals(value.Tags["phase"], "after")).Value);
+        Assert.Equal(removed, removedMessages.Value);
+        Assert.True(removedEntries.Value > 0);
         Assert.Equal(initialSize - finalSize, reclaimed.Value);
-        Assert.Equal(initialSize, before.Value);
-        Assert.Equal(finalSize, after.Value);
         Assert.All(
             listener.Measurements,
             measurement =>
             {
-                Assert.Equal(AgentName, measurement.Tags["agent.name"]);
-                Assert.DoesNotContain(SessionKey, measurement.Tags.Values);
-                Assert.DoesNotContain(Content, measurement.Tags.Values);
-                Assert.All(
+                Assert.DoesNotContain(
                     measurement.Tags.Keys,
-                    key => Assert.Contains(key, s_allowedTagNames));
+                    key => key is "agent.name" or "session.id" or "correlation.id");
+                Assert.DoesNotContain(
+                    measurement.Tags.Values,
+                    value => Equals(value, "do-not-export-agent") ||
+                        Equals(value, "do-not-export-session") ||
+                        Equals(value, "do-not-export-content"));
             });
+        Assert.Empty(listener.Find(DurableAgentTelemetry.CapacityFailuresInstrumentName));
+        Assert.Empty(listener.Find(DurableAgentTelemetry.WriteAttemptsInstrumentName));
+        Assert.Empty(listener.Find(DurableAgentTelemetry.OperationsInstrumentName));
     }
 
     [Fact]
-    public void ZeroMessageEntryEvictionRecordsEntryOutcomeAndReclaimedBytes()
+    public void CapacityFailureIsAtomicAndRecordsUncommittedFailure()
     {
-        const string AgentName = "metric-empty-entry";
         DateTimeOffset now = DateTimeOffset.UtcNow;
         DurableAgentState state = CreateRevisedState();
-        state.Data.ConversationHistory.Add(
-            new DurableAgentStateCompaction
-            {
-                CreatedAt = now.AddMinutes(-5),
-                ExtensionData = new Dictionary<string, JsonElement>
-                {
-                    ["padding"] = JsonSerializer.SerializeToElement(new string('x', 2_000)),
-                },
-            });
-        state.Data.ConversationHistory.Add(
-            new DurableAgentStateCompaction
-            {
-                CreatedAt = now,
-                Messages =
-                [
-                    DurableAgentStateMessage.FromChatMessage(
-                        new ChatMessage(ChatRole.Assistant, "newest")),
-                ],
-            });
-        int initialSize = DurableAgentStateRetention.GetSerializedSize(state);
-        using RetentionMetricListener listener = new(AgentName);
-
-        int removedMessages = DurableAgentStateRetention.Enforce(
+        AddExchange(state, "old", new string('o', 2_000), now.AddMinutes(-5));
+        AddExchange(state, "newest", new string('n', 2_000), now);
+        string original = JsonSerializer.Serialize(
             state,
-            DurableAgentHistoryRetentionMode.Auto,
-            2_000,
-            now,
-            NullLogger.Instance,
-            new AgentSessionId(AgentName, "session"));
-
-        int finalSize = DurableAgentStateRetention.GetSerializedSize(state);
-        MetricMeasurement operation = listener.Single(
-            DurableAgentTelemetry.RetentionOperationsInstrumentName);
-        MetricMeasurement evictedEntries = listener.Single(
-            DurableAgentTelemetry.EvictedEntriesInstrumentName);
-        MetricMeasurement reclaimed = listener.Single(
-            DurableAgentTelemetry.ReclaimedBytesInstrumentName);
-
-        Assert.Equal(0, removedMessages);
-        Assert.Equal(DurableAgentTelemetry.TranscriptEvictedOutcome, operation.Tags["outcome"]);
-        Assert.Equal(1, evictedEntries.Value);
-        Assert.Equal(DurableAgentTelemetry.TranscriptPressureReason, evictedEntries.Tags["reason"]);
-        Assert.Empty(listener.Find(DurableAgentTelemetry.EvictedMessagesInstrumentName));
-        Assert.Equal(initialSize - finalSize, reclaimed.Value);
-        Assert.True(reclaimed.Value > 0);
-    }
-
-    [Fact]
-    public void ZeroMessageEvictionDoesNotCreateInvalidTruncationEvidence()
-    {
-        const string AgentName = "metric-truncation-offset";
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        DurableAgentState state = CreateRevisedState();
-        state.Data.ConversationHistory.Add(
-            new DurableAgentStateCompaction
-            {
-                CreatedAt = now.AddMinutes(-5),
-            });
-        state.Data.ConversationHistory.Add(
-            new DurableAgentStateCompaction
-            {
-                CreatedAt = now,
-                Messages =
-                [
-                    DurableAgentStateMessage.FromChatMessage(
-                        new ChatMessage(ChatRole.Assistant, new string('x', 2_000))),
-                ],
-            });
-        int initialSize = DurableAgentStateRetention.GetSerializedSize(state);
-        using RetentionMetricListener listener = new(AgentName);
-
-        _ = Assert.Throws<DurableAgentStateSizeLimitExceededException>(
-            () => DurableAgentStateRetention.Enforce(
-                state,
-                DurableAgentHistoryRetentionMode.Auto,
-                initialSize,
-                now,
-                NullLogger.Instance,
-                new AgentSessionId(AgentName, "session")));
-
-        int finalSize = DurableAgentStateRetention.GetSerializedSize(state);
-        MetricMeasurement operation = listener.Single(
-            DurableAgentTelemetry.RetentionOperationsInstrumentName);
-        MetricMeasurement evictedEntries = listener.Single(
-            DurableAgentTelemetry.EvictedEntriesInstrumentName);
-        MetricMeasurement reclaimed = listener.Single(
-            DurableAgentTelemetry.ReclaimedBytesInstrumentName);
-
-        Assert.True(finalSize < initialSize);
-        Assert.Equal(
-            DurableAgentTelemetry.ProtectedStateCapacityFailureOutcome,
-            operation.Tags["outcome"]);
-        Assert.Equal(1, evictedEntries.Value);
-        Assert.Equal(DurableAgentTelemetry.TranscriptPressureReason, evictedEntries.Tags["reason"]);
-        Assert.Empty(listener.Find(DurableAgentTelemetry.EvictedMessagesInstrumentName));
-        Assert.Equal(initialSize - finalSize, reclaimed.Value);
-        Assert.Null(state.Data.Truncation);
-    }
-
-    [Fact]
-    public void ProtectedStateFailureRecordsFailedOutcomeAndSizes()
-    {
-        const string AgentName = "metric-failure";
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        DurableAgentState state = CreateRevisedState();
-        AddExchange(state, "newest", new string('x', 2_000), now);
-        int initialSize = DurableAgentStateRetention.GetSerializedSize(state);
-        using RetentionMetricListener listener = new(AgentName);
+            DurableAgentStateJsonContext.Default.DurableAgentState);
+        using RetentionMetricListener listener = new();
 
         _ = Assert.Throws<DurableAgentStateSizeLimitExceededException>(
             () => DurableAgentStateRetention.Enforce(
@@ -194,132 +130,265 @@ public sealed class DurableAgentTelemetryTests
                 500,
                 now,
                 NullLogger.Instance,
-                new AgentSessionId(AgentName, "session")));
-
-        MetricMeasurement operation = listener.Single(
-            DurableAgentTelemetry.RetentionOperationsInstrumentName);
-        MetricMeasurement before = listener.Single(
-            DurableAgentTelemetry.StateSizeBeforeInstrumentName);
-        MetricMeasurement after = listener.Single(
-            DurableAgentTelemetry.StateSizeAfterInstrumentName);
+                new AgentSessionId("agent", "session")));
 
         Assert.Equal(
-            DurableAgentTelemetry.ProtectedStateCapacityFailureOutcome,
-            operation.Tags["outcome"]);
-        Assert.Equal(initialSize, before.Value);
-        Assert.Equal(DurableAgentStateRetention.GetSerializedSize(state), after.Value);
-        Assert.Empty(listener.Find(DurableAgentTelemetry.EvictedMessagesInstrumentName));
-        Assert.Empty(listener.Find(DurableAgentTelemetry.EvictedEntriesInstrumentName));
-        Assert.Empty(listener.Find(DurableAgentTelemetry.ReclaimedBytesInstrumentName));
+            original,
+            JsonSerializer.Serialize(
+                state,
+                DurableAgentStateJsonContext.Default.DurableAgentState));
+        Assert.Equal(
+            DurableAgentTelemetry.ProtectedFloorOutcome,
+            listener.Single(DurableAgentTelemetry.EvaluationsInstrumentName).Tags["outcome"]);
+        Assert.Equal(
+            1,
+            listener.Single(DurableAgentTelemetry.CapacityFailuresInstrumentName).Value);
+        MetricMeasurement operation = listener.Single(
+            DurableAgentTelemetry.OperationsInstrumentName);
+        Assert.Equal(DurableAgentTelemetry.FailedOutcome, operation.Tags["outcome"]);
+        Assert.Equal(
+            DurableAgentTelemetry.NotAttemptedCommitStatus,
+            operation.Tags["commit_status"]);
     }
 
     [Fact]
-    public void BelowHighWatermarkRecordsOnlyNoActionOperation()
+    public void BelowThresholdRecordsEvaluationBudgetAndBothPhases()
     {
-        const string AgentName = "metric-no-action";
-        DateTimeOffset now = DateTimeOffset.UtcNow;
         DurableAgentState state = CreateRevisedState();
-        AddExchange(state, "newest", "small", now);
-        using RetentionMetricListener listener = new(AgentName);
+        AddExchange(state, "newest", "small", DateTimeOffset.UtcNow);
+        using RetentionMetricListener listener = new();
 
         int removed = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.Auto,
             100_000,
-            now,
+            DateTimeOffset.UtcNow,
             NullLogger.Instance,
-            new AgentSessionId(AgentName, "session"));
+            new AgentSessionId("agent", "session"));
 
         Assert.Equal(0, removed);
+        Assert.Equal(
+            DurableAgentTelemetry.BelowThresholdOutcome,
+            listener.Single(DurableAgentTelemetry.EvaluationsInstrumentName).Tags["outcome"]);
+        Assert.Equal(
+            2,
+            listener.Find(DurableAgentTelemetry.StateSizeInstrumentName).Count);
+        Assert.Empty(listener.Find(DurableAgentTelemetry.RemovedMessagesInstrumentName));
+        Assert.Empty(listener.Find(DurableAgentTelemetry.RemovedEntriesInstrumentName));
+    }
+
+    [Fact]
+    public void ArbitraryPrecisionCumulativeEvidenceDoesNotNarrowAttemptTelemetry()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateLargeState(now, "large");
+        BigInteger initialCount = (BigInteger)long.MaxValue + 1;
+        string countJson = $"{initialCount}0e-1";
+        using JsonDocument countDocument = JsonDocument.Parse(countJson);
+        state.Data.Truncation = new DurableAgentStateTruncation
+        {
+            EvictedMessageCount = countDocument.RootElement.Clone(),
+            FirstEvictedAt = now.AddMinutes(-20),
+            LastEvictedAt = now.AddMinutes(-10),
+        };
+        using RetentionMetricListener listener = new();
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            4_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.True(
+            DurableAgentStateContract.TryGetBigInteger(
+                state.Data.Truncation!.EvictedMessageCount,
+                out BigInteger persistedCount));
+        Assert.Equal(initialCount + removed, persistedCount);
+        Assert.Equal(
+            removed,
+            listener.Single(DurableAgentTelemetry.RemovedMessagesInstrumentName).Value);
+    }
+
+    [Fact]
+    public void CarryBeyondExpansionBoundaryDoesNotNarrowAttemptTelemetry()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateLargeState(now, "large");
+        string countJson = new('9', DurableAgentStateContract.MaxExpandedIntegerDigits);
+        state.Data.Truncation = new DurableAgentStateTruncation
+        {
+            EvictedMessageCount = JsonDocument.Parse(countJson).RootElement.Clone(),
+            FirstEvictedAt = now.AddMinutes(-20),
+            LastEvictedAt = now.AddMinutes(-10),
+        };
+        using RetentionMetricListener listener = new();
+
+        int removed = DurableAgentStateRetention.Enforce(
+            state,
+            DurableAgentHistoryRetentionMode.Auto,
+            10_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.Equal(
+            (BigInteger.Parse(countJson) + removed).ToString(CultureInfo.InvariantCulture),
+            state.Data.Truncation.EvictedMessageCount.GetRawText());
+        Assert.False(
+            DurableAgentStateContract.TryGetInt64(
+                state.Data.Truncation.EvictedMessageCount,
+                out _));
+        Assert.Equal(
+            removed,
+            listener.Single(DurableAgentTelemetry.RemovedMessagesInstrumentName).Value);
+    }
+
+    [Fact]
+    public void ZeroMessageEntryEvictionRecordsReclaimedBytesAndDeletion()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateRevisedState();
+        for (int index = 0; index < 3; index++)
+        {
+            state.Data.ConversationHistory.Add(
+                new DurableAgentStateCompaction
+                {
+                    CreatedAt = now.AddMinutes(index - 4),
+                    UnknownProperties = new Dictionary<string, JsonElement>
+                    {
+                        ["padding"] = JsonSerializer.SerializeToElement(new string('p', 500)),
+                    },
+                });
+        }
+        AddExchange(state, "newest", "newest", now);
+        using RetentionMetricListener listener = new();
+
+        RetentionResult? result = DurableAgentStateRetention.EnforceForCommit(
+            state,
+            new(
+                DurableAgentHistoryRetentionMode.Auto,
+                MaxStateBytes: 2_000,
+                HighWatermark: 0.85,
+                LowWatermark: 0.70),
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+
+        Assert.NotNull(result);
+        Assert.True(result.RemovedEntryCount > 0);
+        Assert.Equal(0, result.RemovedMessageCount);
+        Assert.Empty(listener.Find(DurableAgentTelemetry.RemovedMessagesInstrumentName));
+        Assert.True(
+            listener.Single(DurableAgentTelemetry.RemovedEntriesInstrumentName).Value > 0);
+        Assert.True(
+            listener.Single(DurableAgentTelemetry.ReclaimedBytesInstrumentName).Value > 0);
+    }
+
+    [Fact]
+    public void ZeroMessageCapacityFailureReportsDeletionStaged()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DurableAgentState state = CreateRevisedState();
+        state.Data.ConversationHistory.Add(
+            new DurableAgentStateCompaction
+            {
+                CreatedAt = now.AddMinutes(-2),
+                UnknownProperties = new Dictionary<string, JsonElement>
+                {
+                    ["padding"] = JsonSerializer.SerializeToElement(new string('p', 500)),
+                },
+            });
+        AddExchange(state, "newest", new string('n', 2_000), now);
+        int originalEntryCount = state.Data.ConversationHistory.Count;
+        using RetentionMetricListener listener = new();
+
+        _ = Assert.Throws<DurableAgentStateSizeLimitExceededException>(
+            () => DurableAgentStateRetention.Enforce(
+                state,
+                DurableAgentHistoryRetentionMode.Auto,
+                1_000,
+                now,
+                NullLogger.Instance,
+                new AgentSessionId("agent", "session")));
+
+        Assert.Equal(originalEntryCount, state.Data.ConversationHistory.Count);
+        Assert.True(
+            listener.Single(DurableAgentTelemetry.RemovedEntriesInstrumentName).Value > 0);
+        Assert.True(
+            listener.Single(DurableAgentTelemetry.ReclaimedBytesInstrumentName).Value > 0);
         MetricMeasurement operation = listener.Single(
-            DurableAgentTelemetry.RetentionOperationsInstrumentName);
-        Assert.Equal(DurableAgentTelemetry.NoActionOutcome, operation.Tags["outcome"]);
-        Assert.Single(listener.Measurements);
+            DurableAgentTelemetry.OperationsInstrumentName);
+        Assert.Equal(DurableAgentTelemetry.FailedOutcome, operation.Tags["outcome"]);
+        Assert.Equal(true, operation.Tags["deletion_staged"]);
+    }
+
+    [Fact]
+    public void WriteAndOperationMeasurementsCarryCommitStatus()
+    {
+        using RetentionMetricListener listener = new();
+
+        DurableAgentTelemetry.RecordWrite(
+            DurableAgentTelemetry.SerializationStage,
+            DurableAgentTelemetry.ReturnedOutcome,
+            DurableAgentTelemetry.NotAttemptedCommitStatus,
+            deletionStaged: true);
+        DurableAgentTelemetry.RecordWrite(
+            DurableAgentTelemetry.SetStateStage,
+            DurableAgentTelemetry.ReturnedOutcome,
+            DurableAgentTelemetry.UnknownCommitStatus,
+            deletionStaged: true);
+        DurableAgentTelemetry.RecordOperation(
+            DurableAgentTelemetry.ReturnedOutcome,
+            DurableAgentTelemetry.UnknownCommitStatus,
+            deletionStaged: true);
+
+        List<MetricMeasurement> writes = listener.Find(
+            DurableAgentTelemetry.WriteAttemptsInstrumentName);
+        Assert.Equal(2, writes.Count);
+        Assert.Equal(
+            DurableAgentTelemetry.NotAttemptedCommitStatus,
+            Assert.Single(
+                writes,
+                value => Equals(
+                    value.Tags["stage"],
+                    DurableAgentTelemetry.SerializationStage)).Tags["commit_status"]);
+        Assert.Equal(
+            DurableAgentTelemetry.UnknownCommitStatus,
+            Assert.Single(
+                writes,
+                value => Equals(
+                    value.Tags["stage"],
+                    DurableAgentTelemetry.SetStateStage)).Tags["commit_status"]);
+        MetricMeasurement operation = listener.Single(
+            DurableAgentTelemetry.OperationsInstrumentName);
+        Assert.Equal(DurableAgentTelemetry.UnknownCommitStatus, operation.Tags["commit_status"]);
+        Assert.Equal(true, operation.Tags["deletion_staged"]);
     }
 
     [Fact]
     public void KeepAllDoesNotEmitRetentionMetrics()
     {
-        const string AgentName = "metric-keep-all";
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        DurableAgentState state = CreateLargeState(now, "large");
-        using RetentionMetricListener listener = new(AgentName);
+        DurableAgentState state = CreateLargeState(DateTimeOffset.UtcNow, "large");
+        using RetentionMetricListener listener = new();
 
         int removed = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.KeepAll,
-            500,
-            now,
+            maxStateBytes: null,
+            DateTimeOffset.UtcNow,
             NullLogger.Instance,
-            new AgentSessionId(AgentName, "session"));
+            new AgentSessionId("agent", "session"));
 
         Assert.Equal(0, removed);
         Assert.Empty(listener.Measurements);
     }
 
     [Fact]
-    public void ConcurrentRetentionCallsRecordIndependently()
-    {
-        const string AgentName = "metric-concurrent";
-        const int AttemptCount = 32;
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        using RetentionMetricListener listener = new(AgentName);
-
-        Parallel.For(
-            0,
-            AttemptCount,
-            _ =>
-            {
-                DurableAgentState state = CreateLargeState(now, "payload");
-                int removed = DurableAgentStateRetention.Enforce(
-                    state,
-                    DurableAgentHistoryRetentionMode.Auto,
-                    2_500,
-                    now,
-                    NullLogger.Instance,
-                    new AgentSessionId(AgentName, "session"));
-                Assert.True(removed > 0);
-            });
-
-        Assert.Equal(
-            AttemptCount,
-            listener.Find(DurableAgentTelemetry.RetentionOperationsInstrumentName).Count);
-        Assert.Equal(
-            AttemptCount,
-            listener.Find(DurableAgentTelemetry.StateSizeBeforeInstrumentName).Count);
-        Assert.Equal(
-            AttemptCount,
-            listener.Find(DurableAgentTelemetry.StateSizeAfterInstrumentName).Count);
-    }
-
-    [Fact]
-    public void ListenerAbsenceDoesNotChangeRetention()
-    {
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        DurableAgentState state = CreateLargeState(now, "payload");
-
-        int removed = DurableAgentStateRetention.Enforce(
-            state,
-            DurableAgentHistoryRetentionMode.Auto,
-            2_500,
-            now,
-            NullLogger.Instance,
-            new AgentSessionId("metric-no-listener", "session"));
-
-        Assert.True(removed > 0);
-        Assert.DoesNotContain(
-            state.Data.ConversationHistory,
-            entry => entry.CorrelationId == "oldest");
-        Assert.Contains(
-            state.Data.ConversationHistory,
-            entry => entry.CorrelationId == "newest");
-    }
-
-    [Fact]
     public void ThrowingListenerCannotAffectRetention()
     {
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        DurableAgentState state = CreateLargeState(now, "payload");
+        DurableAgentState state = CreateLargeState(DateTimeOffset.UtcNow, "payload");
         using MeterListener listener = new();
         listener.InstrumentPublished = static (instrument, meterListener) =>
         {
@@ -335,10 +404,10 @@ public sealed class DurableAgentTelemetryTests
         int removed = DurableAgentStateRetention.Enforce(
             state,
             DurableAgentHistoryRetentionMode.Auto,
-            2_500,
-            now,
+            4_000,
+            DateTimeOffset.UtcNow,
             NullLogger.Instance,
-            new AgentSessionId("metric-throwing-listener", "session"));
+            new AgentSessionId("agent", "session"));
 
         Assert.True(removed > 0);
         Assert.Contains(
@@ -415,13 +484,11 @@ public sealed class DurableAgentTelemetryTests
 
     private sealed class RetentionMetricListener : IDisposable
     {
-        private readonly string _agentName;
         private readonly ConcurrentQueue<MetricMeasurement> _measurements = new();
         private readonly MeterListener _listener = new();
 
-        public RetentionMetricListener(string agentName)
+        public RetentionMetricListener()
         {
-            this._agentName = agentName;
             this._listener.InstrumentPublished = static (instrument, listener) =>
             {
                 if (instrument.Meter.Name == DurableAgentTelemetry.MeterName)
@@ -457,18 +524,12 @@ public sealed class DurableAgentTelemetryTests
                 copiedTags[tag.Key] = tag.Value;
             }
 
-            if (copiedTags.TryGetValue(
-                    DurableAgentTelemetry.AgentNameTagName,
-                    out object? agentName) &&
-                string.Equals(agentName as string, this._agentName, StringComparison.Ordinal))
-            {
-                this._measurements.Enqueue(
-                    new MetricMeasurement(
-                        instrument.Name,
-                        instrument.Unit,
-                        measurement,
-                        copiedTags));
-            }
+            this._measurements.Enqueue(
+                new MetricMeasurement(
+                    instrument.Name,
+                    instrument.Unit,
+                    measurement,
+                    copiedTags));
         }
     }
 }

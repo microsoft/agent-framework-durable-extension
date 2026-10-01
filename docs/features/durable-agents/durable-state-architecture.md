@@ -131,7 +131,7 @@ The application or external provider remains responsible for availability, autho
 
 ## History configuration
 
-Closed choices are represented by enums: `DurableAgentHistoryReplayMode` has `PreloadEntityHistory` and `CurrentRequestOnly`; `DurableAgentHistoryRetentionMode` has `KeepAll` and `Auto`. History ownership is also a closed internal enum after resolution.
+Closed public replay choices are represented by `DurableAgentHistoryReplayMode`, with `PreloadEntityHistory` and `CurrentRequestOnly`. Pressure-retention choices remain an internal enum alongside the default-off schema-2 writer gate; applications are not offered an activation surface that the public rollout cannot yet support. History ownership is also a closed internal enum after resolution.
 
 Agent names and logical provider identities are open sets, so an enum is not appropriate for them. History policy is attached to `AddAIAgent` or `AddAIAgentFactory` through `DurableAgentHistoryOptions`; callers do not repeat the agent name. `DurableAgentHistoryProviderKey` validates the logical provider identity before registration. It crosses the JSON wire as a string for interoperability, but applications can define it once as a static typed value.
 
@@ -144,10 +144,14 @@ These are independent mechanisms:
 | Mechanism | Trigger | Removes | Preserves |
 | --- | --- | --- | --- |
 | Result expiry | `ResultRetentionPeriod` (60 seconds by default) and `CheckAndExpireResults` | `terminalResults[correlationId]` payload | Completion receipt with unavailable state |
-| Pressure retention | `DurableAgentHistoryRetentionMode.Auto` and serialized-state high watermark | Oldest eligible connected transcript groups | Mailbox, receipts, binding, session, TTL, bookkeeping, system groups, newest group |
+| Pressure retention | Internal `Auto`, explicit positive storage-envelope budget, and configured high watermark | Oldest eligible transcript groups | Mailbox, receipts, binding, session, TTL, bookkeeping, system groups, newest exchange and its tool pairs |
 | Whole-entity TTL | `expirationTimeUtc` and `CheckAndDeleteIfExpired` | Entire entity | Nothing in that session |
 
-`AgentEntity.ApplyRetentionAndCommit` performs due result expiry, writes the next generation-aware expiry schedule, invokes `DurableAgentStateRetention.Enforce`, validates serialization, schedules required self-signals, and finally replaces entity state. Automatic retention measures the complete serialized extension state, starts eviction at 85% of `MaxStateBytes`, and targets 70%. It fails the operation with `DurableAgentStateSizeLimitExceededException` when protected state cannot fit rather than deleting correctness-critical data.
+`AgentEntity.ApplyRetentionAndCommit` performs due result expiry, writes the next generation-aware expiry schedule, invokes staged retention, validates serialization, schedules required self-signals, and finally replaces entity state. Automatic retention measures the converter output as an escaped JSON-string storage envelope. Its default 0.85 high and 0.70 low watermarks are internally configurable with `0 < low < high <= 1`; there is no implicit portable budget. A protected-floor failure leaves the input state unchanged and fails before model/provider effects when the floor is deterministically knowable.
+
+Protection is a fixed-point connected-component closure over correlation membership and tool-call/result links. The actual newest entry and every entry containing a system message seed protection. Every entry in any reached non-null correlation is protected, and every occurrence of a reached non-empty tool ID is protected; newly reached entries recursively expand protection through their own correlation and tool links until closure. Pressure eviction removes only an oldest prefix of atomic components that remain disconnected from that closure. A newest or system-message component may therefore connect to older history and raise the protected floor above the budget, in which case retention fails atomically without publishing the working state.
+
+The `.NET` and Python runtimes share meter `agent_framework.durabletask`, nine `durable.retention.*` instruments, and a `commit_status` dimension. Cumulative truncation evidence remains an arbitrary-precision JSON integer; per-attempt metric values use bounded `Int64` measurements and never replace or narrow that durable evidence. These measurements describe staged attempts and host write boundaries; they do not claim durable commit confirmation.
 
 Model-context compaction is not pressure retention. `CompactionProvider` may reduce only the messages sent to the model; its serialized session state counts toward the complete entity-state budget, and the durable transcript remains unchanged. Store-pruning behavior that follows compaction is deferred.
 

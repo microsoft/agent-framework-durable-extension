@@ -104,11 +104,11 @@ expiry. Result-payload retention and whole-entity TTL are separate policies. Del
 idempotency evidence. Keep schema 2.0 writes disabled until the shared rollout gates are agreed and every
 participating reader/worker is mailbox-aware or explicitly rejects the new major version.
 Producer activation and receipt-deleting entity TTL are internal test gates only, disabled by default.
-`HistoryRetentionMode.Auto` does not activate schema 2 production writes. Automatic transcript retention
-requires a mailbox-aware state writer, but that rollout remains internal until Python, dashboards, pollers,
-and every other participating reader can safely consume or reject schema 2. Auto therefore fails closed when
-the internal writer gate is disabled or legacy migration is not explicitly authorized from independently
-authoritative complete history.
+Automatic transcript retention is part of that same internal rollout surface rather than a public option.
+It requires a mailbox-aware state writer and remains inaccessible to applications until Python, dashboards,
+pollers, and every other participating reader can safely consume or reject schema 2. Internal activation
+fails closed when the writer gate is disabled or legacy migration is not explicitly authorized from
+independently authoritative complete history.
 Legacy TTL behavior is preserved, but old deadlines cannot delete schema-2 receipts without a separately agreed
 deletion policy. Unknown-field
 preservation by an older worker is not sufficient. See [state compatibility](State/README.md).
@@ -296,36 +296,34 @@ The pinned Agent Framework API cannot universally inspect builder-installed or p
 decorators; this implementation does not use reflection, type-name scanning, guessed session keys, or
 factory double invocation.
 
-Pressure retention is opt-in. `KeepAll` is the default and performs no proactive history eviction; backend or
-provider size limits can still reject a write. Select `Auto` and configure its positive serialized-state budget
-when bounded transcript storage is preferred:
+Pressure retention is default-off and internal in this release. `KeepAll` performs no proactive history
+eviction; backend or provider size limits can still reject a write. The internal `Auto` path requires an
+explicit positive byte budget: there is no implicit 1 MiB portable default. Supplying a budget or watermark
+while retention remains `KeepAll` is rejected instead of being silently ignored.
 
-```csharp
-services.ConfigureDurableAgents(options =>
-{
-    options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
-    options.MaxStateBytes = 1_048_576;
-    options.AddAIAgent(agent);
-});
-```
+The high and low watermarks default to 0.85 and 0.70 and can be overridden only with finite values satisfying
+`0 < low < high <= 1`. The high watermark starts a retention attempt, which removes the oldest eligible
+transcript groups toward the low watermark. Measurement serializes the complete extension state through the
+durable converter and then measures its JSON-string storage envelope, including quote, backslash, and non-ASCII
+escaping. The state includes terminal-result mailboxes, completion receipts, fixed history binding, opaque
+provider or agent continuation, TTL, ingestion and workflow bookkeeping, truncation evidence, media, and
+metadata. Backend framing outside that stored string remains backend-specific.
 
-`MaxStateBytes` is active only in `Auto`. The 85% high watermark starts a retention attempt, which removes the
-oldest eligible transcript groups toward the 70% low watermark. The measured payload is the complete JSON state
-produced by this extension, including terminal-result mailboxes, completion receipts, fixed history binding,
-opaque provider or agent continuation, TTL, ingestion and workflow bookkeeping, truncation evidence, media, and
-metadata. Durable Task backends can add envelope bytes outside this measurement.
-
-Selecting `Auto` configures retention policy only; it does not activate mailbox-aware schema 2 writes.
 When the internal rollout gate is enabled, existing legacy sessions are migrated only when the configured
 migration authorization confirms independently authoritative complete history. Otherwise the operation fails
-before model or provider side effects.
+before model or provider side effects. A deterministically impossible protected floor, including the accepted
+request for entity-owned history, is also rejected before model/provider invocation.
 
 Only `conversationHistory` transcript entries are eligible for pressure eviction. Mailbox result envelopes,
 completion receipts, fixed history binding, serialized continuation, TTL, and other execution controls are
-protected. Correlation IDs connect transcript request/response entries, and stable tool-call IDs connect calls
-with results even across entries or correlations. Duplicate non-empty tool IDs are conservatively connected;
-missing or empty IDs create no cross-entry edge. System-message groups and the newest transcript exchange are
-also protected.
+protected. Protection is a fixed-point connected-component closure over correlation membership and
+tool-call/result links. The actual newest entry and every entry containing a system message seed protection.
+Every entry in any reached non-null correlation is protected, and every occurrence of a reached non-empty tool
+ID is protected; newly reached entries recursively expand protection through their own correlation and tool
+links until closure. Missing or empty tool IDs create no cross-entry edge. Eviction removes only an oldest
+prefix of atomic components that remain disconnected from the protected closure. A component containing the
+newest entry or a system message can therefore connect to older history and raise the protected floor above
+the budget, in which case retention fails atomically without committing the working state.
 
 Schema 2 mailbox results remain authoritative after their transcript copies are removed, so duplicate execution
 and polling return the same retained result. Legacy state is converted to schema 2 before entity retention once
@@ -333,9 +331,23 @@ history ownership can be resolved. Retention itself fails closed if legacy trans
 only completion evidence.
 
 If all eligible transcript is removed and the protected floor still reaches the high watermark,
-`DurableAgentStateSizeLimitExceededException` fails the operation without committing the working state. Auto
-does not expire mailbox payloads; delivery expiry is a separate mailbox policy. Large inline image and
-tool-result offload is not part of this implementation.
+the operation fails with an `InvalidOperationException` describing the protected floor without committing the
+working state. Auto does not expire mailbox payloads; delivery expiry is a separate mailbox policy. Large
+inline image and tool-result offload is not part of this implementation.
+
+Retention telemetry uses the shared `agent_framework.durabletask` meter and the nine
+`durable.retention.*` instruments used by Python. Retention measurements carry `mechanism`, `outcome`, and
+`commit_status`; size measurements add `phase`, while write attempts add `stage` and operations identify
+whether deletion was staged. A host state setter returning is reported as commit status `unknown`, never as
+durable commit confirmation. Metrics contain no agent, session, correlation, or payload dimensions. Persisted
+`evictedMessageCount` evidence remains an arbitrary-precision JSON integer; telemetry reports the bounded
+message count removed by the current attempt rather than narrowing the cumulative value. The 4,096-digit safety
+bound applies only when automatic retention must computationally expand compact exponent notation. Raw decimal
+integer tokens remain unbounded and are incremented with exact string arithmetic, including a 4,096-digit
+all-nine value carrying to 4,097 digits and subsequent increments. Larger spellings that contract exactly through
+a negative exponent are canonicalized and incremented. If a positive exponent would exceed the expansion safety
+bound, retention fails before staged deletion is applied instead of preserving a stale count or losing eviction
+evidence.
 
 Retention is separate from model-context compaction: retention destructively removes durable history only under
 storage pressure, while compaction changes the context supplied to the model. `Auto` is not
@@ -344,21 +356,26 @@ storage pressure, while compaction changes the context supplied to the model. `A
 ### Retention metrics
 
 The package emits automatic-retention metrics through the
-`Microsoft.Agents.AI.DurableTask` meter, with the package assembly version as its instrumentation scope version.
+`agent_framework.durabletask` meter, with the package assembly version as its instrumentation scope version.
 Applications can subscribe by using the public `DurableAgentTelemetry.MeterName` constant. The OpenTelemetry SDK
 and exporter remain application choices; the product package depends only on `System.Diagnostics.Metrics`.
 
 | Instrument | Type | Unit | Tags | Meaning |
 | --- | --- | --- | --- | --- |
-| `durable.agent.history.evicted.entries` | Counter | `{entry}` | `agent.name`, `reason` | Transcript entries removed, including entries that contain no messages. |
-| `durable.agent.history.evicted.messages` | Counter | `{message}` | `agent.name`, `reason` | Transcript messages removed. |
-| `durable.agent.history.reclaimed.bytes` | Counter | `By` | `agent.name`, `reason` | Positive net serialized state bytes reclaimed by transcript eviction. |
-| `durable.agent.history.state.size.before` | Histogram | `By` | `agent.name`, `outcome` | Exact serialized state size when an `Auto` check reaches the high watermark. |
-| `durable.agent.history.state.size.after` | Histogram | `By` | `agent.name`, `outcome` | Exact serialized state size after that pressure-retention attempt. |
-| `durable.agent.history.retention.operations` | Counter | `{operation}` | `agent.name`, `outcome` | Automatic retention checks by final outcome. |
+| `durable.retention.evaluations` | Counter | `{evaluation}` | `mechanism`, `outcome`, `commit_status` | Local pressure-retention evaluations. |
+| `durable.retention.budget` | Histogram | `By` | `mechanism`, `outcome`, `commit_status` | Requested resolved whole-entity pressure budget. |
+| `durable.retention.state.size` | Histogram | `By` | `mechanism`, `outcome`, `commit_status`, `phase` | Exact escaped storage-envelope bytes before and after the attempt. |
+| `durable.retention.removed_messages` | Counter | `{message}` | `mechanism`, `outcome`, `commit_status` | Transcript messages removed from staged state by this attempt. |
+| `durable.retention.removed_entries` | Counter | `{entry}` | `mechanism`, `outcome`, `commit_status` | Transcript entries removed from staged state, including zero-message entries. |
+| `durable.retention.reclaimed_bytes` | Counter | `By` | `mechanism`, `outcome`, `commit_status` | Positive net serialized bytes reclaimed in staged state. |
+| `durable.retention.capacity_failures` | Counter | `{failure}` | `mechanism`, `outcome`, `commit_status` | Attempts whose protected floor cannot reach the safe threshold. |
+| `durable.retention.write_attempts` | Counter | `{attempt}` | `stage`, `outcome`, `commit_status`, `deletion_staged` | Serialization and host set-state outcomes, not durable commit confirmation. |
+| `durable.retention.operations` | Counter | `{operation}` | `outcome`, `commit_status`, `deletion_staged` | Entity-operation outcome and the strongest host write status observed. |
 
-The bounded `outcome` values are `no_action`, `transcript_evicted`, and
-`protected_state_capacity_failure`; the bounded `reason` value is `transcript_pressure`.
+Pressure evaluation outcomes are `below_threshold`, `staged`, and `protected_floor`; write and operation
+outcomes are `returned` or `failed`. `commit_status` is `not_attempted` until a host state setter is reached
+and `unknown` afterward because this layer cannot observe durable confirmation. `phase` is `before` or `after`,
+and `stage` is `serialization` or `set_state`.
 Removing a zero-message entry increments the entry counter without incrementing the message counter, and
 reclaimed bytes are emitted only for a positive net reduction so truncation metadata never creates a negative
 measurement. `KeepAll` emits no retention metrics. Session IDs, correlation IDs, message IDs, content,

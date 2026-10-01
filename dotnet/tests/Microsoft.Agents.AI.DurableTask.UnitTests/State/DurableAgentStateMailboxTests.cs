@@ -1197,11 +1197,42 @@ public sealed class DurableAgentStateMailboxTests
         Assert.Equal(expectedProjection, projection);
     }
 
+    [Fact]
+    public void IngestionPositionsPreserveZeroWithHugeExponentSpelling()
+    {
+        string value = $"0e{new string('9', 5_000)}";
+        string json = $$"""
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [],
+                "ingestedPositions": {
+                  "producer": {{value}}
+                }
+              }
+            }
+            """;
+
+        DurableAgentState state = Deserialize(json);
+        string roundTrip = Serialize(state);
+
+        Assert.Equal(
+            value,
+            JsonDocument.Parse(roundTrip).RootElement.GetProperty("data")
+                .GetProperty("ingestedPositions")
+                .GetProperty("producer")
+                .GetRawText());
+        Assert.True(state.Data.TryGetIngestedPosition("producer", out long projection));
+        Assert.Equal(0, projection);
+    }
+
     [Theory]
     [InlineData("9223372036854775808")]
     [InlineData("9.223372036854775808e18")]
     [InlineData("-1")]
+    [InlineData("-10e-1")]
     [InlineData("1.5")]
+    [InlineData("10e-2")]
     [InlineData("true")]
     [InlineData("null")]
     public void IngestionPositionsRejectValuesOutsideNonNegativeInt64(string value)
@@ -1260,7 +1291,9 @@ public sealed class DurableAgentStateMailboxTests
     [InlineData("9223372036854775808")]
     [InlineData("9.223372036854775808e18")]
     [InlineData("-1")]
+    [InlineData("-10e-1")]
     [InlineData("1.5")]
+    [InlineData("10e-2")]
     [InlineData("true")]
     [InlineData("null")]
     public void TruncationRejectsValuesOutsidePositiveInt64(string value)

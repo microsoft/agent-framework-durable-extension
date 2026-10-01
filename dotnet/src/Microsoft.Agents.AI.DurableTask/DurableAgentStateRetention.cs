@@ -1,5 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Globalization;
+using System.Numerics;
 using System.Text.Json;
 using Microsoft.Agents.AI.DurableTask.State;
 using Microsoft.Extensions.AI;
@@ -12,36 +14,68 @@ namespace Microsoft.Agents.AI.DurableTask;
 /// </summary>
 internal static class DurableAgentStateRetention
 {
-    internal const double HighWatermark = 0.85;
-    internal const double LowWatermark = 0.70;
+    internal const double DefaultHighWatermark = 0.85;
+    internal const double DefaultLowWatermark = 0.70;
+    internal const double HighWatermark = DefaultHighWatermark;
+    internal const double LowWatermark = DefaultLowWatermark;
 
     internal sealed class ExecutionStatistics
     {
         public int CandidateGroupingPassCount { get; set; }
+
+        public int ProtectedFloorCloneCount { get; set; }
 
         public int SerializedStateMeasurementCount { get; set; }
     }
 
     public static int GetSerializedSize(DurableAgentState state)
     {
-        return JsonSerializer.SerializeToUtf8Bytes(
+        string converterPayload = JsonSerializer.Serialize(
             state,
-            DurableAgentStateJsonContext.Default.DurableAgentState).Length;
+            DurableAgentStateJsonContext.Default.DurableAgentState);
+        using SerializedByteCountingStream stream = new();
+        JsonSerializer.Serialize(
+            stream,
+            converterPayload,
+            DurableAgentStateJsonContext.Default.String);
+        return checked((int)stream.BytesWritten);
     }
 
     public static int Enforce(
         DurableAgentState state,
         DurableAgentHistoryRetentionMode mode,
-        int maxStateBytes,
+        int? maxStateBytes,
         DateTimeOffset now,
         ILogger logger,
-        AgentSessionId sessionId) =>
-        Enforce(state, mode, maxStateBytes, now, logger, sessionId, statistics: null);
+        AgentSessionId sessionId)
+    {
+        if (mode == DurableAgentHistoryRetentionMode.KeepAll)
+        {
+            if (maxStateBytes.HasValue)
+            {
+                throw new InvalidOperationException(
+                    "A durable state budget is not applicable when history retention is KeepAll.");
+            }
+
+            return 0;
+        }
+
+        return EnforceAuto(
+            state,
+            mode,
+            maxStateBytes,
+            DefaultHighWatermark,
+            DefaultLowWatermark,
+            now,
+            logger,
+            sessionId,
+            statistics: null).RemovedMessageCount;
+    }
 
     internal static int Enforce(
         DurableAgentState state,
         DurableAgentHistoryRetentionMode mode,
-        int maxStateBytes,
+        int? maxStateBytes,
         DateTimeOffset now,
         ILogger logger,
         AgentSessionId sessionId,
@@ -49,18 +83,177 @@ internal static class DurableAgentStateRetention
     {
         if (mode == DurableAgentHistoryRetentionMode.KeepAll)
         {
+            if (maxStateBytes.HasValue)
+            {
+                throw new InvalidOperationException(
+                    "A durable state budget is not applicable when history retention is KeepAll.");
+            }
+
             return 0;
         }
 
-        if (mode != DurableAgentHistoryRetentionMode.Auto)
+        return EnforceAuto(
+            state,
+            mode,
+            maxStateBytes,
+            DefaultHighWatermark,
+            DefaultLowWatermark,
+            now,
+            logger,
+            sessionId,
+            statistics).RemovedMessageCount;
+    }
+
+    internal static RetentionResult? EnforceForCommit(
+        DurableAgentState state,
+        DurableAgentRetentionSettings settings,
+        DateTimeOffset now,
+        ILogger logger,
+        AgentSessionId sessionId)
+    {
+        if (settings.Mode == DurableAgentHistoryRetentionMode.KeepAll)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(mode),
-                mode,
-                "The durable agent history retention mode is not supported.");
+            return null;
         }
 
-        int highWatermark = (int)(maxStateBytes * HighWatermark);
+        return EnforceAuto(
+            state,
+            settings.Mode,
+            settings.MaxStateBytes,
+            settings.HighWatermark,
+            settings.LowWatermark,
+            now,
+            logger,
+            sessionId,
+            statistics: null);
+    }
+
+    internal static void ValidateProtectedFloor(
+        DurableAgentState state,
+        DurableAgentRetentionSettings settings,
+        DateTimeOffset now,
+        DurableAgentStateEntry? pendingEntry = null,
+        ExecutionStatistics? statistics = null)
+    {
+        if (settings.Mode == DurableAgentHistoryRetentionMode.KeepAll)
+        {
+            return;
+        }
+
+        ValidateAutoSettings(
+            settings.Mode,
+            settings.MaxStateBytes,
+            settings.HighWatermark,
+            settings.LowWatermark);
+        int maxStateBytes = settings.MaxStateBytes!.Value;
+        int highWatermark = (int)(maxStateBytes * settings.HighWatermark);
+        int initialSize;
+        IList<DurableAgentStateEntry> history = state.Data.ConversationHistory;
+        if (pendingEntry is not null)
+        {
+            history.Add(pendingEntry);
+        }
+
+        try
+        {
+            initialSize = GetSerializedSize(state);
+            if (statistics is not null)
+            {
+                statistics.SerializedStateMeasurementCount++;
+            }
+            if (initialSize < highWatermark)
+            {
+                return;
+            }
+
+            ValidateSchema(state);
+            if (FindEligibleExchanges(history).Count == 0)
+            {
+                RecordProtectedFloorFailure(
+                    initialSize,
+                    initialSize,
+                    maxStateBytes);
+            }
+        }
+        finally
+        {
+            if (pendingEntry is not null)
+            {
+                history.RemoveAt(history.Count - 1);
+            }
+        }
+
+        DurableAgentState floorState = state.Clone();
+        if (statistics is not null)
+        {
+            statistics.ProtectedFloorCloneCount++;
+        }
+        if (pendingEntry is not null)
+        {
+            floorState.Data.ConversationHistory.Add(pendingEntry);
+        }
+
+        List<List<DurableAgentStateEntry>> eligibleGroups =
+            FindEligibleExchanges(floorState.Data.ConversationHistory);
+        HashSet<DurableAgentStateEntry> floorEntries =
+            CreateEntrySet(eligibleGroups.SelectMany(static group => group));
+        int removedMessages = floorEntries.Sum(entry => entry.Messages.Count);
+        RemoveEntries(floorState.Data.ConversationHistory, floorEntries);
+
+        RecordTruncation(floorState, removedMessages, now);
+        int floorSize = GetSerializedSize(floorState);
+        if (statistics is not null)
+        {
+            statistics.SerializedStateMeasurementCount++;
+        }
+        if (floorSize >= highWatermark)
+        {
+            RecordProtectedFloorFailure(
+                initialSize,
+                floorSize,
+                maxStateBytes);
+        }
+    }
+
+    private static void RecordProtectedFloorFailure(
+        int initialSize,
+        int floorSize,
+        int maxStateBytes)
+    {
+        DurableAgentTelemetry.RecordRetention(
+            new(
+                RemovedEntryCount: 0,
+                RemovedMessageCount: 0,
+                InitialSizeBytes: initialSize,
+                FinalSizeBytes: floorSize,
+                ProtectedStateCapacityFailure: true),
+            maxStateBytes);
+        DurableAgentTelemetry.RecordOperation(
+            DurableAgentTelemetry.FailedOutcome,
+            DurableAgentTelemetry.NotAttemptedCommitStatus,
+            deletionStaged: false);
+        throw new DurableAgentStateSizeLimitExceededException(floorSize, maxStateBytes);
+    }
+
+    private static RetentionResult EnforceAuto(
+        DurableAgentState state,
+        DurableAgentHistoryRetentionMode mode,
+        int? configuredMaxStateBytes,
+        double highWatermarkRatio,
+        double lowWatermarkRatio,
+        DateTimeOffset now,
+        ILogger logger,
+        AgentSessionId sessionId,
+        ExecutionStatistics? statistics)
+    {
+        ValidateAutoSettings(
+            mode,
+            configuredMaxStateBytes,
+            highWatermarkRatio,
+            lowWatermarkRatio);
+        int maxStateBytes = configuredMaxStateBytes!.Value;
+
+        int highWatermark = (int)(maxStateBytes * highWatermarkRatio);
         int initialSize = GetSerializedSize(state);
         if (statistics is not null)
         {
@@ -68,35 +261,37 @@ internal static class DurableAgentStateRetention
         }
         if (initialSize < highWatermark)
         {
-            DurableAgentTelemetry.RecordNoAction(sessionId.Name);
-            return 0;
+            RetentionResult noAction = new(
+                RemovedEntryCount: 0,
+                RemovedMessageCount: 0,
+                InitialSizeBytes: initialSize,
+                FinalSizeBytes: initialSize,
+                ProtectedStateCapacityFailure: false);
+            DurableAgentTelemetry.RecordRetention(noAction, maxStateBytes);
+            return noAction;
         }
 
-        DurableAgentStateSchemaVersion schemaVersion =
-            DurableAgentStateSchemaVersion.ParseSupported(state.SchemaVersion);
-        if (schemaVersion.Major != DurableAgentState.RevisedSchemaMajorVersion)
-        {
-            throw new DurableAgentStateCorruptionException(
-                "Automatic history retention requires schema 2 mailbox state. Legacy terminal transcript " +
-                "entries must be converted to authoritative mailbox results before transcript eviction.");
-        }
+        ValidateSchema(state);
+        DurableAgentState stagedState = state.Clone();
 
-        int lowWatermark = (int)(maxStateBytes * LowWatermark);
+        int lowWatermark = (int)(maxStateBytes * lowWatermarkRatio);
         List<List<DurableAgentStateEntry>> eligibleGroups =
-            FindEligibleExchanges(state.Data.ConversationHistory);
+            FindEligibleExchanges(stagedState.Data.ConversationHistory);
         if (statistics is not null)
         {
             statistics.CandidateGroupingPassCount++;
         }
 
         int selectedGroupCount = FindRemovalPrefix(
-            state,
+            stagedState,
             eligibleGroups,
             lowWatermark,
             now,
             statistics);
         int removedEntries = 0;
         int removedMessages = 0;
+        HashSet<DurableAgentStateEntry> selectedEntries =
+            new(ReferenceEqualityComparer.Instance);
         for (int index = 0; index < selectedGroupCount; index++)
         {
             List<DurableAgentStateEntry> group = eligibleGroups[index];
@@ -105,14 +300,15 @@ internal static class DurableAgentStateRetention
             removedMessages += removedFromGroup;
             foreach (DurableAgentStateEntry entry in group)
             {
-                _ = state.Data.ConversationHistory.Remove(entry);
+                selectedEntries.Add(entry);
             }
         }
+        RemoveEntries(stagedState.Data.ConversationHistory, selectedEntries);
 
-        RecordTruncation(state, removedMessages, now);
+        RecordTruncation(stagedState, removedMessages, now);
         int finalSize = selectedGroupCount == 0
             ? initialSize
-            : GetSerializedSize(state);
+            : GetSerializedSize(stagedState);
         if (selectedGroupCount > 0 && statistics is not null)
         {
             statistics.SerializedStateMeasurementCount++;
@@ -125,7 +321,7 @@ internal static class DurableAgentStateRetention
             initialSize,
             finalSize,
             protectedStateCapacityFailure);
-        DurableAgentTelemetry.RecordRetentionAttempt(sessionId.Name, result);
+        DurableAgentTelemetry.RecordRetention(result, maxStateBytes);
 
         if (protectedStateCapacityFailure)
         {
@@ -133,9 +329,14 @@ internal static class DurableAgentStateRetention
                 sessionId,
                 finalSize,
                 maxStateBytes);
+            DurableAgentTelemetry.RecordOperation(
+                outcome: DurableAgentTelemetry.FailedOutcome,
+                commitStatus: DurableAgentTelemetry.NotAttemptedCommitStatus,
+                deletionStaged: removedEntries > 0);
             throw new DurableAgentStateSizeLimitExceededException(finalSize, maxStateBytes);
         }
 
+        ApplyStagedTranscript(state, stagedState);
         if (removedEntries > 0)
         {
             logger.LogDurableHistoryTruncated(
@@ -147,7 +348,94 @@ internal static class DurableAgentStateRetention
                 finalSize);
         }
 
-        return result.RemovedMessageCount;
+        return result;
+    }
+
+    private static void ValidateAutoSettings(
+        DurableAgentHistoryRetentionMode mode,
+        int? maxStateBytes,
+        double highWatermark,
+        double lowWatermark)
+    {
+        if (mode != DurableAgentHistoryRetentionMode.Auto)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(mode),
+                mode,
+                "The durable agent history retention mode is not supported.");
+        }
+
+        if (maxStateBytes is null or <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxStateBytes),
+                maxStateBytes,
+                "Automatic durable history retention requires an explicit positive state byte budget.");
+        }
+
+        if (!double.IsFinite(highWatermark) ||
+            !double.IsFinite(lowWatermark) ||
+            lowWatermark <= 0 ||
+            lowWatermark >= highWatermark ||
+            highWatermark > 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(highWatermark),
+                "Durable history retention watermarks must satisfy 0 < low < high <= 1.");
+        }
+    }
+
+    private static void ValidateSchema(DurableAgentState state)
+    {
+        DurableAgentStateSchemaVersion schemaVersion =
+            DurableAgentStateSchemaVersion.ParseSupported(state.SchemaVersion);
+        if (schemaVersion.Major != DurableAgentState.RevisedSchemaMajorVersion)
+        {
+            throw new DurableAgentStateCorruptionException(
+                "Automatic history retention requires schema 2 mailbox state. Legacy terminal transcript " +
+                "entries must be converted to authoritative mailbox results before transcript eviction.");
+        }
+    }
+
+    private static void ApplyStagedTranscript(
+        DurableAgentState state,
+        DurableAgentState stagedState)
+    {
+        state.Data.ConversationHistory.Clear();
+        foreach (DurableAgentStateEntry entry in stagedState.Data.ConversationHistory)
+        {
+            state.Data.ConversationHistory.Add(entry);
+        }
+
+        state.Data.Truncation = stagedState.Data.Truncation;
+    }
+
+    private static HashSet<DurableAgentStateEntry> CreateEntrySet(
+        IEnumerable<DurableAgentStateEntry> entries)
+    {
+        HashSet<DurableAgentStateEntry> result =
+            new(ReferenceEqualityComparer.Instance);
+        result.UnionWith(entries);
+        return result;
+    }
+
+    private static void RemoveEntries(
+        IList<DurableAgentStateEntry> history,
+        HashSet<DurableAgentStateEntry> removedEntries)
+    {
+        if (removedEntries.Count == 0)
+        {
+            return;
+        }
+
+        List<DurableAgentStateEntry> retainedEntries = history
+            .Where(entry => !removedEntries.Contains(entry))
+            .ToList();
+        history.Clear();
+        foreach (DurableAgentStateEntry entry in retainedEntries)
+        {
+            history.Add(entry);
+        }
     }
 
     private static int FindRemovalPrefix(
@@ -251,7 +539,8 @@ internal static class DurableAgentStateRetention
     {
         List<DurableAgentStateEntry> originalHistory = [.. state.Data.ConversationHistory];
         DurableAgentStateTruncation? originalTruncation = state.Data.Truncation;
-        HashSet<DurableAgentStateEntry> removedEntries = [];
+        HashSet<DurableAgentStateEntry> removedEntries =
+            new(ReferenceEqualityComparer.Instance);
         int removedMessages = 0;
         for (int index = 0; index < groupCount; index++)
         {
@@ -316,21 +605,144 @@ internal static class DurableAgentStateRetention
     private static List<List<DurableAgentStateEntry>> FindEligibleExchanges(
         IList<DurableAgentStateEntry> history)
     {
-        List<List<DurableAgentStateEntry>> groups = BuildAtomicGroups(history);
-        List<DurableAgentStateEntry>? newestGroup = history.Count == 0
-            ? null
-            : groups.First(group => group.Contains(history[^1]));
+        HashSet<DurableAgentStateEntry> protectedEntries =
+            FindNewestProtectedEntries(history);
+        List<DurableAgentStateEntry> eligibleEntries =
+            history.Where(entry => !protectedEntries.Contains(entry)).ToList();
+        return BuildAtomicGroups(eligibleEntries);
+    }
 
-        return groups
-            .Where(group =>
-                !ReferenceEquals(group, newestGroup) &&
-                !group.Any(entry =>
-                    entry.Messages.Any(message => message.Role == ChatRole.System.ToString())))
-            .ToList();
+    private static HashSet<DurableAgentStateEntry> FindNewestProtectedEntries(
+        IList<DurableAgentStateEntry> history)
+    {
+        HashSet<DurableAgentStateEntry> protectedEntries =
+            new(ReferenceEqualityComparer.Instance);
+        if (history.Count == 0)
+        {
+            return protectedEntries;
+        }
+
+        Dictionary<string, List<DurableAgentStateEntry>> correlationOccurrences =
+            new(StringComparer.Ordinal);
+        Dictionary<string, List<DurableAgentStateEntry>> toolOccurrences =
+            new(StringComparer.Ordinal);
+        foreach (DurableAgentStateEntry entry in history)
+        {
+            if (entry.CorrelationId is string correlationId)
+            {
+                AddOccurrence(correlationOccurrences, correlationId, entry);
+            }
+
+            foreach (string callId in GetToolCallIds(entry))
+            {
+                AddOccurrence(toolOccurrences, callId, entry);
+            }
+        }
+
+        Queue<DurableAgentStateEntry> pendingEntries = new();
+        Protect(history[^1]);
+        foreach (DurableAgentStateEntry entry in history)
+        {
+            if (ContainsSystemMessage(entry))
+            {
+                Protect(entry);
+            }
+        }
+
+        HashSet<string> visitedCorrelations = new(StringComparer.Ordinal);
+        HashSet<string> visitedCallIds = new(StringComparer.Ordinal);
+        while (pendingEntries.TryDequeue(out DurableAgentStateEntry? entry))
+        {
+            if (entry.CorrelationId is string correlationId &&
+                visitedCorrelations.Add(correlationId))
+            {
+                ProtectOccurrences(correlationOccurrences, correlationId);
+            }
+
+            foreach (string callId in GetToolCallIds(entry))
+            {
+                if (visitedCallIds.Add(callId))
+                {
+                    ProtectOccurrences(toolOccurrences, callId);
+                }
+            }
+        }
+
+        return protectedEntries;
+
+        static void AddOccurrence(
+            Dictionary<string, List<DurableAgentStateEntry>> occurrencesById,
+            string id,
+            DurableAgentStateEntry entry)
+        {
+            if (!occurrencesById.TryGetValue(
+                id,
+                out List<DurableAgentStateEntry>? occurrences))
+            {
+                occurrences = [];
+                occurrencesById.Add(id, occurrences);
+            }
+
+            occurrences.Add(entry);
+        }
+
+        void Protect(DurableAgentStateEntry entry)
+        {
+            if (protectedEntries.Add(entry))
+            {
+                pendingEntries.Enqueue(entry);
+            }
+        }
+
+        void ProtectOccurrences(
+            Dictionary<string, List<DurableAgentStateEntry>> occurrencesById,
+            string id)
+        {
+            if (!occurrencesById.TryGetValue(
+                id,
+                out List<DurableAgentStateEntry>? occurrences))
+            {
+                return;
+            }
+
+            foreach (DurableAgentStateEntry occurrence in occurrences)
+            {
+                Protect(occurrence);
+            }
+        }
+    }
+
+    private static bool ContainsSystemMessage(DurableAgentStateEntry entry) =>
+        entry.Messages.Any(
+            message => string.Equals(
+                message.Role,
+                ChatRole.System.ToString(),
+                StringComparison.Ordinal));
+
+    private static IEnumerable<string> GetToolCallIds(
+        DurableAgentStateEntry entry)
+    {
+        HashSet<string> ids = new(StringComparer.Ordinal);
+        foreach (DurableAgentStateContent content in
+            entry.Messages.SelectMany(message => message.Contents))
+        {
+            string? callId = content switch
+            {
+                DurableAgentStateFunctionCallContent functionCall =>
+                    functionCall.CallId,
+                DurableAgentStateFunctionResultContent functionResult =>
+                    functionResult.CallId,
+                _ => null,
+            };
+            if (!string.IsNullOrWhiteSpace(callId) && ids.Add(callId))
+            {
+                yield return callId;
+            }
+        }
     }
 
     private static List<List<DurableAgentStateEntry>> BuildAtomicGroups(
-        IList<DurableAgentStateEntry> history)
+        List<DurableAgentStateEntry> history)
     {
         int[] parents = Enumerable.Range(0, history.Count).ToArray();
         Dictionary<string, int> correlationOwners = new(StringComparer.Ordinal);
@@ -442,8 +854,60 @@ internal static class DurableAgentStateRetention
         truncation.LastEvictedAt = GetEffectiveEvictionTime(truncation, now);
     }
 
-    private static long AddEvictedMessages(long current, int added) =>
-        current > long.MaxValue - added ? long.MaxValue : current + added;
+    private static JsonElement AddEvictedMessages(
+        JsonElement current,
+        int added)
+    {
+        string currentDigits;
+        if (current.ValueKind == JsonValueKind.Undefined)
+        {
+            currentDigits = "0";
+        }
+        else
+        {
+            string raw = current.GetRawText();
+            if (raw.AsSpan().IndexOfAny('.', 'e', 'E') < 0 &&
+                !raw.StartsWith("-", StringComparison.Ordinal))
+            {
+                currentDigits = raw;
+            }
+            else if (DurableAgentStateContract.TryGetBigInteger(
+                current,
+                out BigInteger currentValue) &&
+                currentValue.Sign >= 0)
+            {
+                currentDigits = currentValue.ToString(CultureInfo.InvariantCulture);
+            }
+            else
+            {
+                throw new InvalidOperationException(
+                    "The durable evicted message count cannot be incremented because canonicalizing its " +
+                    $"JSON exponent form would exceed the {DurableAgentStateContract.MaxExpandedIntegerDigits:N0}-digit expansion safety bound.");
+            }
+        }
+
+        using JsonDocument document = JsonDocument.Parse(
+            AddDecimalDigits(currentDigits, added));
+        return document.RootElement.Clone();
+    }
+
+    private static string AddDecimalDigits(string digits, int added)
+    {
+        char[] result = digits.ToCharArray();
+        long carry = added;
+        for (int index = result.Length - 1; index >= 0 && carry > 0; index--)
+        {
+            long sum = result[index] - '0' + carry;
+            result[index] = (char)('0' + (sum % 10));
+            carry = sum / 10;
+        }
+
+        return carry == 0
+            ? new string(result)
+            : string.Concat(
+                carry.ToString(CultureInfo.InvariantCulture),
+                result);
+    }
 
     private static DateTimeOffset GetEffectiveEvictionTime(
         DurableAgentStateTruncation? truncation,
@@ -460,5 +924,43 @@ internal static class DurableAgentStateRetention
         return effectiveTime > truncation.FirstEvictedAt
             ? effectiveTime
             : truncation.FirstEvictedAt;
+    }
+
+    private sealed class SerializedByteCountingStream : Stream
+    {
+        public long BytesWritten { get; private set; }
+
+        public override bool CanRead => false;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => true;
+
+        public override long Length => this.BytesWritten;
+
+        public override long Position
+        {
+            get => this.BytesWritten;
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+
+        public override void SetLength(long value) =>
+            throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) =>
+            this.BytesWritten = checked(this.BytesWritten + count);
+
+        public override void Write(ReadOnlySpan<byte> buffer) =>
+            this.BytesWritten = checked(this.BytesWritten + buffer.Length);
     }
 }

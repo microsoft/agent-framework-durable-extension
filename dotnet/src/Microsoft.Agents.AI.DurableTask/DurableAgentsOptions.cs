@@ -131,17 +131,13 @@ public sealed class DurableAgentsOptions
     } = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// Gets or sets how durable agent conversation state is retained. Defaults to
-    /// <see cref="DurableAgentHistoryRetentionMode.KeepAll"/>.
+    /// Gets or sets the internal pressure-retention mode.
     /// </summary>
     /// <remarks>
-    /// Automatic retention requires mailbox-aware schema 2 state, but selecting
-    /// <see cref="DurableAgentHistoryRetentionMode.Auto"/> does not enable schema 2 production writes.
-    /// Writer activation remains an internal rollout gate until every participating reader is compatible.
-    /// Existing legacy sessions require explicitly authorized migration from independently authoritative
-    /// complete history.
+    /// Pressure retention remains behind the same internal rollout gate as schema 2 mailbox writes.
+    /// It is not a public activation surface until every participating reader and rollback target is compatible.
     /// </remarks>
-    public DurableAgentHistoryRetentionMode HistoryRetentionMode
+    internal DurableAgentHistoryRetentionMode HistoryRetentionMode
     {
         get;
         set => field = Enum.IsDefined(value)
@@ -153,23 +149,98 @@ public sealed class DurableAgentsOptions
     } = DurableAgentHistoryRetentionMode.KeepAll;
 
     /// <summary>
-    /// Gets or sets the extension-controlled serialized state budget used when
-    /// <see cref="HistoryRetentionMode"/> is <see cref="DurableAgentHistoryRetentionMode.Auto"/>.
-    /// Defaults to 1 MiB.
+    /// Gets or sets the explicit storage-envelope byte budget for internal automatic retention.
     /// </summary>
-    /// <remarks>
-    /// This budget measures the exact JSON payload produced by this extension. Durable Task backends can add
-    /// envelope bytes outside this payload, so the default retention watermarks intentionally leave headroom.
-    /// The budget is inactive in <see cref="DurableAgentHistoryRetentionMode.KeepAll"/> mode.
-    /// Automatic retention fails the operation if protected state cannot fit below the high watermark.
-    /// </remarks>
-    public int MaxStateBytes
+    internal int? MaxStateBytes
     {
         get;
-        set => field = value > 0
+        set => field = value is null or > 0
             ? value
-            : throw new ArgumentOutOfRangeException(nameof(value), value, "The durable agent state budget must be positive.");
-    } = 1_048_576;
+            : throw new ArgumentOutOfRangeException(
+                nameof(value),
+                value,
+                "The durable agent state budget must be null or a positive byte count.");
+    }
+
+    /// <summary>
+    /// Gets or sets an internal override for the fraction at which pressure retention starts.
+    /// </summary>
+    internal double? HistoryRetentionHighWatermark
+    {
+        get;
+        set
+        {
+            ValidateWatermark(value, nameof(value));
+            field = value;
+        }
+    }
+
+    /// <summary>
+    /// Gets or sets an internal override for the fraction pressure retention targets.
+    /// </summary>
+    internal double? HistoryRetentionLowWatermark
+    {
+        get;
+        set
+        {
+            ValidateWatermark(value, nameof(value));
+            field = value;
+        }
+    }
+
+    internal DurableAgentRetentionSettings GetRetentionSettings()
+    {
+        if (this.HistoryRetentionMode == DurableAgentHistoryRetentionMode.KeepAll)
+        {
+            if (this.MaxStateBytes.HasValue ||
+                this.HistoryRetentionHighWatermark.HasValue ||
+                this.HistoryRetentionLowWatermark.HasValue)
+            {
+                throw new InvalidOperationException(
+                    "A durable state budget and retention watermarks are only valid when automatic history retention is enabled.");
+            }
+
+            return new(
+                DurableAgentHistoryRetentionMode.KeepAll,
+                MaxStateBytes: null,
+                DurableAgentStateRetention.DefaultHighWatermark,
+                DurableAgentStateRetention.DefaultLowWatermark);
+        }
+
+        if (this.MaxStateBytes is not int maxStateBytes)
+        {
+            throw new InvalidOperationException(
+                "Automatic durable history retention requires an explicit positive state byte budget.");
+        }
+
+        double highWatermark =
+            this.HistoryRetentionHighWatermark ?? DurableAgentStateRetention.DefaultHighWatermark;
+        double lowWatermark =
+            this.HistoryRetentionLowWatermark ?? DurableAgentStateRetention.DefaultLowWatermark;
+        if (lowWatermark >= highWatermark)
+        {
+            throw new InvalidOperationException(
+                "Durable history retention watermarks must satisfy 0 < low < high <= 1.");
+        }
+
+        return new(
+            DurableAgentHistoryRetentionMode.Auto,
+            maxStateBytes,
+            highWatermark,
+            lowWatermark);
+    }
+
+    private static void ValidateWatermark(double? value, string parameterName)
+    {
+        if (value.HasValue &&
+            (!double.IsFinite(value.Value) || value.Value <= 0 || value.Value > 1))
+        {
+            throw new ArgumentOutOfRangeException(
+                parameterName,
+                value,
+                "A durable history retention watermark must be a finite number in (0, 1].");
+        }
+    }
 
     /// <summary>
     /// Adds an AI agent factory to the options.
@@ -376,6 +447,12 @@ public sealed class DurableAgentsOptions
         return this._agentFactories.ContainsKey(agentName);
     }
 }
+
+internal readonly record struct DurableAgentRetentionSettings(
+    DurableAgentHistoryRetentionMode Mode,
+    int? MaxStateBytes,
+    double HighWatermark,
+    double LowWatermark);
 
 internal readonly record struct DurableAgentHistoryConfiguration(
     bool ServiceManagedPerServiceCallHistory,

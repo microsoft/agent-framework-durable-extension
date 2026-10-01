@@ -59,7 +59,11 @@ Usage counts and `extensionData` are preserved as arbitrary JSON integers and JS
 compatibility. When a durable response is projected to `UsageDetails`, only exact integral values representable
 as `Int64` become runtime counts; strings, objects, arrays, fractional numbers, and out-of-range numbers remain
 in durable state but are ignored by the runtime projection. Malformed known count fields fail deserialization
-rather than being silently reinterpreted.
+rather than being silently reinterpreted. Automatic retention applies the 4,096-digit safety bound only when
+computationally expanding exponent notation. Raw decimal integer tokens remain unbounded and use exact string
+arithmetic, so a 4,096-digit carry and later increments remain monotonic. Larger spellings that contract exactly
+through a negative exponent are canonicalized and incremented. A positive exponent that would exceed the
+expansion safety bound aborts retention before staged deletion is applied rather than losing eviction evidence.
 
 Mailbox lookup, delivery, and guarded entity-local commit behavior are implemented. Session ownership,
 replay filtering, transcript compaction, and provider behavior remain deferred to later stack layers.

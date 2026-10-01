@@ -5,7 +5,7 @@ namespace Microsoft.Agents.AI.DurableTask;
 /// <summary>
 /// The exception thrown when automatic retention cannot reduce durable agent state below its safe write threshold.
 /// </summary>
-public sealed class DurableAgentStateSizeLimitExceededException : InvalidOperationException
+internal sealed class DurableAgentStateSizeLimitExceededException : InvalidOperationException
 {
     /// <summary>
     /// Initializes a new instance of the <see cref="DurableAgentStateSizeLimitExceededException"/> class.
