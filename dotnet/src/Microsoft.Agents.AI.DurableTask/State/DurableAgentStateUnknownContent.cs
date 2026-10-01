@@ -1,5 +1,6 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -30,6 +31,8 @@ internal sealed class DurableAgentStateUnknownContent : DurableAgentStateContent
     private const int DurableEnvelopeVersion = 1;
 
     private static readonly JsonElement s_minimalUnknownContent = CreateMinimalUnknownContent();
+    private static readonly ConditionalWeakTable<AIContent, OpaqueContentAssociation>
+        s_opaqueContentAssociations = new();
 
     /// <summary>
     /// Gets the serialized unknown content.
@@ -149,36 +152,34 @@ internal sealed class DurableAgentStateUnknownContent : DurableAgentStateContent
         {
             if (content.GetType() != typeof(AIContent) ||
                 content.Annotations is { Count: > 0 } ||
-                content.RawRepresentation is not JsonElement rawRepresentation ||
-                content.AdditionalProperties is not { } metadata ||
-                !metadata.TryGetValue("content", out object? storedContent) ||
-                storedContent is not JsonElement storedElement)
+                !s_opaqueContentAssociations.TryGetValue(
+                    content,
+                    out OpaqueContentAssociation? association))
             {
                 return false;
             }
 
-            if (rawRepresentation.GetRawText() != storedElement.GetRawText())
+            if (content.RawRepresentation is not JsonElement rawRepresentation ||
+                !JsonElement.DeepEquals(rawRepresentation, association.Content))
             {
                 return false;
             }
 
-            foreach ((string key, object? value) in metadata)
+            if (content.AdditionalProperties is { } metadata)
             {
-                if (key == "content")
+                foreach ((string key, object? value) in metadata)
                 {
-                    continue;
-                }
+                    if (value is not JsonElement element)
+                    {
+                        return false;
+                    }
 
-                if (value is not JsonElement element)
-                {
-                    return false;
+                    additionalProperties ??= [];
+                    additionalProperties[key] = element.Clone();
                 }
-
-                additionalProperties ??= [];
-                additionalProperties[key] = element.Clone();
             }
 
-            opaqueContent = rawRepresentation.Clone();
+            opaqueContent = association.Content.Clone();
             return true;
         }
         catch (Exception exception) when (IsRecoverableSerializationFailure(exception))
@@ -677,15 +678,17 @@ internal sealed class DurableAgentStateUnknownContent : DurableAgentStateContent
 
     private static AIContent CreateOpaqueAIContent(JsonElement content)
     {
-        return new AIContent
+        AIContent opaqueContent = new()
         {
             RawRepresentation = content.Clone(),
-            AdditionalProperties = new AdditionalPropertiesDictionary
-            {
-                ["content"] = content.Clone(),
-            },
         };
+        s_opaqueContentAssociations.Add(
+            opaqueContent,
+            new OpaqueContentAssociation(content.Clone()));
+        return opaqueContent;
     }
+
+    private sealed record OpaqueContentAssociation(JsonElement Content);
 
     private static void LogSerializationFallback(
         ILogger? logger,

@@ -203,16 +203,7 @@ internal sealed class DurableAgentStateTerminalResponse
         };
     }
 
-    public AgentResponse ToResponse()
-    {
-        if (this.Value.ValueKind != JsonValueKind.Undefined)
-        {
-            throw new InvalidOperationException(
-                "A durable terminal response with a structured value must be read through ToResult().");
-        }
-
-        return this.ToResult().Response;
-    }
+    public AgentResponse ToResponse() => this.ToResult().Response;
 
     public (AgentResponse Response, JsonElement Value) ToResult()
     {

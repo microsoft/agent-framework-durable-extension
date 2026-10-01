@@ -594,10 +594,10 @@ public sealed class DurableAgentStateContentTests
 
         AIContent restored = stored.ToAIContent();
 
-        JsonElement content =
-            Assert.IsType<JsonElement>(restored.AdditionalProperties?["content"]);
+        JsonElement content = Assert.IsType<JsonElement>(restored.RawRepresentation);
         Assert.Equal("future_content", content.GetProperty("type").GetString());
         Assert.Equal(42, content.GetProperty("value").GetInt32());
+        Assert.Null(restored.AdditionalProperties);
     }
 
     [Fact]
@@ -613,6 +613,7 @@ public sealed class DurableAgentStateContentTests
                 }),
             AdditionalProperties = new Dictionary<string, JsonElement>
             {
+                ["content"] = JsonSerializer.SerializeToElement("producer-owned-metadata"),
                 ["producer"] = JsonSerializer.SerializeToElement("python"),
             },
         };
@@ -628,9 +629,18 @@ public sealed class DurableAgentStateContentTests
             "python",
             Assert.IsType<JsonElement>(restored.AdditionalProperties?["producer"]).GetString());
         Assert.Equal(
+            "producer-owned-metadata",
+            restored.AdditionalProperties?["content"].GetString());
+        Assert.Equal(
             "python",
             Assert.IsType<JsonElement>(secondConversion.AdditionalProperties?["producer"]).GetString());
-        Assert.Contains("\"extensionData\":{\"producer\":\"python\"}", roundTrip, StringComparison.Ordinal);
+        Assert.Equal(
+            "producer-owned-metadata",
+            Assert.IsType<JsonElement>(secondConversion.AdditionalProperties?["content"]).GetString());
+        Assert.Contains(
+            "\"extensionData\":{\"content\":\"producer-owned-metadata\",\"producer\":\"python\"}",
+            roundTrip,
+            StringComparison.Ordinal);
         Assert.DoesNotContain("$microsoftAgentFrameworkDurableTask", roundTrip, StringComparison.Ordinal);
     }
 

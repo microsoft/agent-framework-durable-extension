@@ -854,7 +854,7 @@ public sealed class DurableAgentStateMailboxTests
         Assert.Empty(response.Messages);
         Assert.Equal(expectedKind, value.ValueKind);
         Assert.Equal(valueJson, value.GetRawText());
-        Assert.Throws<InvalidOperationException>(() => terminalResponse.ToResponse());
+        Assert.Empty(terminalResponse.ToResponse().Messages);
     }
 
     [Fact]
