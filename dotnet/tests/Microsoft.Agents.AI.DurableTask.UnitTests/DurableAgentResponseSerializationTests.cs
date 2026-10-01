@@ -158,6 +158,136 @@ public sealed class DurableAgentResponseSerializationTests
     }
 
     [Fact]
+    public void MixedCaseEnvelopeDuplicateFailsBeforeNativeResponseMaterialization()
+    {
+        const string Wire = """
+            {"messages":false,"$microsoftAgentFrameworkDurableTask":{
+              "kind":"agentResponse","version":1,"VERSION":1,"result":{"messages":[]}}}
+            """;
+
+        JsonException exception = Assert.Throws<JsonException>(
+            () => new DurableDataConverter().Deserialize(Wire, typeof(AgentResponse)));
+
+        Assert.Contains("duplicate recognized property", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [MemberData(nameof(RecognizedEnvelopeDuplicates))]
+    public void RecognizedEnvelopeDuplicatesFailClosed(string wire)
+    {
+        JsonException exception = Assert.Throws<JsonException>(
+            () => new DurableDataConverter().Deserialize(wire, typeof(AgentResponse)));
+
+        Assert.Contains("duplicate recognized property", exception.Message, StringComparison.Ordinal);
+    }
+
+    public static IEnumerable<object[]> RecognizedEnvelopeDuplicates()
+    {
+        const string Failure = """
+            {"version":1,"correlationId":"correlation","code":"failed","message":"failure",
+             "details":{"flag":false},"serializedResponse":null,"completedAt":"2026-10-01T06:00:00Z",
+             "resultExpiresAt":"2026-10-01T06:01:00Z","outcome":"failed"}
+            """;
+        string envelope = $$"""
+            {"kind":"agentResponse","version":2,"result":{"messages":[]},"failure":{{Failure}}}
+            """;
+        string root = $$"""
+            {"messages":[],"$microsoftAgentFrameworkDurableTask":{{envelope}}}
+            """;
+        foreach ((string level, string json) in new[] { ("root", root), ("envelope", envelope), ("failure", Failure) })
+        {
+            using JsonDocument document = JsonDocument.Parse(json);
+            foreach (JsonProperty property in document.RootElement.EnumerateObject())
+            {
+                if (level == "root" && property.Name == "messages")
+                {
+                    continue;
+                }
+
+                foreach (string duplicateName in new[] { property.Name, property.Name.ToUpperInvariant() })
+                {
+                    foreach (bool conflicting in new[] { false, true })
+                    {
+                        foreach (bool duplicateFirst in new[] { false, true })
+                        {
+                            string conflictingValue = property.Value.ValueKind == JsonValueKind.Null ? "\"conflict\"" : "null";
+                            string duplicate = $"\"{duplicateName}\":{(conflicting ? conflictingValue : property.Value.GetRawText())}";
+                            string duplicated = duplicateFirst
+                                ? $"{{{duplicate},{json[1..]}"
+                                : $"{json[..^1]},{duplicate}}}";
+                            yield return
+                            [
+                                level switch
+                                {
+                                    "root" => duplicated,
+                                    "envelope" => root.Replace(envelope, duplicated, StringComparison.Ordinal),
+                                    _ => root.Replace(Failure, duplicated, StringComparison.Ordinal),
+                                },
+                            ];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public void UnknownFieldsAndNestedEnvelopeNamesRemainOpaque()
+    {
+        const string Wire = """
+            {"messages":[],"kind":"native","KIND":"future","future":1,"FUTURE":2,
+             "$microsoftAgentFrameworkDurableTask":{
+               "kind":"agentResponse","version":2,"future":1,"FUTURE":2,
+               "result":{"messages":[],"value":{"version":1,"VERSION":2},
+                         "kind":"opaque","KIND":"also opaque","MESSAGES":"future"},
+               "failure":{"version":1,"correlationId":"correlation","code":"failed","message":"failure",
+                          "completedAt":"2026-10-01T06:00:00Z","outcome":"failed","future":1,"FUTURE":2,
+                          "details":{"kind":"opaque","KIND":"also opaque","version":1,"VERSION":2}}}}
+            """;
+
+        AgentResponse restored = Assert.IsType<AgentResponse>(
+            new DurableDataConverter().Deserialize(Wire, typeof(AgentResponse)));
+
+        JsonElement result = Assert.IsType<JsonElement>(restored.GetDurableResult());
+        Assert.Equal("future", result.GetProperty("MESSAGES").GetString());
+        Assert.Equal("also opaque", result.GetProperty("KIND").GetString());
+        Assert.Equal(2, result.GetProperty("value").GetProperty("VERSION").GetInt32());
+        Assert.Equal(2, DurableAgentJsonUtilities.GetCommittedFailure(restored)!.Details.GetProperty("VERSION").GetInt32());
+    }
+
+    [Fact]
+    public void SingleCaseVariantEnvelopeFieldsUseCaseInsensitiveMetadataSemantics()
+    {
+        const string Wire = """
+            {"messages":[],"$MICROSOFTAGENTFRAMEWORKDURABLETASK":{
+              "KIND":"agentResponse","VERSION":2,"RESULT":{"messages":[]},
+              "FAILURE":{"VERSION":1,"CORRELATIONID":"correlation","CODE":"failed","MESSAGE":"failure",
+                         "COMPLETEDAT":"2026-10-01T06:00:00Z","OUTCOME":"failed"}}}
+            """;
+
+        AgentResponse restored = Assert.IsType<AgentResponse>(
+            new DurableDataConverter().Deserialize(Wire, typeof(AgentResponse)));
+
+        Assert.NotNull(restored.GetDurableResult());
+        Assert.Equal("correlation", DurableAgentJsonUtilities.GetCommittedFailure(restored)!.CorrelationId);
+    }
+
+    [Fact]
+    public void SharedStateDuplicateValidationKeepsOrdinalPropertySemantics()
+    {
+        const string Wire = """
+            {"schemaVersion":"1.0.0","SCHEMAVERSION":"future","data":{"conversationHistory":[]},"DATA":"future"}
+            """;
+
+        DurableAgentState state = Assert.IsType<DurableAgentState>(
+            new DurableDataConverter().Deserialize(Wire, typeof(DurableAgentState)));
+
+        Assert.Equal("1.0.0", state.SchemaVersion);
+        Assert.Equal("future", state.UnknownProperties!["SCHEMAVERSION"].GetString());
+        Assert.Equal("future", state.UnknownProperties["DATA"].GetString());
+    }
+
+    [Fact]
     public void LegacyNativeResponseRemainsReadableWithoutFabricatingCanonicalMetadata()
     {
         DurableDataConverter converter = new();

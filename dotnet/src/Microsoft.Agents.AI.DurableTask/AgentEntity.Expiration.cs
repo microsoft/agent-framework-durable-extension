@@ -320,8 +320,9 @@ internal partial class AgentEntity
         string entityId = this.Context.Id.ToString();
         AgentEntityResultExpirySchedule? schedule =
             AgentEntityResultExpirySchedule.Read(workingState, entityId);
+        bool hasExpiredResults = false;
         DateTimeOffset? nextResultExpiration = null;
-        foreach (DurableAgentStateTerminalResult result in workingState.Data.TerminalResults!.Values.ToArray())
+        foreach (DurableAgentStateTerminalResult result in workingState.Data.TerminalResults!.Values)
         {
             if (result.ResultExpiresAt is not DateTimeOffset expiresAt)
             {
@@ -330,15 +331,17 @@ internal partial class AgentEntity
 
             if (expiresAt <= currentTime)
             {
-                DurableAgentStateOutcomeResolver.MarkExpiredResultUnavailable(
-                    workingState,
-                    result.CorrelationId,
-                    currentTime);
+                hasExpiredResults = true;
             }
             else if (nextResultExpiration is null || expiresAt < nextResultExpiration)
             {
                 nextResultExpiration = expiresAt;
             }
+        }
+
+        if (hasExpiredResults)
+        {
+            DurableAgentStateOutcomeResolver.MarkExpiredResultsUnavailable(workingState, currentTime);
         }
 
         AgentEntityResultExpirationCheck? pending = schedule?.Pending;

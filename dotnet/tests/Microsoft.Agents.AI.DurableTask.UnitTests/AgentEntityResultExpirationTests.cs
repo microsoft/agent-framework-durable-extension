@@ -188,6 +188,58 @@ public sealed class AgentEntityResultExpirationTests
     }
 
     [Fact]
+    public async Task BatchCleanupPersistsEveryDueTransitionAndSchedulesOnlyNextDeadlineAsync()
+    {
+        DurableAgentState state = CreateState();
+        for (int index = 0; index < 64; index++)
+        {
+            AgentResponse response = new(new ChatMessage(ChatRole.Assistant, "retained payload"));
+            if (index % 2 == 0)
+            {
+                DurableAgentStateOutcomeResolver.AddSuccessfulResult(state, $"due-{index}", response,
+                    s_now.AddMinutes(-2), s_now);
+            }
+            else
+            {
+                DurableAgentStateOutcomeResolver.AddFailedResult(state, $"due-{index}", response,
+                    new DurableAgentStateTerminalError { Code = "failed", Message = "failure" },
+                    s_now.AddMinutes(-2), s_now);
+            }
+        }
+
+        DurableAgentStateOutcomeResolver.AddSuccessfulResult(state, "future",
+            new AgentResponse(new ChatMessage(ChatRole.Assistant, "future")), s_now, s_now.AddMinutes(5));
+        DurableAgentStateOutcomeResolver.AddSuccessfulResult(state, "forever",
+            new AgentResponse(new ChatMessage(ChatRole.Assistant, "forever")), s_now);
+        string before = Serialize(state);
+        List<DateTimeOffset> signals = [];
+        EntityHarness cleanup = CleanupHarness(state, signals, s_now);
+
+        await cleanup.CheckResultsExpirationAsync();
+
+        DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(cleanup.PersistedState));
+        Assert.Equal(before, Serialize(state));
+        Assert.Equal(2, committed.Data.TerminalResults!.Count);
+        Assert.Equal(67, committed.Data.CompletionReceipts!.Count);
+        Assert.Equal(s_now.AddMinutes(5), Assert.Single(signals));
+        foreach ((string correlationId, DurableAgentStateCompletionReceipt receipt) in committed.Data.CompletionReceipts)
+        {
+            DurableAgentStateCompletionReceipt original = state.Data.CompletionReceipts![correlationId];
+            bool retained = correlationId is "future" or "forever";
+            Assert.Equal(retained ? "available" : "unavailable", receipt.ResultState);
+            Assert.Equal(original.Outcome, receipt.Outcome);
+            Assert.Equal(original.CompletedAt, receipt.CompletedAt);
+            Assert.Equal(original.ResultExpiresAt, receipt.ResultExpiresAt);
+            Assert.Equal(retained ? null : s_now, receipt.ResultUnavailableAt);
+        }
+
+        EntityHarness repeated = CleanupHarness(committed, signals, s_now.AddMinutes(1));
+        await repeated.CheckResultsExpirationAsync();
+        Assert.Equal(Serialize(committed), Serialize(Assert.IsType<DurableAgentState>(repeated.PersistedState)));
+        Assert.Single(signals);
+    }
+
+    [Fact]
     public async Task SuccessfulLaterRunRecoversImportedExpiredResultsWithoutRefreshingTheirTtlAsync()
     {
         DurableAgentState state = CreateState();

@@ -1075,14 +1075,21 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         JsonElement element,
         string path,
         params string[] recognizedProperties)
+        => ValidateNoDuplicateRecognizedProperties(element, path, StringComparer.Ordinal, recognizedProperties);
+
+    internal static void ValidateNoDuplicateRecognizedProperties(
+        JsonElement element,
+        string path,
+        StringComparer comparer,
+        params string[] recognizedProperties)
     {
         if (element.ValueKind != JsonValueKind.Object)
         {
             return;
         }
 
-        HashSet<string> recognized = new(recognizedProperties, StringComparer.Ordinal);
-        HashSet<string> encountered = new(StringComparer.Ordinal);
+        HashSet<string> recognized = new(recognizedProperties, comparer);
+        HashSet<string> encountered = new(comparer);
         foreach (JsonProperty property in element.EnumerateObject())
         {
             if (recognized.Contains(property.Name) && !encountered.Add(property.Name))

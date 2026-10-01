@@ -155,7 +155,7 @@ internal sealed class DurableDataConverter : DataConverter
             writer.WriteStartObject();
             foreach (JsonProperty property in nativeResponse.EnumerateObject())
             {
-                if (property.NameEquals(ResponseEnvelopeProperty))
+                if (string.Equals(property.Name, ResponseEnvelopeProperty, StringComparison.OrdinalIgnoreCase))
                 {
                     throw new JsonException("The native response conflicts with reserved durable response metadata.");
                 }
@@ -198,41 +198,49 @@ internal sealed class DurableDataConverter : DataConverter
     {
         using JsonDocument document = JsonDocument.Parse(data);
         JsonElement root = document.RootElement;
+        DurableAgentStateJsonConverter.ValidateNoDuplicateRecognizedProperties(
+            root, "durable response root", StringComparer.OrdinalIgnoreCase, ResponseEnvelopeProperty);
         if (root.ValueKind != JsonValueKind.Object ||
-            !root.TryGetProperty(ResponseEnvelopeProperty, out JsonElement envelope))
+            !TryGetResponseMetadataProperty(root, ResponseEnvelopeProperty, out JsonElement envelope))
         {
             return default;
         }
 
-        if (root.EnumerateObject().Count(property => property.NameEquals(ResponseEnvelopeProperty)) != 1 ||
-            envelope.ValueKind != JsonValueKind.Object ||
-            envelope.EnumerateObject().Count(property => property.NameEquals("kind")) != 1 ||
-            envelope.EnumerateObject().Count(property => property.NameEquals("version")) != 1 ||
-            envelope.EnumerateObject().Count(property => property.NameEquals("result")) != 1 ||
-            !envelope.TryGetProperty("kind", out JsonElement kind) ||
+        DurableAgentStateJsonConverter.ValidateNoDuplicateRecognizedProperties(
+            envelope, "durable response envelope", StringComparer.OrdinalIgnoreCase,
+            "kind", "version", "result", "failure");
+        if (envelope.ValueKind != JsonValueKind.Object ||
+            !TryGetResponseMetadataProperty(envelope, "kind", out JsonElement kind) ||
             kind.ValueKind != JsonValueKind.String || kind.GetString() != ResponseEnvelopeKind ||
-            !envelope.TryGetProperty("version", out JsonElement version) ||
+            !TryGetResponseMetadataProperty(envelope, "version", out JsonElement version) ||
             version.ValueKind != JsonValueKind.Number || !version.TryGetInt32(out int versionNumber) ||
             versionNumber is not 1 and not 2 ||
-            !envelope.TryGetProperty("result", out JsonElement result) || result.ValueKind != JsonValueKind.Object ||
+            !TryGetResponseMetadataProperty(envelope, "result", out JsonElement result) || result.ValueKind != JsonValueKind.Object ||
             !result.TryGetProperty("messages", out JsonElement messages) || messages.ValueKind != JsonValueKind.Array)
         {
             throw new JsonException("The durable response metadata envelope is malformed or unsupported.");
+        }
+
+        DurableAgentFailureData? failure = null;
+        bool hasFailure = TryGetResponseMetadataProperty(envelope, "failure", out JsonElement failureElement);
+        if (versionNumber == 1 && hasFailure ||
+            versionNumber == 2 && !hasFailure)
+        {
+            throw new JsonException("The durable response metadata envelope is malformed or unsupported.");
+        }
+
+        if (hasFailure)
+        {
+            DurableAgentStateJsonConverter.ValidateNoDuplicateRecognizedProperties(
+                failureElement, "durable response failure", StringComparer.OrdinalIgnoreCase,
+                DurableAgentJsonUtilities.JsonContext.Default.DurableAgentFailureData.Properties
+                    .Select(property => property.Name).ToArray());
         }
 
         DurableAgentStateTerminalResponse terminalResponse = result.Deserialize(
             DurableAgentStateJsonContext.Default.DurableAgentStateTerminalResponse)
             ?? throw new JsonException("The durable response result is missing.");
         terminalResponse.Validate();
-
-        DurableAgentFailureData? failure = null;
-        bool hasFailure = envelope.TryGetProperty("failure", out JsonElement failureElement);
-        if (versionNumber == 1 && hasFailure ||
-            versionNumber == 2 && (!hasFailure ||
-                envelope.EnumerateObject().Count(property => property.NameEquals("failure")) != 1))
-        {
-            throw new JsonException("The durable response metadata envelope is malformed or unsupported.");
-        }
 
         if (hasFailure)
         {
@@ -273,5 +281,20 @@ internal sealed class DurableDataConverter : DataConverter
         }
 
         return (result.Clone(), failure);
+    }
+
+    private static bool TryGetResponseMetadataProperty(JsonElement element, string name, out JsonElement value)
+    {
+        foreach (JsonProperty property in element.EnumerateObject())
+        {
+            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
     }
 }

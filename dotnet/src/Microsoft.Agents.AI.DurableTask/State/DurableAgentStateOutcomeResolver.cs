@@ -29,16 +29,7 @@ internal static class DurableAgentStateOutcomeResolver
         ArgumentNullException.ThrowIfNull(state);
         ArgumentException.ThrowIfNullOrWhiteSpace(correlationId);
 
-        DurableAgentStateSchemaVersion version =
-            DurableAgentStateSchemaVersion.ParseSupported(state.SchemaVersion);
-        try
-        {
-            state.Data.Validate(state.SchemaVersion);
-        }
-        catch (InvalidOperationException exception)
-        {
-            throw new DurableAgentStateCorruptionException("The durable agent outcome state is inconsistent.", exception);
-        }
+        DurableAgentStateSchemaVersion version = ValidateOutcomeState(state);
 
         return version.Major == DurableAgentState.RevisedSchemaMajorVersion
             ? ResolveRevised(state, correlationId, currentTime)
@@ -238,8 +229,63 @@ internal static class DurableAgentStateOutcomeResolver
             throw new InvalidOperationException("A revised durable state requires completion receipts.");
         DurableAgentStateCompletionReceipt receipt = outcome.Receipt;
 
+        DurableAgentStateCompletionReceipt unavailableReceipt = CreateUnavailableReceipt(receipt, currentTime);
         terminalResults.Remove(correlationId);
-        completionReceipts[correlationId] = new DurableAgentStateCompletionReceipt
+        completionReceipts[correlationId] = unavailableReceipt;
+        return true;
+    }
+
+    /// <summary>
+    /// Validates the complete state once and stages all due payload removals and receipt transitions.
+    /// </summary>
+    public static int MarkExpiredResultsUnavailable(DurableAgentState state, DateTimeOffset currentTime)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        if (ValidateOutcomeState(state).Major != DurableAgentState.RevisedSchemaMajorVersion)
+        {
+            return 0;
+        }
+
+        IDictionary<string, DurableAgentStateTerminalResult> terminalResults = state.Data.TerminalResults!;
+        IDictionary<string, DurableAgentStateCompletionReceipt> completionReceipts = state.Data.CompletionReceipts!;
+        List<(string CorrelationId, DurableAgentStateCompletionReceipt Receipt)> expired = [];
+        foreach ((string correlationId, DurableAgentStateTerminalResult result) in terminalResults)
+        {
+            if (result.ResultExpiresAt is DateTimeOffset expiresAt && expiresAt <= currentTime)
+            {
+                expired.Add((correlationId, CreateUnavailableReceipt(completionReceipts[correlationId], currentTime)));
+            }
+        }
+
+        foreach ((string correlationId, DurableAgentStateCompletionReceipt receipt) in expired)
+        {
+            terminalResults.Remove(correlationId);
+            completionReceipts[correlationId] = receipt;
+        }
+
+        return expired.Count;
+    }
+
+    private static DurableAgentStateSchemaVersion ValidateOutcomeState(DurableAgentState state)
+    {
+        DurableAgentStateSchemaVersion version =
+            DurableAgentStateSchemaVersion.ParseSupported(state.SchemaVersion);
+        try
+        {
+            state.Data.Validate(state.SchemaVersion);
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw new DurableAgentStateCorruptionException("The durable agent outcome state is inconsistent.", exception);
+        }
+
+        return version;
+    }
+
+    private static DurableAgentStateCompletionReceipt CreateUnavailableReceipt(
+        DurableAgentStateCompletionReceipt receipt,
+        DateTimeOffset currentTime) =>
+        new()
         {
             CorrelationId = receipt.CorrelationId,
             Outcome = receipt.Outcome,
@@ -249,8 +295,6 @@ internal static class DurableAgentStateOutcomeResolver
             ResultUnavailableAt = currentTime,
             UnknownProperties = CloneElements(receipt.UnknownProperties),
         };
-        return true;
-    }
 
     private static DurableAgentRunOutcome ResolveRevised(
         DurableAgentState state,
