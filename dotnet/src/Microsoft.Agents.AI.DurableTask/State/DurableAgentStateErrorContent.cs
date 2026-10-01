@@ -57,7 +57,7 @@ internal sealed class DurableAgentStateErrorContent : DurableAgentStateContent
     }
 
     /// <inheritdoc/>
-    public override AIContent ToAIContent()
+    protected override AIContent ToAIContentCore()
     {
         return new ErrorContent(this.Message)
         {

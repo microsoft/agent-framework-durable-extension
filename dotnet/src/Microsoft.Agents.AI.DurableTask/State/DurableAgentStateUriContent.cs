@@ -27,18 +27,9 @@ internal sealed class DurableAgentStateUriContent : DurableAgentStateContent
     /// Creates a <see cref="DurableAgentStateUriContent"/> from a <see cref="UriContent"/>.
     /// </summary>
     /// <param name="uriContent">The <see cref="UriContent"/> to convert.</param>
-    /// <param name="allowLosslessV2">Whether a missing media type may be preserved for schema 2.</param>
     /// <returns>A <see cref="DurableAgentStateUriContent"/> representing the original content.</returns>
-    public static DurableAgentStateUriContent FromUriContent(
-        UriContent uriContent,
-        bool allowLosslessV2 = false)
+    public static DurableAgentStateUriContent FromUriContent(UriContent uriContent)
     {
-        if (uriContent.MediaType is null && !allowLosslessV2)
-        {
-            throw new InvalidOperationException(
-                "Legacy durable agent URI content requires a media type.");
-        }
-
         return new DurableAgentStateUriContent()
         {
             MediaType = uriContent.MediaType,
@@ -47,25 +38,8 @@ internal sealed class DurableAgentStateUriContent : DurableAgentStateContent
     }
 
     /// <inheritdoc/>
-    internal override void Validate(DurableAgentStateSchemaVersion version)
+    protected override AIContent ToAIContentCore()
     {
-        if (version.Major < DurableAgentState.RevisedSchemaMajorVersion &&
-            this.MediaType is null)
-        {
-            throw new InvalidOperationException(
-                "Legacy durable agent URI content requires a media type.");
-        }
-    }
-
-    /// <inheritdoc/>
-    public override AIContent ToAIContent()
-    {
-        if (this.MediaType is null)
-        {
-            throw new InvalidOperationException(
-                "The current .NET UriContent contract cannot represent a URI without a media type.");
-        }
-
-        return new UriContent(this.Uri, this.MediaType);
+        return new UriContent(this.Uri, this.MediaType!);
     }
 }

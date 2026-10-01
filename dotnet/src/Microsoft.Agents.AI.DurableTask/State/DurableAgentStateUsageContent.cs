@@ -30,7 +30,7 @@ internal sealed class DurableAgentStateUsageContent : DurableAgentStateContent
     }
 
     /// <inheritdoc/>
-    public override AIContent ToAIContent()
+    protected override AIContent ToAIContentCore()
     {
         return new UsageContent(this.Usage.ToUsageDetails());
     }

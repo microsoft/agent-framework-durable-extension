@@ -16,18 +16,69 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 /// </remarks>
 internal sealed class DurableAgentStateTerminalResult
 {
+    private DateTimeOffset _completedAt;
+    private string? _completedAtText;
+    private DateTimeOffset? _resultExpiresAt;
+    private string? _resultExpiresAtText;
+
     [JsonPropertyName("correlationId")]
     public required string CorrelationId { get; init; }
 
     [JsonPropertyName("outcome")]
     public required string Outcome { get; init; }
 
+    [JsonIgnore]
+    public DateTimeOffset CompletedAt
+    {
+        get => this._completedAt;
+        init
+        {
+            this._completedAt = value;
+            this._completedAtText = value == default ? null : value.ToString("O");
+        }
+    }
+
     [JsonPropertyName("completedAt")]
-    public required DateTimeOffset CompletedAt { get; init; }
+    public string? CompletedAtText
+    {
+        get => this._completedAtText;
+        init
+        {
+            this._completedAtText = value;
+            this._completedAt = value is null
+                ? default
+                : DurableAgentStateContract.ParseOffsetRfc3339(
+                    value,
+                    "terminalResults.completedAt");
+        }
+    }
+
+    [JsonIgnore]
+    public DateTimeOffset? ResultExpiresAt
+    {
+        get => this._resultExpiresAt;
+        init
+        {
+            this._resultExpiresAt = value;
+            this._resultExpiresAtText = value?.ToString("O");
+        }
+    }
 
     [JsonPropertyName("resultExpiresAt")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public DateTimeOffset? ResultExpiresAt { get; init; }
+    public string? ResultExpiresAtText
+    {
+        get => this._resultExpiresAtText;
+        init
+        {
+            this._resultExpiresAtText = value;
+            this._resultExpiresAt = value is null
+                ? null
+                : DurableAgentStateContract.ParseOffsetRfc3339(
+                    value,
+                    "terminalResults.resultExpiresAt");
+        }
+    }
 
     [JsonPropertyName("response")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

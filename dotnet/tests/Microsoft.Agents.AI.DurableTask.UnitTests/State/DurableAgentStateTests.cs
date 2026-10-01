@@ -426,7 +426,7 @@ public sealed class DurableAgentStateTests
             DurableAgentStateJsonContext.Default.DurableAgentState);
 
         Assert.Equal(DurableAgentState.CurrentSchemaVersion, promoted.SchemaVersion);
-        Assert.Equal(2, promoted.Data.IngestedPositions?["writer"]);
+        Assert.Equal(2, promoted.Data.IngestedPositions?["writer"].GetInt32());
         Assert.Contains("\"schemaVersion\":\"1.2.0\"", roundTrip, StringComparison.Ordinal);
     }
 
@@ -485,7 +485,10 @@ public sealed class DurableAgentStateTests
             JsonSerializer.Deserialize(JsonText, DurableAgentStateJsonContext.Default.DurableAgentState));
 
         DurableAgentState mutated = state.Clone();
-        mutated.Data.IngestedPositions = new Dictionary<string, long> { ["writer"] = 7 };
+        mutated.Data.IngestedPositions = new Dictionary<string, JsonElement>
+        {
+            ["writer"] = JsonSerializer.SerializeToElement(7),
+        };
         string roundTrip = JsonSerializer.Serialize(
             mutated,
             DurableAgentStateJsonContext.Default.DurableAgentState);
@@ -570,7 +573,7 @@ public sealed class DurableAgentStateTests
         Assert.Contains("\"futureArray\":[9]", roundTrip, StringComparison.Ordinal);
         Assert.Contains("\"type\":\"future_python_content\"", roundTrip, StringComparison.Ordinal);
         Assert.Contains("\"payload\":\"python-value\"", roundTrip, StringComparison.Ordinal);
-        Assert.Equal(3, migrated.Data.IngestedPositions?["writer"]);
+        Assert.Equal(3, migrated.Data.IngestedPositions?["writer"].GetInt32());
         Assert.Equal("interop-fixture", migrated.ExtensionData?["rootProducer"].GetString());
         Assert.True(migrated.UnknownProperties?["futureRootProperty"].GetProperty("preserve").GetBoolean());
         Assert.Equal("python", migrated.Data.ExtensionData?["dataProducer"].GetString());
@@ -601,7 +604,7 @@ public sealed class DurableAgentStateTests
     }
 
     [Fact]
-    public void LegacyWriteRejectsUriContentWithoutMediaType()
+    public void LegacyWritePreservesUriContentWithoutMediaType()
     {
         DurableAgentState state = new();
         state.Data.ConversationHistory.Add(
@@ -624,14 +627,15 @@ public sealed class DurableAgentStateTests
                 ]
             });
 
-        Assert.Throws<InvalidOperationException>(
-            () => JsonSerializer.Serialize(
-                state,
-                DurableAgentStateJsonContext.Default.DurableAgentState));
+        string json = JsonSerializer.Serialize(
+            state,
+            DurableAgentStateJsonContext.Default.DurableAgentState);
+
+        Assert.DoesNotContain("\"mediaType\"", json, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void LegacyWriteRejectsDeveloperRole()
+    public void LegacyWritePreservesFreeFormRole()
     {
         DurableAgentState developerRoleState = new();
         developerRoleState.Data.ConversationHistory.Add(
@@ -644,14 +648,15 @@ public sealed class DurableAgentStateTests
                 ]
             });
 
-        Assert.Throws<InvalidOperationException>(
-            () => JsonSerializer.Serialize(
-                developerRoleState,
-                DurableAgentStateJsonContext.Default.DurableAgentState));
+        string json = JsonSerializer.Serialize(
+            developerRoleState,
+            DurableAgentStateJsonContext.Default.DurableAgentState);
+
+        Assert.Contains("\"role\":\"developer\"", json, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void LegacyWriteRejectsNonObjectFunctionCallArguments()
+    public void LegacyWritePreservesStringFunctionCallArguments()
     {
         DurableAgentState verbatimArgumentsState = new();
         verbatimArgumentsState.Data.ConversationHistory.Add(
@@ -678,9 +683,10 @@ public sealed class DurableAgentStateTests
                 ]
             });
 
-        Assert.Throws<InvalidOperationException>(
-            () => JsonSerializer.Serialize(
-                verbatimArgumentsState,
-                DurableAgentStateJsonContext.Default.DurableAgentState));
+        string json = JsonSerializer.Serialize(
+            verbatimArgumentsState,
+            DurableAgentStateJsonContext.Default.DurableAgentState);
+
+        Assert.Contains("\"arguments\":\"{\\u0022partial\\u0022:\"", json, StringComparison.Ordinal);
     }
 }

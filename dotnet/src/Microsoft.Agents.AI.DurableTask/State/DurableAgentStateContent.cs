@@ -43,6 +43,18 @@ internal abstract class DurableAgentStateContent
         JsonSerializer.SerializeToElement(value: null, jsonTypeInfo: s_objectTypeInfo);
 
     /// <summary>
+    /// Gets producer-defined content metadata from the schema's declared <c>extensionData</c> field.
+    /// </summary>
+    /// <remarks>
+    /// This field is converted to and from <see cref="AIContent.AdditionalProperties"/>. Undeclared
+    /// sibling properties remain in <see cref="UnknownProperties"/> and are never promoted into the
+    /// framework metadata bag.
+    /// </remarks>
+    [JsonPropertyName("extensionData")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IDictionary<string, JsonElement>? AdditionalProperties { get; set; }
+
+    /// <summary>
     /// Gets unknown content properties that are outside the declared schema.
     /// </summary>
     [JsonExtensionData]
@@ -52,7 +64,30 @@ internal abstract class DurableAgentStateContent
     /// Converts this durable agent state content to an <see cref="AIContent"/>.
     /// </summary>
     /// <returns>A converted <see cref="AIContent"/> instance.</returns>
-    public abstract AIContent ToAIContent();
+    public AIContent ToAIContent()
+    {
+        AIContent content = this.ToAIContentCore();
+        if (this.AdditionalProperties is null)
+        {
+            return content;
+        }
+
+        content.AdditionalProperties ??= [];
+        foreach ((string key, JsonElement value) in this.AdditionalProperties)
+        {
+            if (content.AdditionalProperties.ContainsKey(key))
+            {
+                throw new InvalidOperationException(
+                    $"Durable agent content extension data contains duplicate framework metadata key '{key}'.");
+            }
+
+            content.AdditionalProperties[key] = value.Clone();
+        }
+
+        return content;
+    }
+
+    protected abstract AIContent ToAIContentCore();
 
     /// <summary>
     /// Validates semantic constraints for the specified state schema version.
@@ -78,7 +113,7 @@ internal abstract class DurableAgentStateContent
         bool allowLosslessV2,
         ILogger? logger)
     {
-        return content switch
+        DurableAgentStateContent durableContent = content switch
         {
             DataContent dataContent => DurableAgentStateDataContent.FromDataContent(dataContent),
             ErrorContent errorContent => DurableAgentStateErrorContent.FromErrorContent(errorContent),
@@ -91,10 +126,27 @@ internal abstract class DurableAgentStateContent
             HostedVectorStoreContent hostedVectorStoreContent => DurableAgentStateHostedVectorStoreContent.FromHostedVectorStoreContent(hostedVectorStoreContent),
             TextContent textContent => DurableAgentStateTextContent.FromTextContent(textContent),
             TextReasoningContent textReasoningContent => DurableAgentStateTextReasoningContent.FromTextReasoningContent(textReasoningContent),
-            UriContent uriContent => DurableAgentStateUriContent.FromUriContent(uriContent, allowLosslessV2),
+            UriContent uriContent => DurableAgentStateUriContent.FromUriContent(uriContent),
             UsageContent usageContent => DurableAgentStateUsageContent.FromUsageContent(usageContent),
             _ => DurableAgentStateUnknownContent.FromUnknownContent(content, logger)
         };
+
+        if (content is not AIContent { AdditionalProperties: not null } ||
+            durableContent is DurableAgentStateUnknownContent)
+        {
+            return durableContent;
+        }
+
+        Dictionary<string, JsonElement> additionalProperties = [];
+        foreach ((string key, object? value) in content.AdditionalProperties)
+        {
+            additionalProperties[key] = allowLosslessV2
+                ? DurableAgentStateTerminalResponse.ConvertMetadata(value, key)
+                : ToJsonElement(value);
+        }
+
+        durableContent.AdditionalProperties = additionalProperties;
+        return durableContent;
     }
 
     /// <summary>

@@ -17,21 +17,33 @@ internal sealed class DurableAgentStateUsage
     /// </summary>
     [JsonPropertyName("inputTokenCount")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public long? InputTokenCount { get; init; }
+    public JsonElement InputTokenCount
+    {
+        get;
+        init => field = ValidateCount(value, "inputTokenCount");
+    }
 
     /// <summary>
     /// Gets the number of output tokens used.
     /// </summary>
     [JsonPropertyName("outputTokenCount")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public long? OutputTokenCount { get; init; }
+    public JsonElement OutputTokenCount
+    {
+        get;
+        init => field = ValidateCount(value, "outputTokenCount");
+    }
 
     /// <summary>
     /// Gets the total number of tokens used.
     /// </summary>
     [JsonPropertyName("totalTokenCount")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public long? TotalTokenCount { get; init; }
+    public JsonElement TotalTokenCount
+    {
+        get;
+        init => field = ValidateCount(value, "totalTokenCount");
+    }
 
     /// <summary>
     /// Gets provider-specific usage counts from the schema's <c>extensionData</c> property.
@@ -56,9 +68,9 @@ internal sealed class DurableAgentStateUsage
         usage is not null
             ? new()
             {
-                InputTokenCount = usage.InputTokenCount,
-                OutputTokenCount = usage.OutputTokenCount,
-                TotalTokenCount = usage.TotalTokenCount,
+                InputTokenCount = ToJsonElement(usage.InputTokenCount),
+                OutputTokenCount = ToJsonElement(usage.OutputTokenCount),
+                TotalTokenCount = ToJsonElement(usage.TotalTokenCount),
                 ExtensionData = usage.AdditionalCounts?.ToDictionary(
                     pair => pair.Key,
                     pair => JsonSerializer.SerializeToElement(
@@ -83,7 +95,7 @@ internal sealed class DurableAgentStateUsage
 
             foreach ((string name, JsonElement value) in values)
             {
-                if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out long count))
+                if (DurableAgentStateContract.TryGetInt64(value, out long count))
                 {
                     additionalCounts ??= [];
                     additionalCounts[name] = count;
@@ -93,10 +105,28 @@ internal sealed class DurableAgentStateUsage
 
         return new()
         {
-            InputTokenCount = this.InputTokenCount,
-            OutputTokenCount = this.OutputTokenCount,
-            TotalTokenCount = this.TotalTokenCount,
+            InputTokenCount = ToInt64(this.InputTokenCount),
+            OutputTokenCount = ToInt64(this.OutputTokenCount),
+            TotalTokenCount = ToInt64(this.TotalTokenCount),
             AdditionalCounts = additionalCounts,
         };
+    }
+
+    private static JsonElement ToJsonElement(long? value) => value.HasValue
+        ? JsonSerializer.SerializeToElement(value.Value, DurableAgentStateJsonContext.Default.Int64)
+        : default;
+
+    private static long? ToInt64(JsonElement value) =>
+        DurableAgentStateContract.TryGetInt64(value, out long count) ? count : null;
+
+    private static JsonElement ValidateCount(JsonElement value, string propertyName)
+    {
+        if (value.ValueKind != JsonValueKind.Undefined &&
+            !DurableAgentStateContract.IsJsonInteger(value))
+        {
+            throw new JsonException($"The durable agent usage '{propertyName}' property must be an integer.");
+        }
+
+        return value.ValueKind == JsonValueKind.Undefined ? default : value.Clone();
     }
 }

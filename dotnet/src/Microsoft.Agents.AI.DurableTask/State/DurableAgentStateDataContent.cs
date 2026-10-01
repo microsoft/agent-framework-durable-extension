@@ -38,7 +38,7 @@ internal sealed class DurableAgentStateDataContent : DurableAgentStateContent
     }
 
     /// <inheritdoc/>
-    public override AIContent ToAIContent()
+    protected override AIContent ToAIContentCore()
     {
         return new DataContent(this.Uri, this.MediaType);
     }

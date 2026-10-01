@@ -73,7 +73,7 @@ internal sealed class DurableAgentStateUnknownContent : DurableAgentStateContent
     }
 
     /// <inheritdoc/>
-    public override AIContent ToAIContent()
+    protected override AIContent ToAIContentCore()
     {
         if (TryGetEnvelope(this.Content, out JsonElement envelope, out string? kind) &&
             kind == UnknownContentKind &&

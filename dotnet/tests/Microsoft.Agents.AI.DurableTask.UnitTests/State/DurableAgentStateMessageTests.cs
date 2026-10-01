@@ -9,15 +9,14 @@ namespace Microsoft.Agents.AI.DurableTask.Tests.Unit.State;
 public sealed class DurableAgentStateMessageTests
 {
     [Fact]
-    public void ProductionMappingRejectsV2OnlyDeveloperRole()
+    public void ProductionMappingPreservesFreeFormDeveloperRole()
     {
         ChatMessage message = new(new ChatRole("developer"), "instruction");
 
-        Assert.Throws<InvalidOperationException>(
-            () => DurableAgentStateMessage.FromChatMessage(message));
-
+        DurableAgentStateMessage legacy = DurableAgentStateMessage.FromChatMessage(message);
         DurableAgentStateMessage revised =
             DurableAgentStateMessage.FromTerminalChatMessage(message);
+        Assert.Equal("developer", legacy.Role);
         Assert.Equal("developer", revised.Role);
     }
 
@@ -263,8 +262,8 @@ public sealed class DurableAgentStateMessageTests
         Assert.NotNull(state);
         Assert.Equal("1.2.0", state.SchemaVersion);
         Assert.Equal("message-1", state.Data.ConversationHistory[0].Messages[0].MessageId);
-        Assert.Equal(0, state.Data.IngestedPositions?["input"]);
-        Assert.Equal(1, state.Data.IngestedPositions?["writer"]);
+        Assert.Equal(0, state.Data.IngestedPositions?["input"].GetInt32());
+        Assert.Equal(1, state.Data.IngestedPositions?["writer"].GetInt32());
         Assert.Contains("\"conversationId\":\"service-1\"", roundTrip, StringComparison.Ordinal);
         Assert.Contains("\"ingestedPositions\":{\"input\":0,\"writer\":1}", roundTrip, StringComparison.Ordinal);
         Assert.Contains("\"evictedMessageCount\":2", roundTrip, StringComparison.Ordinal);

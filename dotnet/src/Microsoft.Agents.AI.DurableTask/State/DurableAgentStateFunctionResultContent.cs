@@ -57,7 +57,7 @@ internal sealed class DurableAgentStateFunctionResultContent : DurableAgentState
     }
 
     /// <inheritdoc/>
-    public override AIContent ToAIContent()
+    protected override AIContent ToAIContentCore()
     {
         object? result = this.Result.ValueKind == JsonValueKind.Undefined ? null : this.Result;
         return new FunctionResultContent(this.CallId, result);

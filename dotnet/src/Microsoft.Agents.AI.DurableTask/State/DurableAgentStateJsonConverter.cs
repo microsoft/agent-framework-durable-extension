@@ -1,9 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
-using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Text.RegularExpressions;
 
 namespace Microsoft.Agents.AI.DurableTask.State;
 
@@ -12,10 +10,6 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 /// </summary>
 internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgentState>
 {
-    private static readonly Regex s_rfc3339Pattern = new(
-        @"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$",
-        RegexOptions.CultureInvariant);
-
     private const string SchemaVersionPropertyName = "schemaVersion";
     private const string DataPropertyName = "data";
     private const string ExtensionDataPropertyName = "extensionData";
@@ -55,6 +49,12 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
             throw new JsonException("The durable agent state is not valid JSON.");
         }
 
+        ValidateNoDuplicateRecognizedProperties(
+            element.Value,
+            "root",
+            SchemaVersionPropertyName,
+            DataPropertyName,
+            ExtensionDataPropertyName);
         if (!element.Value.TryGetProperty(SchemaVersionPropertyName, out JsonElement versionElement))
         {
             throw new InvalidOperationException("The durable agent state is missing the 'schemaVersion' property.");
@@ -75,6 +75,18 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
             throw new JsonException("The durable agent state 'data' property must be an object.");
         }
 
+        ValidateNoDuplicateRecognizedProperties(
+            dataElement,
+            "data",
+            "conversationHistory",
+            "terminalResults",
+            "completionReceipts",
+            "historyBinding",
+            "session",
+            "expirationTimeUtc",
+            "ingestedPositions",
+            "truncation",
+            ExtensionDataPropertyName);
         ValidateOpaqueSession(dataElement);
         ValidateDeclaredExtensionData(element.Value, dataElement);
         ValidateKnownFieldShapes(dataElement);
@@ -189,6 +201,7 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
             throw new JsonException("The durable agent state 'extensionData' property must be an object.");
         }
 
+        ValidateUniqueObjectKeys(element, "extensionData");
         return element.EnumerateObject().ToDictionary(
             property => property.Name,
             property => property.Value.Clone());
@@ -316,10 +329,10 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
                     role.ValueKind == JsonValueKind.String
                         ? role.GetString()
                         : null;
-                if (roleText is not ("user" or "assistant" or "system" or "tool"))
+                if (roleText is null)
                 {
                     throw new InvalidOperationException(
-                        $"The legacy durable agent state message role '{roleText}' is not supported.");
+                        "The legacy durable agent state message role must be a string.");
                 }
 
                 if (!message.TryGetProperty("contents", out JsonElement contents))
@@ -345,18 +358,10 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
 
                     if (contentType.ValueEquals("functionCall") &&
                         content.TryGetProperty("arguments", out JsonElement arguments) &&
-                        arguments.ValueKind != JsonValueKind.Object)
+                        arguments.ValueKind is not JsonValueKind.Object and not JsonValueKind.String)
                     {
                         throw new InvalidOperationException(
-                            "Legacy durable agent function-call arguments must be an object when present.");
-                    }
-
-                    if (contentType.ValueEquals("uri") &&
-                        (!content.TryGetProperty("mediaType", out JsonElement mediaType) ||
-                         mediaType.ValueKind != JsonValueKind.String))
-                    {
-                        throw new InvalidOperationException(
-                            "Legacy durable agent URI content requires a string mediaType.");
+                            "Legacy durable agent function-call arguments must be an object or string when present.");
                     }
 
                     if (contentType.ValueEquals("usage") &&
@@ -389,12 +394,10 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
 
             foreach (JsonProperty position in ingestedPositions.EnumerateObject())
             {
-                if (position.Value.ValueKind != JsonValueKind.Number ||
-                    !position.Value.TryGetInt64(out long value) ||
-                    value < 0)
+                if (!DurableAgentStateContract.IsNonNegativeJsonInteger(position.Value))
                 {
                     throw new InvalidOperationException(
-                        $"The durable agent ingestion position '{position.Name}' must be a non-negative Int64 integer token.");
+                        $"The durable agent ingestion position '{position.Name}' must be a non-negative integer.");
                 }
             }
         }
@@ -410,12 +413,10 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
                     "Durable agent truncation evidence requires evictedMessageCount, firstEvictedAt, and lastEvictedAt.");
             }
 
-            if (evictedMessageCount.ValueKind != JsonValueKind.Number ||
-                !evictedMessageCount.TryGetInt64(out long value) ||
-                value < 1)
+            if (!DurableAgentStateContract.IsPositiveJsonInteger(evictedMessageCount))
             {
                 throw new InvalidOperationException(
-                    "The durable agent truncation evictedMessageCount must be a positive Int64 integer token.");
+                    "The durable agent truncation evictedMessageCount must be a positive integer.");
             }
         }
     }
@@ -551,6 +552,18 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
                     continue;
                 }
 
+                ValidateNoDuplicateRecognizedProperties(
+                    entry,
+                    "conversationHistory entry",
+                    "$type",
+                    "createdAt",
+                    "correlationId",
+                    "messages",
+                    ExtensionDataPropertyName,
+                    "orchestrationId",
+                    "responseSchema",
+                    "responseType",
+                    "usage");
                 RequireDateTimeWhenPresent(entry, "createdAt", "conversationHistory.createdAt");
                 RequireStringWhenPresent(entry, "correlationId", "conversationHistory.correlationId");
                 string? entryType = entry.TryGetProperty("$type", out JsonElement typeElement) &&
@@ -578,6 +591,15 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
                             continue;
                         }
 
+                        ValidateNoDuplicateRecognizedProperties(
+                            message,
+                            "conversationHistory message",
+                            "authorName",
+                            "createdAt",
+                            "messageId",
+                            ExtensionDataPropertyName,
+                            "contents",
+                            "role");
                         RequireStringWhenPresent(message, "authorName", "conversationHistory.messages.authorName");
                         RequireDateTimeWhenPresent(
                             message,
@@ -594,9 +616,30 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         {
             foreach (JsonProperty result in terminalResults.EnumerateObject())
             {
+                ValidateNoDuplicateRecognizedProperties(
+                    result.Value,
+                    $"terminalResults.{result.Name}",
+                    "correlationId",
+                    "outcome",
+                    "completedAt",
+                    "resultExpiresAt",
+                    "response",
+                    "error");
                 if (result.Value.TryGetProperty("response", out JsonElement response) &&
                     response.ValueKind == JsonValueKind.Object)
                 {
+                    ValidateNoDuplicateRecognizedProperties(
+                        response,
+                        $"terminalResults.{result.Name}.response",
+                        "messages",
+                        "value",
+                        "usage",
+                        "createdAt",
+                        "responseId",
+                        "agentId",
+                        "finishReason",
+                        "continuationToken",
+                        ExtensionDataPropertyName);
                     RequireDateTimeWhenPresent(
                         result.Value,
                         "completedAt",
@@ -614,6 +657,17 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
                         "usage",
                         $"terminalResults.{result.Name}.response.usage");
                 }
+
+                if (result.Value.TryGetProperty("error", out JsonElement error) &&
+                    error.ValueKind == JsonValueKind.Object)
+                {
+                    ValidateNoDuplicateRecognizedProperties(
+                        error,
+                        $"terminalResults.{result.Name}.error",
+                        "code",
+                        "message",
+                        "details");
+                }
             }
         }
 
@@ -622,6 +676,15 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         {
             foreach (JsonProperty receipt in receipts.EnumerateObject())
             {
+                ValidateNoDuplicateRecognizedProperties(
+                    receipt.Value,
+                    $"completionReceipts.{receipt.Name}",
+                    "correlationId",
+                    "outcome",
+                    "completedAt",
+                    "resultState",
+                    "resultExpiresAt",
+                    "resultUnavailableAt");
                 RequireDateTimeWhenPresent(
                     receipt.Value,
                     "completedAt",
@@ -640,6 +703,12 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         if (data.TryGetProperty("truncation", out JsonElement truncation) &&
             truncation.ValueKind == JsonValueKind.Object)
         {
+            ValidateNoDuplicateRecognizedProperties(
+                truncation,
+                "data.truncation",
+                "evictedMessageCount",
+                "firstEvictedAt",
+                "lastEvictedAt");
             RequireDateTimeWhenPresent(truncation, "firstEvictedAt", "data.truncation.firstEvictedAt");
             RequireDateTimeWhenPresent(truncation, "lastEvictedAt", "data.truncation.lastEvictedAt");
         }
@@ -662,13 +731,20 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
 
     private static void ValidateUsageObject(JsonElement usage, string path)
     {
+        ValidateNoDuplicateRecognizedProperties(
+            usage,
+            path,
+            "inputTokenCount",
+            "outputTokenCount",
+            "totalTokenCount",
+            ExtensionDataPropertyName);
         foreach (string countName in new[] { "inputTokenCount", "outputTokenCount", "totalTokenCount" })
         {
             if (usage.TryGetProperty(countName, out JsonElement count) &&
-                (count.ValueKind != JsonValueKind.Number || !count.TryGetInt64(out _)))
+                !DurableAgentStateContract.IsJsonInteger(count))
             {
                 throw new JsonException(
-                    $"The durable agent state '{path}.{countName}' property must be an Int64 integer token.");
+                    $"The durable agent state '{path}.{countName}' property must be an integer.");
             }
         }
 
@@ -710,30 +786,11 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         }
 
         if (value.ValueKind != JsonValueKind.String ||
-            !IsOffsetRfc3339(value.GetString()))
+            !DurableAgentStateContract.IsOffsetRfc3339(value.GetString()))
         {
             throw new JsonException(
                 $"The durable agent state '{path}' property must be an RFC 3339 date-time with an explicit offset.");
         }
-    }
-
-    private static bool IsOffsetRfc3339(string? value)
-    {
-        if (string.IsNullOrEmpty(value) ||
-            !s_rfc3339Pattern.IsMatch(value) ||
-            !DateTimeOffset.TryParse(
-                value,
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.None,
-                out _))
-        {
-            return false;
-        }
-
-        return value.EndsWith('Z') ||
-            (value.Length >= 6 &&
-             value[^6] is '+' or '-' &&
-             value[^3] == ':');
     }
 
     private static void ValidateUniqueObjectKeys(JsonElement element, string propertyName)
@@ -830,6 +887,15 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
                     $"Durable agent {location} contains a non-object message.");
             }
 
+            ValidateNoDuplicateRecognizedProperties(
+                message,
+                $"{location} message",
+                "authorName",
+                "createdAt",
+                "messageId",
+                ExtensionDataPropertyName,
+                "contents",
+                "role");
             RequireStringWhenPresent(message, "authorName", $"{location}.authorName");
             RequireDateTimeWhenPresent(message, "createdAt", $"{location}.createdAt");
             RequireStringWhenPresent(message, "messageId", $"{location}.messageId");
@@ -890,6 +956,27 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
 
     private static void ValidateKnownContentFields(JsonElement content, string contentType)
     {
+        string[] recognizedProperties = contentType switch
+        {
+            "data" => ["$type", "uri", "mediaType", ExtensionDataPropertyName],
+            "error" => ["$type", "message", "errorCode", "details", ExtensionDataPropertyName],
+            "functionCall" => ["$type", "callId", "name", "arguments", ExtensionDataPropertyName],
+            "functionResult" => ["$type", "callId", "result", ExtensionDataPropertyName],
+            "hostedFile" => ["$type", "fileId", ExtensionDataPropertyName],
+            "hostedVectorStore" => ["$type", "vectorStoreId", ExtensionDataPropertyName],
+            "text" => ["$type", "text", ExtensionDataPropertyName],
+            "reasoning" => ["$type", "text", ExtensionDataPropertyName],
+            "uri" => ["$type", "uri", "mediaType", ExtensionDataPropertyName],
+            "usage" => ["$type", "usage", ExtensionDataPropertyName],
+            "unknown" => ["$type", "content", ExtensionDataPropertyName],
+            _ => [],
+        };
+        ValidateNoDuplicateRecognizedProperties(content, $"'{contentType}' content", recognizedProperties);
+        RequireObjectWhenPresent(
+            content,
+            ExtensionDataPropertyName,
+            $"'{contentType}' content.extensionData");
+
         switch (contentType)
         {
             case "data":
@@ -921,6 +1008,7 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
                 break;
             case "uri":
                 RequireString(content, "uri", contentType);
+                OptionalString(content, "mediaType", contentType);
                 break;
             case "usage":
                 if (!content.TryGetProperty("usage", out JsonElement usage) ||
@@ -959,6 +1047,28 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         {
             throw new InvalidOperationException(
                 $"Durable agent '{contentType}' content property '{propertyName}' must be a string when present.");
+        }
+    }
+
+    private static void ValidateNoDuplicateRecognizedProperties(
+        JsonElement element,
+        string path,
+        params string[] recognizedProperties)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        HashSet<string> recognized = new(recognizedProperties, StringComparer.Ordinal);
+        HashSet<string> encountered = new(StringComparer.Ordinal);
+        foreach (JsonProperty property in element.EnumerateObject())
+        {
+            if (recognized.Contains(property.Name) && !encountered.Add(property.Name))
+            {
+                throw new JsonException(
+                    $"The durable agent state '{path}' object contains duplicate recognized property '{property.Name}'.");
+            }
         }
     }
 }

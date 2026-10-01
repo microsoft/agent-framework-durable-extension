@@ -13,6 +13,13 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 /// </summary>
 internal sealed class DurableAgentStateCompletionReceipt
 {
+    private DateTimeOffset _completedAt;
+    private string? _completedAtText;
+    private DateTimeOffset? _resultExpiresAt;
+    private string? _resultExpiresAtText;
+    private DateTimeOffset? _resultUnavailableAt;
+    private string? _resultUnavailableAtText;
+
     public const string SucceededOutcome = "succeeded";
     public const string FailedOutcome = "failed";
     public const string AvailableResult = "available";
@@ -40,8 +47,34 @@ internal sealed class DurableAgentStateCompletionReceipt
     /// This records durable completion, not when the result was read or acknowledged
     /// by a caller.
     /// </summary>
+    [JsonIgnore]
+    public DateTimeOffset CompletedAt
+    {
+        get => this._completedAt;
+        init
+        {
+            this._completedAt = value;
+            this._completedAtText = value == default ? null : value.ToString("O");
+        }
+    }
+
+    /// <summary>
+    /// Gets the original RFC 3339 completion timestamp text.
+    /// </summary>
     [JsonPropertyName("completedAt")]
-    public required DateTimeOffset CompletedAt { get; init; }
+    public string? CompletedAtText
+    {
+        get => this._completedAtText;
+        init
+        {
+            this._completedAtText = value;
+            this._completedAt = value is null
+                ? default
+                : DurableAgentStateContract.ParseOffsetRfc3339(
+                    value,
+                    "completionReceipts.completedAt");
+        }
+    }
 
     /// <summary>
     /// Gets whether the terminal result payload is still available for retrieval.
@@ -59,9 +92,35 @@ internal sealed class DurableAgentStateCompletionReceipt
     /// This does not remove the completion receipt or make the correlation reusable.
     /// A null value means that no result-payload expiry was scheduled.
     /// </summary>
+    [JsonIgnore]
+    public DateTimeOffset? ResultExpiresAt
+    {
+        get => this._resultExpiresAt;
+        init
+        {
+            this._resultExpiresAt = value;
+            this._resultExpiresAtText = value?.ToString("O");
+        }
+    }
+
+    /// <summary>
+    /// Gets the original RFC 3339 result-expiry timestamp text.
+    /// </summary>
     [JsonPropertyName("resultExpiresAt")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public DateTimeOffset? ResultExpiresAt { get; init; }
+    public string? ResultExpiresAtText
+    {
+        get => this._resultExpiresAtText;
+        init
+        {
+            this._resultExpiresAtText = value;
+            this._resultExpiresAt = value is null
+                ? null
+                : DurableAgentStateContract.ParseOffsetRfc3339(
+                    value,
+                    "completionReceipts.resultExpiresAt");
+        }
+    }
 
     /// <summary>
     /// Gets the time at which the terminal result payload actually became
@@ -70,9 +129,35 @@ internal sealed class DurableAgentStateCompletionReceipt
     /// later than <see cref="ResultExpiresAt"/>. It is required when
     /// <see cref="ResultState"/> is <c>unavailable</c>.
     /// </summary>
+    [JsonIgnore]
+    public DateTimeOffset? ResultUnavailableAt
+    {
+        get => this._resultUnavailableAt;
+        init
+        {
+            this._resultUnavailableAt = value;
+            this._resultUnavailableAtText = value?.ToString("O");
+        }
+    }
+
+    /// <summary>
+    /// Gets the original RFC 3339 result-unavailable timestamp text.
+    /// </summary>
     [JsonPropertyName("resultUnavailableAt")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public DateTimeOffset? ResultUnavailableAt { get; init; }
+    public string? ResultUnavailableAtText
+    {
+        get => this._resultUnavailableAtText;
+        init
+        {
+            this._resultUnavailableAtText = value;
+            this._resultUnavailableAt = value is null
+                ? null
+                : DurableAgentStateContract.ParseOffsetRfc3339(
+                    value,
+                    "completionReceipts.resultUnavailableAt");
+        }
+    }
 
     /// <summary>
     /// Gets additional undeclared JSON properties preserved for forward

@@ -226,7 +226,27 @@
         "description": "Known malformed text is not an opaque fallback",
         "data": { "role": "assistant", "contents": [{ "$type": "text", "text": 0, "content": { "preserve": true } }] },
         "valid": false
+      },
+      {
+        "description": "Known content extension data is preserved separately",
+        "data": { "role": "assistant", "contents": [{ "$type": "text", "text": "hello", "extensionData": { "producer": "python" }, "$runtimeType": "inert-unknown-sibling" }] },
+        "valid": true
+      },
+      {
+        "description": "Known content extension data must be an object",
+        "data": { "role": "assistant", "contents": [{ "$type": "text", "text": "hello", "extensionData": null }] },
+        "valid": false
       }
+    ]
+  },
+  {
+    "description": "Unbounded JSON integer counters",
+    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/usage" },
+    "tests": [
+      { "description": "Value above Int64 remains valid", "data": { "inputTokenCount": 9223372036854775808 }, "valid": true },
+      { "description": "Mathematically integral decimal remains valid", "data": { "outputTokenCount": 1.0 }, "valid": true },
+      { "description": "Mathematically integral exponent remains valid", "data": { "totalTokenCount": 1e3 }, "valid": true },
+      { "description": "Fractional value remains invalid", "data": { "inputTokenCount": 1.5 }, "valid": false }
     ]
   },
   {

@@ -58,7 +58,7 @@ public sealed class DurableAgentStateMailboxTests
     [InlineData("""{"role":"developer","contents":[]}""")]
     [InlineData("""{"role":"assistant","contents":[{"$type":"functionCall","callId":"c","name":"f","arguments":"verbatim"}]}""")]
     [InlineData("""{"role":"assistant","contents":[{"$type":"uri","uri":"https://example.test/media"}]}""")]
-    public void LegacySnapshotsRejectV2OnlyMessageShapes(string messageJson)
+    public void LegacySnapshotsRoundTripHistoricalPermissiveMessageShapes(string messageJson)
     {
         string json = $$"""
             {
@@ -72,7 +72,30 @@ public sealed class DurableAgentStateMailboxTests
             }
             """;
 
-        Assert.Throws<InvalidOperationException>(() => Deserialize(json));
+        string roundTrip = Serialize(Deserialize(json));
+        using JsonDocument expectedDocument = JsonDocument.Parse(messageJson);
+        using JsonDocument actualDocument = JsonDocument.Parse(roundTrip);
+        JsonElement expected = expectedDocument.RootElement;
+        JsonElement actual = actualDocument.RootElement.GetProperty("data")
+            .GetProperty("conversationHistory")[0]
+            .GetProperty("messages")[0];
+
+        Assert.Equal(expected.GetProperty("role").GetString(), actual.GetProperty("role").GetString());
+        if (expected.TryGetProperty("contents", out JsonElement expectedContents) &&
+            expectedContents.GetArrayLength() > 0)
+        {
+            JsonElement expectedContent = expectedContents[0];
+            JsonElement actualContent = actual.GetProperty("contents")[0];
+            Assert.Equal(expectedContent.GetProperty("$type").GetString(), actualContent.GetProperty("$type").GetString());
+            if (expectedContent.TryGetProperty("arguments", out JsonElement arguments))
+            {
+                Assert.Equal(arguments.GetRawText(), actualContent.GetProperty("arguments").GetRawText());
+            }
+
+            Assert.Equal(
+                expectedContent.TryGetProperty("mediaType", out _),
+                actualContent.TryGetProperty("mediaType", out _));
+        }
     }
 
     [Theory]
@@ -137,7 +160,7 @@ public sealed class DurableAgentStateMailboxTests
     }
 
     [Fact]
-    public void LegacySerializationRejectsProgrammaticV2OnlyTranscriptContent()
+    public void LegacySerializationPreservesProgrammaticStringArguments()
     {
         DurableAgentState state = new()
         {
@@ -168,7 +191,9 @@ public sealed class DurableAgentStateMailboxTests
             },
         };
 
-        Assert.Throws<InvalidOperationException>(() => Serialize(state));
+        string json = Serialize(state);
+
+        Assert.Contains("\"arguments\":\"verbatim\"", json, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1074,31 +1099,46 @@ public sealed class DurableAgentStateMailboxTests
         Assert.Throws<InvalidOperationException>(() => Deserialize(Json));
     }
 
-    [Fact]
-    public void IngestionPositionsAcceptInt64Maximum()
+    [Theory]
+    [InlineData("9223372036854775808", false, 0L)]
+    [InlineData("1.0", true, 1L)]
+    [InlineData("1e3", true, 1000L)]
+    public void IngestionPositionsPreserveUnboundedJsonIntegerForms(
+        string value,
+        bool canProject,
+        long expectedProjection)
     {
-        const string Json = """
+        string json = $$"""
             {
               "schemaVersion": "1.2.0",
               "data": {
                 "conversationHistory": [],
                 "ingestedPositions": {
-                  "producer": 9223372036854775807
+                  "producer": {{value}}
                 }
               }
             }
             """;
 
-        DurableAgentState state = Deserialize(Json);
+        DurableAgentState state = Deserialize(json);
+        string roundTrip = Serialize(state);
 
-        Assert.Equal(long.MaxValue, state.Data.IngestedPositions?["producer"]);
+        Assert.Equal(
+            value,
+            JsonDocument.Parse(roundTrip).RootElement.GetProperty("data")
+                .GetProperty("ingestedPositions")
+                .GetProperty("producer")
+                .GetRawText());
+        Assert.Equal(
+            canProject,
+            state.Data.TryGetIngestedPosition("producer", out long projection));
+        Assert.Equal(canProject ? expectedProjection : 0, projection);
     }
 
     [Theory]
-    [InlineData("1.0")]
-    [InlineData("1e3")]
-    [InlineData("9223372036854775808")]
-    public void IngestionPositionsRejectNonCanonicalOrOverflowValues(string value)
+    [InlineData("-1")]
+    [InlineData("1.5")]
+    public void IngestionPositionsRejectNegativeOrFractionalValues(string value)
     {
         string json = $$"""
             {
@@ -1115,16 +1155,19 @@ public sealed class DurableAgentStateMailboxTests
         Assert.Throws<InvalidOperationException>(() => Deserialize(json));
     }
 
-    [Fact]
-    public void TruncationAcceptsInt64Maximum()
+    [Theory]
+    [InlineData("9223372036854775808")]
+    [InlineData("1.0")]
+    [InlineData("1e3")]
+    public void TruncationPreservesUnboundedJsonIntegerForms(string value)
     {
-        const string Json = """
+        string json = $$"""
             {
               "schemaVersion": "1.2.0",
               "data": {
                 "conversationHistory": [],
                 "truncation": {
-                  "evictedMessageCount": 9223372036854775807,
+                  "evictedMessageCount": {{value}},
                   "firstEvictedAt": "2026-09-11T10:00:00Z",
                   "lastEvictedAt": "2026-09-11T11:00:00Z"
                 }
@@ -1132,16 +1175,21 @@ public sealed class DurableAgentStateMailboxTests
             }
             """;
 
-        DurableAgentState state = Deserialize(Json);
+        string roundTrip = Serialize(Deserialize(json));
 
-        Assert.Equal(long.MaxValue, state.Data.Truncation?.EvictedMessageCount);
+        Assert.Equal(
+            value,
+            JsonDocument.Parse(roundTrip).RootElement.GetProperty("data")
+                .GetProperty("truncation")
+                .GetProperty("evictedMessageCount")
+                .GetRawText());
     }
 
     [Theory]
-    [InlineData("1.0")]
-    [InlineData("1e3")]
-    [InlineData("9223372036854775808")]
-    public void TruncationRejectsNonCanonicalOrOverflowCount(string value)
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("1.5")]
+    public void TruncationRejectsNonPositiveOrFractionalCount(string value)
     {
         string json = $$"""
             {
@@ -1178,7 +1226,7 @@ public sealed class DurableAgentStateMailboxTests
             {
                 Truncation = new()
                 {
-                    EvictedMessageCount = 1,
+                    EvictedMessageCount = JsonSerializer.SerializeToElement(1),
                     FirstEvictedAt = DateTimeOffset.Parse("2026-09-11T11:00:00+00:00"),
                     LastEvictedAt = DateTimeOffset.Parse("2026-09-11T10:00:00+00:00"),
                 },
@@ -1271,6 +1319,76 @@ public sealed class DurableAgentStateMailboxTests
     }
 
     [Fact]
+    public void RevisedMailboxPreservesNanosecondTimestampText()
+    {
+        const string Timestamp = "2026-09-11T10:00:00.123456789Z";
+        const string Json = """
+            {
+              "schemaVersion": "2.0.0",
+              "data": {
+                "conversationHistory": [],
+                "terminalResults": {
+                  "c": {
+                    "correlationId": "c",
+                    "outcome": "succeeded",
+                    "completedAt": "2026-09-11T10:00:00.123456789Z",
+                    "response": { "messages": [] }
+                  }
+                },
+                "completionReceipts": {
+                  "c": {
+                    "correlationId": "c",
+                    "outcome": "succeeded",
+                    "completedAt": "2026-09-11T10:00:00.123456789Z",
+                    "resultState": "available"
+                  }
+                }
+              }
+            }
+            """;
+
+        DurableAgentState state = Deserialize(Json);
+        string roundTrip = Serialize(state);
+        DurableAgentStateTerminalResult result = state.Data.TerminalResults!["c"];
+        DurableAgentStateCompletionReceipt receipt = state.Data.CompletionReceipts!["c"];
+
+        Assert.Equal(Timestamp, result.CompletedAtText);
+        Assert.Equal(Timestamp, receipt.CompletedAtText);
+        Assert.Equal(2, roundTrip.Split(Timestamp, StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void RevisedMailboxRequiresExactTimestampTextAcrossResultAndReceipt()
+    {
+        const string Json = """
+            {
+              "schemaVersion": "2.0.0",
+              "data": {
+                "conversationHistory": [],
+                "terminalResults": {
+                  "c": {
+                    "correlationId": "c",
+                    "outcome": "succeeded",
+                    "completedAt": "2026-09-11T10:00:00.123456789Z",
+                    "response": { "messages": [] }
+                  }
+                },
+                "completionReceipts": {
+                  "c": {
+                    "correlationId": "c",
+                    "outcome": "succeeded",
+                    "completedAt": "2026-09-11T10:00:00.123456789+00:00",
+                    "resultState": "available"
+                  }
+                }
+              }
+            }
+            """;
+
+        Assert.Throws<InvalidOperationException>(() => Deserialize(Json));
+    }
+
+    [Fact]
     public void UnavailableReceiptIsTimestampValidatedWithoutTerminalResults()
     {
         const string Json = """
@@ -1321,6 +1439,7 @@ public sealed class DurableAgentStateMailboxTests
     [InlineData("""{"$type":"uri","uri":"https://example.test","mediaType":null}""")]
     [InlineData("""{"$type":"usage","usage":{"inputTokenCount":null}}""")]
     [InlineData("""{"$type":"usage","usage":{"extensionData":null}}""")]
+    [InlineData("""{"$type":"text","text":"hello","extensionData":null}""")]
     public void RevisedStateRejectsMalformedKnownContent(string contentJson)
     {
         string json = $$"""
@@ -1341,6 +1460,32 @@ public sealed class DurableAgentStateMailboxTests
             """;
 
         Assert.ThrowsAny<Exception>(() => Deserialize(json));
+    }
+
+    [Fact]
+    public void DuplicateRecognizedContentFieldIsRejected()
+    {
+        const string Json = """
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [{
+                  "$type": "request",
+                  "messages": [{
+                    "role": "user",
+                    "contents": [{
+                      "$type": "text",
+                      "text": "first",
+                      "future": { "preserve": true },
+                      "text": "second"
+                    }]
+                  }]
+                }]
+              }
+            }
+            """;
+
+        Assert.Throws<JsonException>(() => Deserialize(Json));
     }
 
     [Theory]
@@ -1450,15 +1595,25 @@ public sealed class DurableAgentStateMailboxTests
         DurableAgentStateUriContent uri = Assert.IsType<DurableAgentStateUriContent>(message.Contents[1]);
         DurableAgentStateUnknownContent unknown =
             Assert.IsType<DurableAgentStateUnknownContent>(message.Contents[2]);
+        DurableAgentStateCompletionReceipt receipt =
+            Assert.IsType<DurableAgentStateCompletionReceipt>(
+                state.Data.CompletionReceipts?["corr-lossless"]);
+        DurableAgentStateTerminalResult result =
+            Assert.IsType<DurableAgentStateTerminalResult>(
+                state.Data.TerminalResults?["corr-lossless"]);
 
         Assert.Equal(" { \"partial\": ", functionCall.Arguments.GetString());
         Assert.Null(uri.MediaType);
         Assert.Equal("opaque-data-only", unknown.Content.GetProperty("$runtimeType").GetString());
         Assert.Equal(JsonValueKind.False, response.Value.ValueKind);
+        Assert.Equal("2026-09-11T10:00:00.123456789Z", result.CompletedAtText);
+        Assert.Equal(result.CompletedAtText, receipt.CompletedAtText);
         FunctionCallContent runtimeFunctionCall =
             Assert.IsType<FunctionCallContent>(functionCall.ToAIContent());
         Assert.Equal(" { \"partial\": ", runtimeFunctionCall.RawRepresentation);
-        Assert.Throws<InvalidOperationException>(() => uri.ToAIContent());
+        Assert.Equal(
+            "application/octet-stream",
+            Assert.IsType<UriContent>(uri.ToAIContent()).MediaType);
         using JsonDocument roundTripDocument = JsonDocument.Parse(roundTrip);
         Assert.Equal(
             " { \"partial\": ",
@@ -1488,11 +1643,11 @@ public sealed class DurableAgentStateMailboxTests
         Assert.Equal(DurableAgentStateCompletionReceipt.SucceededOutcome, receipt.Outcome);
         Assert.Equal(DurableAgentStateCompletionReceipt.UnavailableResult, receipt.ResultState);
         Assert.False(state.Data.TerminalResults?.ContainsKey("corr-pruned"));
-        Assert.Equal(3, state.Data.IngestedPositions?["example-producer"]);
+        Assert.Equal(3, state.Data.IngestedPositions?["example-producer"].GetInt32());
         Assert.Equal(
             "opaque-user-data",
             state.Data.Session?.GetProperty("exampleContinuation").GetProperty("$runtimeType").GetString());
-        Assert.Equal(4, state.Data.Truncation?.EvictedMessageCount);
+        Assert.Equal(4, state.Data.Truncation?.EvictedMessageCount.GetInt32());
     }
 
     [Theory]

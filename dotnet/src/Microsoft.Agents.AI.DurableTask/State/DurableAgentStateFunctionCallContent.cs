@@ -78,7 +78,7 @@ internal sealed class DurableAgentStateFunctionCallContent : DurableAgentStateCo
     }
 
     /// <inheritdoc/>
-    public override AIContent ToAIContent()
+    protected override AIContent ToAIContentCore()
     {
         if (this.Arguments.ValueKind == JsonValueKind.String)
         {
@@ -106,18 +106,6 @@ internal sealed class DurableAgentStateFunctionCallContent : DurableAgentStateCo
     /// <inheritdoc/>
     internal override void Validate(DurableAgentStateSchemaVersion version)
     {
-        if (version.Major < DurableAgentState.RevisedSchemaMajorVersion)
-        {
-            if (this.Arguments.ValueKind is not JsonValueKind.Undefined and
-                not JsonValueKind.Object)
-            {
-                throw new InvalidOperationException(
-                    "Legacy durable agent function-call arguments must be an object or absent.");
-            }
-
-            return;
-        }
-
         if (this.Arguments.ValueKind is not JsonValueKind.Undefined and
             not JsonValueKind.Object and
             not JsonValueKind.String)

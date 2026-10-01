@@ -24,13 +24,13 @@ requires `terminalResults`, `completionReceipts`, and `conversationHistory`
 (which can be empty). `historyBinding` is an optional runtime extension/profile,
 not a shared requirement for session-fixed effective ownership.
 
-Historical `1.0.0`, `1.1.0`, and `1.2.0` message/content validation is unchanged
-from the pre-widening contract at `efed11f7786332d8bb0447ddbfc1727ddd7de09b`:
-roles exclude `developer`, function arguments are objects when present, and
-URI content requires `mediaType`. The root version selects historical
-`conversationEntry` definitions or the v2 definitions. Only v2 transcript entries
-and terminal responses use the expanded lossless shapes. This is not a
-historical-contract correction, and no persisted legacy bytes are rewritten.
+Historical `1.0.0`, `1.1.0`, and `1.2.0` readers and writers remain compatible
+with values accepted by the original .NET implementation: message roles are
+free-form strings, function arguments may retain their historical string form,
+and URI content may omit `mediaType`. Schema 2.0 remains stricter where the
+contract requires a closed set, including its recognized role values. The root
+version therefore selects version-aware semantic validation without making a
+legacy read-and-write cycle reject previously persisted state.
 
 Major 2 is required because the authority for completion and replay changes,
 not merely because new optional properties appear. This schema intentionally rejects unlisted versions, including future
@@ -180,6 +180,13 @@ bookkeeping with explicit producer/delivery identity, preservation, and migratio
 semantics, independent of transcript retention. This contract neither defines
 that wire format nor backfills receipts from the scalar.
 
+JSON integer counters are not bounded to a runtime's native integer width.
+Compatible readers preserve the original integer value and representation,
+including values outside Int64 and mathematically integral decimal or exponent
+forms. A runtime API that exposes Int64 projects only values that are exactly
+integral and in range; projection failure must not discard or rewrite the stored
+JSON value.
+
 `truncation` records evicted message count and first/last eviction
 instants (last must be no earlier than first). It is diagnostic evidence, not
 model context. Optional `messageId` is message identity, not request identity.
@@ -214,6 +221,11 @@ require byte-identical JSON formatting or object-property order. Wrapping is a
 producer mapping for supported unmodeled content, not permission for a reader
 to hide malformed known wire fields or accept unknown wire discriminators.
 
+Known content `extensionData` maps only to the framework content metadata bag.
+Undeclared sibling properties remain unknown wire data at their original
+location and must not be promoted into framework metadata, where they could
+impersonate framework-owned control values.
+
 Unknown properties are allowed and must round-trip **at their original object
 locations**, independently of explicit `extensionData` objects, including
 nested content and mailbox fields. Known fields must still satisfy their
@@ -238,6 +250,10 @@ execute tool calls, or log opaque session/error/token contents merely by reading
 state. Normal host authorization, redaction, and total storage/depth limits are
 still required. Identifier limits count Unicode code points, not UTF-16 units.
 Identifiers are nonblank and exclude C0/C1 controls; metadata is not executable.
+Mailbox RFC 3339 timestamps preserve their original text, including fractional
+precision beyond 100 nanoseconds, while separately parsing the instant for
+ordering checks. Matching result and receipt fields compare the preserved text
+so a read-and-write cycle remains exact across runtimes.
 Usage metadata retains arbitrary JSON even if a runtime cannot represent it as
 numeric counts. Timestamp precision and provider-specific
 continuation formats require cross-language agreement; validation alone does

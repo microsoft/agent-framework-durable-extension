@@ -94,13 +94,6 @@ internal sealed class DurableAgentStateMessage
         ILogger? logger)
     {
         string role = message.Role.ToString();
-        if (!requireJsonSafeMetadata &&
-            role is not ("user" or "assistant" or "system" or "tool"))
-        {
-            throw new InvalidOperationException(
-                $"The legacy durable agent state cannot persist message role '{role}'.");
-        }
-
         Dictionary<string, JsonElement>? additionalProperties = null;
         if (message.AdditionalProperties is not null)
         {
@@ -156,25 +149,15 @@ internal sealed class DurableAgentStateMessage
     internal void Validate(DurableAgentStateSchemaVersion version)
     {
         bool revised = version.Major >= DurableAgentState.RevisedSchemaMajorVersion;
-        if (revised)
-        {
-            if (this.Role is not "user" and
-                not "assistant" and
-                not "system" and
-                not "developer" and
-                not "tool")
-            {
-                throw new InvalidOperationException(
-                    $"The durable agent state message role '{this.Role}' is not supported.");
-            }
-        }
-        else if (this.Role is not "user" and
-                 not "assistant" and
-                 not "system" and
-                 not "tool")
+        if (revised &&
+            this.Role is not "user" and
+            not "assistant" and
+            not "system" and
+            not "developer" and
+            not "tool")
         {
             throw new InvalidOperationException(
-                $"The legacy durable agent state message role '{this.Role}' is not supported.");
+                $"The durable agent state message role '{this.Role}' is not supported.");
         }
 
         if (this.Contents.Any(static content => content is null))
