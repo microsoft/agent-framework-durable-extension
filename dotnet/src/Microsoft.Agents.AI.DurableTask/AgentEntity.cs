@@ -202,8 +202,10 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         DurableAgentState workingState = migrateLegacy
             ? DurableAgentStateOutcomeResolver.PrepareRevisedWorkingState(this.State, hasAuthoritativeLegacyHistory: true)
             : this.State.Clone();
+        bool fixedOwnershipContractActive =
+            workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion;
         if (this._options.EnablePersistentRequestOutcomes &&
-            workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
+            fixedOwnershipContractActive)
         {
             workingState.PersistentRequestOutcomesAuthorized = true;
             // A future/invalid runtime profile cannot be silently replaced after invoking the model.
@@ -240,7 +242,8 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         ValidatedDurableAgentHistoryConfiguration validatedHistoryConfiguration =
             DurableAgentHistoryOwnershipResolver.ValidateRunConfiguration(
                 agent,
-                historyConfiguration.ServiceManagedPerServiceCallHistory);
+                historyConfiguration.ServiceManagedPerServiceCallHistory,
+                fixedOwnershipContractActive);
 
         foreach (ChatMessage msg in request.Messages)
         {
@@ -258,6 +261,9 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
 
         EntityAgentWrapper? agentWrapper = null;
         AgentSession? providerSession = null;
+        ChatClientAgent? invocationChatClientAgent = null;
+        DurableChatHistoryProvider? durableHistoryProvider = null;
+        DurableAgentHistoryOwnership? invocationOwnership = null;
         bool providerInvocationActive = false;
         try
         {
@@ -269,62 +275,63 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                 DurableAgentHistoryOwnershipResolver.Resolve(
                     session,
                     validatedHistoryConfiguration);
-            DurableAgentHistoryOwnership effectiveOwnership =
+            DurableAgentHistoryOwnership resolvedOwnership =
                 DurableAgentHistoryOwnershipResolver.GetEffectiveOwnership(
                     ownership,
                     historyConfiguration.ReplayMode);
-            DurableAgentHistoryBinding.ValidatePreExecutionContinuationContract(
-                effectiveOwnership,
-                session,
-                chatClientAgent,
-                validatedHistoryConfiguration.RequiresPerServiceCallPersistence);
-            if (effectiveOwnership != DurableAgentHistoryOwnership.Entity &&
-                this.State.Data.HistoryBinding.ValueKind != JsonValueKind.Undefined &&
-                persistedHistoryBinding is null)
+            DurableAgentHistoryOwnership effectiveOwnership = fixedOwnershipContractActive
+                ? resolvedOwnership
+                : DurableAgentHistoryOwnership.Entity;
+            invocationChatClientAgent = chatClientAgent;
+            invocationOwnership = effectiveOwnership;
+            if (fixedOwnershipContractActive)
             {
-                throw new DurableAgentHistoryBindingMismatchException(
-                    "The durable session contains an opaque shared historyBinding that the C# runtime " +
-                    $"cannot use to prove {effectiveOwnership} ownership. Preserve that state with its " +
-                    "originating runtime or start a new C# durable session with an explicit logical provider key.");
-            }
-
-            if (effectiveOwnership != DurableAgentHistoryOwnership.Entity &&
-                workingState.SchemaVersion != DurableAgentState.RevisedSchemaVersion)
-            {
-                throw new InvalidOperationException(
-                    "External, service, and opaque agent-session history require schema 2 mailbox writes. " +
-                    "Enable mailbox writes and authorize any legacy migration before continuing this durable session.");
-            }
-
-            DurableAgentStateHistoryBinding expectedHistoryBinding =
-                DurableAgentHistoryBinding.Create(
-                    effectiveOwnership,
-                    configuredHistoryProviderKey);
-            if (existingHistoryBinding is null)
-            {
-                DurableAgentHistoryBinding.ValidateLegacyAdoption(
-                    this.State,
+                DurableAgentHistoryBinding.ValidatePreExecutionContinuationContract(
                     effectiveOwnership,
                     session,
                     chatClientAgent,
                     validatedHistoryConfiguration.RequiresPerServiceCallPersistence);
+                if (effectiveOwnership != DurableAgentHistoryOwnership.Entity &&
+                    this.State.Data.HistoryBinding.ValueKind != JsonValueKind.Undefined &&
+                    persistedHistoryBinding is null)
+                {
+                    throw new DurableAgentHistoryBindingMismatchException(
+                        "The durable session contains an opaque shared historyBinding that the C# runtime " +
+                        $"cannot use to prove {effectiveOwnership} ownership. Preserve that state with its " +
+                        "originating runtime or start a new C# durable session with an explicit logical provider key.");
+                }
+
+                DurableAgentStateHistoryBinding expectedHistoryBinding =
+                    DurableAgentHistoryBinding.Create(
+                        effectiveOwnership,
+                        configuredHistoryProviderKey);
+                if (existingHistoryBinding is null)
+                {
+                    DurableAgentHistoryBinding.ValidateLegacyAdoption(
+                        this.State,
+                        effectiveOwnership,
+                        session,
+                        chatClientAgent,
+                        validatedHistoryConfiguration.RequiresPerServiceCallPersistence);
+                }
+                DurableAgentHistoryBinding.ValidateExisting(
+                    existingHistoryBinding,
+                    expectedHistoryBinding);
+                if (existingHistoryBinding is not null)
+                {
+                    DurableAgentHistoryBinding.ValidateBoundContinuation(
+                        effectiveOwnership,
+                        session,
+                        chatClientAgent);
+                }
             }
-            DurableAgentHistoryBinding.ValidateExisting(
-                existingHistoryBinding,
-                expectedHistoryBinding);
-            if (existingHistoryBinding is not null)
-            {
-                DurableAgentHistoryBinding.ValidateBoundContinuation(
-                    effectiveOwnership,
-                    session,
-                    chatClientAgent);
-            }
+
             bool entityOwnedHistory =
                 effectiveOwnership == DurableAgentHistoryOwnership.Entity;
 
             // The provider is bound per invocation because it needs this operation's working state and
             // correlation ID. A registration-time provider cannot safely bind either value.
-            DurableChatHistoryProvider? durableHistoryProvider =
+            durableHistoryProvider =
                 entityOwnedHistory &&
                 workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion
                 ? new(
@@ -344,9 +351,9 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                 workingState,
                 request,
                 effectiveOwnership,
-                chatClientAgent is not null &&
+                fixedOwnershipContractActive &&
+                    chatClientAgent is not null &&
                     (durableHistoryProvider is not null || !entityOwnedHistory),
-                historyConfiguration.ReplayMode,
                 workingState.SchemaVersion != DurableAgentState.RevisedSchemaVersion);
 
             providerSession = session;
@@ -415,50 +422,55 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             response.ContinuationToken = continuationToken;
 #pragma warning restore MEAI001
 
-            (DurableAgentHistoryOwnership finalOwnership, _) =
-                DurableAgentHistoryOwnershipResolver.Resolve(
+            DurableAgentHistoryOwnership finalOwnership = DurableAgentHistoryOwnership.Entity;
+            DurableAgentStateHistoryBinding? finalHistoryBinding = null;
+            if (fixedOwnershipContractActive)
+            {
+                (finalOwnership, _) =
+                    DurableAgentHistoryOwnershipResolver.Resolve(
+                        session,
+                        validatedHistoryConfiguration);
+                finalOwnership = DurableAgentHistoryOwnershipResolver.GetEffectiveOwnership(
+                    finalOwnership,
+                    historyConfiguration.ReplayMode);
+                bool remoteServiceTransition =
+                    finalOwnership != effectiveOwnership &&
+                    finalOwnership == DurableAgentHistoryOwnership.Service;
+                if (finalOwnership != DurableAgentHistoryOwnership.Entity &&
+                    this.State.Data.HistoryBinding.ValueKind != JsonValueKind.Undefined &&
+                    persistedHistoryBinding is null)
+                {
+                    throw new DurableAgentHistoryBindingMismatchException(
+                        "The completed call resolved non-entity history ownership, but the durable session " +
+                        "contains an opaque shared historyBinding that the C# runtime cannot seal or resume. " +
+                        "Durable state was not committed. The remote service may already have observed the call; " +
+                        "preserve the state with its originating runtime or start a new C# durable session.");
+                }
+
+                finalHistoryBinding =
+                    DurableAgentHistoryBinding.Create(
+                        finalOwnership,
+                        configuredHistoryProviderKey,
+                        remoteServiceTransition);
+                if (existingHistoryBinding is null)
+                {
+                    DurableAgentHistoryBinding.ValidateLegacyTransition(
+                        this.State,
+                        effectiveOwnership,
+                        finalOwnership,
+                        remoteServiceTransition);
+                }
+
+                DurableAgentHistoryBinding.ValidateExisting(
+                    existingHistoryBinding,
+                    finalHistoryBinding,
+                    remoteTransitionDetectedAfterExecution: remoteServiceTransition);
+                DurableAgentHistoryBinding.ValidateBoundContinuation(
+                    finalOwnership,
                     session,
-                    validatedHistoryConfiguration);
-            finalOwnership = DurableAgentHistoryOwnershipResolver.GetEffectiveOwnership(
-                finalOwnership,
-                historyConfiguration.ReplayMode);
-            bool remoteServiceTransition =
-                finalOwnership != effectiveOwnership &&
-                finalOwnership == DurableAgentHistoryOwnership.Service;
-            if (finalOwnership != DurableAgentHistoryOwnership.Entity &&
-                this.State.Data.HistoryBinding.ValueKind != JsonValueKind.Undefined &&
-                persistedHistoryBinding is null)
-            {
-                throw new DurableAgentHistoryBindingMismatchException(
-                    "The completed call resolved non-entity history ownership, but the durable session " +
-                    "contains an opaque shared historyBinding that the C# runtime cannot seal or resume. " +
-                    "Durable state was not committed. The remote service may already have observed the call; " +
-                    "preserve the state with its originating runtime or start a new C# durable session.");
-            }
-
-            DurableAgentStateHistoryBinding finalHistoryBinding =
-                DurableAgentHistoryBinding.Create(
-                    finalOwnership,
-                    configuredHistoryProviderKey,
-                    remoteServiceTransition);
-            if (existingHistoryBinding is null)
-            {
-                DurableAgentHistoryBinding.ValidateLegacyTransition(
-                    this.State,
-                    effectiveOwnership,
-                    finalOwnership,
+                    chatClientAgent,
                     remoteServiceTransition);
             }
-
-            DurableAgentHistoryBinding.ValidateExisting(
-                existingHistoryBinding,
-                finalHistoryBinding,
-                remoteTransitionDetectedAfterExecution: remoteServiceTransition);
-            DurableAgentHistoryBinding.ValidateBoundContinuation(
-                finalOwnership,
-                session,
-                chatClientAgent,
-                remoteServiceTransition);
 
             FinalizeConversationEntries(
                 workingState,
@@ -474,7 +486,7 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                 chatClientAgent,
                 finalOwnership,
                 this._cancellationToken).ConfigureAwait(false);
-            if (workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
+            if (fixedOwnershipContractActive)
             {
                 if (existingHistoryBinding is not null ||
                     persistedHistoryBinding is not null ||
@@ -483,7 +495,7 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                     DurableAgentStateHistoryBinding bindingToSeal =
                         existingHistoryBinding ??
                         DurableAgentHistoryBinding.MergeProvisionalMetadata(
-                            finalHistoryBinding,
+                            finalHistoryBinding!,
                             persistedHistoryBinding);
                     workingState = DurableAgentHistoryBinding.Seal(
                         workingState,
@@ -538,6 +550,7 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             return response;
         }
         catch (InvalidOperationException exception) when (
+            fixedOwnershipContractActive &&
             IsPostResponseServiceHistoryFailure(
                 exception,
                 validatedHistoryConfiguration.ChatClientAgent))
@@ -553,13 +566,19 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         catch (Exception exception)
         {
             logger.LogDurableAgentExecutionFailed(exception, sessionId);
-            if (providerInvocationActive && providerSession is not null && agentWrapper is not null)
+            if (providerInvocationActive &&
+                providerSession is not null &&
+                invocationOwnership.HasValue)
             {
                 AgentResponse? committedFailure = await this.TryFinalizeProviderFailureAsync(
                     exception,
-                    agentWrapper,
+                    agent,
                     providerSession,
+                    invocationChatClientAgent,
+                    invocationOwnership.Value,
+                    durableHistoryProvider,
                     workingState,
+                    request,
                     correlationId,
                     sessionId,
                     logger).ConfigureAwait(false);
@@ -580,9 +599,13 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
 
     private async Task<AgentResponse?> TryFinalizeProviderFailureAsync(
         Exception exception,
-        EntityAgentWrapper agentWrapper,
+        AIAgent agent,
         AgentSession providerSession,
+        ChatClientAgent? chatClientAgent,
+        DurableAgentHistoryOwnership ownership,
+        DurableChatHistoryProvider? durableHistoryProvider,
         DurableAgentState workingState,
+        RunRequest request,
         string correlationId,
         AgentSessionId sessionId,
         ILogger logger)
@@ -600,12 +623,21 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             return null;
         }
 
-        // A provider adapter must attest the accepted input and finality. Session serialization is still
-        // performed by the configured agent; any serialization/validation failure aborts this path and
-        // leaves the previously committed entity state intact.
-        workingState.Data.Session = await agentWrapper.SerializeSessionAsync(
+        // A provider adapter must attest the accepted input and finality. Request staging and session
+        // serialization use the same owner-aware paths as successful finalization; any failure aborts
+        // this path and leaves the previously committed entity state intact.
+        FinalizeAcceptedRequest(
+            workingState,
+            request,
+            ownership,
+            durableHistoryProvider,
+            logger);
+        workingState.Data.Session = await SerializeSessionWithoutDuplicateHistoryAsync(
+            agent,
             providerSession,
-            cancellationToken: this._cancellationToken).ConfigureAwait(false);
+            chatClientAgent,
+            ownership,
+            this._cancellationToken).ConfigureAwait(false);
 
         DateTimeOffset completedAt = this._timeProvider.GetUtcNow();
         DurableAgentStateTerminalError error = new()
@@ -679,12 +711,10 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         RunRequest request,
         DurableAgentHistoryOwnership ownership,
         bool contextPipelineSuppliesHistory,
-        DurableAgentHistoryReplayMode historyReplayMode,
         bool isLegacyState)
     {
         if (contextPipelineSuppliesHistory ||
-            ownership == DurableAgentHistoryOwnership.AgentSession ||
-            historyReplayMode == DurableAgentHistoryReplayMode.CurrentRequestOnly)
+            ownership == DurableAgentHistoryOwnership.AgentSession)
         {
             // A MAF history/context pipeline or a server-owned opaque session supplies prior context.
             // Passing stored history here as well would duplicate messages.
@@ -739,6 +769,23 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion
                 ? DurableAgentStateResponse.FromResponseV2(request.CorrelationId, response, logger)
                 : DurableAgentStateResponse.FromResponse(request.CorrelationId, response, logger));
+    }
+
+    private static void FinalizeAcceptedRequest(
+        DurableAgentState workingState,
+        RunRequest request,
+        DurableAgentHistoryOwnership ownership,
+        DurableChatHistoryProvider? durableHistoryProvider,
+        ILogger logger)
+    {
+        if (ownership != DurableAgentHistoryOwnership.Entity ||
+            durableHistoryProvider?.HasStagedTurn is true)
+        {
+            return;
+        }
+
+        workingState.Data.ConversationHistory.Add(
+            DurableAgentStateRequest.FromRunRequestV2(request, logger));
     }
 
     private static ValueTask<JsonElement> SerializeSessionWithoutDuplicateHistoryAsync(

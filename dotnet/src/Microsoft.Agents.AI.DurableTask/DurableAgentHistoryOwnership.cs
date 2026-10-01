@@ -1,7 +1,5 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
-using Microsoft.Agents.AI.Compaction;
-
 namespace Microsoft.Agents.AI.DurableTask;
 
 /// <summary>
@@ -109,9 +107,13 @@ internal static class DurableAgentHistoryOwnershipResolver
     /// Agent Framework does not currently expose a public traversal contract for providers hidden
     /// inside custom or builder-installed decorators, so those pipelines cannot be inspected here.
     /// </remarks>
-    public static void ValidateStaticConfiguration(AIAgent agent)
+    public static void ValidateStaticConfiguration(
+        AIAgent agent,
+        bool enforceFixedOwnershipContract = false)
     {
-        ValidateStaticConfiguration(FindChatClientAgent(agent));
+        ValidateStaticConfiguration(
+            FindChatClientAgent(agent),
+            enforceFixedOwnershipContract);
     }
 
     /// <summary>
@@ -120,10 +122,13 @@ internal static class DurableAgentHistoryOwnershipResolver
     /// </summary>
     public static ValidatedDurableAgentHistoryConfiguration ValidateRunConfiguration(
         AIAgent agent,
-        bool serviceManagedPerServiceCallHistory = false)
+        bool serviceManagedPerServiceCallHistory = false,
+        bool enforceFixedOwnershipContract = true)
     {
         ChatClientAgent? chatClientAgent = FindChatClientAgent(agent);
-        ValidateStaticConfiguration(chatClientAgent);
+        ValidateStaticConfiguration(
+            chatClientAgent,
+            enforceFixedOwnershipContract);
         if (chatClientAgent is null)
         {
             return default;
@@ -133,6 +138,13 @@ internal static class DurableAgentHistoryOwnershipResolver
         bool requiresPerServiceCallPersistence =
             chatClientAgent.GetService<ChatClientAgentOptions>()?.RequirePerServiceCallChatHistoryPersistence is true;
 #pragma warning restore MAAI001
+        if (!enforceFixedOwnershipContract)
+        {
+            // Schema 1 preserves the pre-profile behavior: the registered Agent Framework pipeline
+            // remains authoritative and the entity continues to mirror the completed outer turn.
+            return new(chatClientAgent, RequiresPerServiceCallPersistence: false);
+        }
+
         if (!requiresPerServiceCallPersistence)
         {
             return new(chatClientAgent, RequiresPerServiceCallPersistence: false);
@@ -157,9 +169,11 @@ internal static class DurableAgentHistoryOwnershipResolver
         return new(chatClientAgent, RequiresPerServiceCallPersistence: true);
     }
 
-    private static void ValidateStaticConfiguration(ChatClientAgent? chatClientAgent)
+    private static void ValidateStaticConfiguration(
+        ChatClientAgent? chatClientAgent,
+        bool enforceFixedOwnershipContract)
     {
-        if (chatClientAgent is null)
+        if (chatClientAgent is null || !enforceFixedOwnershipContract)
         {
             return;
         }
@@ -168,11 +182,6 @@ internal static class DurableAgentHistoryOwnershipResolver
         ChatClientAgentOptions? options =
             chatClientAgent.GetService<ChatClientAgentOptions>();
 #pragma warning restore MAAI001
-        if (HasStatefulCompaction(chatClientAgent))
-        {
-            throw new DurableAgentCompactionNotSupportedException();
-        }
-
         if (options?.ChatHistoryProvider is InMemoryChatHistoryProvider)
         {
             throw new DurableAgentHistoryOwnershipNotSupportedException(
@@ -182,17 +191,5 @@ internal static class DurableAgentHistoryOwnershipResolver
                 "silently change history semantics. Use the implicit default provider or a custom " +
                 "external provider with a stable logical key.");
         }
-    }
-
-    private static bool HasStatefulCompaction(ChatClientAgent chatClientAgent)
-    {
-#pragma warning disable MAAI001
-        if (chatClientAgent.AIContextProviders?.Any(provider => provider is CompactionProvider) is true)
-#pragma warning restore MAAI001
-        {
-            return true;
-        }
-
-        return chatClientAgent.ChatHistoryProvider is InMemoryChatHistoryProvider { ChatReducer: not null };
     }
 }

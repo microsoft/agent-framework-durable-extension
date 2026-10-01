@@ -218,6 +218,49 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
+    public async Task DefaultSchemaWritesPreserveCustomProviderCompatibilityAsync()
+    {
+        RecordingChatClient client = new();
+        RecordingHistoryProvider provider = new();
+        EntityHarness harness = CreateHarness(
+            CreateAgentWithProvider(client, provider),
+            new DurableAgentState(),
+            enableMailboxWrites: false);
+
+        await harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" });
+
+        DurableAgentState persisted = Assert.IsType<DurableAgentState>(harness.PersistedState);
+        Assert.Equal(DurableAgentState.CurrentSchemaVersion, persisted.SchemaVersion);
+        Assert.Equal(1, provider.LoadCount);
+        Assert.Equal(1, provider.StoreCount);
+        Assert.Equal(1, client.InvocationCount);
+        Assert.Equal(2, persisted.Data.ConversationHistory.Count);
+        Assert.Equal(JsonValueKind.Undefined, persisted.Data.HistoryBinding.ValueKind);
+        Assert.Null(persisted.Data.TerminalResults);
+        Assert.Null(persisted.Data.CompletionReceipts);
+    }
+
+    [Fact]
+    public async Task DefaultSchemaWritesPreserveFirstServiceTransitionCompatibilityAsync()
+    {
+        RecordingChatClient client = new() { ResponseConversationId = "service-id" };
+        EntityHarness harness = CreateHarness(
+            new ChatClientAgent(client, name: "agent"),
+            new DurableAgentState(),
+            enableMailboxWrites: false);
+
+        await harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" });
+
+        DurableAgentState persisted = Assert.IsType<DurableAgentState>(harness.PersistedState);
+        Assert.Equal(1, client.InvocationCount);
+        Assert.Equal(2, persisted.Data.ConversationHistory.Count);
+        Assert.Equal(JsonValueKind.Undefined, persisted.Data.HistoryBinding.ValueKind);
+        Assert.Equal(
+            "service-id",
+            persisted.Data.Session?.GetProperty("conversationId").GetString());
+    }
+
+    [Fact]
     public async Task ServiceManagedConversationStoresOnlyMailboxAndContinuationAsync()
     {
         RecordingChatClient client = new();
@@ -249,6 +292,32 @@ public sealed class AgentEntityHistoryTests
         Assert.Equal(
             "service-id",
             persisted.Data.Session?.GetProperty("conversationId").GetString());
+    }
+
+    [Fact]
+    public async Task KnownServiceOwnerWithoutProviderKeyFailsBeforeModelAsync()
+    {
+        RecordingChatClient client = new();
+        ChatClientAgent agent = new(client, name: "agent");
+        AgentSession serviceSession = await agent.CreateSessionAsync("service-id");
+        DurableAgentState state = new()
+        {
+            SchemaVersion = DurableAgentState.RevisedSchemaVersion,
+            PersistentRequestOutcomesAuthorized = true,
+            Data = new DurableAgentStateData
+            {
+                TerminalResults = new Dictionary<string, DurableAgentStateTerminalResult>(),
+                CompletionReceipts = new Dictionary<string, DurableAgentStateCompletionReceipt>(),
+                Session = await agent.SerializeSessionAsync(serviceSession),
+            },
+        };
+        EntityHarness harness = CreateHarness(agent, state);
+
+        await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
+            () => harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" }));
+
+        Assert.Equal(0, client.InvocationCount);
+        Assert.False(harness.StateWasPersisted);
     }
 
     [Fact]
@@ -416,42 +485,45 @@ public sealed class AgentEntityHistoryTests
         Assert.False(harness.StateWasPersisted);
     }
 
-    [Theory]
-    [InlineData("entity")]
-    [InlineData("external")]
-    [InlineData("service")]
-    public async Task StatefulCompactionFailsBeforeEntityExecutionAsync(string ownership)
+    [Fact]
+    public async Task ModelInputCompactionRunsWithoutPruningDurableHistoryAsync()
     {
         RecordingChatClient client = new();
-        ChatHistoryProvider? historyProvider = ownership == "external"
-            ? new RecordingHistoryProvider()
-            : null;
+        CompactionProvider compactionProvider = new(
+            new SlidingWindowCompactionStrategy(
+                trigger: _ => true,
+                minimumPreservedTurns: 1,
+                target: index => index.IncludedTurnCount <= 1),
+            stateKey: "durable-compaction");
         ChatClientAgent agent = new(
             client,
             new ChatClientAgentOptions
             {
                 Name = "agent",
-                ChatHistoryProvider = historyProvider,
                 AIContextProviders =
                 [
-                    new CompactionProvider(
-                        new SlidingWindowCompactionStrategy(_ => true)),
+                    compactionProvider,
                 ],
             });
-        DurableAgentState state = new();
-        if (ownership == "service")
-        {
-            state.Data.Session = await agent.SerializeSessionAsync(
-                await agent.CreateSessionAsync("service-id"));
-        }
+        DurableAgentState state = CreateStateWithExchange("old", "old request", "old response");
 
-        Assert.Throws<DurableAgentCompactionNotSupportedException>(
-            () => CreateHarness(agent, state));
-        Assert.Equal(0, client.InvocationCount);
+        DurableAgentState persisted = await RunEntityAsync(
+            agent,
+            state,
+            new RunRequest("new request") { CorrelationId = "new" });
+
+        Assert.Equal(1, client.InvocationCount);
+        Assert.Equal(["new request"], client.LastMessages.Select(message => message.Text));
+        Assert.Equal(4, persisted.Data.ConversationHistory.Count);
+        JsonElement serializedSession = persisted.Data.Session.GetValueOrDefault();
+        Assert.True(
+            serializedSession.GetProperty("stateBag").TryGetProperty(
+                "durable-compaction",
+                out _));
     }
 
     [Fact]
-    public async Task FactoryAgentValidationRunsOnceBeforeSessionOrModelSideEffectsAsync()
+    public async Task FactoryAgentWithCompactionIsConstructedOnceAndExecutesAsync()
     {
         RecordingChatClient client = new();
         ChatClientAgent agent = new(
@@ -472,12 +544,11 @@ public sealed class AgentEntityHistoryTests
             registerWithFactory: true,
             onFactoryInvoked: () => factoryInvocationCount++);
 
-        await Assert.ThrowsAsync<DurableAgentCompactionNotSupportedException>(
-            () => harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" }));
+        await harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" });
 
         Assert.Equal(1, factoryInvocationCount);
-        Assert.Equal(0, client.InvocationCount);
-        Assert.False(harness.StateWasPersisted);
+        Assert.Equal(1, client.InvocationCount);
+        Assert.True(harness.StateWasPersisted);
     }
 
     [Fact]
@@ -586,6 +657,25 @@ public sealed class AgentEntityHistoryTests
         Assert.Equal(4, persisted.Data.TerminalResults?.Count);
         Assert.Contains("new", persisted.Data.TerminalResults!.Keys);
         Assert.NotNull(persisted.Data.Session);
+    }
+
+    [Fact]
+    public async Task CurrentRequestOnlyDoesNotOverrideDiscoverableEntityHistoryAsync()
+    {
+        RecordingChatClient client = new();
+        ChatClientAgent agent = new(client, name: "agent");
+        DurableAgentState initialState = CreateStateWithExchange("old", "old request", "old response");
+
+        DurableAgentState persisted = await RunEntityAsync(
+            agent,
+            initialState,
+            new RunRequest("new request") { CorrelationId = "new" },
+            options => options.ReplayMode = DurableAgentHistoryReplayMode.CurrentRequestOnly);
+
+        Assert.Equal(
+            ["old request", "old response", "new request"],
+            client.LastMessages.Select(message => message.Text));
+        Assert.Equal(DurableAgentStateHistoryBinding.DurableStateOwner, GetBinding(persisted)?.OwnerKind);
     }
 
     [Fact]
@@ -1079,6 +1169,34 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
+    public async Task DefaultSchemaWritesPreserveExplicitInMemoryProviderCompatibilityAsync()
+    {
+        RecordingChatClient client = new();
+        ChatClientAgent agent = new(
+            client,
+            new ChatClientAgentOptions
+            {
+                Name = "agent",
+                ChatHistoryProvider = new InMemoryChatHistoryProvider(
+                    new InMemoryChatHistoryProviderOptions
+                    {
+                        StorageInputRequestMessageFilter = messages => messages.TakeLast(1),
+                    }),
+            });
+        EntityHarness harness = CreateHarness(
+            agent,
+            new DurableAgentState(),
+            enableMailboxWrites: false);
+
+        await harness.RunAsync(new RunRequest("new") { CorrelationId = "new" });
+
+        DurableAgentState persisted = Assert.IsType<DurableAgentState>(harness.PersistedState);
+        Assert.Equal(1, client.InvocationCount);
+        Assert.Equal(2, persisted.Data.ConversationHistory.Count);
+        Assert.Equal(JsonValueKind.Undefined, persisted.Data.HistoryBinding.ValueKind);
+    }
+
+    [Fact]
     public async Task ExternalProviderRequiresEveryDeclaredContinuationKeyAsync()
     {
         MultiKeyHistoryProvider provider = new(writeSecondKey: false);
@@ -1424,6 +1542,64 @@ public sealed class AgentEntityHistoryTests
 
         Assert.Contains("remote service may already have observed", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(1, transitioningClient.InvocationCount);
+        Assert.False(harness.StateWasPersisted);
+    }
+
+    [Fact]
+    public async Task PerCallOwnerTransitionAgainstEntityBindingFailsBeforeCallbacksAsync()
+    {
+        DurableAgentState entityOwnedState = await RunEntityAsync(
+            new ChatClientAgent(new RecordingChatClient(), name: "agent"),
+            new DurableAgentState(),
+            new RunRequest("first") { CorrelationId = "first" });
+        RecordingChatClient replacementClient = new();
+#pragma warning disable MAAI001
+        ChatClientAgent replacementAgent = new(
+            replacementClient,
+            new ChatClientAgentOptions
+            {
+                Name = "agent",
+                RequirePerServiceCallChatHistoryPersistence = true,
+            });
+#pragma warning restore MAAI001
+        EntityHarness harness = CreateHarness(
+            replacementAgent,
+            DeserializeState(SerializeState(entityOwnedState)),
+            options =>
+            {
+                options.ServiceManagedPerServiceCallHistory = true;
+                options.ProviderKey = new("model-service.v1");
+            });
+
+        await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
+            () => harness.RunAsync(new RunRequest("second") { CorrelationId = "second" }));
+
+        Assert.Equal(0, replacementClient.InvocationCount);
+        Assert.False(harness.StateWasPersisted);
+    }
+
+    [Fact]
+    public async Task RestoredServiceOwnerAgainstEntityBindingFailsBeforeModelAsync()
+    {
+        DurableAgentState entityOwnedState = await RunEntityAsync(
+            new ChatClientAgent(new RecordingChatClient(), name: "agent"),
+            new DurableAgentState(),
+            new RunRequest("first") { CorrelationId = "first" });
+        RecordingChatClient replacementClient = new();
+        ChatClientAgent replacementAgent = new(replacementClient, name: "agent");
+        JsonElement serviceSession = await replacementAgent.SerializeSessionAsync(
+            await replacementAgent.CreateSessionAsync("service-id"));
+        EntityHarness harness = CreateHarness(
+            replacementAgent,
+            CopyState(
+                DeserializeState(SerializeState(entityOwnedState)),
+                serviceSession),
+            options => options.ProviderKey = new("model-service.v1"));
+
+        await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
+            () => harness.RunAsync(new RunRequest("second") { CorrelationId = "second" }));
+
+        Assert.Equal(0, replacementClient.InvocationCount);
         Assert.False(harness.StateWasPersisted);
     }
 

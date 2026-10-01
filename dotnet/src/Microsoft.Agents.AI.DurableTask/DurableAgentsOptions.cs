@@ -199,9 +199,9 @@ public sealed class DurableAgentsOptions
     /// <remarks>
     /// Registering an agent that a workflow already discovered is allowed: the explicit registration takes over,
     /// so an agent can be promoted to a standalone agent regardless of whether the workflow was configured first.
-    /// Static pipeline incompatibilities such as stateful compaction are rejected during this call. Validation that
-    /// depends on the completed options composition or restored session remains at entity execution time, before
-    /// provider, session, or model side effects.
+    /// Static fixed-owner incompatibilities are rejected during this call when the internal schema 2 writer is
+    /// active. Validation that depends on the completed options composition or restored session remains at entity
+    /// execution time, before provider, session, or model side effects.
     /// </remarks>
     public DurableAgentsOptions AddAIAgent(
         AIAgent agent,
@@ -217,7 +217,9 @@ public sealed class DurableAgentsOptions
 
         // Direct registrations expose the constructed pipeline, so reject static incompatibilities now.
         // Factory registrations are validated after their single per-operation construction.
-        DurableAgentHistoryOwnershipResolver.ValidateStaticConfiguration(agent);
+        DurableAgentHistoryOwnershipResolver.ValidateStaticConfiguration(
+            agent,
+            this.EnablePersistentRequestOutcomes);
         DurableAgentHistoryConfiguration historyConfiguration = CreateHistoryConfiguration(configureHistory);
         this.AddExplicitAgentFactory(agent.Name, sp => agent, nameof(agent));
         this._historyConfigurations[agent.Name] = historyConfiguration;

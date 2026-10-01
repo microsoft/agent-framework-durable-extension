@@ -221,10 +221,18 @@ workflow format; shared entity-state fixture compatibility is a separate contrac
 
 The shared schema 2 `historyBinding` remains optional, provisional configuration metadata. It does not
 pin an effective owner or prohibit Python or other runtimes from supporting per-run transitions.
-The C# durable-agent runtime applies a stricter profile: after the first successful turn it marks and
-seals one logical owner using the binding version, owner kind, and a stable non-secret provider key.
+When the internal schema 2 writer is active, the C# durable-agent runtime applies a stricter profile:
+after the first successful turn it marks and seals one logical owner using the binding version, owner
+kind, and a stable non-secret provider key.
 Later C# turns must restore the same continuation and resolve the same identity; mismatches fail instead
 of silently resetting, migrating, or starting another logical conversation.
+
+Schema 2 production writes remain default-off and have no public activation API in this release.
+Under the public defaults, schema 1 operations preserve the existing Agent Framework behavior:
+custom history providers, explicit in-memory providers, and model-service conversation IDs can execute,
+the entity retains the completed outer turn, and no fixed `historyBinding` is created. The registration
+history options below become enforceable only with the internal schema 2 rollout gate; they do not
+silently activate schema 2.
 
 The default in-memory history pipeline is entity-owned and appends its model transcript to
 `conversationHistory`. Custom providers, model services, and opaque `CurrentRequestOnly` agents remain
@@ -251,22 +259,30 @@ The key must not contain credentials or be inferred from CLR type names, process
 session keys. Legacy non-entity adoption requires owner-specific public evidence: a normal service
 conversation ID or a custom provider's declared `StateKeys`. Opaque `CurrentRequestOnly` and legacy
 per-service-call sessions cannot prove their prior owner through the pinned public contracts and require
-a new durable session.
+a new durable session. When an imported provisional binding already supplies a valid key, C# intentionally
+uses that persisted key if registration omits one, then seals the same identity; a later explicit key must
+match it.
 
 Provider/model/session work, mailbox completion, TTL preparation, and entity transcript updates share
-one isolated working-state commit boundary. Remote services can still observe a call before a later
-ownership or serialization failure; those transition errors report that limitation explicitly.
+one isolated working-state commit boundary. External provider and model-service stores are outside that
+transaction. Their adapters must make writes idempotent and treat an exception or lost acknowledgement as
+an uncertain outcome rather than assuming that the remote write did not occur. Remote services can still
+observe a call before a genuinely response-discovered ownership transition or later serialization failure;
+those transition errors report that limitation explicitly. Owner, key, and continuation conflicts that are
+determinable from registration options and the restored session are rejected before provider/model callbacks.
 Local per-service-call provider persistence remains unsupported because public callbacks do not identify
 the final outer tool-loop response.
 
-Directly discoverable stateful `CompactionProvider` configurations and in-memory reducers are rejected.
-Explicitly configured `InMemoryChatHistoryProvider` instances are also rejected because the pinned public
-API does not expose their initializer and message-filter delegates for faithful transfer to the durable adapter.
-Use the implicit default in-memory provider for entity-owned history, or a custom external provider with a key.
+`CompactionProvider` remains supported for model-input compaction. Its opaque provider state is serialized
+inside the durable session and therefore counts toward the complete entity-state size budget, while the
+authoritative durable transcript is not pruned or rewritten to follow that compaction. Store-pruning
+`FollowCompaction` behavior remains deferred. Explicitly configured `InMemoryChatHistoryProvider` instances
+are rejected only by the active fixed-owner profile because the pinned public API does not expose their
+initializer and message-filter delegates for faithful transfer to the durable adapter. Use the implicit
+default in-memory provider for schema 2 entity-owned history, or a custom external provider with a key.
 The pinned Agent Framework API cannot universally inspect builder-installed or privately nested provider
-decorators. Hidden stateful-compaction pipelines are unsupported but cannot be reliably rejected before
-side effects without an upstream public discovery hook; this implementation does not use reflection,
-type-name scanning, guessed session keys, or factory double invocation.
+decorators; this implementation does not use reflection, type-name scanning, guessed session keys, or
+factory double invocation.
 
 ## Feedback & Contributing
 

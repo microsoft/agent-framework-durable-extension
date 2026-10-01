@@ -84,7 +84,7 @@ The operation begins by resolving the correlation before constructing or invokin
 
 After the outer agent response completes, `AgentEntity` re-evaluates history ownership because a model service can establish a conversation ID during the call. It then finalizes only the transcript owned by the entity, serializes the session without duplicating entity-owned in-memory history, seals the fixed binding, and calls `DurableAgentStateOutcomeResolver.AddSuccessfulResult`. The result and receipt are therefore part of the same working state as session continuation, binding, transcript, TTL, ingestion bookkeeping, and retention evidence.
 
-Setting `State` and scheduling entity self-signals use the Durable Entity operation/outbox commit. External model calls, tool calls, model-service conversations, and custom history-provider writes occur outside that transaction and require their own idempotency behavior.
+Setting `State` and scheduling entity self-signals use the Durable Entity operation/outbox commit. External model calls, tool calls, model-service conversations, and custom history-provider writes occur outside that transaction and require their own idempotency behavior. A provider or service adapter must treat a failed or missing acknowledgement as uncertain because the remote write may have completed even when the entity operation later fails.
 
 ## Duplicate and polling flow
 
@@ -117,11 +117,11 @@ History ownership controls where prior model context comes from; it does not con
 | `AgentSession` | Opaque restored session for a generic agent | Only the current request is passed |
 | `NoContextPipeline` | No discoverable Agent Framework context pipeline | `DurableAgentHistoryReplayMode` selects entity preload or current-request-only behavior |
 
-On each cold operation, `DurableAgentSessionState.RestoreAsync` reconstructs the session. `DurableAgentHistoryOwnershipResolver` inspects the public Agent Framework surface available from the agent and session, applies the configured replay policy, and produces the effective owner. `DurableAgentHistoryBinding` compares that owner with the persisted fixed binding and rejects a different owner or provider identity before model execution.
+When the internal schema 2 writer is active, each cold operation uses `DurableAgentSessionState.RestoreAsync` to reconstruct the session. `DurableAgentHistoryOwnershipResolver` inspects the public Agent Framework surface available from the agent and session, applies the configured replay policy, and produces the effective owner. `DurableAgentHistoryBinding` compares that owner with the persisted fixed binding and rejects a different owner or provider identity before model execution. Schema 1 remains the public default and preserves the pre-profile behavior without creating or enforcing a fixed binding.
 
 After execution, ownership is resolved again. A newly assigned real service conversation ID can transition a provisional first turn to service ownership. The final binding and serialized continuation are validated and committed together. Later workers must restore the same logical owner.
 
-The application or external provider remains responsible for availability, authorization, retention, deletion, residency, and consistency of history stored outside the entity. The durable extension is responsible for restoring the recorded continuation, selecting only one context source, and failing closed when it cannot prove a compatible owner.
+The application or external provider remains responsible for availability, authorization, retention, deletion, residency, consistency, idempotency, and uncertain acknowledgement handling for history stored outside the entity. The durable extension is responsible for restoring the recorded continuation, selecting only one context source, and failing closed when it cannot prove a compatible owner.
 
 ## History configuration
 
@@ -143,7 +143,7 @@ These are independent mechanisms:
 
 `AgentEntity.ApplyRetentionAndCommit` performs due result expiry, writes the next generation-aware expiry schedule, invokes `DurableAgentStateRetention.Enforce`, validates serialization, schedules required self-signals, and finally replaces entity state. Automatic retention measures the complete serialized extension state, starts eviction at 85% of `MaxStateBytes`, and targets 70%. It fails the operation with `DurableAgentStateSizeLimitExceededException` when protected state cannot fit rather than deleting correctness-critical data.
 
-Model-context compaction is not pressure retention. Stateful compaction is rejected by the ownership layer because the current public Agent Framework contracts do not allow the durable runtime to prove safe replay and persistence behavior.
+Model-context compaction is not pressure retention. `CompactionProvider` may reduce only the messages sent to the model; its serialized session state counts toward the complete entity-state budget, and the durable transcript remains unchanged. Store-pruning behavior that follows compaction is deferred.
 
 ## Failure boundary
 

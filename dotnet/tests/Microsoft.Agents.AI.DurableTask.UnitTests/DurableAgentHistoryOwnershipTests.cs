@@ -53,7 +53,9 @@ public sealed class DurableAgentHistoryOwnershipTests
 
         DurableAgentHistoryOwnershipNotSupportedException exception =
             Assert.Throws<DurableAgentHistoryOwnershipNotSupportedException>(
-                () => DurableAgentHistoryOwnershipResolver.ValidateStaticConfiguration(chatAgent));
+                () => DurableAgentHistoryOwnershipResolver.ValidateStaticConfiguration(
+                    chatAgent,
+                    enforceFixedOwnershipContract: true));
 
         Assert.Contains("Explicitly configured", exception.Message, StringComparison.Ordinal);
     }
@@ -330,7 +332,7 @@ public sealed class DurableAgentHistoryOwnershipTests
     }
 
     [Fact]
-    public void DirectAgentRegistrationRejectsStaticCompactionConfiguration()
+    public void DirectAgentRegistrationAllowsModelInputCompaction()
     {
         ChatClientAgent agent = new(
             new StubChatClient(),
@@ -345,8 +347,9 @@ public sealed class DurableAgentHistoryOwnershipTests
             });
         DurableAgentsOptions options = new();
 
-        Assert.Throws<DurableAgentCompactionNotSupportedException>(
-            () => options.AddAIAgent(agent));
+        options.AddAIAgent(agent);
+
+        Assert.True(options.ContainsAgent("agent"));
     }
 
     [Fact]
@@ -406,7 +409,7 @@ public sealed class DurableAgentHistoryOwnershipTests
     }
 
     [Fact]
-    public async Task StatefulReducerFailsBeforeExecutionAsync()
+    public async Task StatefulReducerRemainsAvailableUnderLegacySchemaWritesAsync()
     {
         ChatClientAgent chatAgent = new(
             new StubChatClient(),
@@ -421,14 +424,20 @@ public sealed class DurableAgentHistoryOwnershipTests
             });
         AgentSession session = await chatAgent.CreateSessionAsync();
 
-        Assert.Throws<DurableAgentCompactionNotSupportedException>(
-            () => DurableAgentHistoryOwnershipResolver.Resolve(chatAgent, session));
+        ValidatedDurableAgentHistoryConfiguration configuration =
+            DurableAgentHistoryOwnershipResolver.ValidateRunConfiguration(
+                chatAgent,
+                enforceFixedOwnershipContract: false);
+        (DurableAgentHistoryOwnership ownership, _) =
+            DurableAgentHistoryOwnershipResolver.Resolve(session, configuration);
+
+        Assert.Equal(DurableAgentHistoryOwnership.Entity, ownership);
     }
 
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task CompactionProviderFailsForExternalAndServiceOwnershipAsync(bool serviceOwned)
+    public async Task CompactionProviderPreservesResolvedExternalAndServiceOwnershipAsync(bool serviceOwned)
     {
         ChatClientAgent chatAgent = new(
             new StubChatClient(),
@@ -446,8 +455,14 @@ public sealed class DurableAgentHistoryOwnershipTests
             ? await chatAgent.CreateSessionAsync("service-id")
             : await chatAgent.CreateSessionAsync();
 
-        Assert.Throws<DurableAgentCompactionNotSupportedException>(
-            () => DurableAgentHistoryOwnershipResolver.Resolve(chatAgent, session));
+        (DurableAgentHistoryOwnership ownership, _) =
+            DurableAgentHistoryOwnershipResolver.Resolve(chatAgent, session);
+
+        Assert.Equal(
+            serviceOwned
+                ? DurableAgentHistoryOwnership.Service
+                : DurableAgentHistoryOwnership.ExternalProvider,
+            ownership);
     }
 
     private sealed class TestDelegatingAgent(AIAgent innerAgent) : DelegatingAIAgent(innerAgent);
