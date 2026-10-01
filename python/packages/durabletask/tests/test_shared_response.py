@@ -23,6 +23,7 @@ from agent_framework_durabletask._response_utils import (
     preserve_input_envelope,
     serialize_agent_response,
 )
+from agent_framework_durabletask._shared_agent_state import DurableAgentStateUsage
 from agent_framework_durabletask._shared_response import (
     load_terminal_response,
     serialize_terminal_response,
@@ -40,7 +41,7 @@ CONTENT_CASES: list[tuple[str, dict[str, Any]]] = [
     ("functionResult", {"callId": "call", "result": None}),
     ("hostedFile", {"fileId": "file"}),
     ("hostedVectorStore", {"vectorStoreId": "vector"}),
-    ("usage", {"usage": {"inputTokenCount": 2**64, "extensionData": {"provider": [None, 1.25]}}}),
+    ("usage", {"usage": {"inputTokenCount": 2**63 - 1, "extensionData": {"provider": [None, 1.25]}}}),
     ("text", {"text": ""}),
     ("reasoning", {}),
     ("uri", {"uri": "https://example.test/no-inferred-media-type"}),
@@ -141,7 +142,7 @@ def test_every_shared_content_kind_roundtrips_unknowns_at_original_locations(kin
     payload.update({
         "extensionData": {"future": "explicit-response"},
         "future": [None],
-        "usage": {"inputTokenCount": 2**65, "extensionData": {"input_token_count": "collision"}, "future": 1.25},
+        "usage": {"inputTokenCount": 2**63 - 1, "extensionData": {"input_token_count": "collision"}, "future": 1.25},
     })
     _roundtrip(payload)
 
@@ -213,7 +214,7 @@ def test_core_response_instance_preserves_canonical_fields_without_inventing_nul
         response_id="response",
         agent_id="agent",
         finish_reason="stop",
-        usage_details={"input_token_count": 0, "output_token_count": 2**64},
+        usage_details={"input_token_count": 0, "output_token_count": 2**63 - 1},
         value=False,
     )
     shared = _assert_instance_matches_core_snapshot(response)
@@ -221,7 +222,7 @@ def test_core_response_instance_preserves_canonical_fields_without_inventing_nul
     assert shared["createdAt"] == "2026-09-16T00:00:00+00:00"
     canonical_content = serialize_agent_response(response)["messages"][0]["contents"][0]
     assert ("result" in shared["messages"][0]["contents"][0]) == ("result" in canonical_content)
-    assert shared["usage"] == {"inputTokenCount": 0, "outputTokenCount": 2**64}
+    assert shared["usage"] == {"inputTokenCount": 0, "outputTokenCount": 2**63 - 1}
     assert shared["value"] is False
     _roundtrip(shared)
 
@@ -233,6 +234,43 @@ def test_core_arbitrary_usage_metadata_is_not_coerced_or_dropped() -> None:
     expected_metadata = {key: value for key, value in usage.items() if key != "output_token_count"}
     assert shared["usage"]["extensionData"] == expected_metadata
     assert load_terminal_response(shared).usage_details == usage
+
+
+@pytest.mark.parametrize("field", ["input_token_count", "output_token_count", "total_token_count"])
+@pytest.mark.parametrize("value", [-1, 2**63, 2**80, float(2**63), True, 1.5, "1", [], {"value": None}])
+@pytest.mark.parametrize("content_usage", [False, True])
+def test_native_usage_outside_int64_is_rejected_without_rewriting(field: str, value: Any, content_usage: bool) -> None:
+    source: dict[str, Any] = {"type": "agent_response", "messages": []}
+    if content_usage:
+        source = _core_with({"type": "usage", "usage_details": {field: value}})
+    else:
+        source["usage_details"] = {field: value}
+    before = deepcopy(source)
+    with pytest.raises(ValueError):
+        serialize_terminal_response(source)
+    with pytest.raises(ValueError):
+        DurableAgentStateUsage.from_usage({field: value})
+    assert source == before
+
+
+@pytest.mark.parametrize("value", [0, 0.0, 1.0, 2**53 + 1, 2**63 - 1])
+def test_native_counter_writers_keep_exact_values_and_opaque_metadata(value: int | float) -> None:
+    source = {"input_token_count": value, "provider": {"large": 2**80, "fraction": 0.25}}
+    expected = {"inputTokenCount": int(value), "extensionData": {"provider": source["provider"]}}
+    response = serialize_terminal_response({"type": "agent_response", "messages": [], "usage_details": source})
+    assert response["usage"] == expected
+    assert type(response["usage"]["inputTokenCount"]) is int
+    usage = DurableAgentStateUsage.from_usage(source)
+    assert usage is not None
+    assert usage.to_dict() == expected
+    assert type(usage.input_token_count) is int
+
+
+@pytest.mark.parametrize("field", ["inputTokenCount", "outputTokenCount", "totalTokenCount"])
+@pytest.mark.parametrize("value", [0, 1.0, 2**53 + 1, 2**63 - 1])
+def test_usage_int64_roundtrip_keeps_exact_values(field: str, value: int | float) -> None:
+    payload = {"messages": [], "usage": {field: value, "extensionData": {"opaque": 2**80}}}
+    _roundtrip(payload)
 
 
 @pytest.mark.parametrize("kind", get_args(get_type_hints(Content.__init__)["type"]))
@@ -659,7 +697,7 @@ CORE_CATEGORIES: dict[str, dict[str, dict[str, Any]]] = {
     "media": {"data": DATA, "uri": {"uri": "urn:asset", "media_type": "image/png"}},
     "diagnostics": {
         "error": {"message": "failure", "error_code": "test", "error_details": "details"},
-        "usage": {"usage_details": {"input_token_count": 0, "total_token_count": 2**64, "provider": None}},
+        "usage": {"usage_details": {"input_token_count": 0, "total_token_count": 2**63 - 1, "provider": None}},
     },
     "function": {
         "function_call": {**CALL, "informational_only": True},

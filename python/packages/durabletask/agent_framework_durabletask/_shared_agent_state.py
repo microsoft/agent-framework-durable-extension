@@ -33,9 +33,12 @@ from ._response_utils import (
     serialize_input_message,
 )
 from ._shared_state_validation import (
+    load_state_json,
+    validate_counter,
     validate_shared_data,
     validate_shared_state,
     validate_timestamp,
+    validate_usage,
 )
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -677,7 +680,7 @@ class DurableAgentState:
     @classmethod
     def from_json(cls, json_str: str) -> DurableAgentState:
         try:
-            obj = json.loads(json_str)
+            obj = load_state_json(json_str)
         except json.JSONDecodeError as exc:
             raise ValueError("The durable agent state is not valid JSON.") from exc
 
@@ -1500,10 +1503,12 @@ class DurableAgentStateUsage:
         result = {**self.unknown_fields, **{key: value for key, value in counts.items() if value is not None}}
         if self.extensionData is not None:
             result[DurableStateFields.EXTENSION_DATA] = self.extensionData
+        validate_usage(result)
         return _json_snapshot(result)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DurableAgentStateUsage:
+        validate_usage(data)
         data = deepcopy(data)
         usage = cls(
             input_token_count=data.get(DurableStateFields.INPUT_TOKEN_COUNT),
@@ -1525,7 +1530,11 @@ class DurableAgentStateUsage:
         if usage is None:
             return None
 
-        counts = {key: value for key, value in usage.items() if type(value) is int}
+        counts: dict[str, int] = {}
+        for key, value in usage.items():
+            if key in DurableAgentStateUsage._STANDARD_USAGE_FIELDS and value is not None:
+                validate_counter(value, "usage count")
+                counts[key] = int(value)
         extension_data: dict[str, Any] = {
             key: deepcopy(value)
             for key, value in usage.items()

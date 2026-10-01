@@ -255,6 +255,39 @@ def test_state_tag_does_not_coerce_nonobject_state(value: Any) -> None:
     assert shim.encode_state() == json.dumps(value)
 
 
+@pytest.mark.parametrize(
+    "token,expected",
+    [
+        ("9223372036854775807.0", 2**63 - 1),
+        ("1.00000000000000001", None),
+        ("9223372036854775808.0", None),
+        ("0e9999999999999999999", 0),
+        ("1e-9999999999999999999", None),
+    ],
+)
+def test_state_shim_checks_exact_counter_tokens_without_changing_payloads(token: str, expected: int | None) -> None:
+    from agent_framework_durabletask._json_payload import JsonPayload
+
+    replay = _Replay()
+    wire = (
+        '{"schemaVersion":"2.0.0","data":{"conversationHistory":[],"terminalResults":{},"completionReceipts":{},"ingestedPositions":{"producer":'
+        + token
+        + "}}}"
+    )
+    shim = StateShim(wire, replay.worker._data_converter, is_serialized=True)
+    provider = DurableTaskEntityStateProvider()
+    provider._initialize_entity_context(
+        EntityContext("root", "read", shim, EntityInstanceId("dafx-json-agent", "key"), replay.worker._data_converter)
+    )
+    if expected is None:
+        with pytest.raises(ValueError):
+            _ = provider.state
+    else:
+        assert provider.state.data.ingested_positions == {"producer": expected}
+    assert shim.encode_state() == wire
+    assert replay.worker._data_converter.deserialize(wire, JsonPayload) == json.loads(wire)
+
+
 @pytest.mark.parametrize("marker", [False, True])
 @pytest.mark.parametrize("early", [False, True], ids=["waiting", "buffered"])
 def test_framework_event_preserves_json_for_waiting_and_buffered_delivery(marker: bool, early: bool) -> None:

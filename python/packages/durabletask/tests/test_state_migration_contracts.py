@@ -54,6 +54,15 @@ def _source() -> dict[str, Any]:
     }
 
 
+def test_migration_rejects_oversized_position_without_mutating_source() -> None:
+    source = _source()
+    source["data"]["ingestedPositions"] = {"upstream": 2**63}
+    before = deepcopy(source)
+    with pytest.raises(ValueError, match="Int64"):
+        _migrate(source)
+    assert source == before
+
+
 def _original_result(correlation: str = "done", *, outcome: str = "failed") -> dict[str, Any]:
     # Explicit synthetic ground truth. Never reconstruct completion time from retained entries.
     return {

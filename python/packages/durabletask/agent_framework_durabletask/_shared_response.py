@@ -49,7 +49,9 @@ from ._response_utils import (
 )
 from ._shared_state_validation import (
     _json_value,  # pyright: ignore[reportPrivateUsage]
+    validate_counter,
     validate_timestamp,
+    validate_usage,
 )
 
 _CORE_FIELDS = "pythonCoreFields"
@@ -154,14 +156,7 @@ def _timestamp(value: Any) -> None:
 
 
 def _validate_usage(value: Any) -> None:
-    usage = _object(value)
-    for name in _USAGE_FIELDS.values():
-        if name in usage and (isinstance(usage[name], bool) or not isinstance(usage[name], (int, float))):
-            raise ValueError("Shared token counts must be integers.")
-        if name in usage and isinstance(usage[name], float) and not usage[name].is_integer():
-            raise ValueError("Shared token counts must be integers.")
-    if "extensionData" in usage:
-        _object(usage["extensionData"])
+    validate_usage(value)
 
 
 def _validate_content(value: Any) -> None:
@@ -268,9 +263,9 @@ def _usage_to_shared(value: Any) -> dict[str, Any]:
     target: dict[str, Any] = {}
     extras: dict[str, Any] = {}
     for name, item in source.items():
-        # Non-numeric provider data, including null counts, remains explicit metadata.
-        if name in _USAGE_FIELDS and type(item) is int:
-            target[_USAGE_FIELDS[name]] = item
+        if name in _USAGE_FIELDS and item is not None:
+            validate_counter(item, "usage count")
+            target[_USAGE_FIELDS[name]] = int(item)
         else:
             extras[name] = item
     if extras:

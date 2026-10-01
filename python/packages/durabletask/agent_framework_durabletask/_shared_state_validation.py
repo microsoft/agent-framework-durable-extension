@@ -21,7 +21,7 @@ import math
 import re
 from collections.abc import Iterator
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
 _VERSIONS = ("1.0.0", "1.1.0", "1.2.0", "2.0.0")
@@ -138,14 +138,17 @@ def _enum(value: Any, choices: tuple[str, ...], name: str) -> str:
     return value
 
 
-def _integer(value: Any, name: str, minimum: int | None = None) -> None:
+def validate_counter(value: Any, name: str, minimum: int = 0) -> None:
+    """Require a known shared counter to fit its nonnegative Int64 range."""
     # JSON Schema integer includes integral floats, but excludes booleans.
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{name} must be an integer.")
     if isinstance(value, float) and (not math.isfinite(value) or not value.is_integer()):
         raise ValueError(f"{name} must be a finite integer.")
-    if minimum is not None and value < minimum:
+    if value < minimum:
         raise ValueError(f"{name} is below its minimum.")
+    if value > 9223372036854775807:
+        raise ValueError(f"{name} exceeds the Int64 maximum.")
 
 
 def _timestamp(value: Any, name: str) -> _Instant:
@@ -181,11 +184,12 @@ def timestamp_reached(deadline: str, *, now: datetime) -> bool:
     return _timestamp(now.isoformat(), "now") >= _timestamp(deadline, "deadline")
 
 
-def _usage(value: Any) -> None:
+def validate_usage(value: Any) -> None:
+    """Validate known usage counts while leaving provider metadata opaque."""
     usage = _object(value, "usage")
     for field in ("inputTokenCount", "outputTokenCount", "totalTokenCount"):
         if field in usage:
-            _integer(usage[field], f"usage.{field}")
+            validate_counter(usage[field], f"usage.{field}")
     if "extensionData" in usage:
         _object(usage["extensionData"], "usage.extensionData")
 
@@ -205,7 +209,7 @@ def _content(value: Any, *, v2: bool) -> None:
     if kind == "uri" and not v2:
         _required(content, ("mediaType",), "legacy URI content")
     if kind == "usage":
-        _usage(content["usage"])
+        validate_usage(content["usage"])
 
 
 def _messages(value: Any, *, v2: bool) -> None:
@@ -225,12 +229,9 @@ def _messages(value: Any, *, v2: bool) -> None:
 def _conversation(value: Any, *, v2: bool) -> None:
     for item in _array(value, "conversationHistory"):
         entry = _object(item, "conversation entry")
-        # Legacy 1.x validates common fields without interpreting a discriminator
-        # or kind-specific siblings. V2 requires a known discriminator and checks
-        # that kind's declared fields below.
-        kind = _enum(entry.get("$type"), _ENTRY_TYPES, "entry.$type") if v2 else None
+        kind = _enum(entry.get("$type"), _ENTRY_TYPES, "entry.$type") if v2 else entry.get("$type")
         if "correlationId" in entry:
-            if kind == "compaction":
+            if v2 and kind == "compaction":
                 raise ValueError("Compaction must not contain correlationId, including null.")
             if v2:
                 validate_identifier(entry["correlationId"], "entry.correlationId")
@@ -242,12 +243,12 @@ def _conversation(value: Any, *, v2: bool) -> None:
             _messages(entry["messages"], v2=v2)
         if "extensionData" in entry:
             _object(entry["extensionData"], "entry.extensionData")
-        if kind == "request":
+        if v2 and kind == "request":
             _strings(entry, ("orchestrationId", "responseType"), "entry")
             if "responseSchema" in entry:
                 _object(entry["responseSchema"], "entry.responseSchema")
         elif kind in ("response", "errorResponse") and "usage" in entry:
-            _usage(entry["usage"])
+            validate_usage(entry["usage"])
 
 
 def _response(value: Any) -> None:
@@ -262,7 +263,7 @@ def _response(value: Any) -> None:
     if "createdAt" in response:
         _timestamp(response["createdAt"], "response.createdAt")
     if "usage" in response:
-        _usage(response["usage"])
+        validate_usage(response["usage"])
     if "extensionData" in response:
         for key in _object(response["extensionData"], "response.extensionData"):
             validate_identifier(key, "response.extensionData key")
@@ -349,17 +350,107 @@ def _data(data: dict[str, Any], version: str) -> None:
         _timestamp(data["expirationTimeUtc"], "data.expirationTimeUtc")
     if "ingestedPositions" in data:
         for position in _object(data["ingestedPositions"], "data.ingestedPositions").values():
-            _integer(position, "ingested position", minimum=0)
+            validate_counter(position, "ingested position")
     if "truncation" in data:
         truncation = _object(data["truncation"], "data.truncation")
         _required(truncation, ("evictedMessageCount", "firstEvictedAt", "lastEvictedAt"), "truncation")
-        _integer(truncation["evictedMessageCount"], "truncation.evictedMessageCount", minimum=1)
+        validate_counter(truncation["evictedMessageCount"], "truncation.evictedMessageCount", minimum=1)
         first = _timestamp(truncation["firstEvictedAt"], "truncation.firstEvictedAt")
         last = _timestamp(truncation["lastEvictedAt"], "truncation.lastEvictedAt")
         if last < first:
             raise ValueError("truncation.lastEvictedAt must not precede firstEvictedAt.")
     if v2:
         _mailbox(data)
+
+
+def _objects(value: Any) -> Iterator[dict[str, Any]]:
+    if isinstance(value, list):
+        for item in cast(list[Any], value):
+            if isinstance(item, dict):
+                yield cast(dict[str, Any], item)
+
+
+def _counter_fields(data: dict[str, Any], *, v2: bool) -> Iterator[tuple[dict[str, Any], str, int, bool]]:
+    positions = data.get("ingestedPositions")
+    if isinstance(positions, dict):
+        positions = cast(dict[str, Any], positions)
+        for key in positions:
+            yield positions, key, 0, False
+    truncation = data.get("truncation")
+    if isinstance(truncation, dict) and "evictedMessageCount" in truncation:
+        yield cast(dict[str, Any], truncation), "evictedMessageCount", 1, False
+    responses = [
+        (entry, entry.get("$type") in ("response", "errorResponse"))
+        for entry in _objects(data.get("conversationHistory"))
+    ]
+    results = data.get("terminalResults")
+    if v2 and isinstance(results, dict):
+        for result in cast(dict[str, Any], results).values():
+            if isinstance(result, dict):
+                response = cast(dict[str, Any], result).get("response")
+                if isinstance(response, dict):
+                    responses.append((cast(dict[str, Any], response), True))
+    for response, owns_usage in responses:
+        usages = [response.get("usage")] if owns_usage else []
+        for message in _objects(response.get("messages")):
+            usages.extend(
+                content.get("usage") for content in _objects(message.get("contents")) if content.get("$type") == "usage"
+            )
+        for usage in usages:
+            if isinstance(usage, dict):
+                for field in ("inputTokenCount", "outputTokenCount", "totalTokenCount"):
+                    if field in usage:
+                        yield cast(dict[str, Any], usage), field, 0, True
+
+
+def validate_legacy_counters(data: dict[str, Any]) -> None:
+    """Check known counters before legacy decoding without tightening other legacy shapes."""
+    for owner, field, minimum, nullable in _counter_fields(data, v2=False):
+        if owner[field] is not None or not nullable:
+            validate_counter(owner[field], "shared counter", minimum=minimum)
+
+
+class _JsonNumber(str):
+    """Retain a JSON number token until its owning field is known."""
+
+
+def load_state_json(value: str) -> Any:
+    """Decode named counters exactly before converting opaque JSON decimals to floats."""
+    raw: Any = json.loads(value, parse_float=_JsonNumber)
+    root = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    data = root.get("data")
+    if isinstance(data, dict):
+        for owner, field, minimum, _ in _counter_fields(
+            cast(dict[str, Any], data), v2=root.get("schemaVersion") == "2.0.0"
+        ):
+            number = owner[field]
+            if isinstance(number, _JsonNumber):
+                mantissa = re.split(r"[eE]", number, maxsplit=1)[0]
+                try:
+                    exact = Decimal(0) if Decimal(mantissa).is_zero() else Decimal(number)
+                except InvalidOperation:
+                    raise ValueError("Shared counter is outside its Int64 integer range.") from None
+                if not exact.is_finite() or exact != exact.to_integral_value():
+                    raise ValueError("Shared counter must be a finite integer.")
+                if exact < minimum or exact > 9223372036854775807:
+                    raise ValueError("Shared counter is outside its Int64 range.")
+                projected = float(number)
+                owner[field] = projected if exact == projected else int(exact)
+    pending: list[Any] = [raw]
+    while pending:
+        container = pending.pop()
+        if isinstance(container, dict):
+            items = cast(dict[str, Any], container).items()
+        elif isinstance(container, list):
+            items = enumerate(cast(list[Any], container))
+        else:
+            continue
+        for key, item in items:
+            if isinstance(item, _JsonNumber):
+                cast(Any, container)[key] = float(item)
+            elif isinstance(item, (dict, list)):
+                pending.append(item)
+    return float(raw) if isinstance(raw, _JsonNumber) else cast(Any, raw)
 
 
 def validate_shared_data(data: dict[str, Any], *, version: str = "2.0.0") -> None:

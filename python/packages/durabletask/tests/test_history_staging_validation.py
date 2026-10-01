@@ -59,9 +59,12 @@ async def test_save_rejects_unencodable_response_before_publishing(kind: str, cr
         OLD,
         [DurableAgentStateMessage.from_chat_message(deepcopy(response.messages[0]))],
         extension_data=deepcopy(response.additional_properties),
-        usage=DurableAgentStateUsage.from_usage(response.usage_details),
+        usage=DurableAgentStateUsage(input_token_count=cast(Any, response.usage_details["input_token_count"]))
+        if response.usage_details
+        else None,
     )
-    with pytest.raises(ValueError, match="strict JSON"):
+    expected_error = "integer" if kind.startswith("usage") else "strict JSON"
+    with pytest.raises(ValueError, match=expected_error):
         candidate.to_dict()
     caller_unchanged = _reference_check(vars(response), response.additional_properties, response.usage_details)
     owner = _owner("anonymous")
@@ -71,7 +74,7 @@ async def test_save_rejects_unencodable_response_before_publishing(kind: str, cr
         binding.append_ordinal = 7
         binding.append_response = response
         # Only save is inside this assertion. A later owner.to_dict failure is too late.
-        with pytest.raises(ValueError, match="strict JSON"):
+        with pytest.raises(ValueError, match=expected_error):
             await provider.save_messages("session", response.messages, state=state)
         provider.assert_unchanged()
         caller_unchanged()
@@ -92,7 +95,7 @@ async def test_json_response_metadata_keeps_history_policy_and_detached_timestam
     properties: dict[str, Any] = {"": {"values": [None, False, 0, 0.0]}}
     if error:
         properties["durable_status"] = "error"
-    usage: dict[str, Any] = {"input_token_count": 0.25, "output_token_count": 2, "provider": {"n": [False]}}
+    usage: dict[str, Any] = {"fraction": 0.25, "output_token_count": 2, "provider": {"n": [False]}}
     response = AgentResponse(
         messages=[Message("assistant", ["answer"])],
         created_at=created_at,
@@ -113,7 +116,7 @@ async def test_json_response_metadata_keeps_history_policy_and_detached_timestam
         assert _snapshot(wire["extensionData"]) == _snapshot(properties)
         assert wire["usage"] == {
             "outputTokenCount": 2,
-            "extensionData": {"input_token_count": 0.25, "provider": {"n": [False]}},
+            "extensionData": {"fraction": 0.25, "provider": {"n": [False]}},
         }
         assert entry.created_at is not None and entry.created_at.tzinfo is not None
         if created_at == TIMESTAMP:
@@ -200,9 +203,12 @@ async def test_error_response_rejection_keeps_earlier_input_and_pending_delivery
         OLD,
         [DurableAgentStateMessage.from_chat_message(deepcopy(response.messages[0]))],
         extension_data=deepcopy(response.additional_properties),
-        usage=DurableAgentStateUsage.from_usage(response.usage_details),
+        usage=DurableAgentStateUsage(input_token_count=cast(Any, response.usage_details["input_token_count"]))
+        if response.usage_details
+        else None,
     )
-    with pytest.raises(ValueError, match="strict JSON"):
+    expected_error = "integer" if kind.startswith("usage") else "strict JSON"
+    with pytest.raises(ValueError, match=expected_error):
         candidate.to_dict()
     caller_unchanged = _reference_check(vars(response), response.additional_properties, response.usage_details)
     owner = _CanonicalStateProvider()
@@ -214,7 +220,7 @@ async def test_error_response_rejection_keeps_earlier_input_and_pending_delivery
         binding.accepted_inputs.add(PRIOR)
         pending = binding.pending_inputs
         pending.append(supplied)
-        with pytest.raises(ValueError, match="strict JSON"):
+        with pytest.raises(ValueError, match=expected_error):
             await provider.after_run(agent=None, session=None, context=context, state={})
         provider.assert_unchanged()
         caller_unchanged()
