@@ -5,8 +5,7 @@ happens inside an **inner workflow** that an outer workflow embeds via
 `WorkflowExecutor`. It runs on Azure Durable Functions and is the Azure Functions
 counterpart of the durabletask `12_subworkflow_hitl` sample.
 
-This sample hosts **no AI agents**, so it needs only Azurite and the Durable Task
-Scheduler emulator, with no model credentials.
+This sample hosts **no AI agents**, so it needs only Azurite, with no model credentials.
 
 ## Overview
 
@@ -79,11 +78,10 @@ workflow is driven as a child orchestration, not addressed directly.
 
 ## Running
 
-1. Start Azurite: `azurite --silent --location .`
-2. Start the Durable Task Scheduler emulator on `localhost:8080`.
-3. Copy `local.settings.json.sample` to `local.settings.json`.
-4. `func start`
-5. Drive it with [demo.http](./demo.http): start a run, GET the status to read the
+1. Start Azurite: `azurite --silent --location . --skipApiVersionCheck`
+2. Copy `local.settings.json.sample` to `local.settings.json`.
+3. `func start`
+4. Drive it with [demo.http](./demo.http): start a run, GET the status to read the
    qualified `review_sub~0~{requestId}`, then POST the response to the top-level
    instance with that id.
 

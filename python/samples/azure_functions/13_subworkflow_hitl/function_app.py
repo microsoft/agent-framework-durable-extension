@@ -29,12 +29,10 @@ id (``review_sub~0~{requestId}``); the caller posts the response back to the
 *top-level* instance and the host routes it to the owning child orchestration
 automatically.
 
-This sample hosts **no AI agents**, so it needs only the Durable Task Scheduler and
-Azurite (no model credentials).
+This sample hosts **no AI agents**, so it needs only Azurite (no model credentials).
 
 Prerequisites:
-- Start Azurite: ``azurite --silent --location .``
-- Start a Durable Task Scheduler emulator on ``localhost:8080``.
+- Start Azurite: ``azurite --silent --location . --skipApiVersionCheck``
 - Run: ``func start``
 """
 

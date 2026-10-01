@@ -30,8 +30,13 @@ environment. The workflow uses Azure Login with OpenID Connect so
 
 **Azurite (for orchestration tests):**
 ```bash
-docker run -d -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite
+docker run -d -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite \
+  azurite -l /data --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --skipApiVersionCheck
 ```
+
+`--skipApiVersionCheck` is required because the preview extension bundle's durable
+extension uses a newer Azure Storage API version than Azurite currently recognises. The
+image's default arguments have to be repeated because they are replaced, not appended to.
 
 **Durable Task Scheduler:**
 ```bash
@@ -42,19 +47,27 @@ docker run -d -p 8080:8080 -p 8082:8082 -e DTS_USE_DYNAMIC_TASK_HUBS=true mcr.mi
 
 The tests automatically start and stop the Azure Functions app for each sample.
 
+Run them from `python/packages/azurefunctions`. That package is a standalone uv project,
+because azure-functions-durable 2.x requires Python 3.13, so it has its own environment.
+Install its test dependencies first:
+
+```bash
+uv sync --group dev --group test
+```
+
 ### Run all sample tests
 ```bash
-uv run pytest packages/azurefunctions/tests/integration_tests -v
+uv run pytest tests/integration_tests -v
 ```
 
 ### Run specific sample
 ```bash
-uv run pytest packages/azurefunctions/tests/integration_tests/test_01_single_agent.py -v
+uv run pytest tests/integration_tests/test_01_single_agent.py -v
 ```
 
 ### Run with verbose output
 ```bash
-uv run pytest packages/azurefunctions/tests/integration_tests -sv
+uv run pytest tests/integration_tests -sv
 ```
 
 ## How It Works

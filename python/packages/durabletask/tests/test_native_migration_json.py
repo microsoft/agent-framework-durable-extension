@@ -23,17 +23,17 @@ from _migration_json_test_support import migration_clock as migration_clock
 @pytest.mark.parametrize("case", ["plain", "dt-false", "dt-true"])
 @pytest.mark.parametrize("location", ["source", "completion"])
 def test_native_migration_preserves_json_and_digest(case: str, location: str, migration_clock: Any) -> None:
-    _assert_ingress_and_retry(_EntityHost("dt"), case, location, migration_clock)
+    _assert_ingress_and_retry(_EntityHost(), case, location, migration_clock)
 
 
 @pytest.mark.parametrize("case", ["plain", "dt-false", "dt-true"])
 def test_native_cold_migration_reset_preserves_results(case: str, migration_clock: Any) -> None:
-    _assert_cold_reset(_EntityHost("dt"), case, migration_clock)
+    _assert_cold_reset(_EntityHost(), case, migration_clock)
 
 
 @pytest.mark.parametrize("change", ["erase-marker", "false-to-zero", "change-value"])
 def test_native_migration_retry_compares_original_json(change: str, migration_clock: Any) -> None:
-    host = _EntityHost("dt")
+    host = _EntityHost()
     request = _request(_payload("dt-false"), "completion")
     before = _json(request)
     assert _json(host.call("migrate", request)) == _json(_MIGRATED)

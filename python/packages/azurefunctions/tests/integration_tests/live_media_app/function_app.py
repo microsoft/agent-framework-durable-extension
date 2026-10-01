@@ -3,7 +3,7 @@
 """Copied into a temporary app by test_16, never deployed as a sample.
 
 Only model I/O is substituted. AgentFunctionApp registers the production entity
-handler and the Functions worker supplies its DurableEntityContext.
+class and the Functions worker supplies its durabletask EntityContext.
 """
 
 from __future__ import annotations
@@ -21,19 +21,20 @@ import azure.durable_functions as df
 import azure.functions as func
 from agent_framework import Agent, BaseChatClient, ChatResponse, ChatResponseUpdate, Content, Message, ResponseStream
 from agent_framework_durabletask import AgentSessionId, DurableHistoryProvider, RunRequest
+from agent_framework_durabletask._entities import DurableTaskEntityStateProvider
 from agent_framework_durabletask._history_provider import current_durable_history_binding
+from durabletask.entities import EntityContext, EntityInstanceId
 from opentelemetry.metrics import get_meter_provider, set_meter_provider
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader, Sum
 
 import agent_framework_azurefunctions
 from agent_framework_azurefunctions import AgentFunctionApp
-from agent_framework_azurefunctions._entities import AzureFunctionEntityStateProvider
 
 ROOT = Path(__file__).resolve().parent
 CONFIG = json.loads((ROOT / "live_config.json").read_text(encoding="utf-8"))
 BOOT_ID = uuid.uuid4().hex
-ENTITY = df.EntityId(AgentSessionId.to_entity_name(CONFIG["agent"]), CONFIG["session"])
+ENTITY = EntityInstanceId(AgentSessionId.to_entity_name(CONFIG["agent"]), CONFIG["session"])
 
 for package, expected in (
     (agent_framework_azurefunctions, CONFIG["azurefunctions_source"]),
@@ -66,12 +67,12 @@ class RecordingModel(BaseChatClient):
         async def update() -> ChatResponseUpdate:
             await self._validate_options(options)
             binding = current_durable_history_binding()
-            if binding is None or not isinstance(binding.state_provider, AzureFunctionEntityStateProvider):
-                raise RuntimeError("Expected the production Functions state provider on the async bridge")
-            context = binding.state_provider._context
-            if not isinstance(context, df.DurableEntityContext):
-                raise RuntimeError("Expected a real Functions DurableEntityContext")
-            if context.entity_name != ENTITY.name or context.entity_key != ENTITY.key:
+            if binding is None or not isinstance(binding.state_provider, DurableTaskEntityStateProvider):
+                raise RuntimeError("Expected the production entity state provider on the async bridge")
+            context = binding.state_provider.entity_context
+            if not isinstance(context, EntityContext):
+                raise RuntimeError("Expected a real durabletask EntityContext")
+            if context.entity_id != ENTITY:
                 raise RuntimeError("Functions context addressed the wrong test entity")
             current_id = next(message.message_id for message in reversed(messages) if message.role == "user")
             self.calls += 1
@@ -85,9 +86,9 @@ class RecordingModel(BaseChatClient):
                     "context": {
                         "provider": type(binding.state_provider).__name__,
                         "type": type(context).__name__,
-                        "entity_name": context.entity_name,
-                        "entity_key": context.entity_key,
-                        "operation": context.operation_name,
+                        "entity_name": context.entity_id.entity,
+                        "entity_key": context.entity_id.key,
+                        "operation": context.operation,
                     },
                 }),
                 encoding="utf-8",
@@ -136,7 +137,7 @@ def _json(value: Any, status: int = 200) -> func.HttpResponse:
 
 @app.route(route="retention/run", methods=["POST"])
 @app.durable_client_input(client_name="client")
-async def run(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
+async def run(req: func.HttpRequest, client: df.DurableFunctionsClient) -> func.HttpResponse:
     # The destination is fixed by the test, not a caller-supplied entity or path.
     if len(req.get_body()) > 100_000:
         return _json({"error": "oversized test request"}, 413)
@@ -155,10 +156,13 @@ async def run(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> f
 
 @app.route(route="retention/state", methods=["GET"])
 @app.durable_client_input(client_name="client")
-async def state(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
-    result = await client.read_entity_state(ENTITY)
+async def state(req: func.HttpRequest, client: df.DurableFunctionsClient) -> func.HttpResponse:
+    entity = await client.get_entity(ENTITY)
     # No typed-state reserialization here. Return the backend JSON unchanged.
-    return _json(result.entity_state) if result.entity_exists else _json(None, 404)
+    raw = entity.get_state() if entity is not None else None
+    if raw is None:
+        return _json(None, 404)
+    return func.HttpResponse(raw, status_code=200, mimetype="application/json")
 
 
 @app.route(route="retention/capture", methods=["GET"])

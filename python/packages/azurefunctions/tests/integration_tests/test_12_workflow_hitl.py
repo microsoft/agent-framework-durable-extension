@@ -8,15 +8,15 @@ using the MAF request_info / @response_handler pattern.
 The function app is automatically started by the test fixture.
 
 Prerequisites:
-- Azure OpenAI credentials configured (see packages/azurefunctions/tests/integration_tests/.env.example)
+- Azure OpenAI credentials configured (see tests/integration_tests/.env.example)
 - Azurite running for durable orchestrations (or Azure Storage account configured)
 
 Usage:
     # Start Azurite (if not already running)
-    azurite &
+    azurite --skipApiVersionCheck &
 
-    # Run tests
-    uv run pytest packages/azurefunctions/tests/integration_tests/test_12_workflow_hitl.py -v
+    # Run tests from python/packages/azurefunctions
+    uv run pytest tests/integration_tests/test_12_workflow_hitl.py -v
 """
 
 import time
