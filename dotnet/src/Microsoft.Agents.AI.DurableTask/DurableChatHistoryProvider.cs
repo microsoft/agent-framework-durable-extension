@@ -24,6 +24,7 @@ internal sealed class DurableChatHistoryProvider(
     private readonly IList<DurableAgentStateEntry> _history = history;
     private readonly RunRequest _request = request;
     private readonly ILogger? _logger = logger;
+    private int _requestIndex = -1;
     private int _responseIndex = -1;
 
     /// <inheritdoc />
@@ -79,6 +80,7 @@ internal sealed class DurableChatHistoryProvider(
                 this._request.Messages,
                 allowLosslessV2,
                 this._logger));
+            this._requestIndex = this._history.Count - 1;
             this._history.Add(response);
             this._responseIndex = this._history.Count - 1;
         }
@@ -103,6 +105,36 @@ internal sealed class DurableChatHistoryProvider(
                         this._request.CorrelationId,
                         response,
                         this._logger);
+        }
+    }
+
+    /// <summary>
+    /// Keeps the accepted request while removing a partial response from a failed invocation.
+    /// </summary>
+    public void CompleteStagedFailure()
+    {
+        if (this._responseIndex >= 0)
+        {
+            this._history.RemoveAt(this._responseIndex);
+            this._responseIndex = -1;
+        }
+    }
+
+    /// <summary>
+    /// Removes entity staging when the completed invocation resolved to a non-entity owner.
+    /// </summary>
+    public void DiscardStagedTurn()
+    {
+        if (this._responseIndex >= 0)
+        {
+            this._history.RemoveAt(this._responseIndex);
+            this._responseIndex = -1;
+        }
+
+        if (this._requestIndex >= 0)
+        {
+            this._history.RemoveAt(this._requestIndex);
+            this._requestIndex = -1;
         }
     }
 }

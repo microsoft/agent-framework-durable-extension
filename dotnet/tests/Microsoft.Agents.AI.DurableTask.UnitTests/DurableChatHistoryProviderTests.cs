@@ -62,6 +62,69 @@ public sealed class DurableChatHistoryProviderTests
     }
 
     [Fact]
+    public async Task FailedFinalizationKeepsAcceptedRequestAndRemovesPartialResponseAsync()
+    {
+        RecordingChatClient client = new();
+        ChatClientAgent chatAgent = new(client, name: "test-agent");
+        AgentSession session = await chatAgent.CreateSessionAsync();
+        DurableAgentState state = new();
+        RunRequest request = new(
+            [
+                new ChatMessage(ChatRole.User, "accepted prefix"),
+                new ChatMessage(ChatRole.User, "accepted suffix"),
+            ])
+        {
+            CorrelationId = "new",
+        };
+        DurableChatHistoryProvider provider = new(
+            state.Data.ConversationHistory,
+            request,
+            allowLosslessV2: true);
+
+        await provider.InvokedAsync(
+            new ChatHistoryProvider.InvokedContext(
+                chatAgent,
+                session,
+                request.Messages,
+                [new ChatMessage(ChatRole.Assistant, "partial response")]));
+
+        provider.CompleteStagedFailure();
+
+        DurableAgentStateRequest accepted =
+            Assert.IsType<DurableAgentStateRequest>(Assert.Single(state.Data.ConversationHistory));
+        Assert.Equal(
+            ["accepted prefix", "accepted suffix"],
+            accepted.Messages.Select(message => message.ToChatMessage().Text));
+        Assert.False(provider.HasStagedTurn);
+    }
+
+    [Fact]
+    public async Task NonEntityFinalizationRemovesEntireStagedTurnAsync()
+    {
+        RecordingChatClient client = new();
+        ChatClientAgent chatAgent = new(client, name: "test-agent");
+        AgentSession session = await chatAgent.CreateSessionAsync();
+        DurableAgentState state = new();
+        RunRequest request = new("accepted request") { CorrelationId = "new" };
+        DurableChatHistoryProvider provider = new(
+            state.Data.ConversationHistory,
+            request,
+            allowLosslessV2: true);
+
+        await provider.InvokedAsync(
+            new ChatHistoryProvider.InvokedContext(
+                chatAgent,
+                session,
+                request.Messages,
+                [new ChatMessage(ChatRole.Assistant, "partial response")]));
+
+        provider.DiscardStagedTurn();
+
+        Assert.Empty(state.Data.ConversationHistory);
+        Assert.False(provider.HasStagedTurn);
+    }
+
+    [Fact]
     public async Task V2ProviderStagesDeveloperRoleResponseLosslesslyAsync()
     {
         RecordingChatClient client = new();

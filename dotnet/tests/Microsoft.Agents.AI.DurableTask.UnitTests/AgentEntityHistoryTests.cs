@@ -241,6 +241,104 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
+    public async Task DefaultSchemaCustomProviderIsSoleHistorySourceAcrossColdRestartAsync()
+    {
+        RecordingHistoryProvider firstProvider = new() { PersistTranscript = true };
+        RecordingChatClient firstClient = new();
+        EntityHarness firstHarness = CreateHarness(
+            CreateAgentWithProvider(firstClient, firstProvider),
+            new DurableAgentState(),
+            enableMailboxWrites: false);
+
+        await firstHarness.RunAsync(
+            new RunRequest("first request") { CorrelationId = "first" });
+        DurableAgentState firstWrite =
+            Assert.IsType<DurableAgentState>(firstHarness.PersistedState);
+
+        RecordingHistoryProvider secondProvider = new() { PersistTranscript = true };
+        RecordingChatClient secondClient = new();
+        EntityHarness secondHarness = CreateHarness(
+            CreateAgentWithProvider(secondClient, secondProvider),
+            DeserializeState(SerializeState(firstWrite)),
+            enableMailboxWrites: false);
+
+        await secondHarness.RunAsync(
+            new RunRequest("second request") { CorrelationId = "second" });
+
+        Assert.Equal(
+            ["first request", "response", "second request"],
+            secondClient.LastMessages.Select(message => message.Text));
+        Assert.Equal(
+            1,
+            secondClient.LastMessages.Count(message => message.Text == "first request"));
+        Assert.Equal(
+            1,
+            secondClient.LastMessages.Count(message => message.Text == "response"));
+        Assert.Equal(1, secondProvider.LoadCount);
+        Assert.Equal(1, secondProvider.StoreCount);
+        Assert.Equal(1, secondClient.InvocationCount);
+    }
+
+    [Fact]
+    public async Task DefaultSchemaCustomProviderToolLoopStoresAndReplaysOneOuterTurnAsync()
+    {
+        AIFunction tool = AIFunctionFactory.Create(
+            (string value) => $"tool result: {value}",
+            name: "echo");
+        RecordingHistoryProvider firstProvider = new() { PersistTranscript = true };
+        ToolLoopChatClient firstClient = new(tool.Name);
+        ChatClientAgent firstAgent = new(
+            firstClient,
+            new ChatClientAgentOptions
+            {
+                Name = "agent",
+                ChatHistoryProvider = firstProvider,
+                ChatOptions = new ChatOptions { Tools = [tool] },
+            });
+        EntityHarness firstHarness = CreateHarness(
+            firstAgent,
+            new DurableAgentState(),
+            enableMailboxWrites: false);
+
+        await firstHarness.RunAsync(
+            new RunRequest("first request") { CorrelationId = "first" });
+        DurableAgentState firstWrite =
+            Assert.IsType<DurableAgentState>(firstHarness.PersistedState);
+
+        Assert.Equal(2, firstClient.InvocationCount);
+        Assert.Equal(1, firstProvider.LoadCount);
+        Assert.Equal(1, firstProvider.StoreCount);
+
+        RecordingHistoryProvider secondProvider = new() { PersistTranscript = true };
+        RecordingChatClient secondClient = new();
+        ChatClientAgent secondAgent = new(
+            secondClient,
+            new ChatClientAgentOptions
+            {
+                Name = "agent",
+                ChatHistoryProvider = secondProvider,
+                ChatOptions = new ChatOptions { Tools = [tool] },
+            });
+        EntityHarness secondHarness = CreateHarness(
+            secondAgent,
+            DeserializeState(SerializeState(firstWrite)),
+            enableMailboxWrites: false);
+
+        await secondHarness.RunAsync(
+            new RunRequest("second request") { CorrelationId = "second" });
+
+        Assert.Equal(
+            1,
+            secondClient.LastMessages.Count(message => message.Text == "first request"));
+        Assert.Equal(
+            1,
+            secondClient.LastMessages.Count(message => message.Text == "second request"));
+        Assert.Equal(1, secondProvider.LoadCount);
+        Assert.Equal(1, secondProvider.StoreCount);
+        Assert.Equal(1, secondClient.InvocationCount);
+    }
+
+    [Fact]
     public async Task DefaultSchemaWritesPreserveFirstServiceTransitionCompatibilityAsync()
     {
         RecordingChatClient client = new() { ResponseConversationId = "service-id" };
@@ -258,6 +356,34 @@ public sealed class AgentEntityHistoryTests
         Assert.Equal(
             "service-id",
             persisted.Data.Session?.GetProperty("conversationId").GetString());
+    }
+
+    [Fact]
+    public async Task DefaultSchemaServiceSessionIsSoleHistorySourceAcrossColdRestartAsync()
+    {
+        RecordingChatClient firstClient = new() { ResponseConversationId = "service-id" };
+        EntityHarness firstHarness = CreateHarness(
+            new ChatClientAgent(firstClient, name: "agent"),
+            new DurableAgentState(),
+            enableMailboxWrites: false);
+
+        await firstHarness.RunAsync(
+            new RunRequest("first request") { CorrelationId = "first" });
+        DurableAgentState firstWrite =
+            Assert.IsType<DurableAgentState>(firstHarness.PersistedState);
+
+        RecordingChatClient secondClient = new();
+        EntityHarness secondHarness = CreateHarness(
+            new ChatClientAgent(secondClient, name: "agent"),
+            DeserializeState(SerializeState(firstWrite)),
+            enableMailboxWrites: false);
+
+        await secondHarness.RunAsync(
+            new RunRequest("second request") { CorrelationId = "second" });
+
+        Assert.Equal(["second request"], secondClient.LastMessages.Select(message => message.Text));
+        Assert.Equal("service-id", secondClient.LastConversationId);
+        Assert.Equal(1, secondClient.InvocationCount);
     }
 
     [Fact]
@@ -1737,6 +1863,161 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
+    public async Task CertifiedEntityFailureSealsBindingAndPersistsOnlyAcceptedRequestAsync()
+    {
+        InvalidOperationException failure = new("provider-private-message");
+        RecordingProviderFailureAttestor attestor = new(failure);
+        RecordingChatClient client = new() { Exception = failure };
+        EntityHarness harness = CreateHarness(
+            new ChatClientAgent(client, name: "agent"),
+            new DurableAgentState(),
+            enableProviderFailureFinalization: true,
+            providerFailureAttestor: attestor);
+
+        AgentResponse response = await harness.RunAsync(
+            new RunRequest(
+                [
+                    new ChatMessage(ChatRole.User, "accepted prefix"),
+                    new ChatMessage(ChatRole.User, "accepted suffix"),
+                ])
+            {
+                CorrelationId = "new",
+            });
+
+        DurableAgentState persisted =
+            DeserializeState(SerializeState(Assert.IsType<DurableAgentState>(harness.PersistedState)));
+        Assert.Equal(DurableAgentStateHistoryBinding.DurableStateOwner, GetBinding(persisted)?.OwnerKind);
+        DurableAgentStateRequest accepted =
+            Assert.IsType<DurableAgentStateRequest>(Assert.Single(persisted.Data.ConversationHistory));
+        Assert.Equal(
+            ["accepted prefix", "accepted suffix"],
+            accepted.Messages.Select(message => message.ToChatMessage().Text));
+        Assert.DoesNotContain(
+            persisted.Data.ConversationHistory,
+            entry => entry is DurableAgentStateResponse);
+        Assert.Equal(
+            DurableAgentStateCompletionReceipt.FailedOutcome,
+            persisted.Data.TerminalResults!["new"].Outcome);
+        Assert.Empty(response.Messages);
+        Assert.Equal(1, client.InvocationCount);
+        Assert.Equal(1, attestor.InvocationCount);
+    }
+
+    [Fact]
+    public async Task CertifiedExternalStoreFailureSealsBindingWithoutEntityTranscriptAsync()
+    {
+        InvalidOperationException failure = new("provider-private-message");
+        RecordingProviderFailureAttestor attestor = new(failure);
+        RecordingHistoryProvider provider = new() { StoreException = failure };
+        RecordingChatClient client = new();
+        EntityHarness harness = CreateHarness(
+            CreateAgentWithProvider(client, provider),
+            new DurableAgentState(),
+            options => options.ProviderKey = new("external-history.v1"),
+            enableProviderFailureFinalization: true,
+            providerFailureAttestor: attestor);
+
+        _ = await harness.RunAsync(
+            new RunRequest("accepted request") { CorrelationId = "new" });
+
+        DurableAgentState persisted =
+            DeserializeState(SerializeState(Assert.IsType<DurableAgentState>(harness.PersistedState)));
+        Assert.Equal(DurableAgentStateHistoryBinding.HistoryProviderOwner, GetBinding(persisted)?.OwnerKind);
+        Assert.Equal("external-history.v1", GetBinding(persisted)?.ProviderKey);
+        Assert.Empty(persisted.Data.ConversationHistory);
+        Assert.Equal(
+            DurableAgentStateCompletionReceipt.FailedOutcome,
+            persisted.Data.TerminalResults!["new"].Outcome);
+        Assert.True(
+            persisted.Data.Session?.GetProperty("stateBag").TryGetProperty("external-history", out _) is true);
+        Assert.Equal(1, provider.LoadCount);
+        Assert.Equal(1, provider.StoreCount);
+        Assert.Equal(1, client.InvocationCount);
+
+        RecordingHistoryProvider duplicateProvider = new();
+        RecordingChatClient duplicateClient = new();
+        EntityHarness duplicateHarness = CreateHarness(
+            CreateAgentWithProvider(duplicateClient, duplicateProvider),
+            persisted,
+            options => options.ProviderKey = new("external-history.v1"),
+            enableProviderFailureFinalization: true,
+            providerFailureAttestor: attestor);
+
+        _ = await Assert.ThrowsAsync<DurableAgentTerminalException>(
+            () => duplicateHarness.RunAsync(
+                new RunRequest([]) { CorrelationId = "new" }));
+
+        Assert.Equal(0, duplicateProvider.LoadCount);
+        Assert.Equal(0, duplicateProvider.StoreCount);
+        Assert.Equal(0, duplicateClient.InvocationCount);
+        Assert.Equal(1, attestor.InvocationCount);
+    }
+
+    [Fact]
+    public async Task CertifiedExternalFailureWithoutContinuationDoesNotCommitAsync()
+    {
+        InvalidOperationException failure = new("provider-private-message");
+        RecordingProviderFailureAttestor attestor = new(failure);
+        RecordingHistoryProvider provider = new()
+        {
+            StoreException = failure,
+            SkipContinuationWrite = true,
+        };
+        RecordingChatClient client = new();
+        EntityHarness harness = CreateHarness(
+            CreateAgentWithProvider(client, provider),
+            new DurableAgentState(),
+            options => options.ProviderKey = new("external-history.v1"),
+            enableProviderFailureFinalization: true,
+            providerFailureAttestor: attestor);
+
+        await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
+            () => harness.RunAsync(
+                new RunRequest("accepted request") { CorrelationId = "new" }));
+
+        Assert.False(harness.StateWasPersisted);
+        Assert.Equal(1, provider.LoadCount);
+        Assert.Equal(1, provider.StoreCount);
+        Assert.Equal(1, client.InvocationCount);
+        Assert.Equal(1, attestor.InvocationCount);
+    }
+
+    [Fact]
+    public async Task CertifiedServiceFailureSealsFinalServiceOwnerWithoutEntityTranscriptAsync()
+    {
+        InvalidOperationException failure = new("provider-private-message");
+        RecordingProviderFailureAttestor attestor = new(failure);
+        RecordingChatClient client = new() { Exception = failure };
+        ChatClientAgent agent = new(client, name: "agent");
+        DurableAgentState initialState = new();
+        initialState.Data.Session = await agent.SerializeSessionAsync(
+            await agent.CreateSessionAsync("service-id"));
+        EntityHarness harness = CreateHarness(
+            agent,
+            initialState,
+            options => options.ProviderKey = new("model-service.v1"),
+            enableProviderFailureFinalization: true,
+            providerFailureAttestor: attestor);
+
+        _ = await harness.RunAsync(
+            new RunRequest("accepted request") { CorrelationId = "new" });
+
+        DurableAgentState persisted =
+            DeserializeState(SerializeState(Assert.IsType<DurableAgentState>(harness.PersistedState)));
+        Assert.Equal(DurableAgentStateHistoryBinding.ModelServiceOwner, GetBinding(persisted)?.OwnerKind);
+        Assert.Equal("model-service.v1", GetBinding(persisted)?.ProviderKey);
+        Assert.Empty(persisted.Data.ConversationHistory);
+        Assert.Equal(
+            "service-id",
+            persisted.Data.Session?.GetProperty("conversationId").GetString());
+        Assert.Equal(
+            DurableAgentStateCompletionReceipt.FailedOutcome,
+            persisted.Data.TerminalResults!["new"].Outcome);
+        Assert.Equal(1, client.InvocationCount);
+        Assert.Equal(1, attestor.InvocationCount);
+    }
+
+    [Fact]
     public async Task ProviderLoadFailureDoesNotInvokeModelOrCommitWorkingStateAsync()
     {
         InvalidOperationException expected = new("provider load failed");
@@ -1898,13 +2179,16 @@ public sealed class AgentEntityHistoryTests
         bool registerWithFactory = false,
         Action? onFactoryInvoked = null,
         IHostApplicationLifetime? applicationLifetime = null,
-        bool enableMailboxWrites = true)
+        bool enableMailboxWrites = true,
+        bool enableProviderFailureFinalization = false,
+        IDurableAgentProviderFailureAttestor? providerFailureAttestor = null)
     {
         AgentSessionId sessionId = new(agent.Name!, "session");
         DurableAgentsOptions options = new()
         {
             DefaultTimeToLive = null,
             EnablePersistentRequestOutcomes = enableMailboxWrites,
+            EnableProviderFailureFinalization = enableProviderFailureFinalization,
             AuthorizeLegacyMigration = enableMailboxWrites ? static _ => true : null,
         };
         if (registerWithFactory)
@@ -1935,6 +2219,10 @@ public sealed class AgentEntityHistoryTests
                 Mock.Of<IHostApplicationLifetime>(
                     lifetime => lifetime.ApplicationStopping == CancellationToken.None),
         };
+        if (providerFailureAttestor is not null)
+        {
+            services[typeof(IDurableAgentProviderFailureAttestor)] = providerFailureAttestor;
+        }
         IServiceProvider serviceProvider = new DictionaryServiceProvider(services);
 
         Mock<TaskEntityContext> context = new();
@@ -2264,6 +2552,8 @@ public sealed class AgentEntityHistoryTests
 
         public bool SkipContinuationWrite { get; init; }
 
+        public bool PersistTranscript { get; init; }
+
         public TaskCompletionSource<bool> LoadStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -2314,6 +2604,14 @@ public sealed class AgentEntityHistoryTests
                 throw this.LoadException;
             }
 
+            if (this.PersistTranscript &&
+                context.Session!.StateBag.TryGetValue(
+                    "external-history",
+                    out TranscriptHistoryState? transcript))
+            {
+                return transcript?.Messages.Select(message => message.ToChatMessage()) ?? [];
+            }
+
             return [];
         }
 
@@ -2323,7 +2621,21 @@ public sealed class AgentEntityHistoryTests
         {
             this.StoreCount++;
             this.StoreCancellationToken = cancellationToken;
-            if (!this.SkipContinuationWrite)
+            if (this.PersistTranscript)
+            {
+                _ = context.Session!.StateBag.TryGetValue(
+                    "external-history",
+                    out TranscriptHistoryState? transcript);
+                transcript ??= new();
+                transcript.Messages.AddRange(
+                    context.RequestMessages.Select(
+                        message => DurableAgentStateMessage.FromChatMessage(message)));
+                transcript.Messages.AddRange(
+                    (context.ResponseMessages ?? [])
+                        .Select(message => DurableAgentStateMessage.FromChatMessage(message)));
+                context.Session.StateBag.SetValue("external-history", transcript);
+            }
+            else if (!this.SkipContinuationWrite)
             {
                 context.Session!.StateBag.SetValue(
                     "external-history",
@@ -2360,6 +2672,11 @@ public sealed class AgentEntityHistoryTests
     private sealed class ExternalHistoryState
     {
         public int Count { get; set; }
+    }
+
+    private sealed class TranscriptHistoryState
+    {
+        public List<DurableAgentStateMessage> Messages { get; set; } = [];
     }
 
     private sealed class MultiKeyHistoryProvider(bool writeSecondKey) : ChatHistoryProvider
@@ -2425,6 +2742,8 @@ public sealed class AgentEntityHistoryTests
 
         public CancellationToken LastCancellationToken { get; private set; }
 
+        public string? LastConversationId { get; private set; }
+
         public List<ChatMessage> LastMessages { get; private set; } = [];
 
         public void Dispose()
@@ -2446,6 +2765,7 @@ public sealed class AgentEntityHistoryTests
         {
             this.InvocationCount++;
             this.LastCancellationToken = cancellationToken;
+            this.LastConversationId = options?.ConversationId;
             this.LastMessages = messages.ToList();
             if (this.Exception is not null)
             {
@@ -2459,6 +2779,68 @@ public sealed class AgentEntityHistoryTests
                     ? null
                     : this.ResponseConversationId ?? options?.ConversationId,
             };
+        }
+    }
+
+    private sealed class ToolLoopChatClient(string toolName) : IChatClient
+    {
+        public int InvocationCount { get; private set; }
+
+        public void Dispose()
+        {
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public Task<ChatResponse> GetResponseAsync(
+            IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            this.InvocationCount++;
+            await Task.Yield();
+            if (this.InvocationCount == 1)
+            {
+                yield return new ChatResponseUpdate(
+                    ChatRole.Assistant,
+                    [
+                        new FunctionCallContent(
+                            "call-1",
+                            toolName,
+                            new Dictionary<string, object?> { ["value"] = "from tool" }),
+                    ]);
+                yield break;
+            }
+
+            yield return new ChatResponseUpdate(ChatRole.Assistant, "final response");
+        }
+    }
+
+    private sealed class RecordingProviderFailureAttestor(
+        Exception expected) : IDurableAgentProviderFailureAttestor
+    {
+        public int InvocationCount { get; private set; }
+
+        public bool TryAttest(
+            Exception exception,
+            out DurableAgentProviderFailureAttestation? attestation)
+        {
+            this.InvocationCount++;
+            attestation = ReferenceEquals(exception, expected)
+                ? new(
+                    DurableAgentProviderFailurePhase.Invoke,
+                    DurableAgentProviderFailureFinality.NonRetryable,
+                    InputAccepted: true,
+                    Code: "providerFailure",
+                    Message: "The provider request failed.")
+                : null;
+            return attestation is not null;
         }
     }
 

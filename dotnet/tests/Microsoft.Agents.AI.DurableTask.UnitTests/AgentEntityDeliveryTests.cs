@@ -467,6 +467,9 @@ public sealed class AgentEntityDeliveryTests
         DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(harness.PersistedState));
         Assert.Equal("provider-session", committed.Data.Session!.Value.GetProperty("conversationId").GetString());
         Assert.IsType<DurableAgentStateRequest>(Assert.Single(committed.Data.ConversationHistory));
+        Assert.Equal(
+            DurableAgentStateHistoryBinding.DurableStateOwner,
+            DurableAgentHistoryBinding.Parse(committed.Data.HistoryBinding)?.OwnerKind);
         DurableAgentStateTerminalResult result = committed.Data.TerminalResults!["new"];
         Assert.Equal(DurableAgentStateCompletionReceipt.FailedOutcome, result.Outcome);
         Assert.Equal("providerFinalFailure", result.Error!.Code);
@@ -493,6 +496,43 @@ public sealed class AgentEntityDeliveryTests
         Assert.Equal("providerFinalFailure", duplicateFailure.Code);
         Assert.Equal(0, duplicateAgent.InvocationCount);
         Assert.Equal(1, attestor.InvocationCount);
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, true)]
+    public async Task ProviderFailureFinalizationRequiresBothInternalGatesAsync(
+        bool enablePersistentRequestOutcomes,
+        bool enableProviderFailureFinalization,
+        bool expectCommittedFailure)
+    {
+        InvalidOperationException providerFailure = new("provider unavailable");
+        RecordingProviderFailureAttestor attestor = CreateFinalAttestor(providerFailure);
+        EntityHarness harness = CreateHarness(
+            new RecordingAgent("agent") { Exception = providerFailure },
+            new DurableAgentState(),
+            enablePersistentRequestOutcomes: enablePersistentRequestOutcomes,
+            enableProviderFailureFinalization: enableProviderFailureFinalization,
+            providerFailureAttestor: attestor);
+
+        if (expectCommittedFailure)
+        {
+            AgentResponse response = await harness.RunAsync(
+                new RunRequest("request") { CorrelationId = "new" });
+            Assert.NotNull(DurableAgentJsonUtilities.GetCommittedFailure(response));
+            Assert.True(harness.StateWasPersisted);
+            Assert.Equal(1, attestor.InvocationCount);
+        }
+        else
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => harness.RunAsync(
+                    new RunRequest("request") { CorrelationId = "new" }));
+            Assert.False(harness.StateWasPersisted);
+            Assert.Equal(0, attestor.InvocationCount);
+        }
     }
 
     [Fact]
