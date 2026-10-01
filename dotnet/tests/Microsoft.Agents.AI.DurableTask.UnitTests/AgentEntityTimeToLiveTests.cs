@@ -28,7 +28,9 @@ public sealed class AgentEntityTimeToLiveTests
         Assert.Equal(s_startTime.AddMinutes(10), signal.SignalTime);
         Assert.Equal(s_startTime.AddMinutes(10).UtcDateTime, signal.Input.ExpectedExpirationTimeUtc);
         Assert.Single(harness.State.Data.CompletionReceipts!);
-        Assert.Null(Assert.Single(harness.State.Data.TerminalResults!).Value.ResultExpiresAt);
+        Assert.Equal(
+            s_startTime.AddMinutes(1),
+            Assert.Single(harness.State.Data.TerminalResults!).Value.ResultExpiresAt);
     }
 
     [Fact]

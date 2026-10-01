@@ -156,6 +156,12 @@ public sealed class DurableAgentFunctionMetadataTransformerTests
                     .Select(p => p.GetProperty("propertyName").GetString()!)];
 
                 Assert.Equal(["query", "sessionId", "responseFormat"], advertisedNames);
+                Assert.Contains(
+                    ".NET-only",
+                    toolProperties.RootElement.EnumerateArray()
+                        .Single(p => p.GetProperty("propertyName").GetString() == "responseFormat")
+                        .GetProperty("description").GetString(),
+                    StringComparison.Ordinal);
 
                 Assert.Single(mcpToolMeta.RawBindings, b => b.Contains("\"propertyName\":\"sessionId\""));
                 Assert.DoesNotContain(mcpToolMeta.RawBindings, b => b.Contains("threadId"));

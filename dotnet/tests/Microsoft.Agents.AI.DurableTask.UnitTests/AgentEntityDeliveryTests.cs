@@ -18,7 +18,7 @@ public sealed class AgentEntityDeliveryTests
     {
         DurableAgentsOptions defaults = new();
         Assert.False(defaults.EnablePersistentRequestOutcomes);
-        Assert.Null(defaults.ResultRetentionPeriod);
+        Assert.Equal(TimeSpan.FromSeconds(60), defaults.ResultRetentionPeriod);
         EntityHarness harness = CreateHarness(
             new RecordingAgent("agent"), new DurableAgentState(), enablePersistentRequestOutcomes: false);
 
@@ -37,7 +37,7 @@ public sealed class AgentEntityDeliveryTests
     [InlineData("1.1.0", true)]
     [InlineData("1.2.0", false)]
     [InlineData("1.2.0", true)]
-    public async Task LegacyDeveloperMessageFailureLeavesStateUnchangedAndRetryableAsync(
+    public async Task LegacyDeveloperMessagesRemainCompatibleAndCommitAsync(
         string schemaVersion,
         bool inResponse)
     {
@@ -59,20 +59,19 @@ public sealed class AgentEntityDeliveryTests
             CorrelationId = "new",
         };
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => harness.RunAsync(request));
+        AgentResponse response = await harness.RunAsync(request);
 
-        Assert.Equal(inResponse ? 1 : 0, factoryCalls);
-        Assert.Equal(inResponse ? 1 : 0, agent.InvocationCount);
-        Assert.False(harness.StateWasPersisted);
+        Assert.Equal("response", response.Text);
+        Assert.Equal(1, factoryCalls);
+        Assert.Equal(1, agent.InvocationCount);
+        Assert.True(harness.StateWasPersisted);
         Assert.Equal(before, JsonSerializer.Serialize(state, DurableAgentStateJsonContext.Default.DurableAgentState));
         Assert.Null(state.Data.CompletionReceipts);
-        Assert.Equal(DurableAgentRunOutcomeKind.Pending,
-            DurableAgentStateOutcomeResolver.Resolve(state, "new", DateTimeOffset.UtcNow).Kind);
-
-        EntityHarness retry = CreateHarness(new RecordingAgent("agent"), state, enablePersistentRequestOutcomes: false);
-        Assert.Equal("response", (await retry.RunAsync(new RunRequest("corrected") { CorrelationId = "new" })).Text);
-        DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(retry.PersistedState));
+        DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(harness.PersistedState));
         Assert.Equal(DurableAgentState.CurrentSchemaVersion, committed.SchemaVersion);
+        Assert.Equal(
+            DurableAgentRunOutcomeKind.Succeeded,
+            DurableAgentStateOutcomeResolver.Resolve(committed, "new", DateTimeOffset.UtcNow).Kind);
         Assert.Equal(3, committed.Data.ConversationHistory.Count);
         Assert.Null(committed.Data.TerminalResults);
         Assert.Null(committed.Data.CompletionReceipts);
@@ -231,7 +230,7 @@ public sealed class AgentEntityDeliveryTests
             JsonSerializer.SerializeToElement(message, DurableAgentStateJsonContext.Default.DurableAgentStateMessage),
             JsonSerializer.SerializeToElement(committed.Data.ConversationHistory[0].Messages[0],
                 DurableAgentStateJsonContext.Default.DurableAgentStateMessage)));
-        Assert.Throws<InvalidOperationException>(() => message.ToChatMessage());
+        Assert.Equal(new ChatRole("developer"), message.ToChatMessage().Role);
     }
 
     [Fact]
@@ -322,6 +321,28 @@ public sealed class AgentEntityDeliveryTests
     }
 
     [Fact]
+    public void MailboxDeletionRequiresAnActualDefaultTtlAssignment()
+    {
+        DurableAgentsOptions options = new()
+        {
+            EnableMailboxEntityDeletion = true,
+        };
+
+        Assert.Equal(TimeSpan.FromDays(14), options.DefaultTimeToLive);
+        Assert.Null(options.GetTimeToLive("agent", revisedState: true));
+
+        options.DefaultTimeToLive = TimeSpan.FromDays(14);
+
+        Assert.Equal(TimeSpan.FromDays(14), options.GetTimeToLive("agent", revisedState: true));
+    }
+
+    [Fact]
+    public void ResultRetentionDefaultsToPortableSixtySecondWindow()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(60), new DurableAgentsOptions().ResultRetentionPeriod);
+    }
+
+    [Fact]
     public async Task DisabledRolloutRejectsNewRevisedExecutionButAllowsDuplicateAsync()
     {
         RecordingAgent agent = new("agent");
@@ -388,6 +409,165 @@ public sealed class AgentEntityDeliveryTests
         await retry.RunAsync(request);
         DurableAgentState committed = Assert.IsType<DurableAgentState>(retry.PersistedState);
         Assert.Equal(DurableAgentStateCompletionReceipt.SucceededOutcome, committed.Data.CompletionReceipts!["new"].Outcome);
+    }
+
+    [Theory]
+    [InlineData((int)DurableAgentProviderFailurePhase.Load, (int)DurableAgentProviderFailureFinality.NonRetryable)]
+    [InlineData((int)DurableAgentProviderFailurePhase.Load, (int)DurableAgentProviderFailureFinality.RetriesExhausted)]
+    [InlineData((int)DurableAgentProviderFailurePhase.Invoke, (int)DurableAgentProviderFailureFinality.NonRetryable)]
+    [InlineData((int)DurableAgentProviderFailurePhase.Invoke, (int)DurableAgentProviderFailureFinality.RetriesExhausted)]
+    [InlineData((int)DurableAgentProviderFailurePhase.Store, (int)DurableAgentProviderFailureFinality.NonRetryable)]
+    [InlineData((int)DurableAgentProviderFailurePhase.Store, (int)DurableAgentProviderFailureFinality.RetriesExhausted)]
+    public async Task AttestedFinalProviderFailureCommitsFailedOutcomeAndSessionAsync(
+        int phaseValue,
+        int finalityValue)
+    {
+        DurableAgentProviderFailurePhase phase = (DurableAgentProviderFailurePhase)phaseValue;
+        DurableAgentProviderFailureFinality finality = (DurableAgentProviderFailureFinality)finalityValue;
+        InvalidOperationException providerFailure = new("provider-private-message");
+        RecordingAgent agent = new("agent")
+        {
+            Exception = providerFailure,
+            SerializedSession = JsonSerializer.SerializeToElement(new { conversationId = "provider-session" }),
+        };
+        RecordingProviderFailureAttestor attestor = new(
+            providerFailure,
+            new(
+                phase,
+                finality,
+                InputAccepted: true,
+                Code: "providerFinalFailure",
+                Message: "The provider request failed after accepted input.",
+                Details: JsonSerializer.SerializeToElement(new { phase = phase.ToString(), finality = finality.ToString() })));
+        EntityHarness harness = CreateHarness(
+            agent,
+            new DurableAgentState(),
+            enableProviderFailureFinalization: true,
+            providerFailureAttestor: attestor);
+
+        AgentResponse transportResponse = await harness.RunAsync(
+            new RunRequest("request") { CorrelationId = "new" });
+
+        DurableAgentState committed = Reload(Assert.IsType<DurableAgentState>(harness.PersistedState));
+        Assert.Equal("provider-session", committed.Data.Session!.Value.GetProperty("conversationId").GetString());
+        Assert.IsType<DurableAgentStateRequest>(Assert.Single(committed.Data.ConversationHistory));
+        DurableAgentStateTerminalResult result = committed.Data.TerminalResults!["new"];
+        Assert.Equal(DurableAgentStateCompletionReceipt.FailedOutcome, result.Outcome);
+        Assert.Equal("providerFinalFailure", result.Error!.Code);
+        Assert.Equal("The provider request failed after accepted input.", result.Error.Message);
+        Assert.Equal(
+            DurableAgentStateCompletionReceipt.FailedOutcome,
+            committed.Data.CompletionReceipts!["new"].Outcome);
+        DurableAgentFailureData transportFailure =
+            Assert.IsType<DurableAgentFailureData>(DurableAgentJsonUtilities.GetCommittedFailure(transportResponse));
+        Assert.Equal("providerFinalFailure", transportFailure.Code);
+        Assert.DoesNotContain("provider-private-message", JsonSerializer.Serialize(committed), StringComparison.Ordinal);
+        Assert.Equal(1, agent.InvocationCount);
+        Assert.Equal(1, attestor.InvocationCount);
+
+        RecordingAgent duplicateAgent = new("agent");
+        EntityHarness duplicate = CreateHarness(
+            duplicateAgent,
+            committed,
+            enableProviderFailureFinalization: true,
+            providerFailureAttestor: attestor);
+        DurableAgentTerminalException duplicateFailure =
+            await Assert.ThrowsAsync<DurableAgentTerminalException>(
+                () => duplicate.RunAsync(new RunRequest([]) { CorrelationId = "new" }));
+        Assert.Equal("providerFinalFailure", duplicateFailure.Code);
+        Assert.Equal(0, duplicateAgent.InvocationCount);
+        Assert.Equal(1, attestor.InvocationCount);
+    }
+
+    [Fact]
+    public async Task ProviderFailureAttestationRequiresAcceptedInputAsync()
+    {
+        InvalidOperationException providerFailure = new("provider unavailable");
+        RecordingProviderFailureAttestor attestor = new(
+            providerFailure,
+            new(
+                DurableAgentProviderFailurePhase.Invoke,
+                DurableAgentProviderFailureFinality.NonRetryable,
+                InputAccepted: false,
+                Code: "providerFailure",
+                Message: "Rejected before acceptance."));
+        EntityHarness harness = CreateHarness(
+            new RecordingAgent("agent") { Exception = providerFailure },
+            new DurableAgentState(),
+            enableProviderFailureFinalization: true,
+            providerFailureAttestor: attestor);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => harness.RunAsync(new RunRequest("request") { CorrelationId = "new" }));
+
+        Assert.False(harness.StateWasPersisted);
+    }
+
+    [Fact]
+    public async Task AttestedFailureSessionSerializationFailureDoesNotCommitAsync()
+    {
+        InvalidOperationException providerFailure = new("provider unavailable");
+        RecordingProviderFailureAttestor attestor = CreateFinalAttestor(providerFailure);
+        EntityHarness harness = CreateHarness(
+            new RecordingAgent("agent")
+            {
+                Exception = providerFailure,
+                SessionSerializationException = new InvalidOperationException("session serialization failed"),
+            },
+            new DurableAgentState(),
+            enableProviderFailureFinalization: true,
+            providerFailureAttestor: attestor);
+
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => harness.RunAsync(new RunRequest("request") { CorrelationId = "new" }));
+
+        Assert.Equal("session serialization failed", exception.Message);
+        Assert.False(harness.StateWasPersisted);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AttestedFailureSchedulingOrStateReplacementFailureDoesNotPublishReceiptAsync(
+        bool failScheduling)
+    {
+        InvalidOperationException providerFailure = new("provider unavailable");
+        RecordingProviderFailureAttestor attestor = CreateFinalAttestor(providerFailure);
+        EntityHarness harness = CreateHarness(
+            new RecordingAgent("agent") { Exception = providerFailure },
+            new DurableAgentState(),
+            enableProviderFailureFinalization: true,
+            providerFailureAttestor: attestor,
+            resultRetentionPeriod: failScheduling ? TimeSpan.FromMinutes(1) : null,
+            onSignal: failScheduling
+                ? (_, _) => throw new InvalidOperationException("schedule failed")
+                : null,
+            onCommit: failScheduling
+                ? null
+                : _ => throw new InvalidOperationException("state replacement failed"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => harness.RunAsync(new RunRequest("request") { CorrelationId = "new" }));
+
+        Assert.False(harness.StateWasPersisted);
+    }
+
+    [Fact]
+    public async Task SessionCreationFailureCannotUseProviderFinalityAttestationAsync()
+    {
+        InvalidOperationException sessionFailure = new("session restoration failed");
+        RecordingProviderFailureAttestor attestor = CreateFinalAttestor(sessionFailure);
+        EntityHarness harness = CreateHarness(
+            new RecordingAgent("agent") { SessionCreationException = sessionFailure },
+            new DurableAgentState(),
+            enableProviderFailureFinalization: true,
+            providerFailureAttestor: attestor);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => harness.RunAsync(new RunRequest("request") { CorrelationId = "new" }));
+
+        Assert.Equal(0, attestor.InvocationCount);
+        Assert.False(harness.StateWasPersisted);
     }
 
     [Fact]
@@ -546,7 +726,7 @@ public sealed class AgentEntityDeliveryTests
         Assert.True(JsonElement.DeepEquals(state.Data.Session!.Value, committed.Data.Session!.Value));
         Assert.Equal(state.Data.IngestedPositions!.Keys, committed.Data.IngestedPositions!.Keys);
         Assert.All(state.Data.IngestedPositions, pair =>
-            Assert.Equal(pair.Value, committed.Data.IngestedPositions[pair.Key]));
+            Assert.True(JsonElement.DeepEquals(pair.Value, committed.Data.IngestedPositions[pair.Key])));
         Assert.Equal("python", committed.Data.ExtensionData!["dataProducer"].GetString());
         Assert.True(committed.Data.UnknownProperties!["futureDataProperty"].GetProperty("preserve").GetBoolean());
         Assert.True(committed.UnknownProperties!["futureRootProperty"].GetProperty("preserve").GetBoolean());
@@ -572,15 +752,15 @@ public sealed class AgentEntityDeliveryTests
         Assert.True(JsonElement.DeepEquals(state.Data.Session!.Value, committed.Data.Session!.Value));
         Assert.Equal(state.Data.IngestedPositions!.Keys, committed.Data.IngestedPositions!.Keys);
         Assert.All(state.Data.IngestedPositions, pair =>
-            Assert.Equal(pair.Value, committed.Data.IngestedPositions[pair.Key]));
+            Assert.True(JsonElement.DeepEquals(pair.Value, committed.Data.IngestedPositions[pair.Key])));
         Assert.Equal(
-            state.Data.Truncation!.EvictedMessageCount,
-            committed.Data.Truncation!.EvictedMessageCount);
+            state.Data.Truncation!.EvictedMessageCount.GetRawText(),
+            committed.Data.Truncation!.EvictedMessageCount.GetRawText());
         Assert.True(JsonElement.DeepEquals(state.Data.HistoryBinding, committed.Data.HistoryBinding));
         Assert.Equal(3, committed.Data.CompletionReceipts!.Count);
         Assert.Equal(2, state.Data.CompletionReceipts!.Count);
-        committed.Data.IngestedPositions!["example-producer"] = 99;
-        Assert.Equal(3, state.Data.IngestedPositions!["example-producer"]);
+        committed.Data.IngestedPositions!["example-producer"] = JsonSerializer.SerializeToElement(99);
+        Assert.Equal(3, state.Data.IngestedPositions!["example-producer"].GetInt64());
     }
 
     [Fact]
@@ -1014,6 +1194,8 @@ public sealed class AgentEntityDeliveryTests
         bool authorizeLegacyMigration = true,
         Action<string, SignalEntityOptions?>? onSignal = null,
         Action<object?>? onSignalInput = null,
+        bool enableProviderFailureFinalization = false,
+        IDurableAgentProviderFailureAttestor? providerFailureAttestor = null,
         CancellationToken cancellationToken = default)
     {
         AgentSessionId sessionId = new(agent.Name!, "session");
@@ -1021,6 +1203,7 @@ public sealed class AgentEntityDeliveryTests
         {
             DefaultTimeToLive = null,
             EnablePersistentRequestOutcomes = enablePersistentRequestOutcomes,
+            EnableProviderFailureFinalization = enableProviderFailureFinalization,
             ResultRetentionPeriod = resultRetentionPeriod,
             AuthorizeLegacyMigration = authorizeLegacyMigration
                 ? candidate => ReferenceEquals(candidate, state)
@@ -1055,6 +1238,11 @@ public sealed class AgentEntityDeliveryTests
         if (responseHandler is not null)
         {
             services[typeof(IAgentResponseHandler)] = responseHandler;
+        }
+
+        if (providerFailureAttestor is not null)
+        {
+            services[typeof(IDurableAgentProviderFailureAttestor)] = providerFailureAttestor;
         }
 
         Mock<TaskEntityContext> context = new();
@@ -1122,6 +1310,12 @@ public sealed class AgentEntityDeliveryTests
 
         public Exception? Exception { get; init; }
 
+        public Exception? SessionCreationException { get; init; }
+
+        public Exception? SessionSerializationException { get; init; }
+
+        public JsonElement SerializedSession { get; init; } = JsonSerializer.SerializeToElement(new { });
+
         public object? UnsupportedResponseMetadata { get; init; }
 
         public string ResponseText { get; init; } = "response";
@@ -1135,13 +1329,28 @@ public sealed class AgentEntityDeliveryTests
         public List<ChatMessage> LastMessages { get; private set; } = [];
 
         protected override ValueTask<AgentSession> CreateSessionCoreAsync(
-            CancellationToken cancellationToken = default) => new(new RecordingSession());
+            CancellationToken cancellationToken = default)
+        {
+            if (this.SessionCreationException is not null)
+            {
+                return ValueTask.FromException<AgentSession>(this.SessionCreationException);
+            }
+
+            return new(new RecordingSession());
+        }
 
         protected override ValueTask<JsonElement> SerializeSessionCoreAsync(
             AgentSession session,
             JsonSerializerOptions? jsonSerializerOptions = null,
-            CancellationToken cancellationToken = default) =>
-            new(JsonSerializer.SerializeToElement(new { }));
+            CancellationToken cancellationToken = default)
+        {
+            if (this.SessionSerializationException is not null)
+            {
+                return ValueTask.FromException<JsonElement>(this.SessionSerializationException);
+            }
+
+            return new(this.SerializedSession);
+        }
 
         protected override ValueTask<AgentSession> DeserializeSessionCoreAsync(
             JsonElement serializedState,
@@ -1183,6 +1392,32 @@ public sealed class AgentEntityDeliveryTests
         }
 
         private sealed class RecordingSession : AgentSession;
+    }
+
+    private static RecordingProviderFailureAttestor CreateFinalAttestor(Exception exception) =>
+        new(
+            exception,
+            new(
+                DurableAgentProviderFailurePhase.Invoke,
+                DurableAgentProviderFailureFinality.NonRetryable,
+                InputAccepted: true,
+                Code: "providerFailure",
+                Message: "The provider request failed."));
+
+    private sealed class RecordingProviderFailureAttestor(
+        Exception expected,
+        DurableAgentProviderFailureAttestation expectedAttestation) : IDurableAgentProviderFailureAttestor
+    {
+        public int InvocationCount { get; private set; }
+
+        public bool TryAttest(
+            Exception exception,
+            out DurableAgentProviderFailureAttestation? attestation)
+        {
+            this.InvocationCount++;
+            attestation = ReferenceEquals(exception, expected) ? expectedAttestation : null;
+            return attestation is not null;
+        }
     }
 
     private sealed class DictionaryServiceProvider(IReadOnlyDictionary<Type, object> services) : IServiceProvider

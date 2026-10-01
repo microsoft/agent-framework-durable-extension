@@ -52,6 +52,14 @@ public sealed class DurableAgentsOptions
     internal bool EnablePersistentRequestOutcomes { get; set; }
 
     /// <summary>
+    /// Gets or sets whether a certified provider adapter may commit explicitly attested terminal failures.
+    /// </summary>
+    /// <remarks>
+    /// This internal capability is disabled by default. It is not enabled merely by mailbox activation.
+    /// </remarks>
+    internal bool EnableProviderFailureFinalization { get; set; }
+
+    /// <summary>
     /// Gets or sets the test-only agreement to delete receipt-bearing entities after an explicit TTL.
     /// Production deletion remains disabled until a late-duplicate policy is agreed.
     /// </summary>
@@ -68,7 +76,7 @@ public sealed class DurableAgentsOptions
     internal Func<DurableAgentState, bool>? AuthorizeLegacyMigration { get; set; }
 
     /// <summary>
-    /// Gets or sets optional retention for persisted request outcome payloads. Defaults to no expiry.
+    /// Gets or sets optional retention for persisted request outcome payloads. Defaults to 60 seconds.
     /// Completion receipts remain until the whole entity is deleted.
     /// </summary>
     /// <remarks>
@@ -89,7 +97,7 @@ public sealed class DurableAgentsOptions
 
             field = value;
         }
-    }
+    } = TimeSpan.FromSeconds(60);
 
     /// <summary>
     /// Gets or sets the minimum delay for scheduling TTL deletion signals. Defaults to 5 minutes.

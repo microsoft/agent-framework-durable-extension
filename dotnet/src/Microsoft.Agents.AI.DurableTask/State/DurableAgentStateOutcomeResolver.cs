@@ -158,7 +158,47 @@ internal static class DurableAgentStateOutcomeResolver
                 resultExpiresAt,
                 structuredValue,
                 logger: logger);
+        AddResult(state, correlationId, result);
+    }
 
+    public static void AddFailedResult(
+        DurableAgentState state,
+        string correlationId,
+        AgentResponse response,
+        DurableAgentStateTerminalError error,
+        DateTimeOffset completedAt,
+        DateTimeOffset? resultExpiresAt = null,
+        ILogger? logger = null)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(response);
+        ArgumentNullException.ThrowIfNull(error);
+        DurableAgentStateContract.ValidateIdentifier(
+            value: correlationId,
+            diagnosticPath:
+                $"{nameof(DurableAgentStateData.TerminalResults)}.{nameof(DurableAgentStateTerminalResult.CorrelationId)}");
+        DurableAgentStateTerminalResult result = new()
+        {
+            CorrelationId = correlationId,
+            Outcome = DurableAgentStateCompletionReceipt.FailedOutcome,
+            CompletedAt = completedAt,
+            ResultExpiresAt = resultExpiresAt,
+            Response = DurableAgentStateTerminalResponse.FromResponse(
+                response,
+                correlationId,
+                completedAt,
+                structuredValue: default,
+                logger: logger),
+            Error = error,
+        };
+        AddResult(state, correlationId, result);
+    }
+
+    private static void AddResult(
+        DurableAgentState state,
+        string correlationId,
+        DurableAgentStateTerminalResult result)
+    {
         IDictionary<string, DurableAgentStateTerminalResult> terminalResults =
             state.Data.TerminalResults ??
             throw new InvalidOperationException("A revised durable state requires a terminal result mailbox.");

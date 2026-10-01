@@ -86,9 +86,9 @@ public sealed class AgentEntityResultExpirationTests
         Assert.Equal(state.Data.ExpirationTimeUtc, cleaned.Data.ExpirationTimeUtc);
         Assert.True(JsonElement.DeepEquals(state.Data.HistoryBinding, cleaned.Data.HistoryBinding));
         Assert.True(JsonElement.DeepEquals(state.Data.Session!.Value, cleaned.Data.Session!.Value));
-        Assert.Equal(
+        Assert.True(JsonElement.DeepEquals(
             state.Data.IngestedPositions!["producer"],
-            cleaned.Data.IngestedPositions!["producer"]);
+            cleaned.Data.IngestedPositions!["producer"]));
         Assert.Equal(original, Serialize(state));
         Assert.Empty(signals);
 
@@ -258,11 +258,8 @@ public sealed class AgentEntityResultExpirationTests
     }
 
     [Theory]
-    [InlineData("1.0.0")]
-    [InlineData("1.1.0")]
-    [InlineData("1.2.0")]
     [InlineData("3.0.0")]
-    public async Task CleanupRejectsInvalidLegacyOrUnknownVersionWithoutPromotionAsync(string schemaVersion)
+    public async Task CleanupRejectsUnknownVersionWithoutPromotionAsync(string schemaVersion)
     {
         DurableAgentState state = new() { SchemaVersion = schemaVersion };
         state.Data.ConversationHistory.Add(new DurableAgentStateRequest
@@ -487,9 +484,9 @@ public sealed class AgentEntityResultExpirationTests
                 ExpirationTimeUtc = s_now.AddDays(2).UtcDateTime,
                 HistoryBinding = JsonSerializer.SerializeToElement<object?>(null),
                 Session = JsonSerializer.SerializeToElement(new { continuation = "session" }),
-                IngestedPositions = new Dictionary<string, long>
+                IngestedPositions = new Dictionary<string, JsonElement>
                 {
-                    ["producer"] = 2,
+                    ["producer"] = JsonSerializer.SerializeToElement(2),
                 },
             },
         };

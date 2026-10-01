@@ -186,10 +186,12 @@ public sealed class SubWorkflowTypedRoutingTests
     [InlineData("""{"sentMessages":[42]}""")]
     [InlineData("""{"sentMessages":[{"typeName":42,"data":"{}"}]}""")]
     [InlineData("""{"sentMessages":[{"typeName":"System.String","data":{}}]}""")]
-    public async Task InvalidSdkJsonStillPropagatesSerializationFailureAsync(string wire)
+    public async Task InvalidSdkJsonFallsBackBeforeDeserializationAsync(string wire)
     {
         RoutingHarness harness = new("activity", "seed", childOutputWire: wire);
-        await Assert.ThrowsAsync<JsonException>(() => harness.RunAsync());
+        DurableWorkflowResult result = await harness.RunAsync();
+
+        Assert.Equal(string.Empty, result.Result);
         Assert.Empty(harness.Successor.HandledTypes);
         Assert.Empty(harness.SuccessorInputs);
     }

@@ -137,7 +137,7 @@ public sealed class DurableAgentStateOutcomeResolverTests
                 ],
                 Truncation = new DurableAgentStateTruncation
                 {
-                    EvictedMessageCount = 2,
+                    EvictedMessageCount = JsonSerializer.SerializeToElement(2),
                     FirstEvictedAt = s_completedAt,
                     LastEvictedAt = s_completedAt,
                 },

@@ -75,15 +75,29 @@ tool effects are **not** part of this entity-local transaction; tool implementat
 own idempotency guarantees.
 
 Only a successfully committed outer invocation creates a new success receipt. Validation failures,
-cancellation, model/provider errors, serialization/capacity failures, and failed entity commits remain
-retryable; they are not converted into terminal receipts. Existing explicitly committed terminal
+cancellation, ordinary model/provider errors, serialization/capacity failures, and failed entity commits
+remain retryable; they are not converted into terminal receipts. A separate internal capability can commit
+a provider failure only when a certified adapter explicitly attests the provider phase (`Load`, `Invoke`,
+or `Store`), finality (`NonRetryable` or `RetriesExhausted`), and accepted input. The runtime then serializes
+the resulting session, validates sanitized error metadata, and commits the failed result and receipt through
+the same finalization path. No adapter is registered and the capability is disabled by default. Exception
+messages, HTTP status codes, factory/session creation failures, cancellation, reconciliation, serialization,
+scheduling, state replacement, or uncertain commit acknowledgement never establish finality.
+Existing explicitly committed terminal
 failure evidence can be read and migrated, but a transient exception does not establish such a contract.
 Legacy conversion is evidence-only and idempotent. It never calls the model or tools and cannot
 reconstruct receipts for results already evicted from legacy state.
 
-Completion receipts last until entity deletion. `DurableAgentsOptions.ResultRetentionPeriod` is optional
-and defaults to no payload expiry. Result-payload retention and whole-entity TTL are separate policies;
-there is no implicit 60-second mailbox expiry. Deleting the entity also deletes its
+The Agent Framework 1.13 .NET abstractions do not expose a provider-neutral structured classifier for
+`previous_response_not_found`. Provider-specific clients can expose raw response content, but this generic
+durable layer does not infer service codes from exception messages or HTTP status. The ADR 0032 bounded
+0.5/1.0/1.5-second pre-progress retry therefore remains a provider-adapter dependency: a certified adapter
+must expose the structured code and prove that no streaming, tool, session, or continuation progress occurred
+before this layer can implement that retry safely.
+
+Completion receipts last until entity deletion. `DurableAgentsOptions.ResultRetentionPeriod` defaults
+to the shared 60-second delivery window and accepts another positive duration or `null` for no payload
+expiry. Result-payload retention and whole-entity TTL are separate policies. Deleting the entity also deletes its
 idempotency evidence. Keep schema 2.0 writes disabled until the shared rollout gates are agreed and every
 participating reader/worker is mailbox-aware or explicitly rejects the new major version.
 Producer activation and receipt-deleting entity TTL are internal test gates only, disabled by default;
@@ -133,9 +147,10 @@ provide durable cleanup. Cleanup never migrates legacy state and rejects mailbox
 is off.
 
 Malformed/unsupported scheduling profiles fail closed before a new model invocation or cleanup.
-Other extensions and unknown fields in a supported profile are preserved. Non-relying result reads
-remain opaque. Compatible writers must preserve this profile and honor its scheduling contract;
-preserving unknown JSON alone does not make an older scheduler safe to deploy alongside this writer.
+Other extensions and unknown fields in a supported profile are preserved. This is a .NET-local profile,
+not a shared-schema requirement: foreign runtimes preserve it opaquely but need not honor it. Compatible
+.NET writers honor its scheduling contract; preserving unknown JSON alone does not make another scheduler
+safe to deploy alongside this writer.
 
 **Merge and release gate:** this draft must not merge or release until the actual real-backend atomicity
 test passes in an explicitly isolated environment. A clearly documented gated skip is acceptable only

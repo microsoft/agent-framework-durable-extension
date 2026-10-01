@@ -17,6 +17,8 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
     private readonly DurableTaskClient _client = services.GetRequiredService<DurableTaskClient>();
     private readonly ILoggerFactory _loggerFactory = services.GetRequiredService<ILoggerFactory>();
     private readonly IAgentResponseHandler? _messageHandler = services.GetService<IAgentResponseHandler>();
+    private readonly IDurableAgentProviderFailureAttestor? _providerFailureAttestor =
+        services.GetService<IDurableAgentProviderFailureAttestor>();
     private readonly DurableAgentsOptions _options = services.GetRequiredService<DurableAgentsOptions>();
     // Entity operations execute once rather than replaying like orchestrations, and
     // TaskEntityContext does not expose a deterministic clock.
@@ -222,15 +224,20 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             services: this._services);
         DurableAgentContext.SetCurrent(agentContext);
 
+        AgentSession? providerSession = null;
+        bool providerInvocationActive = false;
         try
         {
+            providerSession = await agentWrapper.CreateSessionAsync(this._cancellationToken).ConfigureAwait(false);
+            providerInvocationActive = true;
+
             // Start the agent response stream
             IAsyncEnumerable<AgentResponseUpdate> responseStream = agentWrapper.RunStreamingAsync(
                 workingState.Data.ConversationHistory.SelectMany(e => e.Messages).Select(
                     message => workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion
                         ? message.ToChatMessageV2()
                         : message.ToChatMessage()),
-                await agentWrapper.CreateSessionAsync(this._cancellationToken).ConfigureAwait(false),
+                providerSession,
                 options: null,
                 this._cancellationToken);
 
@@ -285,6 +292,7 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                 response = responseUpdates.ToAgentResponse();
             }
 
+            providerInvocationActive = false;
 #pragma warning disable MEAI001 // Preserve the caller-visible token as well as the mailbox snapshot.
             response.ContinuationToken = continuationToken;
 #pragma warning restore MEAI001
@@ -336,6 +344,22 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         catch (Exception exception)
         {
             logger.LogDurableAgentExecutionFailed(exception, sessionId);
+            if (providerInvocationActive && providerSession is not null)
+            {
+                AgentResponse? committedFailure = await this.TryFinalizeProviderFailureAsync(
+                    exception,
+                    agentWrapper,
+                    providerSession,
+                    workingState,
+                    correlationId,
+                    sessionId,
+                    logger).ConfigureAwait(false);
+                if (committedFailure is not null)
+                {
+                    return committedFailure;
+                }
+            }
+
             throw;
         }
         finally
@@ -343,6 +367,82 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             // Clear the current agent context
             DurableAgentContext.ClearCurrent();
         }
+    }
+
+    private async Task<AgentResponse?> TryFinalizeProviderFailureAsync(
+        Exception exception,
+        EntityAgentWrapper agentWrapper,
+        AgentSession providerSession,
+        DurableAgentState workingState,
+        string correlationId,
+        AgentSessionId sessionId,
+        ILogger logger)
+    {
+        if (!this._options.EnablePersistentRequestOutcomes ||
+            !this._options.EnableProviderFailureFinalization ||
+            workingState.SchemaVersion != DurableAgentState.RevisedSchemaVersion ||
+            exception is OperationCanceledException ||
+            this._cancellationToken.IsCancellationRequested ||
+            this._providerFailureAttestor?.TryAttest(exception, out DurableAgentProviderFailureAttestation? attestation) != true ||
+            attestation is not { InputAccepted: true } certified ||
+            !Enum.IsDefined(certified.Phase) ||
+            !Enum.IsDefined(certified.Finality))
+        {
+            return null;
+        }
+
+        // A provider adapter must attest the accepted input and finality. Session serialization is still
+        // performed by the configured agent; any serialization/validation failure aborts this path and
+        // leaves the previously committed entity state intact.
+        workingState.Data.Session = await agentWrapper.SerializeSessionAsync(
+            providerSession,
+            cancellationToken: this._cancellationToken).ConfigureAwait(false);
+
+        DateTimeOffset completedAt = this._timeProvider.GetUtcNow();
+        DurableAgentStateTerminalError error = new()
+        {
+            Code = certified.Code,
+            Message = certified.Message,
+            Details = certified.Details,
+        };
+        error.Validate();
+
+        AgentResponse response = new()
+        {
+            CreatedAt = completedAt,
+            Messages = [],
+        };
+        DateTimeOffset? resultExpiresAt =
+            CalculateResultExpiration(completedAt, this._options.ResultRetentionPeriod);
+        DurableAgentStateOutcomeResolver.AddFailedResult(
+            workingState,
+            correlationId,
+            response,
+            error,
+            completedAt,
+            resultExpiresAt,
+            logger);
+        DurableAgentStateTerminalResult result = workingState.Data.TerminalResults![correlationId];
+        DurableAgentJsonUtilities.CaptureRetainedResult(response, result.Response!);
+        DurableAgentJsonUtilities.CaptureCommittedFailure(
+            response,
+            new DurableAgentFailureData
+            {
+                Version = 1,
+                CorrelationId = correlationId,
+                Code = error.Code,
+                Message = error.Message,
+                Details = error.Details,
+                CompletedAt = completedAt,
+                ResultExpiresAt = resultExpiresAt,
+                Outcome = DurableAgentStateCompletionReceipt.FailedOutcome,
+            });
+
+        DateTime? entityDeletionCheckExpiration =
+            this.UpdateEntityExpiration(workingState, sessionId, logger);
+        this._cancellationToken.ThrowIfCancellationRequested();
+        this.CommitWorkingState(workingState, sessionId, logger, entityDeletionCheckExpiration);
+        return response;
     }
 
     private void CommitWorkingState(

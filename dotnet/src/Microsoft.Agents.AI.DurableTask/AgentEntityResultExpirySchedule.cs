@@ -10,13 +10,14 @@ namespace Microsoft.Agents.AI.DurableTask;
 /// Tracks the result-expiration self-signal currently scheduled for one agent entity.
 /// </summary>
 /// <remarks>
-/// This runtime-owned schedule metadata is stored under <see cref="DurableAgentState.ExtensionData"/>. It contains the entity
+/// This .NET-owned schedule metadata is stored under <see cref="DurableAgentState.ExtensionData"/>. It contains the entity
 /// identity, scheduled UTC time, and generation token needed to reject delayed signals that belong to an older
 /// schedule or deleted entity generation.
 ///
-/// It is separate from the shared durable-state contract: it does not contain request results, completion receipts,
-/// or conversation-history evidence. The metadata is optional because a successful run or explicit cleanup operation
-/// can reconstruct it from the retained result-expiration timestamps.
+/// It is not part of the shared durable-state schema. Foreign runtimes must preserve the opaque extension value but
+/// need not validate, update, or honor its scheduling semantics. A foreign writer that changes result-retention state
+/// cannot be assumed to maintain this .NET profile. The metadata is optional because a successful .NET run or explicit
+/// cleanup operation can reconstruct it from the retained result-expiration timestamps.
 /// </remarks>
 internal sealed class AgentEntityResultExpirySchedule
 {
@@ -143,5 +144,5 @@ internal sealed class AgentEntityResultExpirySchedule
 
     private static InvalidOperationException InvalidScheduleMetadata() =>
         new($"The '{ExtensionKey}' schedule metadata is malformed, unsupported, or belongs to another entity. " +
-            "Result-expiry scheduling cannot safely continue; preserve the metadata and use a compatible writer.");
+            "Result-expiry scheduling cannot safely continue; preserve the metadata and use a compatible .NET writer.");
 }

@@ -143,7 +143,7 @@ These are independent mechanisms:
 
 | Mechanism | Trigger | Removes | Preserves |
 | --- | --- | --- | --- |
-| Result expiry | `ResultRetentionPeriod` and `CheckAndExpireResults` | `terminalResults[correlationId]` payload | Completion receipt with unavailable state |
+| Result expiry | `ResultRetentionPeriod` (60 seconds by default) and `CheckAndExpireResults` | `terminalResults[correlationId]` payload | Completion receipt with unavailable state |
 | Pressure retention | `DurableAgentHistoryRetentionMode.Auto` and serialized-state high watermark | Oldest eligible connected transcript groups | Mailbox, receipts, binding, session, TTL, bookkeeping, system groups, newest group |
 | Whole-entity TTL | `expirationTimeUtc` and `CheckAndDeleteIfExpired` | Entire entity | Nothing in that session |
 

@@ -62,6 +62,68 @@ public sealed class DurableAgentResponseSerializationTests
     }
 
     [Fact]
+    public async Task OrchestrationCallThrowsCommittedFailureAfterNormalEntityReturnAsync()
+    {
+        DateTimeOffset completedAt = DateTimeOffset.Parse("2026-10-01T06:00:00+00:00");
+        AgentResponse entityResponse = new() { CreatedAt = completedAt, Messages = [] };
+        DurableAgentStateTerminalResult terminalResult = new()
+        {
+            CorrelationId = "correlation",
+            Outcome = DurableAgentStateCompletionReceipt.FailedOutcome,
+            CompletedAt = completedAt,
+            Response = DurableAgentStateTerminalResponse.FromResponse(
+                entityResponse,
+                "correlation",
+                completedAt),
+            Error = new DurableAgentStateTerminalError
+            {
+                Code = "providerFinalFailure",
+                Message = "The provider request failed.",
+            },
+        };
+        DurableAgentJsonUtilities.CaptureRetainedResult(entityResponse, terminalResult.Response);
+        DurableAgentJsonUtilities.CaptureCommittedFailure(
+            entityResponse,
+            new DurableAgentFailureData
+            {
+                Version = 1,
+                CorrelationId = "correlation",
+                Code = terminalResult.Error.Code,
+                Message = terminalResult.Error.Message,
+                CompletedAt = completedAt,
+                Outcome = DurableAgentStateCompletionReceipt.FailedOutcome,
+            });
+        DurableDataConverter converter = new();
+        string wire = converter.Serialize(entityResponse);
+        Assert.Equal(
+            2,
+            JsonDocument.Parse(wire).RootElement
+                .GetProperty("$microsoftAgentFrameworkDurableTask")
+                .GetProperty("version").GetInt32());
+
+        AgentSessionId sessionId = new("agent", "session");
+        Mock<TaskOrchestrationEntityFeature> entities = new();
+        entities.Setup(value => value.CallEntityAsync<AgentResponse>(
+                sessionId, nameof(AgentEntity.Run), It.IsAny<object?>(), It.IsAny<CallEntityOptions?>()))
+            .ReturnsAsync(() => Assert.IsType<AgentResponse>(converter.Deserialize(wire, typeof(AgentResponse))));
+        Mock<TaskOrchestrationContext> context = new();
+        context.SetupGet(value => value.Entities).Returns(entities.Object);
+        context.SetupGet(value => value.InstanceId).Returns("orchestration");
+        DurableAIAgent agent = new(context.Object, "agent");
+
+        DurableAgentTerminalException exception =
+            await Assert.ThrowsAsync<DurableAgentTerminalException>(
+                () => agent.RunAsync(
+                    new ChatMessage(ChatRole.User, "request"),
+                    new DurableAgentSession(sessionId)));
+
+        Assert.Equal("correlation", exception.CorrelationId);
+        Assert.Equal("providerFinalFailure", exception.Code);
+        Assert.Equal("The provider request failed.", exception.Message);
+        Assert.NotNull(exception.Response?.GetDurableResult());
+    }
+
+    [Fact]
     public void SharedOpaqueUriSurvivesDurableResponseSerializationWithoutInventedMediaType()
     {
         DurableAgentState state = JsonSerializer.Deserialize(

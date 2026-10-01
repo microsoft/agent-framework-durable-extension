@@ -226,7 +226,7 @@ public sealed class DurableExecutorDispatcherTests
         context.Setup(c => c.NewGuid()).Returns(Guid.Parse("00000000-0000-0000-0000-000000000001"));
 
         // Act
-        string output = await DurableExecutorDispatcher.DispatchAsync(
+        DurableExecutorOutput output = await DurableExecutorDispatcher.DispatchAsync(
             context.Object,
             new WorkflowExecutorInfo("Agent", IsAgenticExecutor: true),
             DurableMessageEnvelope.Create("input", inputTypeName: null),
@@ -235,15 +235,11 @@ public sealed class DurableExecutorDispatcherTests
             NullLogger.Instance);
 
         // Assert
-        DurableExecutorOutput? parsed = JsonSerializer.Deserialize(
-            output, DurableWorkflowJsonContext.Default.DurableExecutorOutput);
-
-        Assert.NotNull(parsed);
-        Assert.Equal(ResponseText, parsed.Result);
-        Assert.Empty(parsed.StateUpdates);
-        Assert.Empty(parsed.Events);
-        Assert.Empty(parsed.SentMessages);
-        Assert.False(parsed.HaltRequested);
+        Assert.Equal(ResponseText, output.Result);
+        Assert.Empty(output.StateUpdates);
+        Assert.Empty(output.Events);
+        Assert.Empty(output.SentMessages);
+        Assert.False(output.HaltRequested);
     }
 
     [Fact]

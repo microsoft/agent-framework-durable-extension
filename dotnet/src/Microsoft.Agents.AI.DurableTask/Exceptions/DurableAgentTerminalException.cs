@@ -38,6 +38,7 @@ public sealed class DurableAgentTerminalException : InvalidOperationException
             Version = 1,
             CorrelationId = correlationId,
             Code = code,
+            Message = message,
             Details = details ?? default,
             SerializedResponse = new DurableDataConverter().Serialize(response),
         }, innerException))

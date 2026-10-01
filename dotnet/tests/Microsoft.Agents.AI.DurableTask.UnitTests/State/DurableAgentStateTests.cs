@@ -426,7 +426,7 @@ public sealed class DurableAgentStateTests
             DurableAgentStateJsonContext.Default.DurableAgentState);
 
         Assert.Equal(DurableAgentState.CurrentSchemaVersion, promoted.SchemaVersion);
-        Assert.Equal(2, promoted.Data.IngestedPositions?["writer"]);
+        Assert.Equal(2, promoted.Data.IngestedPositions!["writer"].GetInt64());
         Assert.Contains("\"schemaVersion\":\"1.2.0\"", roundTrip, StringComparison.Ordinal);
     }
 
@@ -455,7 +455,7 @@ public sealed class DurableAgentStateTests
     }
 
     [Fact]
-    public void ContractIntegersBeyondInt64AreRejected()
+    public void ContractIntegersBeyondInt64RoundTripLosslessly()
     {
         const string Json = """
             {
@@ -472,8 +472,17 @@ public sealed class DurableAgentStateTests
             }
             """;
 
-        Assert.Throws<InvalidOperationException>(() =>
-            JsonSerializer.Deserialize(Json, DurableAgentStateJsonContext.Default.DurableAgentState));
+        DurableAgentState state = JsonSerializer.Deserialize(
+            Json, DurableAgentStateJsonContext.Default.DurableAgentState)!;
+        string roundTrip = JsonSerializer.Serialize(
+            state, DurableAgentStateJsonContext.Default.DurableAgentState);
+
+        Assert.Equal(
+            "9223372036854775808",
+            state.Data.IngestedPositions!["writer"].GetRawText());
+        Assert.Equal("1e20", state.Data.Truncation!.EvictedMessageCount.GetRawText());
+        Assert.Contains("\"writer\":9223372036854775808", roundTrip, StringComparison.Ordinal);
+        Assert.Contains("\"evictedMessageCount\":1e20", roundTrip, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -595,7 +604,7 @@ public sealed class DurableAgentStateTests
         Assert.Contains("\"futureArray\":[9]", roundTrip, StringComparison.Ordinal);
         Assert.Contains("\"type\":\"future_python_content\"", roundTrip, StringComparison.Ordinal);
         Assert.Contains("\"payload\":\"python-value\"", roundTrip, StringComparison.Ordinal);
-        Assert.Equal(3, migrated.Data.IngestedPositions?["writer"]);
+        Assert.Equal(3, migrated.Data.IngestedPositions!["writer"].GetInt64());
         Assert.Equal("interop-fixture", migrated.ExtensionData?["rootProducer"].GetString());
         Assert.True(migrated.UnknownProperties?["futureRootProperty"].GetProperty("preserve").GetBoolean());
         Assert.Equal("python", migrated.Data.ExtensionData?["dataProducer"].GetString());

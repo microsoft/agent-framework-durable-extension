@@ -53,6 +53,8 @@ internal static class BuiltInFunctions
     private const int MaxWaitTimeoutSeconds = 200;
 
     private const string SessionIdHeaderName = "x-ms-session-id";
+    private const string DurableOutcomeHeaderName = "x-ms-durable-outcome";
+    private const string LegacyCompletionOutcomeHeaderName = "x-ms-agent-completion-outcome";
     private const string SessionIdParameterName = "session_id";
     private const string SessionIdMcpArgumentName = "sessionId";
     private const string ResponseFormatMcpArgumentName = "responseFormat";
@@ -532,7 +534,7 @@ internal static class BuiltInFunctions
         using MemoryStream stream = new();
         await serializer.SerializeAsync(
             stream,
-            new AgentRunSuccessResponse((int)HttpStatusCode.OK, sessionId.Key, agentResponse),
+            new AgentRunSuccessResponse("success", (int)HttpStatusCode.OK, sessionId.Key, agentResponse),
             typeof(AgentRunSuccessResponse),
             functionContext.CancellationToken);
         return Encoding.UTF8.GetString(stream.ToArray());
@@ -774,7 +776,8 @@ internal static class BuiltInFunctions
 
         if (AcceptsJson(req))
         {
-            AgentRunSuccessResponse successResponse = new((int)statusCode, sessionId, agentResponse);
+            AgentRunSuccessResponse successResponse =
+                new("success", (int)statusCode, sessionId, agentResponse);
             await response.WriteAsJsonAsync(successResponse, context.CancellationToken);
         }
         else
@@ -803,7 +806,8 @@ internal static class BuiltInFunctions
 
         if (AcceptsJson(req))
         {
-            AgentRunAcceptedResponse acceptedResponse = new((int)HttpStatusCode.Accepted, sessionId);
+            AgentRunAcceptedResponse acceptedResponse =
+                new("accepted", (int)HttpStatusCode.Accepted, sessionId);
             await response.WriteAsJsonAsync(acceptedResponse, context.CancellationToken);
         }
         else
@@ -820,7 +824,7 @@ internal static class BuiltInFunctions
         FunctionContext context,
         HttpStatusCode statusCode,
         string sessionId,
-        string outcome,
+        string status,
         string code,
         string message,
         JsonElement? details,
@@ -828,18 +832,18 @@ internal static class BuiltInFunctions
     {
         HttpResponseData response = req.CreateResponse(statusCode);
         response.Headers.Add(SessionIdHeaderName, sessionId);
-        if (completionOutcome is not null)
-        {
-            response.Headers.Add("x-ms-agent-completion-outcome", completionOutcome);
-        }
+        string durableOutcome = completionOutcome ?? "failed";
+        response.Headers.Add(DurableOutcomeHeaderName, durableOutcome);
+        response.Headers.Add(LegacyCompletionOutcomeHeaderName, durableOutcome);
 
         if (AcceptsJson(req))
         {
             await response.WriteAsJsonAsync(
                 new AgentRunFailureResponse(
+                    status,
                     (int)statusCode,
                     sessionId,
-                    outcome,
+                    durableOutcome,
                     new AgentRunError(code, message, details),
                     completionOutcome),
                 context.CancellationToken);
@@ -1166,11 +1170,13 @@ internal static class BuiltInFunctions
     /// <summary>
     /// Represents a successful agent run response.
     /// </summary>
-    /// <param name="Status">The HTTP status code.</param>
+    /// <param name="Status">The portable agent-run status.</param>
+    /// <param name="StatusCode">The numeric HTTP status code.</param>
     /// <param name="SessionId">The session ID for the conversation.</param>
     /// <param name="Response">The agent response.</param>
     internal sealed record AgentRunSuccessResponse(
-        [property: JsonPropertyName("status")] int Status,
+        [property: JsonPropertyName("status")] string Status,
+        [property: JsonPropertyName("status_code")] int StatusCode,
         [property: JsonPropertyName("session_id")] string SessionId,
         [property: JsonPropertyName("response")] AgentResponse Response)
     {
@@ -1182,14 +1188,17 @@ internal static class BuiltInFunctions
     /// <summary>
     /// Represents an accepted (fire-and-forget) agent run response.
     /// </summary>
-    /// <param name="Status">The HTTP status code.</param>
+    /// <param name="Status">The portable agent-run status.</param>
+    /// <param name="StatusCode">The numeric HTTP status code.</param>
     /// <param name="SessionId">The session ID for the conversation.</param>
     internal sealed record AgentRunAcceptedResponse(
-        [property: JsonPropertyName("status")] int Status,
+        [property: JsonPropertyName("status")] string Status,
+        [property: JsonPropertyName("status_code")] int StatusCode,
         [property: JsonPropertyName("session_id")] string SessionId);
 
     internal sealed record AgentRunFailureResponse(
-        [property: JsonPropertyName("status")] int Status,
+        [property: JsonPropertyName("status")] string Status,
+        [property: JsonPropertyName("status_code")] int StatusCode,
         [property: JsonPropertyName("session_id")] string SessionId,
         [property: JsonPropertyName("outcome")] string Outcome,
         [property: JsonPropertyName("error")] AgentRunError Error,

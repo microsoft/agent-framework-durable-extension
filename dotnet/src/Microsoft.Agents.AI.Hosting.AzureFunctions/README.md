@@ -70,16 +70,20 @@ terminal-response JSON. Use `result` for optional `value` (absent and explicit n
 opaque content, and unknown metadata that the native response cannot represent. Legacy plain-text
 negotiation remains supported.
 
-A supported committed terminal failure returns `500` with `outcome: "failed"` and the retained error
-code/details. A completion whose result is unavailable returns `410 Gone` with
-`outcome: "completedResultUnavailable"` and the retained `completion_outcome` (`"succeeded"` or `"failed"`);
-the `x-ms-agent-completion-outcome` header also carries that outcome for plain-text callers. It must not be treated as
+A supported committed terminal failure returns `500` with string `status: "failed"`, numeric
+`status_code: 500`, `outcome: "failed"`, and the retained error code/details. A completion whose result
+is unavailable returns `410 Gone` with `status: "completedResultUnavailable"`, `status_code: 410`, and
+the retained `outcome` (`"succeeded"` or `"failed"`). The canonical `x-ms-durable-outcome` header carries
+the same outcome for JSON and plain-text callers. The legacy `completion_outcome` body property and
+`x-ms-agent-completion-outcome` header are emitted as compatibility aliases for existing .NET clients.
+It must not be treated as
 pending, retried with a new identity automatically, or replaced by a transcript-derived result.
 Ordinary transient failures and cancellation are not durable terminal outcomes.
 
 MCP agent calls continue waiting while pending and return text by default for compatibility.
-Set the optional tool argument `responseFormat` to `"json"` to receive the full successful response
-envelope (`status`, `session_id`, `response`, and canonical `result`); `"text"` explicitly selects legacy text.
+The optional `responseFormat` argument is a .NET-only opt-in and is not advertised by the Python MCP
+surface; cross-runtime clients should omit it. In .NET, set it to `"json"` to receive the full successful response
+envelope (`status`, `status_code`, `session_id`, `response`, and canonical `result`); `"text"` explicitly selects legacy text.
 Unsupported format values are rejected before dispatch. Committed failures and unavailable results
 throw `DurableAgentTerminalException` and `DurableAgentResultUnavailableException` respectively, for
 the MCP host to report as tool failures. They are never returned as successful text or JSON responses.

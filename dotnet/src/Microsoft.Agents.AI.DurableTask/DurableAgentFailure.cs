@@ -102,6 +102,8 @@ internal sealed class DurableAgentFailureData
 
     public string? Code { get; init; }
 
+    public string? Message { get; init; }
+
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public JsonElement Details { get; init; }
 

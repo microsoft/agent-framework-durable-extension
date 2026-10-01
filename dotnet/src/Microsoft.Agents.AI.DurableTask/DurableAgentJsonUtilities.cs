@@ -65,6 +65,9 @@ internal static partial class DurableAgentJsonUtilities
     private static readonly ConditionalWeakTable<AgentResponse, RetainedResultHolder>
         s_retainedResultsByResponse = new();
 
+    private static readonly ConditionalWeakTable<AgentResponse, CommittedFailureHolder>
+        s_committedFailuresByResponse = new();
+
     /// <summary>
     /// Gets the singleton <see cref="JsonSerializerOptions"/> used for Durable Agent serialization.
     /// </summary>
@@ -86,6 +89,14 @@ internal static partial class DurableAgentJsonUtilities
         ArgumentNullException.ThrowIfNull(response);
         return s_retainedResultsByResponse.TryGetValue(response, out RetainedResultHolder? retained)
             ? retained.Value
+            : null;
+    }
+
+    internal static DurableAgentFailureData? GetCommittedFailure(AgentResponse response)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        return s_committedFailuresByResponse.TryGetValue(response, out CommittedFailureHolder? failure)
+            ? failure.Value
             : null;
     }
 
@@ -121,6 +132,33 @@ internal static partial class DurableAgentJsonUtilities
     internal static void CaptureRetainedResult(AgentResponse response, JsonElement snapshot) =>
         s_retainedResultsByResponse.Add(response, new RetainedResultHolder(snapshot.Clone()));
 
+    internal static void CaptureCommittedFailure(
+        AgentResponse response,
+        DurableAgentFailureData failure)
+    {
+        if (GetRetainedResult(response) is null)
+        {
+            throw new InvalidOperationException(
+                "A committed durable failure requires its canonical terminal response.");
+        }
+
+        s_committedFailuresByResponse.Add(
+            response,
+            new CommittedFailureHolder(new DurableAgentFailureData
+            {
+                Version = failure.Version,
+                CorrelationId = failure.CorrelationId,
+                Code = failure.Code,
+                Message = failure.Message,
+                Details = failure.Details.ValueKind == JsonValueKind.Undefined
+                    ? default
+                    : failure.Details.Clone(),
+                CompletedAt = failure.CompletedAt,
+                ResultExpiresAt = failure.ResultExpiresAt,
+                Outcome = failure.Outcome,
+            }));
+    }
+
     /// <summary>
     /// Converts a legacy transcript response into the canonical terminal-response shape and associates it with the
     /// projected runtime response.
@@ -154,6 +192,11 @@ internal static partial class DurableAgentJsonUtilities
         {
             CaptureRetainedResult(target, result);
         }
+
+        if (GetCommittedFailure(source) is DurableAgentFailureData failure)
+        {
+            CaptureCommittedFailure(target, failure);
+        }
     }
 
     /// <summary>
@@ -165,6 +208,11 @@ internal static partial class DurableAgentJsonUtilities
         /// Gets the immutable, independently owned canonical result JSON.
         /// </summary>
         public JsonElement Value { get; } = value;
+    }
+
+    private sealed class CommittedFailureHolder(DurableAgentFailureData value)
+    {
+        public DurableAgentFailureData Value { get; } = value;
     }
 
     /// <summary>

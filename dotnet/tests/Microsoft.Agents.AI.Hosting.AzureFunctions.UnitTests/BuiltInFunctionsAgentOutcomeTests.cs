@@ -33,7 +33,8 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
 
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         using JsonDocument body = ReadBody(response);
-        Assert.Equal(202, body.RootElement.GetProperty("status").GetInt32());
+        Assert.Equal("accepted", body.RootElement.GetProperty("status").GetString());
+        Assert.Equal(202, body.RootElement.GetProperty("status_code").GetInt32());
         Assert.False(body.RootElement.TryGetProperty("response", out _));
         fixture.Entities.Verify(
             c => c.GetEntityAsync<DurableAgentState>(
@@ -56,7 +57,8 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
         if (accept == "application/json")
         {
             using JsonDocument body = ReadBody(response);
-            Assert.Equal(200, body.RootElement.GetProperty("status").GetInt32());
+            Assert.Equal("success", body.RootElement.GetProperty("status").GetString());
+            Assert.Equal(200, body.RootElement.GetProperty("status_code").GetInt32());
             Assert.Equal("original result", body.RootElement.GetProperty("response")
                 .GetProperty("messages")[0].GetProperty("contents")[0].GetProperty("text").GetString());
         }
@@ -82,6 +84,8 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
         if (format == "json")
         {
             using JsonDocument body = JsonDocument.Parse(Assert.IsType<string>(response));
+            Assert.Equal("success", body.RootElement.GetProperty("status").GetString());
+            Assert.Equal(200, body.RootElement.GetProperty("status_code").GetInt32());
             Assert.Equal(SessionKey, body.RootElement.GetProperty("session_id").GetString());
             Assert.Equal("original result", body.RootElement.GetProperty("response")
                 .GetProperty("messages")[0].GetProperty("contents")[0].GetProperty("text").GetString());
@@ -137,11 +141,14 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
             fixture.Request, fixture.Client.Object, fixture.Context);
 
         Assert.Equal(HttpStatusCode.Gone, response.StatusCode);
+        Assert.Equal(outcome, Assert.Single(response.Headers.GetValues("x-ms-durable-outcome")));
         Assert.Equal(outcome, Assert.Single(response.Headers.GetValues("x-ms-agent-completion-outcome")));
         if (accept == "application/json")
         {
             using JsonDocument body = ReadBody(response);
-            Assert.Equal("completedResultUnavailable", body.RootElement.GetProperty("outcome").GetString());
+            Assert.Equal("completedResultUnavailable", body.RootElement.GetProperty("status").GetString());
+            Assert.Equal(410, body.RootElement.GetProperty("status_code").GetInt32());
+            Assert.Equal(outcome, body.RootElement.GetProperty("outcome").GetString());
             Assert.Equal(outcome, body.RootElement.GetProperty("completion_outcome").GetString());
             Assert.False(body.RootElement.TryGetProperty("response", out _));
         }
@@ -157,7 +164,10 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
             fixture.Request, fixture.Client.Object, fixture.Context);
 
         Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Equal("failed", Assert.Single(response.Headers.GetValues("x-ms-durable-outcome")));
         using JsonDocument body = ReadBody(response);
+        Assert.Equal("failed", body.RootElement.GetProperty("status").GetString());
+        Assert.Equal(500, body.RootElement.GetProperty("status_code").GetInt32());
         Assert.Equal("failed", body.RootElement.GetProperty("outcome").GetString());
         JsonElement error = body.RootElement.GetProperty("error");
         Assert.Equal("committedFailure", error.GetProperty("code").GetString());

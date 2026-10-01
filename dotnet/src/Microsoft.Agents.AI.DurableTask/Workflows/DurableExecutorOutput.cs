@@ -122,9 +122,98 @@ internal sealed class DurableExecutorOutput
 
     internal static bool HasValidTypedMessage(JsonElement message)
     {
-        return HasUnambiguousProperties(message, s_messageProperties, out HashSet<string> presentProperties) &&
-            presentProperties.Contains(nameof(TypedPayload.TypeName)) &&
-            presentProperties.Contains(nameof(TypedPayload.Data));
+        if (!HasUnambiguousProperties(message, s_messageProperties, out HashSet<string> presentProperties) ||
+            !presentProperties.Contains(nameof(TypedPayload.TypeName)) ||
+            !presentProperties.Contains(nameof(TypedPayload.Data)))
+        {
+            return false;
+        }
+
+        JsonElement typeName = default;
+        JsonElement data = default;
+        foreach (JsonProperty property in message.EnumerateObject())
+        {
+            if (property.Name.Equals(nameof(TypedPayload.TypeName), StringComparison.OrdinalIgnoreCase))
+            {
+                typeName = property.Value;
+            }
+            else if (property.Name.Equals(nameof(TypedPayload.Data), StringComparison.OrdinalIgnoreCase))
+            {
+                data = property.Value;
+            }
+        }
+
+        return typeName.ValueKind == JsonValueKind.String &&
+            !string.IsNullOrWhiteSpace(typeName.GetString()) &&
+            data.ValueKind == JsonValueKind.String &&
+            !string.IsNullOrWhiteSpace(data.GetString());
+    }
+
+    /// <summary>
+    /// Validates a received typed-message collection before source-generated deserialization can
+    /// materialize a malformed field or attempt any downstream type resolution.
+    /// </summary>
+    internal static bool HasValidRawTypedMessages(JsonElement result)
+    {
+        if (result.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        JsonElement sentMessages = default;
+        bool found = false;
+        foreach (JsonProperty property in result.EnumerateObject())
+        {
+            if (!property.Name.Equals(nameof(SentMessages), StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (found)
+            {
+                return false;
+            }
+
+            found = true;
+            sentMessages = property.Value;
+        }
+
+        return !found ||
+            sentMessages.ValueKind == JsonValueKind.Null ||
+            sentMessages.ValueKind == JsonValueKind.Array &&
+            sentMessages.EnumerateArray().All(HasValidTypedMessage);
+    }
+
+    internal static string? GetRawResult(JsonElement result)
+    {
+        if (result.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        JsonElement value = default;
+        bool found = false;
+        foreach (JsonProperty property in result.EnumerateObject())
+        {
+            if (!property.Name.Equals(nameof(Result), StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (found)
+            {
+                return null;
+            }
+
+            found = true;
+            value = property.Value;
+        }
+
+        return !found || value.ValueKind == JsonValueKind.Null
+            ? null
+            : value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : null;
     }
 
     /// <summary>

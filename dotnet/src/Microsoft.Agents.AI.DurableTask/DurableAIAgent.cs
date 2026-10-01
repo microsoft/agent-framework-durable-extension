@@ -133,10 +133,21 @@ public sealed class DurableAIAgent : AIAgent
 
         try
         {
-            return await this._context.Entities.CallEntityAsync<AgentResponse>(
+            AgentResponse response = await this._context.Entities.CallEntityAsync<AgentResponse>(
                 durableSession.SessionId,
                 nameof(AgentEntity.Run),
                 request);
+            if (DurableAgentJsonUtilities.GetCommittedFailure(response) is DurableAgentFailureData failure)
+            {
+                throw new DurableAgentTerminalException(
+                    failure.CorrelationId,
+                    failure.Code!,
+                    failure.Message!,
+                    failure.Details,
+                    response);
+            }
+
+            return response;
         }
         catch (EntityOperationFailedException e) when (e.FailureDetails.ErrorType == "EntityTaskNotFound")
         {

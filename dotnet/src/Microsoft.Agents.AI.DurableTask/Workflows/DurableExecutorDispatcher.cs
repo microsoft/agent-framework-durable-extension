@@ -159,8 +159,13 @@ internal static class DurableExecutorDispatcher
         AgentSession session = await agent.CreateSessionAsync().ConfigureAwait(true);
         AgentResponse response = await agent.RunAsync(input, session).ConfigureAwait(true);
 
-        return CreateExecutorOutputEnvelope(response.Text ?? string.Empty);
+        return new DurableExecutorOutput { Result = response.Text ?? string.Empty };
     }
+
+    internal static string CreateExecutorOutputEnvelope(string response) =>
+        JsonSerializer.Serialize(
+            new DurableExecutorOutput { Result = response },
+            DurableWorkflowJsonContext.Default.DurableExecutorOutput);
 
     /// <summary>
     /// Dispatches a sub-workflow executor as a sub-orchestration.
@@ -193,17 +198,22 @@ internal static class DurableExecutorDispatcher
         }
 
         JsonElement resultElement = serializedWorkflowResult.Value;
-        DurableWorkflowResult? workflowResult = resultElement.Deserialize(
-            DurableWorkflowJsonContext.Default.DurableWorkflowResult);
-        if (workflowResult is not null &&
-            resultElement.TryGetProperty("sentMessages", out JsonElement sentMessages) &&
-            sentMessages.ValueKind == JsonValueKind.Array &&
-            !sentMessages.EnumerateArray().All(DurableExecutorOutput.HasValidTypedMessage))
+        string? rawResult = DurableExecutorOutput.GetRawResult(resultElement);
+        if (!DurableExecutorOutput.HasValidRawTypedMessages(resultElement))
         {
-            workflowResult.SentMessages = [new TypedPayload()];
+            return CreateInvalidChildFallback(rawResult);
         }
 
-        return ConvertWorkflowResultToExecutorOutput(workflowResult);
+        try
+        {
+            DurableWorkflowResult? workflowResult = resultElement.Deserialize(
+                DurableWorkflowJsonContext.Default.DurableWorkflowResult);
+            return ConvertWorkflowResultToExecutorOutput(workflowResult);
+        }
+        catch (JsonException)
+        {
+            return CreateInvalidChildFallback(rawResult);
+        }
     }
 
     /// <summary>
@@ -246,6 +256,13 @@ internal static class DurableExecutorDispatcher
             HaltRequested = workflowResult.HaltRequested,
         };
     }
+
+    private static DurableExecutorOutput CreateInvalidChildFallback(string? result) =>
+        new()
+        {
+            Result = result,
+            SentMessages = CreateResultMessages(result),
+        };
 
     private static List<TypedPayload> CreateResultMessages(string? result) =>
         // Result-only fallback retains exact string provenance, including whitespace text.

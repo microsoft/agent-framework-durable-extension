@@ -97,8 +97,9 @@ Missing and explicit-null profiles remain distinct, and scalar, array, and objec
 unchanged through the independent working clone. This layer never selects a provider from this data.
 
 The shared DTOs retain their schema contract. Delivery lookup and polling use the same resolver for both
-layouts. `ResultRetentionPeriod` is optional and defaults to no payload expiry; expiry never removes the
-completion receipt. Binding selection/enforcement and transcript retention are not implemented by this layer.
+layouts. `ResultRetentionPeriod` defaults to the portable 60-second delivery window and accepts another
+positive duration or `null` for no payload expiry; expiry never removes the completion receipt. Binding
+selection/enforcement and transcript retention are not implemented by this layer.
 With the internal mailbox-writer gate enabled, successful new runs and the scheduled/explicit
 `CheckAndExpireResults` entity operation durably remove due `terminalResults` entries and transition
 their existing receipts to `unavailable`. The operation uses an independent state copy and commits its
@@ -136,18 +137,22 @@ fields and other extensions are retained. A missing profile is compatible for im
 a successful new run or explicit no-input cleanup installs it when needed. Old timestamp-only signals
 cannot install or consume a profile; import/upgrade recovery must explicitly enqueue no-input cleanup.
 
-Relying writers validate version, entity identity, UTC deadline, nonempty GUID token, paired nulls and
-duplicate properties, failing closed rather than dropping an unsupported/malformed profile. A new run
-validates before constructing the model. Legacy writes do not interpret/create this profile, and
-non-relying reads preserve it opaquely. Compatible serializers must preserve the extension; compatible
-schedulers must also honor the token contract. Do not roll back to an older scheduler that merely
-preserves the extension but starts a fresh chain on every run.
+.NET writers that rely on this profile validate version, entity identity, UTC deadline, nonempty GUID
+token, paired nulls and duplicate properties, failing closed rather than dropping an unsupported/malformed
+profile. A new run validates before constructing the model. Legacy writes do not interpret/create this
+profile, and foreign runtimes preserve it opaquely without any requirement to honor it. Compatible .NET
+schedulers honor the token contract. Do not roll back to an older scheduler that merely preserves the
+extension but starts a fresh chain on every run.
 
 Under the internal schema-2 test gate, one successful durable entity operation atomically stages the
 terminal result and receipt together with that operation's session continuation, ingestion bookkeeping,
 entity-local transcript, whole-entity TTL, optional binding, and other local control state. External provider
 writes and tool side effects are outside that entity-local transaction. A failed outer invocation or durable
-commit does not establish a new completion receipt. Legacy conversion uses only retained authoritative
+commit does not establish a new completion receipt. The only exception is an internal, default-off provider
+finalization capability: a certified adapter must explicitly attest accepted input, provider phase, and
+non-retryable/exhausted finality; the resulting session must serialize and the failed result, receipt, session,
+and accepted request evidence must pass the normal commit path. No generic exception/message/status inference
+is permitted. Legacy conversion uses only retained authoritative
 terminal evidence, never calls the model/tools, and cannot invent receipts for already-evicted results.
 Previously persisted legacy state stays legacy unless independently authorized as complete history;
 retained transcript alone does not establish that authorization. Known truncation/compaction prevents
