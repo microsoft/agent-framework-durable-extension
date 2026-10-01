@@ -224,14 +224,18 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         DurableAgentHistoryConfiguration historyConfiguration =
             this._options.GetHistoryConfiguration(sessionId.Name);
         string? configuredHistoryProviderKey =
-            historyConfiguration.ProviderKey?.Value ??
-            persistedHistoryBinding?.ProviderKey;
+            historyConfiguration.ProviderKey?.Value;
         DurableAgentHistoryBinding.ValidateContinuationPresence(
             existingHistoryBinding,
             this.State.Data.Session);
-        DurableAgentHistoryBinding.ValidateConfiguredKey(
-            existingHistoryBinding,
-            configuredHistoryProviderKey);
+        if (configuredHistoryProviderKey is not null)
+        {
+            DurableAgentHistoryBinding.ValidateConfiguredKey(
+                persistedHistoryBinding,
+                configuredHistoryProviderKey);
+        }
+
+        configuredHistoryProviderKey ??= persistedHistoryBinding?.ProviderKey;
         if (workingState.SchemaVersion != DurableAgentState.RevisedSchemaVersion)
         {
             workingState.Data.ConversationHistory.Add(

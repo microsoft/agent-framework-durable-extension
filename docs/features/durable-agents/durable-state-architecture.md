@@ -119,7 +119,11 @@ History ownership controls where prior model context comes from; it does not con
 
 When the internal schema 2 writer is active, each cold operation uses `DurableAgentSessionState.RestoreAsync` to reconstruct the session. `DurableAgentHistoryOwnershipResolver` inspects the public Agent Framework surface available from the agent and session, applies the configured replay policy, and produces the effective owner. `DurableAgentHistoryBinding` compares that owner with the persisted fixed binding and rejects a different owner or provider identity before model execution. Schema 1 remains the public default and preserves the pre-profile behavior without creating or enforcing a fixed binding.
 
+Recognized provisional bindings are also authoritative for provider identity: an explicitly configured provider key must match before the agent is constructed, while truly unrecognized profiles remain opaque and are never interpreted as C# provider identities. Prior continuity includes transcript entries, terminal results, completion receipts, recognized or opaque binding state, serialized sessions, ingestion positions, and truncation evidence, so transcript pruning cannot make an established session appear fresh.
+
 After execution, ownership is resolved again. A newly assigned real service conversation ID can transition a provisional first turn to service ownership. The final binding and serialized continuation are validated and committed together. Later workers must restore the same logical owner.
+
+External providers must declare continuation `StateKeys`, and every declared key must contain usable non-empty JSON state before a bound invocation or final seal. Missing, null, blank-string, empty-container, and marker-only values do not prove that the same logical provider history can resume. A restored real service conversation and a custom history provider are conflicting authorities and are rejected before provider or model callbacks.
 
 The application or external provider remains responsible for availability, authorization, retention, deletion, residency, consistency, idempotency, and uncertain acknowledgement handling for history stored outside the entity. The durable extension is responsible for restoring the recorded continuation, selecting only one context source, and failing closed when it cannot prove a compatible owner.
 

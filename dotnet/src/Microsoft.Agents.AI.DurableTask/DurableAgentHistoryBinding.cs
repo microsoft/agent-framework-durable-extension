@@ -347,6 +347,15 @@ internal static class DurableAgentHistoryBinding
                 "An external history provider used by the C# fixed-owner profile must declare at least " +
                 "one StateKey so durable continuation can be verified before later model calls.");
         }
+
+        if (ownership == DurableAgentHistoryOwnership.Service &&
+            chatClientAgent?.ChatHistoryProvider is { } provider &&
+            provider is not InMemoryChatHistoryProvider)
+        {
+            throw new DurableAgentHistoryOwnershipNotSupportedException(
+                "A restored model-service conversation cannot be combined with a custom chat history " +
+                "provider because both would be authoritative for the same durable invocation.");
+        }
     }
 
     public static DurableAgentState Seal(
@@ -447,6 +456,9 @@ internal static class DurableAgentHistoryBinding
     private static bool HasPriorContinuity(DurableAgentState state)
     {
         return state.Data.ConversationHistory.Count > 0 ||
+            state.Data.TerminalResults is { Count: > 0 } ||
+            state.Data.CompletionReceipts is { Count: > 0 } ||
+            state.Data.HistoryBinding.ValueKind != System.Text.Json.JsonValueKind.Undefined ||
             state.Data.Session is not null ||
             state.Data.IngestedPositions is not null ||
             state.Data.Truncation is not null;
@@ -490,7 +502,26 @@ internal static class DurableAgentHistoryBinding
 
         System.Text.Json.JsonElement stateBag = session.StateBag.Serialize();
         return provider.StateKeys.All(
-            key => stateBag.TryGetProperty(key, out _));
+            key =>
+                stateBag.TryGetProperty(key, out System.Text.Json.JsonElement value) &&
+                HasUsableProviderContinuationValue(value));
+    }
+
+    private static bool HasUsableProviderContinuationValue(
+        System.Text.Json.JsonElement value)
+    {
+        return value.ValueKind switch
+        {
+            System.Text.Json.JsonValueKind.String =>
+                !string.IsNullOrWhiteSpace(value.GetString()),
+            System.Text.Json.JsonValueKind.Number => true,
+            System.Text.Json.JsonValueKind.Object =>
+                value.EnumerateObject().Any(
+                    property => HasUsableProviderContinuationValue(property.Value)),
+            System.Text.Json.JsonValueKind.Array =>
+                value.EnumerateArray().Any(HasUsableProviderContinuationValue),
+            _ => false,
+        };
     }
 
     private static bool HasInMemoryProviderMessages(
