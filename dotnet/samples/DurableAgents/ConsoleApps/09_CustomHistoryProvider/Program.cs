@@ -204,7 +204,6 @@ static IHost CreateHost(
                         timeToLive: TimeSpan.FromHours(1),
                         configureHistory: history =>
                             history.ProviderKey = new(JsonFileChatHistoryProvider.ProviderKey));
-                    options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll;
                 },
                 workerBuilder: builder => builder.UseDurableTaskScheduler(dtsConnectionString),
                 clientBuilder: builder => builder.UseDurableTaskScheduler(dtsConnectionString));

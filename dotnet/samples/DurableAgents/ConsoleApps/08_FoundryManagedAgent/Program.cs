@@ -171,7 +171,6 @@ static IHost CreateHost(AIAgent foundryAgent, string dtsConnectionString)
                         timeToLive: TimeSpan.FromHours(1),
                         configureHistory: history =>
                             history.ProviderKey = new(FoundryServiceHistoryProviderKey));
-                    options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll;
 
                     // FoundryAgent's versioned-agent path does not enable
                     // RequirePerServiceCallChatHistoryPersistence. Once the first response supplies

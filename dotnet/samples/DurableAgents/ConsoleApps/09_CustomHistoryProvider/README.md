@@ -71,8 +71,9 @@ ASCII and multibyte input), the stable logical key, external storage above 1 MiB
 projection, provider-reference restoration, framework-filtered persistence, unsupported content
 failure, and cancellation without requiring Foundry or DTS. The durable runtime registration tests
 exercise the configured keyed proxy across a cold host restart, verify schema 2 mailbox and completion
-state without a transcript mirror through the internal test hook, and verify a missing mailbox
-activation fails before provider or model callbacks. Additional durable runtime tests
+state without a transcript mirror through the internal test hook, and verify that the default,
+non-activated runtime continues using legacy entity history while the external provider runs, without
+authorizing or writing schema 2 outcomes. Additional durable runtime tests
 `AgentEntityHistoryTests.RecreatedExternalProviderWithSameLogicalKeyContinuesWithoutTranscriptMirrorAsync`,
 `AgentEntityHistoryTests.ChangedExternalProviderKeyRejectsBeforeProviderOrModelCallbacksAsync`,
 `AgentEntityHistoryTests.CustomProviderOwnsTranscriptAndEntityStoresOnlyMailboxAndContinuationAsync`,

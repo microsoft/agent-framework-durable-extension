@@ -36,8 +36,7 @@ public sealed class FoundryAgentRegistrationTests
             foundryAgent,
             timeToLive: null,
             configureHistory: history => history.ProviderKey = s_historyProviderKey);
-        options.EnableMailboxWrites = true;
-        options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll;
+        options.EnablePersistentRequestOutcomes = true;
 
         Assert.NotNull(innerAgent);
         Assert.Same(innerAgent, DurableAgentHistoryOwnershipResolver.FindChatClientAgent(foundryAgent));
@@ -51,8 +50,7 @@ public sealed class FoundryAgentRegistrationTests
         Assert.Equal(
             s_historyProviderKey,
             options.GetHistoryConfiguration(foundryAgent.Name!).ProviderKey);
-        Assert.True(options.EnableMailboxWrites);
-        Assert.Equal(DurableAgentHistoryRetentionMode.KeepAll, options.HistoryRetentionMode);
+        Assert.True(options.EnablePersistentRequestOutcomes);
         Assert.False(
             options.GetHistoryConfiguration(foundryAgent.Name!).ServiceManagedPerServiceCallHistory);
     }

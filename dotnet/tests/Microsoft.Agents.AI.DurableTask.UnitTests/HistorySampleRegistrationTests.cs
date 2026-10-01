@@ -47,11 +47,7 @@ public sealed class HistorySampleRegistrationTests
             using (IHost firstHost = CreateHost(
                 firstAgent,
                 stateStore,
-                options =>
-                {
-                    options.EnableMailboxWrites = true;
-                    options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll;
-                },
+                options => options.EnablePersistentRequestOutcomes = true,
                 s_customHistoryProviderKey,
                 services => services.AddSingleton(firstProvider)))
             {
@@ -71,10 +67,7 @@ public sealed class HistorySampleRegistrationTests
                     DurableAgentStateHistoryBinding.HistoryProviderOwner,
                     JsonFileChatHistoryProvider.ProviderKey,
                     completionCount: 1);
-                Assert.True(firstHost.Services.GetRequiredService<DurableAgentsOptions>().EnableMailboxWrites);
-                Assert.Equal(
-                    DurableAgentHistoryRetentionMode.KeepAll,
-                    firstHost.Services.GetRequiredService<DurableAgentsOptions>().HistoryRetentionMode);
+                Assert.True(firstHost.Services.GetRequiredService<DurableAgentsOptions>().EnablePersistentRequestOutcomes);
                 await firstHost.StopAsync();
             }
 
@@ -84,11 +77,7 @@ public sealed class HistorySampleRegistrationTests
             using IHost secondHost = CreateHost(
                 secondAgent,
                 stateStore,
-                options =>
-                {
-                    options.EnableMailboxWrites = true;
-                    options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll;
-                },
+                options => options.EnablePersistentRequestOutcomes = true,
                 s_customHistoryProviderKey,
                 services => services.AddSingleton(secondProvider));
             await secondHost.StartAsync();
@@ -211,7 +200,7 @@ public sealed class HistorySampleRegistrationTests
     }
 
     [Fact]
-    public async Task ExternalOwnershipWithoutMailboxActivationFailsClearlyThroughProxyAsync()
+    public async Task ExternalProviderWithoutMailboxActivationRetainsLegacyEntityHistoryAsync()
     {
         string directory = CreateStoreDirectory();
         InProcessDurableStateStore stateStore = new();
@@ -224,26 +213,26 @@ public sealed class HistorySampleRegistrationTests
             using IHost host = CreateHost(
                 agent,
                 stateStore,
-                options => options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll,
+                static options => _ = options,
                 s_customHistoryProviderKey,
                 services => services.AddSingleton(provider));
             await host.StartAsync();
             AIAgent proxy = host.Services.GetRequiredKeyedService<AIAgent>(HistoryAgentName);
             AgentSession session = await proxy.CreateSessionAsync();
 
-            InvalidOperationException exception =
-                await Assert.ThrowsAsync<InvalidOperationException>(
-                    () => proxy.RunAsync("request", session));
+            AgentResponse response = await proxy.RunAsync("request", session);
+            DurableAgentState state =
+                stateStore.ReadRequired(session.GetService<AgentSessionId>());
 
-            Assert.Contains("schema 2 mailbox writes", exception.Message, StringComparison.Ordinal);
-            Assert.Contains(
-                "Enable mailbox writes",
-                exception.Message,
-                StringComparison.Ordinal);
-            Assert.Equal(0, client.InvocationCount);
-            Assert.Empty(provider.GetObservedHistoryIds());
-            Assert.Empty(Directory.EnumerateFiles(directory));
-            Assert.False(stateStore.TryRead(session.GetService<AgentSessionId>(), out _));
+            Assert.Equal("response-1", response.Text);
+            Assert.Equal(1, client.InvocationCount);
+            Assert.Single(provider.GetObservedHistoryIds());
+            Assert.Single(Directory.EnumerateFiles(directory));
+            Assert.Equal(DurableAgentState.CurrentSchemaVersion, state.SchemaVersion);
+            Assert.False(state.PersistentRequestOutcomesAuthorized);
+            Assert.Equal(2, state.Data.ConversationHistory.Count);
+            Assert.Null(state.Data.TerminalResults);
+            Assert.Null(state.Data.CompletionReceipts);
             await host.StopAsync();
         }
         finally
@@ -283,8 +272,7 @@ public sealed class HistorySampleRegistrationTests
 
     private static void ConfigureFoundryRegistration(DurableAgentsOptions options)
     {
-        options.EnableMailboxWrites = true;
-        options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.KeepAll;
+        options.EnablePersistentRequestOutcomes = true;
     }
 
     private static ChatClientAgent CreateHistoryAgent(
