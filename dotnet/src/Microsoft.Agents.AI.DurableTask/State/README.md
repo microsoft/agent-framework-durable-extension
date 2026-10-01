@@ -26,7 +26,7 @@ Some versioning considerations:
 - Durable agents should preserve existing, but unrecognized, properties when serializing state
 
 Schema version 1.2 adds optional message identity and extension metadata, opaque session state, workflow
-`ingestedPositions`, and bounded truncation evidence. The .NET workflow path preserves but does not currently
+`ingestedPositions`, and truncation evidence. The .NET workflow path preserves but does not currently
 populate `ingestedPositions`. Older 1.x state remains readable. `DurableAgentState.Clone()` promotes older
 supported versions to 1.2 when a caller uses that write-clone path. Versions outside the exact contract
 snapshots are rejected until compatibility is explicitly reviewed. Wiring that path into entity execution is
@@ -34,23 +34,24 @@ deferred. New `DurableAgentState` instances default to the current version, whil
 the persisted version through an init-only property.
 
 The schema's declared `extensionData` objects and forward-compatible unknown JSON properties are distinct.
-The .NET model names declared metadata `ExtensionData` (or message `AdditionalProperties`) and names
+The .NET model names declared metadata `ExtensionData` (or message/content `AdditionalProperties`) and names
 `[JsonExtensionData]` catch-all dictionaries `UnknownProperties`. Both coexist and round-trip independently
-at root, data, entry, message, and usage boundaries. Content types also use `UnknownProperties`; the current
-schema does not declare a content-level `extensionData` field. Unknown fields are never folded into an
-application-defined `extensionData` object.
+at root, data, entry, message, content, and usage boundaries. Unknown content siblings remain in
+`UnknownProperties` and are never promoted into framework metadata or folded into an application-defined
+`extensionData` object.
 
-Usage `extensionData` is preserved as arbitrary JSON for forward compatibility. When a durable response is
-projected to `UsageDetails`, only integral numeric extension values representable as `Int64` become additional
-counts; strings, objects, arrays, fractional numbers, and out-of-range numbers remain in durable state but are
-ignored by the runtime projection. Malformed known count fields fail deserialization rather than being silently reinterpreted.
+Usage counts and `extensionData` are preserved as arbitrary JSON integers and JSON metadata for forward
+compatibility. When a durable response is projected to `UsageDetails`, only exact integral values representable
+as `Int64` become runtime counts; strings, objects, arrays, fractional numbers, and out-of-range numbers remain
+in durable state but are ignored by the runtime projection. Malformed known count fields fail deserialization
+rather than being silently reinterpreted.
 
 This layer defines and round-trips the schema contracts only. Agent entity integration for session ownership,
 replay filtering, compaction, retention, and provider behavior is deferred to later stack layers.
 
-Version-aware validation is symmetric: the 1.x message restrictions (no `developer` role, object-only function-call
-`arguments`, and a required URI `mediaType`) are enforced when legacy state is written, not only when it is read, so
-a programmatically constructed 1.x state cannot be persisted in a form this reader later rejects.
+Version-aware validation is symmetric: historical 1.x free-form roles, string function-call `arguments`, and
+URI content without `mediaType` remain readable and writable, while schema 2 applies its closed role set and
+other revised semantic checks consistently on read and write.
 
 ## Revised execution-state foundation
 

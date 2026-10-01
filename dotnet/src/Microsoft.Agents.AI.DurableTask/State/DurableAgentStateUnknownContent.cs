@@ -49,9 +49,17 @@ internal sealed class DurableAgentStateUnknownContent : DurableAgentStateContent
     {
         ArgumentNullException.ThrowIfNull(content);
 
-        if (TryGetOpaqueContent(content, logger, out JsonElement opaqueContent))
+        if (TryGetOpaqueContent(
+                content,
+                logger,
+                out JsonElement opaqueContent,
+                out Dictionary<string, JsonElement>? additionalProperties))
         {
-            return new DurableAgentStateUnknownContent { Content = opaqueContent };
+            return new DurableAgentStateUnknownContent
+            {
+                Content = opaqueContent,
+                AdditionalProperties = additionalProperties,
+            };
         }
 
         JsonObject envelope = CreateEnvelope(UnknownContentKind);
@@ -132,16 +140,18 @@ internal sealed class DurableAgentStateUnknownContent : DurableAgentStateContent
     private static bool TryGetOpaqueContent(
         AIContent content,
         ILogger? logger,
-        out JsonElement opaqueContent)
+        out JsonElement opaqueContent,
+        out Dictionary<string, JsonElement>? additionalProperties)
     {
         opaqueContent = default;
+        additionalProperties = null;
         try
         {
             if (content.GetType() != typeof(AIContent) ||
                 content.Annotations is { Count: > 0 } ||
                 content.RawRepresentation is not JsonElement rawRepresentation ||
-                content.AdditionalProperties is not { Count: 1 } additionalProperties ||
-                !additionalProperties.TryGetValue("content", out object? storedContent) ||
+                content.AdditionalProperties is not { } metadata ||
+                !metadata.TryGetValue("content", out object? storedContent) ||
                 storedContent is not JsonElement storedElement)
             {
                 return false;
@@ -152,12 +162,29 @@ internal sealed class DurableAgentStateUnknownContent : DurableAgentStateContent
                 return false;
             }
 
+            foreach ((string key, object? value) in metadata)
+            {
+                if (key == "content")
+                {
+                    continue;
+                }
+
+                if (value is not JsonElement element)
+                {
+                    return false;
+                }
+
+                additionalProperties ??= [];
+                additionalProperties[key] = element.Clone();
+            }
+
             opaqueContent = rawRepresentation.Clone();
             return true;
         }
         catch (Exception exception) when (IsRecoverableSerializationFailure(exception))
         {
             LogSerializationFallback(logger, content, exception);
+            additionalProperties = null;
             return false;
         }
     }

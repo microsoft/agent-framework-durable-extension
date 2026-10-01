@@ -846,9 +846,15 @@ public sealed class DurableAgentStateMailboxTests
             JsonSerializer.Deserialize(
                 json,
                 DurableAgentStateJsonContext.Default.DurableAgentStateTerminalResult));
+        DurableAgentStateTerminalResponse terminalResponse =
+            Assert.IsType<DurableAgentStateTerminalResponse>(restored.Response);
+        (AgentResponse response, JsonElement value) = terminalResponse.ToResult();
 
         Assert.Contains("\"value\":", json, StringComparison.Ordinal);
-        Assert.Equal(expectedKind, Assert.IsType<DurableAgentStateTerminalResponse>(restored.Response).Value.ValueKind);
+        Assert.Empty(response.Messages);
+        Assert.Equal(expectedKind, value.ValueKind);
+        Assert.Equal(valueJson, value.GetRawText());
+        Assert.Throws<InvalidOperationException>(() => terminalResponse.ToResponse());
     }
 
     [Fact]
@@ -862,11 +868,14 @@ public sealed class DurableAgentStateMailboxTests
         string json = JsonSerializer.Serialize(
             stored,
             DurableAgentStateJsonContext.Default.DurableAgentStateTerminalResult);
+        DurableAgentStateTerminalResponse response =
+            Assert.IsType<DurableAgentStateTerminalResponse>(stored.Response);
+        (AgentResponse converted, JsonElement value) = response.ToResult();
 
         Assert.DoesNotContain("\"value\"", json, StringComparison.Ordinal);
-        Assert.Equal(
-            JsonValueKind.Undefined,
-            Assert.IsType<DurableAgentStateTerminalResponse>(stored.Response).Value.ValueKind);
+        Assert.Equal(JsonValueKind.Undefined, value.ValueKind);
+        Assert.Empty(converted.Messages);
+        Assert.Empty(response.ToResponse().Messages);
     }
 
     [Fact]

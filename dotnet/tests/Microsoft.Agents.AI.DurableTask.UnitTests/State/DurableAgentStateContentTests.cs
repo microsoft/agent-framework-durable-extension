@@ -601,6 +601,40 @@ public sealed class DurableAgentStateContentTests
     }
 
     [Fact]
+    public void OpaqueUnknownContentPreservesDeclaredExtensionDataAcrossRepeatedConversions()
+    {
+        DurableAgentStateUnknownContent stored = new()
+        {
+            Content = JsonSerializer.SerializeToElement(
+                new
+                {
+                    type = "future_content",
+                    value = 42,
+                }),
+            AdditionalProperties = new Dictionary<string, JsonElement>
+            {
+                ["producer"] = JsonSerializer.SerializeToElement("python"),
+            },
+        };
+
+        AIContent firstConversion = stored.ToAIContent();
+        DurableAgentStateUnknownContent restored = Assert.IsType<DurableAgentStateUnknownContent>(
+            DurableAgentStateContent.FromAIContent(firstConversion));
+        AIContent secondConversion = restored.ToAIContent();
+        string roundTrip = JsonSerializer.Serialize(restored, s_stateContentTypeInfo);
+
+        Assert.True(JsonElement.DeepEquals(stored.Content, restored.Content));
+        Assert.Equal(
+            "python",
+            Assert.IsType<JsonElement>(restored.AdditionalProperties?["producer"]).GetString());
+        Assert.Equal(
+            "python",
+            Assert.IsType<JsonElement>(secondConversion.AdditionalProperties?["producer"]).GetString());
+        Assert.Contains("\"extensionData\":{\"producer\":\"python\"}", roundTrip, StringComparison.Ordinal);
+        Assert.DoesNotContain("$microsoftAgentFrameworkDurableTask", roundTrip, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PythonShapedOpaqueUnknownContentWithRuntimeTypeRoundTripsUnchanged()
     {
         using JsonDocument document = JsonDocument.Parse(

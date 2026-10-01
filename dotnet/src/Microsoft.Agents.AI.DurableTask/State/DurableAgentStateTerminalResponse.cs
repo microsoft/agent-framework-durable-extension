@@ -205,12 +205,23 @@ internal sealed class DurableAgentStateTerminalResponse
 
     public AgentResponse ToResponse()
     {
+        if (this.Value.ValueKind != JsonValueKind.Undefined)
+        {
+            throw new InvalidOperationException(
+                "A durable terminal response with a structured value must be read through ToResult().");
+        }
+
+        return this.ToResult().Response;
+    }
+
+    public (AgentResponse Response, JsonElement Value) ToResult()
+    {
         AdditionalPropertiesDictionary? additionalProperties = this.AdditionalProperties is null
             ? null
             : new(this.AdditionalProperties.Select(pair =>
                 new KeyValuePair<string, object?>(pair.Key, pair.Value)));
 
-        return new AgentResponse
+        AgentResponse response = new()
         {
             Messages = this.Messages.Select(message => message.ToChatMessage()).ToList(),
             Usage = this.Usage?.ToUsageDetails(),
@@ -223,6 +234,10 @@ internal sealed class DurableAgentStateTerminalResponse
                 : ResponseContinuationToken.FromBytes(Convert.FromBase64String(this.ContinuationToken)),
             AdditionalProperties = additionalProperties,
         };
+        JsonElement value = this.Value.ValueKind == JsonValueKind.Undefined
+            ? default
+            : this.Value.Clone();
+        return (response, value);
     }
 
     public void Validate()
