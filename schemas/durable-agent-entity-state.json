@@ -4,6 +4,12 @@
   "title": "Durable agent state: proposed 2.0 contract and legacy review shapes",
   "description": "Proposed contract under review; validation does not authorize any runtime to read, migrate, or emit 2.0. See README.md for semantic invariants and the cross-runtime deployment gate.",
   "$defs": {
+    "nonNegativeInt64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807,
+      "description": "A known shared bookkeeping value in the nonnegative signed 64-bit range. Writers must reject overflow, not wrap, clamp, or move the value into opaque metadata."
+    },
     "identifier": {
       "type": "string",
       "minLength": 1,
@@ -15,9 +21,9 @@
       "type": "object",
       "description": "Token usage statistics.",
       "properties": {
-          "inputTokenCount": { "type": "integer" },
-          "outputTokenCount": { "type": "integer" },
-          "totalTokenCount": { "type": "integer" },
+          "inputTokenCount": { "$ref": "#/$defs/nonNegativeInt64" },
+          "outputTokenCount": { "$ref": "#/$defs/nonNegativeInt64" },
+          "totalTokenCount": { "$ref": "#/$defs/nonNegativeInt64" },
           "extensionData": {
             "type": "object",
             "description": "Opaque provider-specific usage metadata, preserved even when values cannot be projected to runtime numeric counts."
@@ -175,6 +181,11 @@
     },
     "conversationEntry": {
       "type": "object",
+      "if": {
+        "properties": { "$type": { "enum": ["response", "errorResponse"] } },
+        "required": ["$type"]
+      },
+      "then": { "properties": { "usage": { "$ref": "#/$defs/usage" } } },
       "properties": {
         "createdAt": { "type": "string", "format": "date-time", "description": "When this exchange was created (RFC 3339)." },
         "correlationId": { "type": "string", "description": "An optional correlation ID to group related exchanges." },
@@ -459,13 +470,13 @@
         "ingestedPositions": {
           "type": "object",
           "description": "Legacy highest-seen position by producer, not proof of a contiguous delivered prefix or request completion. Preserve historical values without inferring missing deliveries during migration. Exact gap-preserving workflow receipts require separately versioned bookkeeping independent of transcript retention.",
-          "additionalProperties": { "type": "integer", "minimum": 0 }
+          "additionalProperties": { "$ref": "#/$defs/nonNegativeInt64" }
         },
         "truncation": {
           "type": "object",
           "description": "Diagnostic evidence of transcript removal; not model context or terminal completion evidence.",
           "properties": {
-            "evictedMessageCount": { "type": "integer", "minimum": 1 },
+            "evictedMessageCount": { "$ref": "#/$defs/nonNegativeInt64", "minimum": 1 },
             "firstEvictedAt": { "type": "string", "format": "date-time" },
             "lastEvictedAt": { "type": "string", "format": "date-time" }
           },

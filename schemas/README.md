@@ -242,9 +242,36 @@ state. Normal host authorization, redaction, and total storage/depth limits are
 still required. Identifier limits count Unicode code points, not UTF-16 units.
 Identifiers are nonblank and exclude C0/C1 controls; metadata is not executable.
 Usage metadata retains arbitrary JSON even if a runtime cannot represent it as
-numeric counts. Integer ranges, timestamp precision, and provider-specific
+numeric counts. Timestamp precision and provider-specific
 continuation formats require cross-language agreement; validation alone does
 not ensure lossless projection. No provider or retention policy is implemented.
+
+### Bookkeeping integer bounds
+
+The named `inputTokenCount`, `outputTokenCount`, `totalTokenCount`, and
+`ingestedPositions` values are integers from zero through `9223372036854775807`
+(`Int64.MaxValue`). A present `truncation.evictedMessageCount` retains its minimum
+of one and uses the same maximum. Counts may remain absent where the schema
+already permits omission. Explicit null, booleans, numeric strings and fractional
+values are not counters.
+
+This narrows the previously unbounded known fields in every versioned shape
+described by this schema. Readers and writers must enforce the same bounds.
+Validate increments and sums before persisting them, including values produced
+by retention or migration. On overflow, reject the operation without committing
+the invalid state. Never wrap, clamp, discard the count, or hide an invalid known
+counter in extension data. Existing out-of-range snapshots must be rejected for
+processing without modifying their stored bytes.
+
+JSON Schema's existing mathematical-integer semantics remain unchanged: integral
+numbers such as `1.0` and `1e0` are valid when in range. Writers should emit integer
+JSON tokens. Readers must not round fractional or out-of-range values into range
+or route integer tokens through floating-point conversion. A runtime parser's
+`Int64` token conversion alone may not accept every integral representation.
+
+These bounds do not apply to opaque user payloads, provider metadata, unknown
+properties, session state or runtime-profile data. Their existing JSON preservation
+rules remain unchanged. A relying runtime may separately constrain its own profile.
 
 ## Rollout, migration, and maintainer questions
 
