@@ -455,7 +455,7 @@ public sealed class DurableAgentStateTests
     }
 
     [Fact]
-    public void ContractIntegersBeyondInt64RoundTripLosslessly()
+    public void ContractIntegersBeyondInt64AreRejected()
     {
         const string Json = """
             {
@@ -472,6 +472,29 @@ public sealed class DurableAgentStateTests
             }
             """;
 
+        Assert.Throws<InvalidOperationException>(
+            () => JsonSerializer.Deserialize(
+                Json,
+                DurableAgentStateJsonContext.Default.DurableAgentState));
+    }
+
+    [Fact]
+    public void OpaqueIntegersBeyondInt64RoundTripLosslessly()
+    {
+        const string Json = """
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [],
+                "extensionData": {
+                  "writer": 9223372036854775808,
+                  "evictedMessageCount": 1e20
+                },
+                "futureCounter": 9223372036854775808
+              }
+            }
+            """;
+
         DurableAgentState state = JsonSerializer.Deserialize(
             Json, DurableAgentStateJsonContext.Default.DurableAgentState)!;
         string roundTrip = JsonSerializer.Serialize(
@@ -479,10 +502,12 @@ public sealed class DurableAgentStateTests
 
         Assert.Equal(
             "9223372036854775808",
-            state.Data.IngestedPositions!["writer"].GetRawText());
-        Assert.Equal("1e20", state.Data.Truncation!.EvictedMessageCount.GetRawText());
+            state.Data.ExtensionData!["writer"].GetRawText());
+        Assert.Equal("1e20", state.Data.ExtensionData["evictedMessageCount"].GetRawText());
+        Assert.Equal("9223372036854775808", state.Data.UnknownProperties!["futureCounter"].GetRawText());
         Assert.Contains("\"writer\":9223372036854775808", roundTrip, StringComparison.Ordinal);
         Assert.Contains("\"evictedMessageCount\":1e20", roundTrip, StringComparison.Ordinal);
+        Assert.Contains("\"futureCounter\":9223372036854775808", roundTrip, StringComparison.Ordinal);
     }
 
     [Fact]
