@@ -10,6 +10,9 @@ do not fetch it from GitHub, which might contain a different revision. Use a
 Draft 2020-12 validator. The cases cover v2-only correlation constraints,
 unchanged legacy/compaction handling, opaque runtime profiles, v2 lossless
 message shapes, structured-value presence, and historical ingestion scalars.
+Known usage, ingestion and truncation counters cover the nonnegative Int64
+boundary, the positive truncation minimum, invalid types, unchanged integral-number
+semantics and preservation of larger integers in opaque data.
 
 The versioned cases use complete root envelopes for every version rather than
 just testing `$defs` fragments. Historical `1.0.0`, `1.1.0`, and `1.2.0` reject

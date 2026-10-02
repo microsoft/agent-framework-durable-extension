@@ -1,5 +1,36 @@
 [
   {
+    "description": "Legacy response counter ownership",
+    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json" },
+    "tests": [
+      {
+        "description": "Legacy response count at Int64 maximum",
+        "data": { "schemaVersion": "1.0.0", "data": { "conversationHistory": [{ "$type": "response", "usage": { "totalTokenCount": 9223372036854775807 } }] } },
+        "valid": true
+      },
+      {
+        "description": "Legacy response count overflow",
+        "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "$type": "response", "usage": { "totalTokenCount": 9223372036854775808 } }] } },
+        "valid": false
+      },
+      {
+        "description": "Legacy error response count negative",
+        "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "$type": "errorResponse", "usage": { "inputTokenCount": -1 } }] } },
+        "valid": false
+      },
+      {
+        "description": "Legacy request usage is an opaque sibling",
+        "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "$type": "request", "usage": { "totalTokenCount": 9223372036854775808 } }] } },
+        "valid": true
+      },
+      {
+        "description": "Legacy undiscriminated usage is an opaque sibling",
+        "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "usage": { "totalTokenCount": 9223372036854775808 } }] } },
+        "valid": true
+      }
+    ]
+  },
+  {
     "description": "Version-scoped correlation IDs and optional binding",
     "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json" },
     "tests": [
@@ -214,11 +245,48 @@
     ]
   },
   {
+    "description": "Bounded shared usage counters",
+    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/usage" },
+    "tests": [
+      { "description": "Missing counts remain valid", "data": {}, "valid": true },
+      { "description": "Zero counts", "data": { "inputTokenCount": 0, "outputTokenCount": 0, "totalTokenCount": 0 }, "valid": true },
+      { "description": "Int64 maximum counts", "data": { "inputTokenCount": 9223372036854775807, "outputTokenCount": 9223372036854775807, "totalTokenCount": 9223372036854775807 }, "valid": true },
+      { "description": "Exact integer beyond binary64 precision", "data": { "totalTokenCount": 9007199254740993 }, "valid": true },
+      { "description": "Integral JSON numbers remain integers", "data": { "inputTokenCount": 1.0, "outputTokenCount": 1e0 }, "valid": true },
+      { "description": "Negative input count", "data": { "inputTokenCount": -1 }, "valid": false },
+      { "description": "Negative output count", "data": { "outputTokenCount": -1 }, "valid": false },
+      { "description": "Negative total count", "data": { "totalTokenCount": -1 }, "valid": false },
+      { "description": "Input count exceeds Int64", "data": { "inputTokenCount": 9223372036854775808 }, "valid": false },
+      { "description": "Output count exceeds Int64", "data": { "outputTokenCount": 9223372036854775808 }, "valid": false },
+      { "description": "Total count exceeds Int64", "data": { "totalTokenCount": 9223372036854775808 }, "valid": false },
+      { "description": "Fractional count", "data": { "inputTokenCount": 1.5 }, "valid": false },
+      { "description": "Boolean count", "data": { "inputTokenCount": true }, "valid": false },
+      { "description": "Numeric string count", "data": { "inputTokenCount": "1" }, "valid": false },
+      { "description": "Explicit null count", "data": { "inputTokenCount": null }, "valid": false },
+      { "description": "Opaque usage data keeps larger integers", "data": { "extensionData": { "provider": 18446744073709551616 }, "future": 18446744073709551616 }, "valid": true }
+    ]
+  },
+  {
+    "description": "Bounded eviction counter",
+    "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/data/properties/truncation/properties/evictedMessageCount" },
+    "tests": [
+      { "description": "Zero remains invalid for recorded truncation", "data": 0, "valid": false },
+      { "description": "One remains valid", "data": 1, "valid": true },
+      { "description": "Int64 maximum", "data": 9223372036854775807, "valid": true },
+      { "description": "Int64 overflow", "data": 9223372036854775808, "valid": false },
+      { "description": "Negative count", "data": -1, "valid": false },
+      { "description": "Boolean count", "data": true, "valid": false },
+      { "description": "Fractional count", "data": 1.5, "valid": false }
+    ]
+  },
+  {
     "description": "Legacy highest-seen ingestion scalar",
     "schema": { "$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/data/properties/ingestedPositions" },
     "tests": [
       { "description": "Highest seen three does not encode gaps", "data": { "producer": 3 }, "valid": true },
       { "description": "Zero remains valid", "data": { "producer": 0 }, "valid": true },
+      { "description": "Int64 maximum remains valid", "data": { "producer": 9223372036854775807 }, "valid": true },
+      { "description": "Position exceeding Int64 is invalid", "data": { "producer": 9223372036854775808 }, "valid": false },
       { "description": "Negative position remains invalid", "data": { "producer": -1 }, "valid": false },
       { "description": "Receipt sets cannot masquerade as the legacy scalar", "data": { "producer": [1, 3] }, "valid": false }
     ]
