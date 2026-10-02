@@ -131,12 +131,14 @@ public sealed class DurableAgentStateFunctionCallContentTests
             roundTripDocument.RootElement.GetProperty("arguments").GetString());
     }
 
-    [Fact]
-    public void ProductionMappingDoesNotEmitV2StringArguments()
+    [Theory]
+    [InlineData("verbatim")]
+    [InlineData(" { \"partial\": ")]
+    public void ProductionMappingsPreserveRawStringArguments(string rawArguments)
     {
         FunctionCallContent runtime = new("call-8", "future")
         {
-            RawRepresentation = "verbatim",
+            RawRepresentation = rawArguments,
         };
 
         DurableAgentStateFunctionCallContent legacy =
@@ -146,8 +148,53 @@ public sealed class DurableAgentStateFunctionCallContentTests
             Assert.IsType<DurableAgentStateFunctionCallContent>(
                 DurableAgentStateContent.FromAIContentV2(runtime));
 
-        Assert.Equal(JsonValueKind.Undefined, legacy.Arguments.ValueKind);
-        Assert.Equal("verbatim", revised.Arguments.GetString());
+        Assert.Equal(rawArguments, legacy.Arguments.GetString());
+        Assert.Equal(rawArguments, revised.Arguments.GetString());
+        Assert.Equal(
+            rawArguments,
+            Assert.IsType<FunctionCallContent>(legacy.ToAIContent()).RawRepresentation);
+        Assert.Equal(
+            rawArguments,
+            Assert.IsType<FunctionCallContent>(revised.ToAIContent()).RawRepresentation);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void LegacyRequestAndResponsePreserveRawStringArgumentsAcrossRuntime(bool request)
+    {
+        const string RawArguments = " { \"partial\": ";
+        ChatMessage message = new(
+            ChatRole.Assistant,
+            [new FunctionCallContent("call-9", "future") { RawRepresentation = RawArguments }])
+        {
+            CreatedAt = DateTimeOffset.Parse("2026-10-02T10:00:00Z"),
+        };
+
+        DurableAgentStateMessage rewrittenMessage;
+        if (request)
+        {
+            DurableAgentStateRequest stored =
+                DurableAgentStateRequest.FromRunRequest(new RunRequest([message]));
+            ChatMessage runtime = Assert.Single(stored.Messages).ToChatMessage();
+            rewrittenMessage = Assert.Single(
+                DurableAgentStateRequest.FromRunRequest(new RunRequest([runtime])).Messages);
+        }
+        else
+        {
+            DurableAgentStateResponse stored =
+                DurableAgentStateResponse.FromResponse("correlation", new AgentResponse([message]));
+            ChatMessage runtime = Assert.Single(stored.ToResponse().Messages);
+            rewrittenMessage = Assert.Single(
+                DurableAgentStateResponse.FromResponse(
+                    "correlation",
+                    new AgentResponse([runtime])).Messages);
+        }
+
+        DurableAgentStateFunctionCallContent rewritten =
+            Assert.IsType<DurableAgentStateFunctionCallContent>(
+                Assert.Single(rewrittenMessage.Contents));
+        Assert.Equal(RawArguments, rewritten.Arguments.GetString());
     }
 
     private sealed record Location(string City, string State);

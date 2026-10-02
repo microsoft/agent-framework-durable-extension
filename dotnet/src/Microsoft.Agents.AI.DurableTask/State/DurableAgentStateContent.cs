@@ -118,9 +118,7 @@ internal abstract class DurableAgentStateContent
             DataContent dataContent => DurableAgentStateDataContent.FromDataContent(dataContent),
             ErrorContent errorContent => DurableAgentStateErrorContent.FromErrorContent(errorContent),
             FunctionCallContent functionCallContent =>
-                DurableAgentStateFunctionCallContent.FromFunctionCallContent(
-                    functionCallContent,
-                    allowLosslessV2),
+                DurableAgentStateFunctionCallContent.FromFunctionCallContent(functionCallContent),
             FunctionResultContent functionResultContent => DurableAgentStateFunctionResultContent.FromFunctionResultContent(functionResultContent),
             HostedFileContent hostedFileContent => DurableAgentStateHostedFileContent.FromHostedFileContent(hostedFileContent),
             HostedVectorStoreContent hostedVectorStoreContent => DurableAgentStateHostedVectorStoreContent.FromHostedVectorStoreContent(hostedVectorStoreContent),

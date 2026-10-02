@@ -45,45 +45,72 @@ public sealed class DurableAgentStateContentTests
         Assert.Equal(errorContent.ErrorCode, convertedErrorContent.ErrorCode);
     }
 
-    [Fact]
-    public void ErrorContentPreservesNonStringPythonDetails()
+    [Theory]
+    [InlineData("""{"retryable":true}""", """{"retryable":true}""")]
+    [InlineData("""[1,false]""", """[1,false]""")]
+    [InlineData("42", "42")]
+    [InlineData("null", null)]
+    [InlineData("\"details\"", "details")]
+    [InlineData(null, null)]
+    public void ErrorContentDetailsRemainStableAcrossRepeatedRuntimeConversions(
+        string? detailsJson,
+        string? expectedRuntimeDetails)
     {
-        const string Json = """
-            {
-              "$type": "error",
-              "message": "failed",
-              "details": {
-                "retryable": true
-              }
-            }
-            """;
+        string json = detailsJson is null
+            ? """{"$type":"error","message":"failed"}"""
+            : $$"""{"$type":"error","message":"failed","details":{{detailsJson}}}""";
         DurableAgentStateContent stored = Assert.IsType<DurableAgentStateErrorContent>(
-            JsonSerializer.Deserialize(Json, s_stateContentTypeInfo));
+            JsonSerializer.Deserialize(json, s_stateContentTypeInfo));
 
-        ErrorContent restored = Assert.IsType<ErrorContent>(stored.ToAIContent());
+        for (int iteration = 0; iteration < 2; iteration++)
+        {
+            ErrorContent runtime = Assert.IsType<ErrorContent>(stored.ToAIContent());
+            Assert.Equal(expectedRuntimeDetails, runtime.Details);
+            stored = DurableAgentStateContent.FromAIContent(runtime);
+        }
+
         string roundTrip = JsonSerializer.Serialize(stored, s_stateContentTypeInfo);
-
-        using JsonDocument details = JsonDocument.Parse(restored.Details!);
-        Assert.True(details.RootElement.GetProperty("retryable").GetBoolean());
-        Assert.Contains("\"details\":{\"retryable\":true}", roundTrip, StringComparison.Ordinal);
+        using JsonDocument roundTripDocument = JsonDocument.Parse(roundTrip);
+        bool hasDetails = roundTripDocument.RootElement.TryGetProperty("details", out JsonElement actualDetails);
+        Assert.Equal(detailsJson is not null, hasDetails);
+        if (detailsJson is not null)
+        {
+            using JsonDocument expectedDetails = JsonDocument.Parse(detailsJson);
+            Assert.True(JsonElement.DeepEquals(expectedDetails.RootElement, actualDetails));
+        }
     }
 
     [Fact]
-    public void ErrorContentMapsExplicitNullDetailsToNull()
+    public void ErrorContentChangedDetailsReplaceAssociatedOriginalJson()
     {
         const string Json = """
             {
               "$type": "error",
               "message": "failed",
-              "details": null
+              "details": { "retryable": true }
             }
             """;
         DurableAgentStateContent stored = Assert.IsType<DurableAgentStateErrorContent>(
             JsonSerializer.Deserialize(Json, s_stateContentTypeInfo));
 
-        ErrorContent restored = Assert.IsType<ErrorContent>(stored.ToAIContent());
+        ErrorContent changedToString = Assert.IsType<ErrorContent>(stored.ToAIContent());
+        changedToString.Details = "changed";
+        string stringJson = JsonSerializer.Serialize(
+            DurableAgentStateContent.FromAIContent(changedToString),
+            s_stateContentTypeInfo);
 
-        Assert.Null(restored.Details);
+        ErrorContent changedToNull = Assert.IsType<ErrorContent>(stored.ToAIContent());
+        changedToNull.Details = null;
+        string nullJson = JsonSerializer.Serialize(
+            DurableAgentStateContent.FromAIContent(changedToNull),
+            s_stateContentTypeInfo);
+
+        Assert.Equal(
+            "changed",
+            JsonDocument.Parse(stringJson).RootElement.GetProperty("details").GetString());
+        Assert.Equal(
+            JsonValueKind.Null,
+            JsonDocument.Parse(nullJson).RootElement.GetProperty("details").ValueKind);
     }
 
     [Fact]

@@ -41,16 +41,13 @@ internal sealed class DurableAgentStateFunctionCallContent : DurableAgentStateCo
     /// Creates a <see cref="DurableAgentStateFunctionCallContent"/> from a <see cref="FunctionCallContent"/>.
     /// </summary>
     /// <param name="content">The <see cref="FunctionCallContent"/> to convert.</param>
-    /// <param name="allowLosslessV2">Whether v2-only verbatim string arguments may be persisted.</param>
     /// <returns>
     /// A <see cref="DurableAgentStateFunctionCallContent"/> representing the original content.
     /// </returns>
-    public static DurableAgentStateFunctionCallContent FromFunctionCallContent(
-        FunctionCallContent content,
-        bool allowLosslessV2 = false)
+    public static DurableAgentStateFunctionCallContent FromFunctionCallContent(FunctionCallContent content)
     {
         JsonElement arguments = default;
-        if (allowLosslessV2 && content.RawRepresentation is string encodedArguments)
+        if (content.RawRepresentation is string encodedArguments)
         {
             arguments = JsonSerializer.SerializeToElement(
                 encodedArguments,
