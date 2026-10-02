@@ -325,6 +325,15 @@ prefix of atomic components that remain disconnected from the protected closure.
 newest entry or a system message can therefore connect to older history and raise the protected floor above
 the budget, in which case retention fails atomically without committing the working state.
 
+> [!WARNING]
+> Pressure retention is internal and unreleased. In long client-side tool or approval flows, transitive
+> correlation and tool links can connect most or all of the transcript to the protected newest component.
+> If the protected floor reaches the configured budget, later writes fail atomically without corrupting the
+> session. When testing an internal activation, use `KeepAll` or disable pressure retention as a workaround.
+> The public default is unaffected. Linked-flow support remains tracked under
+> [#4](https://github.com/microsoft/agent-framework-durable-extension/issues/4); the release deferral is recorded
+> in [the accepted review follow-up](https://github.com/microsoft/agent-framework-durable-extension/pull/97#discussion_r4168013183).
+
 Schema 2 mailbox results remain authoritative after their transcript copies are removed, so duplicate execution
 and polling return the same retained result. Legacy state is converted to schema 2 before entity retention once
 history ownership can be resolved. Retention itself fails closed if legacy transcript terminals are still the
