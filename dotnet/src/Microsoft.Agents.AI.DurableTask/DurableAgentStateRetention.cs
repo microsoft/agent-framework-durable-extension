@@ -1,7 +1,5 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
-using System.Globalization;
-using System.Numerics;
 using System.Text.Json;
 using Microsoft.Agents.AI.DurableTask.State;
 using Microsoft.Extensions.AI;
@@ -200,7 +198,10 @@ internal static class DurableAgentStateRetention
         int removedMessages = floorEntries.Sum(entry => entry.Messages.Count);
         RemoveEntries(floorState.Data.ConversationHistory, floorEntries);
 
-        RecordTruncation(floorState, removedMessages, now);
+        floorState.Data.Truncation = ProjectTruncation(
+            floorState.Data.Truncation,
+            removedMessages,
+            now);
         int floorSize = GetSerializedSize(floorState);
         if (statistics is not null)
         {
@@ -593,7 +594,7 @@ internal static class DurableAgentStateRetention
         DateTimeOffset effectiveTime = GetEffectiveEvictionTime(original, now);
         return new DurableAgentStateTruncation
         {
-            EvictedMessageCount = AddEvictedMessages(
+            EvictedMessageCount = ProjectEvictedMessagesForSizing(
                 original?.EvictedMessageCount ?? default,
                 removedMessages),
             FirstEvictedAt = original?.FirstEvictedAt ?? effectiveTime,
@@ -858,55 +859,51 @@ internal static class DurableAgentStateRetention
         JsonElement current,
         int added)
     {
-        string currentDigits;
-        if (current.ValueKind == JsonValueKind.Undefined)
+        long currentValue = ReadEvictedMessageCount(current);
+        try
         {
-            currentDigits = "0";
+            return JsonSerializer.SerializeToElement(
+                checked(currentValue + added),
+                DurableAgentStateJsonContext.Default.Int64);
         }
-        else
+        catch (OverflowException exception)
         {
-            string raw = current.GetRawText();
-            if (raw.AsSpan().IndexOfAny('.', 'e', 'E') < 0 &&
-                !raw.StartsWith("-", StringComparison.Ordinal))
-            {
-                currentDigits = raw;
-            }
-            else if (DurableAgentStateContract.TryGetBigInteger(
-                current,
-                out BigInteger currentValue) &&
-                currentValue.Sign >= 0)
-            {
-                currentDigits = currentValue.ToString(CultureInfo.InvariantCulture);
-            }
-            else
-            {
-                throw new InvalidOperationException(
-                    "The durable evicted message count cannot be incremented because canonicalizing its " +
-                    $"JSON exponent form would exceed the {DurableAgentStateContract.MaxExpandedIntegerDigits:N0}-digit expansion safety bound.");
-            }
+            throw new InvalidOperationException(
+                "The durable evicted message count cannot exceed the nonnegative Int64 range.",
+                exception);
         }
-
-        using JsonDocument document = JsonDocument.Parse(
-            AddDecimalDigits(currentDigits, added));
-        return document.RootElement.Clone();
     }
 
-    private static string AddDecimalDigits(string digits, int added)
+    private static JsonElement ProjectEvictedMessagesForSizing(
+        JsonElement current,
+        int added)
     {
-        char[] result = digits.ToCharArray();
-        long carry = added;
-        for (int index = result.Length - 1; index >= 0 && carry > 0; index--)
+        long currentValue = ReadEvictedMessageCount(current);
+        // Prefix probes are hypothetical; cap only their serialized width so a larger infeasible
+        // prefix cannot prevent selection of a smaller prefix whose actual checked increment fits.
+        long projectedIncrement = Math.Min(
+            added,
+            long.MaxValue - currentValue);
+        return JsonSerializer.SerializeToElement(
+            checked(currentValue + projectedIncrement),
+            DurableAgentStateJsonContext.Default.Int64);
+    }
+
+    private static long ReadEvictedMessageCount(JsonElement current)
+    {
+        if (current.ValueKind == JsonValueKind.Undefined)
         {
-            long sum = result[index] - '0' + carry;
-            result[index] = (char)('0' + (sum % 10));
-            carry = sum / 10;
+            return 0;
         }
 
-        return carry == 0
-            ? new string(result)
-            : string.Concat(
-                carry.ToString(CultureInfo.InvariantCulture),
-                result);
+        if (!DurableAgentStateContract.TryGetInt64(current, out long value) ||
+            value < 0)
+        {
+            throw new InvalidOperationException(
+                "The durable evicted message count must be a nonnegative Int64 integer.");
+        }
+
+        return value;
     }
 
     private static DateTimeOffset GetEffectiveEvictionTime(

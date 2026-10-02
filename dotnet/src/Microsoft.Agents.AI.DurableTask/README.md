@@ -340,14 +340,13 @@ Retention telemetry uses the shared `agent_framework.durabletask` meter and the 
 `commit_status`; size measurements add `phase`, while write attempts add `stage` and operations identify
 whether deletion was staged. A host state setter returning is reported as commit status `unknown`, never as
 durable commit confirmation. Metrics contain no agent, session, correlation, or payload dimensions. Persisted
-`evictedMessageCount` evidence remains an arbitrary-precision JSON integer; telemetry reports the bounded
-message count removed by the current attempt rather than narrowing the cumulative value. The 4,096-digit safety
-bound applies only when automatic retention must computationally expand compact exponent notation. Raw decimal
-integer tokens remain unbounded and are incremented with exact string arithmetic, including a 4,096-digit
-all-nine value carrying to 4,097 digits and subsequent increments. Larger spellings that contract exactly through
-a negative exponent are canonicalized and incremented. If a positive exponent would exceed the expansion safety
-bound, retention fails before staged deletion is applied instead of preserving a stale count or losing eviction
-evidence.
+`evictedMessageCount` evidence is a nonnegative signed `Int64`. Automatic retention uses the shared exact
+integer projection for recognized JSON integer spellings and checks every increment. If the selected eviction
+would exceed `Int64.MaxValue`, the operation fails atomically without committing transcript deletion, mailbox
+changes, receipts, or serialized session state. Sizing-only probes may project a larger hypothetical prefix at
+the maximum value so they do not reject a smaller feasible eviction; persisted evidence is never wrapped,
+clamped, saturated, or left stale. Telemetry continues to report the bounded message count removed by the
+current attempt rather than substituting for cumulative durable evidence.
 
 Retention is separate from model-context compaction: retention destructively removes durable history only under
 storage pressure, while compaction changes the context supplied to the model. `Auto` is not

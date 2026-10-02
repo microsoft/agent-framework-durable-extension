@@ -2693,6 +2693,46 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
+    public async Task AutoRetentionCounterOverflowDoesNotCommitRunStateAsync()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        RecordingChatClient client = new();
+        ChatClientAgent agent = new(client, name: "agent");
+        DurableAgentState initialState = CopyState(
+            DurableAgentStateOutcomeResolver.PrepareRevisedWorkingState(
+                CreateLargeState(),
+                hasAuthoritativeLegacyHistory: true),
+            session: null,
+            historyBinding: DurableAgentHistoryBinding.Create(
+                DurableAgentHistoryOwnership.Entity,
+                configuredProviderKey: null));
+        initialState.Data.Truncation = new DurableAgentStateTruncation
+        {
+            EvictedMessageCount = JsonSerializer.SerializeToElement(long.MaxValue),
+            FirstEvictedAt = now.AddMinutes(-20),
+            LastEvictedAt = now.AddMinutes(-10),
+        };
+        string originalState = SerializeState(initialState);
+        EntityHarness harness = CreateHarness(
+            agent,
+            initialState,
+            configureOptions: options =>
+            {
+                options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+                options.MaxStateBytes = 9_000;
+            });
+
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => harness.RunAsync(
+                new RunRequest(new string('n', 500)) { CorrelationId = "new" }));
+
+        Assert.Contains("Int64", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(1, client.InvocationCount);
+        Assert.False(harness.StateWasPersisted);
+        Assert.Equal(originalState, SerializeState(initialState));
+    }
+
+    [Fact]
     public async Task AutoRetentionRemovesMixedMediaToolGroupFromReloadedModelInputAsync()
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;

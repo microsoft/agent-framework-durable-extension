@@ -2,8 +2,6 @@
 
 using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
-using System.Globalization;
-using System.Numerics;
 using System.Text.Json;
 using Microsoft.Agents.AI.DurableTask.State;
 using Microsoft.Extensions.AI;
@@ -178,16 +176,23 @@ public sealed class DurableAgentTelemetryTests
     }
 
     [Fact]
-    public void ArbitraryPrecisionCumulativeEvidenceDoesNotNarrowAttemptTelemetry()
+    public void BoundedCumulativeEvidenceDoesNotNarrowAttemptTelemetry()
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
-        DurableAgentState state = CreateLargeState(now, "large");
-        BigInteger initialCount = (BigInteger)long.MaxValue + 1;
-        string countJson = $"{initialCount}0e-1";
-        using JsonDocument countDocument = JsonDocument.Parse(countJson);
+        DurableAgentState baseline = CreateLargeState(now, "large");
+        DurableAgentState control = baseline.Clone();
+        int expectedRemoved = DurableAgentStateRetention.Enforce(
+            control,
+            DurableAgentHistoryRetentionMode.Auto,
+            4_000,
+            now,
+            NullLogger.Instance,
+            new AgentSessionId("agent", "session"));
+        DurableAgentState state = baseline.Clone();
         state.Data.Truncation = new DurableAgentStateTruncation
         {
-            EvictedMessageCount = countDocument.RootElement.Clone(),
+            EvictedMessageCount = JsonSerializer.SerializeToElement(
+                long.MaxValue - expectedRemoved),
             FirstEvictedAt = now.AddMinutes(-20),
             LastEvictedAt = now.AddMinutes(-10),
         };
@@ -201,48 +206,49 @@ public sealed class DurableAgentTelemetryTests
             NullLogger.Instance,
             new AgentSessionId("agent", "session"));
 
-        Assert.True(
-            DurableAgentStateContract.TryGetBigInteger(
-                state.Data.Truncation!.EvictedMessageCount,
-                out BigInteger persistedCount));
-        Assert.Equal(initialCount + removed, persistedCount);
+        Assert.Equal(expectedRemoved, removed);
+        Assert.Equal(
+            long.MaxValue,
+            state.Data.Truncation!.EvictedMessageCount.GetInt64());
         Assert.Equal(
             removed,
             listener.Single(DurableAgentTelemetry.RemovedMessagesInstrumentName).Value);
     }
 
     [Fact]
-    public void CarryBeyondExpansionBoundaryDoesNotNarrowAttemptTelemetry()
+    public void CounterOverflowIsAtomicAndDoesNotReportRemovalTelemetry()
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
         DurableAgentState state = CreateLargeState(now, "large");
-        string countJson = new('9', DurableAgentStateContract.MaxExpandedIntegerDigits);
         state.Data.Truncation = new DurableAgentStateTruncation
         {
-            EvictedMessageCount = JsonDocument.Parse(countJson).RootElement.Clone(),
+            EvictedMessageCount = JsonSerializer.SerializeToElement(long.MaxValue),
             FirstEvictedAt = now.AddMinutes(-20),
             LastEvictedAt = now.AddMinutes(-10),
         };
+        string original = JsonSerializer.Serialize(
+            state,
+            DurableAgentStateJsonContext.Default.DurableAgentState);
         using RetentionMetricListener listener = new();
 
-        int removed = DurableAgentStateRetention.Enforce(
-            state,
-            DurableAgentHistoryRetentionMode.Auto,
-            10_000,
-            now,
-            NullLogger.Instance,
-            new AgentSessionId("agent", "session"));
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+            () => DurableAgentStateRetention.Enforce(
+                state,
+                DurableAgentHistoryRetentionMode.Auto,
+                4_000,
+                now,
+                NullLogger.Instance,
+                new AgentSessionId("agent", "session")));
 
+        Assert.Contains("Int64", exception.Message, StringComparison.Ordinal);
         Assert.Equal(
-            (BigInteger.Parse(countJson) + removed).ToString(CultureInfo.InvariantCulture),
-            state.Data.Truncation.EvictedMessageCount.GetRawText());
-        Assert.False(
-            DurableAgentStateContract.TryGetInt64(
-                state.Data.Truncation.EvictedMessageCount,
-                out _));
-        Assert.Equal(
-            removed,
-            listener.Single(DurableAgentTelemetry.RemovedMessagesInstrumentName).Value);
+            original,
+            JsonSerializer.Serialize(
+                state,
+                DurableAgentStateJsonContext.Default.DurableAgentState));
+        Assert.Empty(listener.Find(DurableAgentTelemetry.RemovedMessagesInstrumentName));
+        Assert.Empty(listener.Find(DurableAgentTelemetry.RemovedEntriesInstrumentName));
+        Assert.Empty(listener.Find(DurableAgentTelemetry.ReclaimedBytesInstrumentName));
     }
 
     [Fact]
