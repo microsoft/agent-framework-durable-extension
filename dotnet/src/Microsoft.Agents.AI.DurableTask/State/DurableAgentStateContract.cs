@@ -32,15 +32,11 @@ internal static class DurableAgentStateContract
     public static bool IsJsonInteger(JsonElement value) =>
         value.ValueKind == JsonValueKind.Number && IsJsonInteger(value.GetRawText());
 
-    public static bool IsNonNegativeJsonInteger(JsonElement value) =>
-        IsJsonInteger(value) &&
-        (!value.GetRawText().StartsWith("-", StringComparison.Ordinal) ||
-         IsZeroSignificand(value.GetRawText()));
+    public static bool IsNonNegativeInt64(JsonElement value) =>
+        TryGetInt64(value, out long result) && result >= 0;
 
-    public static bool IsPositiveJsonInteger(JsonElement value) =>
-        IsJsonInteger(value) &&
-        !value.GetRawText().StartsWith("-", StringComparison.Ordinal) &&
-        !IsZeroSignificand(value.GetRawText());
+    public static bool IsPositiveInt64(JsonElement value) =>
+        TryGetInt64(value, out long result) && result > 0;
 
     public static bool TryGetInt64(JsonElement value, out long result)
     {
@@ -190,20 +186,5 @@ internal static class DurableAgentStateContract
                 NumberStyles.AllowLeadingSign,
                 CultureInfo.InvariantCulture);
         return exponent >= fractionalDigitCount - trailingZeroCount;
-    }
-
-    private static bool IsZeroSignificand(string value)
-    {
-        int exponentIndex = value.IndexOfAny('e', 'E');
-        foreach (char character in
-            exponentIndex >= 0 ? value.AsSpan(0, exponentIndex) : value)
-        {
-            if (character is >= '1' and <= '9')
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 }

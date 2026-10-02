@@ -305,6 +305,16 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
                     "Legacy durable agent conversation history cannot contain non-object entries.");
             }
 
+            string? entryType =
+                entry.TryGetProperty("$type", out JsonElement typeElement) &&
+                typeElement.ValueKind == JsonValueKind.String
+                    ? typeElement.GetString()
+                    : null;
+            if (entryType is "response" or "errorResponse")
+            {
+                ValidateUsageWhenPresent(entry, "usage", "conversationHistory.usage");
+            }
+
             if (!entry.TryGetProperty("messages", out JsonElement messages))
             {
                 continue;
@@ -394,10 +404,10 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
 
             foreach (JsonProperty position in ingestedPositions.EnumerateObject())
             {
-                if (!DurableAgentStateContract.IsNonNegativeJsonInteger(position.Value))
+                if (!DurableAgentStateContract.IsNonNegativeInt64(position.Value))
                 {
                     throw new InvalidOperationException(
-                        $"The durable agent ingestion position '{position.Name}' must be a non-negative integer.");
+                        $"The durable agent ingestion position '{position.Name}' must be a non-negative Int64 value.");
                 }
             }
         }
@@ -413,10 +423,10 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
                     "Durable agent truncation evidence requires evictedMessageCount, firstEvictedAt, and lastEvictedAt.");
             }
 
-            if (!DurableAgentStateContract.IsPositiveJsonInteger(evictedMessageCount))
+            if (!DurableAgentStateContract.IsPositiveInt64(evictedMessageCount))
             {
                 throw new InvalidOperationException(
-                    "The durable agent truncation evictedMessageCount must be a positive integer.");
+                    "The durable agent truncation evictedMessageCount must be a positive Int64 value.");
             }
         }
     }
@@ -741,10 +751,10 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         foreach (string countName in new[] { "inputTokenCount", "outputTokenCount", "totalTokenCount" })
         {
             if (usage.TryGetProperty(countName, out JsonElement count) &&
-                !DurableAgentStateContract.IsJsonInteger(count))
+                !DurableAgentStateContract.IsNonNegativeInt64(count))
             {
                 throw new JsonException(
-                    $"The durable agent state '{path}.{countName}' property must be an integer.");
+                    $"The durable agent state '{path}.{countName}' property must be a non-negative Int64 value.");
             }
         }
 

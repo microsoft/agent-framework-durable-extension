@@ -1109,12 +1109,15 @@ public sealed class DurableAgentStateMailboxTests
     }
 
     [Theory]
-    [InlineData("9223372036854775808", false, 0L)]
-    [InlineData("1.0", true, 1L)]
-    [InlineData("1e3", true, 1000L)]
-    public void IngestionPositionsPreserveUnboundedJsonIntegerForms(
+    [InlineData("0", 0L)]
+    [InlineData("9007199254740993", 9007199254740993L)]
+    [InlineData("9223372036854775807", long.MaxValue)]
+    [InlineData("9223372036854775807.0", long.MaxValue)]
+    [InlineData("9.223372036854775807e18", long.MaxValue)]
+    [InlineData("1.0", 1L)]
+    [InlineData("1e3", 1000L)]
+    public void IngestionPositionsPreserveExactNonNegativeInt64Forms(
         string value,
-        bool canProject,
         long expectedProjection)
     {
         string json = $$"""
@@ -1138,16 +1141,18 @@ public sealed class DurableAgentStateMailboxTests
                 .GetProperty("ingestedPositions")
                 .GetProperty("producer")
                 .GetRawText());
-        Assert.Equal(
-            canProject,
-            state.Data.TryGetIngestedPosition("producer", out long projection));
-        Assert.Equal(canProject ? expectedProjection : 0, projection);
+        Assert.True(state.Data.TryGetIngestedPosition("producer", out long projection));
+        Assert.Equal(expectedProjection, projection);
     }
 
     [Theory]
+    [InlineData("9223372036854775808")]
+    [InlineData("9.223372036854775808e18")]
     [InlineData("-1")]
     [InlineData("1.5")]
-    public void IngestionPositionsRejectNegativeOrFractionalValues(string value)
+    [InlineData("true")]
+    [InlineData("null")]
+    public void IngestionPositionsRejectValuesOutsideNonNegativeInt64(string value)
     {
         string json = $$"""
             {
@@ -1165,10 +1170,14 @@ public sealed class DurableAgentStateMailboxTests
     }
 
     [Theory]
-    [InlineData("9223372036854775808")]
+    [InlineData("1")]
+    [InlineData("9007199254740993")]
+    [InlineData("9223372036854775807")]
+    [InlineData("9223372036854775807.0")]
+    [InlineData("9.223372036854775807e18")]
     [InlineData("1.0")]
     [InlineData("1e3")]
-    public void TruncationPreservesUnboundedJsonIntegerForms(string value)
+    public void TruncationPreservesExactPositiveInt64Forms(string value)
     {
         string json = $$"""
             {
@@ -1196,9 +1205,13 @@ public sealed class DurableAgentStateMailboxTests
 
     [Theory]
     [InlineData("0")]
+    [InlineData("9223372036854775808")]
+    [InlineData("9.223372036854775808e18")]
     [InlineData("-1")]
     [InlineData("1.5")]
-    public void TruncationRejectsNonPositiveOrFractionalCount(string value)
+    [InlineData("true")]
+    [InlineData("null")]
+    public void TruncationRejectsValuesOutsidePositiveInt64(string value)
     {
         string json = $$"""
             {
@@ -1215,6 +1228,90 @@ public sealed class DurableAgentStateMailboxTests
             """;
 
         Assert.Throws<InvalidOperationException>(() => Deserialize(json));
+    }
+
+    [Theory]
+    [InlineData("response", "9223372036854775807", true)]
+    [InlineData("response", "1.0", true)]
+    [InlineData("errorResponse", "1e3", true)]
+    [InlineData("response", "9223372036854775808", false)]
+    [InlineData("errorResponse", "-1", false)]
+    [InlineData("request", "9223372036854775808", true)]
+    public void LegacyUsageBoundsApplyOnlyToRecognizedResponseCounters(
+        string entryType,
+        string value,
+        bool valid)
+    {
+        string json = $$"""
+            {
+              "schemaVersion": "1.2.0",
+              "data": {
+                "conversationHistory": [
+                  {
+                    "$type": "{{entryType}}",
+                    "usage": { "totalTokenCount": {{value}} }
+                  }
+                ]
+              }
+            }
+            """;
+
+        if (valid)
+        {
+            Deserialize(json);
+        }
+        else
+        {
+            Assert.Throws<JsonException>(() => Deserialize(json));
+        }
+    }
+
+    [Theory]
+    [InlineData("0", true)]
+    [InlineData("9007199254740993", true)]
+    [InlineData("9223372036854775807", true)]
+    [InlineData("9.223372036854775807e18", true)]
+    [InlineData("9223372036854775808", false)]
+    [InlineData("-1", false)]
+    [InlineData("1.5", false)]
+    public void TerminalResponseUsageUsesExactNonNegativeInt64Bounds(string value, bool valid)
+    {
+        string json = $$"""
+            {
+              "schemaVersion": "2.0.0",
+              "data": {
+                "conversationHistory": [],
+                "terminalResults": {
+                  "c": {
+                    "correlationId": "c",
+                    "outcome": "succeeded",
+                    "completedAt": "2026-09-11T10:00:00Z",
+                    "response": {
+                      "messages": [],
+                      "usage": { "totalTokenCount": {{value}} }
+                    }
+                  }
+                },
+                "completionReceipts": {
+                  "c": {
+                    "correlationId": "c",
+                    "outcome": "succeeded",
+                    "completedAt": "2026-09-11T10:00:00Z",
+                    "resultState": "available"
+                  }
+                }
+              }
+            }
+            """;
+
+        if (valid)
+        {
+            Deserialize(json);
+        }
+        else
+        {
+            Assert.Throws<JsonException>(() => Deserialize(json));
+        }
     }
 
     [Fact]

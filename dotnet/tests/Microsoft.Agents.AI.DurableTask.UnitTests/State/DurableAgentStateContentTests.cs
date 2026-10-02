@@ -433,8 +433,11 @@ public sealed class DurableAgentStateContentTests
     }
 
     [Theory]
-    [InlineData("-9223372036854775808", long.MinValue)]
+    [InlineData("0", 0L)]
+    [InlineData("9007199254740993", 9007199254740993L)]
     [InlineData("9223372036854775807", long.MaxValue)]
+    [InlineData("9223372036854775807.0", long.MaxValue)]
+    [InlineData("9.223372036854775807e18", long.MaxValue)]
     [InlineData("1.0", 1L)]
     [InlineData("1e3", 1000L)]
     public void UsageKnownCountsAcceptJsonIntegerFormsAndProjectExactInt64(
@@ -456,20 +459,18 @@ public sealed class DurableAgentStateContentTests
 
     [Theory]
     [InlineData("9223372036854775808")]
-    [InlineData("-9223372036854775809")]
-    public void UsageKnownCountsPreserveValuesOutsideInt64WithoutProjection(string countJson)
+    [InlineData("9.223372036854775808e18")]
+    [InlineData("-1")]
+    [InlineData("1.5")]
+    [InlineData("true")]
+    [InlineData("null")]
+    public void UsageKnownCountsRejectValuesOutsideNonNegativeInt64(string countJson)
     {
         string json = $$"""{"inputTokenCount":{{countJson}}}""";
         JsonTypeInfo usageTypeInfo =
             DurableAgentStateJsonContext.Default.GetTypeInfo(typeof(DurableAgentStateUsage))!;
 
-        DurableAgentStateUsage stored = Assert.IsType<DurableAgentStateUsage>(
-            JsonSerializer.Deserialize(json, usageTypeInfo));
-        string roundTrip = JsonSerializer.Serialize(stored, usageTypeInfo);
-
-        Assert.Equal(countJson, JsonDocument.Parse(roundTrip).RootElement
-            .GetProperty("inputTokenCount").GetRawText());
-        Assert.Null(stored.ToUsageDetails().InputTokenCount);
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize(json, usageTypeInfo));
     }
 
     [Theory]

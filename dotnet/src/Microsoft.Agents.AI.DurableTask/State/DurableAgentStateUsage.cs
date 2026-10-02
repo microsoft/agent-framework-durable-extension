@@ -122,9 +122,10 @@ internal sealed class DurableAgentStateUsage
     private static JsonElement ValidateCount(JsonElement value, string propertyName)
     {
         if (value.ValueKind != JsonValueKind.Undefined &&
-            !DurableAgentStateContract.IsJsonInteger(value))
+            !DurableAgentStateContract.IsNonNegativeInt64(value))
         {
-            throw new JsonException($"The durable agent usage '{propertyName}' property must be an integer.");
+            throw new JsonException(
+                $"The durable agent usage '{propertyName}' property must be a non-negative Int64 value.");
         }
 
         return value.ValueKind == JsonValueKind.Undefined ? default : value.Clone();

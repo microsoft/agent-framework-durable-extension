@@ -171,10 +171,10 @@ internal sealed class DurableAgentStateData
         DurableAgentStateSchemaVersion version =
             DurableAgentStateSchemaVersion.ParseSupported(schemaVersion);
         if (this.IngestedPositions?.Values.Any(
-                static value => !DurableAgentStateContract.IsNonNegativeJsonInteger(value)) == true)
+                static value => !DurableAgentStateContract.IsNonNegativeInt64(value)) == true)
         {
             throw new InvalidOperationException(
-                "Durable agent ingestion positions must be non-negative.");
+                "Durable agent ingestion positions must be non-negative Int64 values.");
         }
 
         this.Truncation?.Validate();
