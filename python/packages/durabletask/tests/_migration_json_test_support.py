@@ -12,16 +12,17 @@ import json
 import logging
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
-from agent_framework import Agent, BaseChatClient
+from agent_framework import Agent, BaseChatClient, Message
 from durabletask.entities import EntityInstanceId
 from durabletask.internal.entity_state_shim import StateShim
 from durabletask.worker import TaskHubGrpcWorker, _EntityExecutor
 
-from agent_framework_durabletask import DurableAIAgentWorker
+from agent_framework_durabletask import DurableAIAgentWorker, state_snapshot_digest
 
 _MARKER = "__durabletask_autoobject__"
 _NAME = "dafx-json-agent"
@@ -30,6 +31,17 @@ _NOW = datetime(2026, 9, 23, 12, tzinfo=timezone.utc)
 _EXPIRES = "2026-09-23T13:00:00+00:00"
 _MIGRATED = {"status": "migrated", "migrationId": "migration-1", "sessionId": _DESTINATION}
 _CONSTRUCTIONS: list[Any] = []
+_COUNTER_CASES = [
+    ("1e0", 1.0),
+    ("9007199254740993.0", 2**53 + 1),
+    ("1000000000000000128.0", 1000000000000000128),
+    ("9223372036854775807.0", 2**63 - 1),
+    ("9.223372036854775807e18", 2**63 - 1),
+    ("1.00000000000000001", None),
+    ("9223372036854775807.1", None),
+    ("9223372036854775808.0", None),
+    ("1e-9999", None),
+]
 
 
 def _json(value: Any) -> str:
@@ -122,13 +134,15 @@ class _CountedState(StateShim):
         super().set_state(state)
 
 
-def _af_batch(function: Any, operation: str, value: Any, raw: str | None) -> dict[str, Any]:
+def _af_batch(
+    function: Any, operation: str, value: Any, raw: str | None, input_json: str | None = None
+) -> dict[str, Any]:
     wire = _json({
         "self": {"name": _NAME, "key": "dest"},
         "exists": raw is not None,
         "state": raw,
         # Both native input layers are required before the SDK decoder is reached.
-        "batch": [{"name": operation, "input": _json(_json(value))}],
+        "batch": [{"name": operation, "input": _json(_json(value) if input_json is None else input_json)}],
     })
     batch = json.loads(function(wire))
     assert len(batch["results"]) == 1 and batch["results"][0]["isError"] is False, batch
@@ -166,14 +180,20 @@ class _EntityHost:
             self.function = registered.get_user_function()
             assert callable(self.function.entity_function)
 
-    def call(self, operation: str, value: Any = None) -> Any:
+    def call(self, operation: str, value: Any = None, *, input_json: str | None = None) -> Any:
         if self.backend == "af":
-            batch = _af_batch(self.function, operation, value, self.raw)
+            batch = _af_batch(self.function, operation, value, self.raw, input_json)
             self.raw = batch["entityState"]
             return json.loads(batch["results"][0]["result"])
         self.shim = _CountedState(self.raw, self.worker._data_converter)
         executor = _EntityExecutor(self.worker._registry, logging.getLogger(__name__), self.worker._data_converter)
-        result = executor.execute("migration-json", EntityInstanceId(_NAME, "dest"), operation, self.shim, _json(value))
+        result = executor.execute(
+            "migration-json",
+            EntityInstanceId(_NAME, "dest"),
+            operation,
+            self.shim,
+            _json(value) if input_json is None else input_json,
+        )
         self.shim.commit()
         self.raw = self.shim.encode_state()
         return json.loads(result) if result is not None else None
@@ -190,6 +210,127 @@ class _EntityHost:
         # Functions returns final state, not a storage-write count or acknowledgement.
         if self.backend == "dt":
             assert self.shim.writes == expected
+
+
+def _assert_counter_ingress(host: _EntityHost, location: str, token: str, expected: int | float | None) -> None:
+    request = _request(_payload("plain"), "completion")
+    if location == "source-position":
+        owner: dict[str, Any] = {"producer": expected if expected is not None else 1.0}
+        request["source"]["data"]["ingestedPositions"] = owner
+        request["deliveryEvidence"] = {
+            "evidenceId": "accepted-inputs",
+            "complete": True,
+            "messages": [Message("user", ["accepted"], message_id="accepted").to_dict()],
+            "messagePositions": [{"producer": "producer", "position": int(expected) if expected is not None else 1}],
+        }
+        field = "producer"
+    elif location == "source":
+        owner = {
+            "evictedMessageCount": expected if expected is not None else 1.0,
+            "firstEvictedAt": "2024-01-01T00:00:00Z",
+            "lastEvictedAt": "2024-01-01T00:00:00Z",
+        }
+        request["source"]["data"]["truncation"] = owner
+        field = "evictedMessageCount"
+    else:
+        owner = {"totalTokenCount": expected if expected is not None else 1.0}
+        if location == "source-usage":
+            request["source"]["data"]["conversationHistory"] = [
+                {"$type": "response", "correlationId": "done", "usage": owner}
+            ]
+        elif location == "completion-content":
+            request["completionEvidence"]["results"][0]["response"]["messages"][0]["contents"] = [
+                {"$type": "usage", "usage": owner}
+            ]
+        else:
+            assert location == "completion"
+            request["completionEvidence"]["results"][0]["response"]["usage"] = owner
+        field = "totalTokenCount"
+    request["sourceDigest"] = request["completionEvidence"]["sourceDigest"] = _digest(request["source"])
+    if "deliveryEvidence" in request:
+        request["deliveryEvidence"]["sourceDigest"] = request["sourceDigest"]
+    owner[field] = "COUNTER_TOKEN"
+    wire = _json(request).replace('"COUNTER_TOKEN"', token)
+    if expected is None:
+        if host.backend == "dt":
+            with pytest.raises(ValueError):
+                host.call("migrate", input_json=wire)
+            assert host.shim.encode_state() is None
+        else:
+            result = host.call("migrate", input_json=wire)
+            assert result["status"] == "error"
+            assert json.loads(host.raw or "null") is None
+        host.assert_writes(0)
+    else:
+        assert host.call("migrate", input_json=wire) == _MIGRATED
+        state = host.snapshot()
+        if location == "source-position":
+            stored = state["data"]["ingestedPositions"]
+        elif location == "source":
+            stored = state["data"]["truncation"]
+        elif location == "source-usage":
+            stored = state["data"]["conversationHistory"][0]["usage"]
+        elif location == "completion-content":
+            stored = state["data"]["terminalResults"]["done"]["response"]["messages"][0]["contents"][0]["usage"]
+        else:
+            stored = state["data"]["terminalResults"]["done"]["response"]["usage"]
+        assert stored[field] == expected
+        assert Decimal(json.dumps(stored[field])) == Decimal(token)
+        before = host.raw
+        assert host.call("migrate", input_json=wire) == _MIGRATED
+        assert host.raw == before
+        host.assert_writes(0)
+    host.assert_idle()
+
+
+def _assert_float_digest_compatibility(host: _EntityHost, location: str) -> None:
+    request = _request(_payload("plain"), "completion")
+    count = 1.0000000000000001e18
+    if location == "source":
+        request["source"]["data"]["truncation"] = {
+            "evictedMessageCount": count,
+            "firstEvictedAt": "2024-01-01T00:00:00Z",
+            "lastEvictedAt": "2024-01-01T00:00:00Z",
+        }
+    else:
+        request["completionEvidence"]["results"][0]["response"]["usage"] = {"totalTokenCount": count}
+    request["sourceDigest"] = request["completionEvidence"]["sourceDigest"] = state_snapshot_digest(request["source"])
+    request_digest = state_snapshot_digest(request)
+    assert host.call("migrate", request) == _MIGRATED
+    snapshot = host.snapshot()
+    assert snapshot["data"]["migration"]["sourceDigest"] == request["sourceDigest"]
+    assert snapshot["data"]["migration"]["requestDigest"] == request_digest
+    stored = (
+        snapshot["data"]["truncation"]["evictedMessageCount"]
+        if location == "source"
+        else snapshot["data"]["terminalResults"]["done"]["response"]["usage"]["totalTokenCount"]
+    )
+    assert _json(stored) == _json(count)
+    before = host.raw
+    assert host.call("migrate", request) == _MIGRATED
+    assert host.raw is not None and before is not None
+    assert json.loads(host.raw, parse_float=Decimal) == json.loads(before, parse_float=Decimal)
+    if host.backend == "dt":
+        assert host.raw == before
+    host.assert_writes(0)
+    host.assert_idle()
+
+
+def _assert_opaque_counter_ingress(host: _EntityHost, location: str, token: str) -> None:
+    expected = {"usage": {"totalTokenCount": json.loads(token)}, "literal": token}
+    request = _request(expected, location)
+    owner = (
+        request["source"]["futureRoot"]
+        if location == "source"
+        else request["completionEvidence"]["results"][0]["futureResult"]
+    )
+    owner["usage"]["totalTokenCount"] = "OPAQUE_TOKEN"
+    wire = _json(request).replace('"OPAQUE_TOKEN"', token)
+    assert host.call("migrate", input_json=wire) == _MIGRATED
+    state = host.snapshot()
+    actual = state["futureRoot"] if location == "source" else state["data"]["terminalResults"]["done"]["futureResult"]
+    assert _json(actual) == _json(expected)
+    host.assert_idle()
 
 
 def _assert_ingress_and_retry(host: _EntityHost, case: str, location: str, clock: Any) -> None:

@@ -8,7 +8,7 @@ import json
 from collections.abc import Callable
 from typing import Any, cast
 
-from agent_framework_durabletask._shared_state_validation import load_state_json
+from agent_framework_durabletask._shared_state_validation import load_migration_json, load_state_json
 from azure.durable_functions import DurableEntityContext
 from azure.durable_functions.entity import Entity
 
@@ -26,6 +26,8 @@ class _JsonEntityContext(DurableEntityContext):
         """Unwrap the two native input layers without object reconstruction."""
         del expected_type
         serialized = json.loads(self._input)
+        if serialized is not None and self.operation_name == "migrate":
+            return load_migration_json(serialized)
         return None if serialized is None else json.loads(serialized)
 
 

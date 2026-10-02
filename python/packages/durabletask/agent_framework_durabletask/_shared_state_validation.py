@@ -416,12 +416,41 @@ class _JsonNumber(str):
 
 def load_state_json(value: str) -> Any:
     """Decode named counters exactly before converting opaque JSON decimals to floats."""
+    return _load_counter_json(value, migration=False)
+
+
+def load_migration_json(value: str) -> Any:
+    """Decode counters in an explicit migration's source and completion journal.
+
+    Retain float representations that preserve the exact JSON number on re-encoding
+    so existing public source digests and committed retry identities stay valid.
+    """
+    return _load_counter_json(value, migration=True)
+
+
+def _load_counter_json(value: str, *, migration: bool) -> Any:
     raw: Any = json.loads(value, parse_float=_JsonNumber)
     root = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
-    data = root.get("data")
-    if isinstance(data, dict):
+    roots = [root]
+    if migration:
+        source = root.get("source")
+        roots = [cast(dict[str, Any], source)] if isinstance(source, dict) else []
+        evidence = root.get("completionEvidence")
+        if isinstance(evidence, dict):
+            results = cast(dict[str, Any], evidence).get("results")
+            if isinstance(results, list):
+                roots.append({
+                    "schemaVersion": "2.0.0",
+                    "data": {
+                        "terminalResults": {str(index): result for index, result in enumerate(cast(list[Any], results))}
+                    },
+                })
+    for snapshot in roots:
+        data = snapshot.get("data")
+        if not isinstance(data, dict):
+            continue
         for owner, field, minimum, _ in _counter_fields(
-            cast(dict[str, Any], data), v2=root.get("schemaVersion") == "2.0.0"
+            cast(dict[str, Any], data), v2=snapshot.get("schemaVersion") == "2.0.0"
         ):
             number = owner[field]
             if isinstance(number, _JsonNumber):
@@ -435,7 +464,8 @@ def load_state_json(value: str) -> Any:
                 if exact < minimum or exact > 9223372036854775807:
                     raise ValueError("Shared counter is outside its Int64 range.")
                 projected = float(number)
-                owner[field] = projected if exact == projected else int(exact)
+                preserves_value = Decimal(json.dumps(projected)) == exact if migration else exact == projected
+                owner[field] = projected if preserves_value else int(exact)
     pending: list[Any] = [raw]
     while pending:
         container = pending.pop()
