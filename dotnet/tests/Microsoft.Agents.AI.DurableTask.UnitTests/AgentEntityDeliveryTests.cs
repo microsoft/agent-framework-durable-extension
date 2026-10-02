@@ -78,20 +78,30 @@ public sealed class AgentEntityDeliveryTests
     }
 
     [Theory]
-    [InlineData("1.0.0", false)]
-    [InlineData("1.0.0", true)]
-    [InlineData("1.1.0", false)]
-    [InlineData("1.1.0", true)]
-    [InlineData("1.2.0", false)]
-    [InlineData("1.2.0", true)]
-    public async Task LegacyRequestAndResponseKeepHistoricalFunctionArgumentMappingAsync(
+    [InlineData("1.0.0", false, " { \"incomplete\": ")]
+    [InlineData("1.0.0", true, " { \"incomplete\": ")]
+    [InlineData("1.1.0", false, " { \"incomplete\": ")]
+    [InlineData("1.1.0", true, " { \"incomplete\": ")]
+    [InlineData("1.2.0", false, " { \"incomplete\": ")]
+    [InlineData("1.2.0", true, " { \"incomplete\": ")]
+    [InlineData("1.0.0", false, " { \"value\": true } ")]
+    [InlineData("1.1.0", false, " { \"value\": true } ")]
+    [InlineData("1.2.0", false, " { \"value\": true } ")]
+    [InlineData("1.0.0", true, "non-JSON text")]
+    [InlineData("1.1.0", true, "non-JSON text")]
+    [InlineData("1.2.0", true, "non-JSON text")]
+    [InlineData("1.0.0", false, null)]
+    [InlineData("1.1.0", false, null)]
+    [InlineData("1.2.0", false, null)]
+    public async Task LegacyRequestAndResponsePreserveVerbatimOrDictionaryFunctionArgumentsAsync(
         string schemaVersion,
-        bool rawOnly)
+        bool rawOnly,
+        string? rawArguments)
     {
         FunctionCallContent call = new("call", "function",
             rawOnly ? null : new Dictionary<string, object?> { ["value"] = false })
         {
-            RawRepresentation = " { \"incomplete\": ",
+            RawRepresentation = rawArguments,
         };
         RecordingAgent agent = new("agent")
         {
@@ -109,14 +119,20 @@ public sealed class AgentEntityDeliveryTests
         {
             DurableAgentStateFunctionCallContent stored = Assert.IsType<DurableAgentStateFunctionCallContent>(
                 Assert.Single(Assert.Single(entry.Messages).Contents));
-            Assert.Equal(rawOnly ? JsonValueKind.Undefined : JsonValueKind.Object, stored.Arguments.ValueKind);
-            if (!rawOnly)
+            if (rawArguments is not null)
             {
+                Assert.Equal(JsonValueKind.String, stored.Arguments.ValueKind);
+                Assert.Equal(rawArguments, stored.Arguments.GetString());
+            }
+            else
+            {
+                Assert.Equal(JsonValueKind.Object, stored.Arguments.ValueKind);
                 Assert.False(stored.Arguments.GetProperty("value").GetBoolean());
             }
         }
 
-        Assert.Null(Assert.IsType<FunctionCallContent>(Assert.Single(Assert.Single(agent.LastMessages).Contents)).RawRepresentation);
+        Assert.Equal(rawArguments,
+            Assert.IsType<FunctionCallContent>(Assert.Single(Assert.Single(agent.LastMessages).Contents)).RawRepresentation);
     }
 
     [Theory]
