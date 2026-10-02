@@ -335,8 +335,10 @@ the operation fails with an `InvalidOperationException` describing the protected
 working state. Auto does not expire mailbox payloads; delivery expiry is a separate mailbox policy. Large
 inline image and tool-result offload is not part of this implementation.
 
-Retention telemetry uses the shared `agent_framework.durabletask` meter and the nine
-`durable.retention.*` instruments used by Python. Retention measurements carry `mechanism`, `outcome`, and
+Retention telemetry uses the `agent_framework.durabletask` meter and nine `durable.retention.*` instruments.
+These instrument names align with the Python retention implementation proposed in
+[microsoft/agent-framework-durable-extension#123](https://github.com/microsoft/agent-framework-durable-extension/pull/123).
+Retention measurements carry `mechanism`, `outcome`, and
 `commit_status`; size measurements add `phase`, while write attempts add `stage` and operations identify
 whether deletion was staged. A host state setter returning is reported as commit status `unknown`, never as
 durable commit confirmation. Metrics contain no agent, session, correlation, or payload dimensions. Persisted
