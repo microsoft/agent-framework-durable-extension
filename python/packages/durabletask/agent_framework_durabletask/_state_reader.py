@@ -23,6 +23,7 @@ from ._delivery_state import (
 )
 from ._durable_agent_state import DurableAgentState
 from ._shared_response import load_terminal_response
+from ._shared_state_validation import load_state_json
 
 __all__ = ["SharedAgentStateReader", "read_agent_state"]
 
@@ -91,7 +92,7 @@ def read_agent_state(raw: dict[str, Any] | str) -> SharedAgentStateReader | Dura
     """
     if isinstance(raw, str):
         try:
-            raw = json.loads(raw)
+            raw = load_state_json(raw)
         except json.JSONDecodeError:
             raise ValueError("The durable agent state is not valid JSON.") from None
     if not isinstance(raw, dict):

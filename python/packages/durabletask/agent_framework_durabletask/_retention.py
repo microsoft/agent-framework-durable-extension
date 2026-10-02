@@ -34,6 +34,7 @@ from ._shared_agent_state import (
     DurableAgentStateMessage,
     DurableAgentStateUnknownEntry,
 )
+from ._shared_state_validation import validate_counter
 from ._state_capacity import StateCapacityError
 
 __all__ = [
@@ -182,7 +183,9 @@ async def enforce_budget(
     floor_state = _stage_eviction(baseline, set(origins))
     floor_without_record = _serialized_size(floor_state)
     if origins:
-        record_truncation(floor_state, len(origins), now=now)
+        previous_count = int((baseline.data.truncation or {}).get(DurableStateFields.EVICTED_MESSAGE_COUNT, 0))
+        sizing_increment = min(len(origins), 9223372036854775807 - previous_count)
+        record_truncation(floor_state, sizing_increment, now=now)
     floor = _serialized_size(floor_state)
     target = max(int(max_state_bytes * low_watermark), floor)
     if floor >= high:
@@ -294,12 +297,16 @@ async def enforce_budget(
 
 def record_truncation(state: DurableAgentState, removed: int, *, now: datetime | None = None) -> None:
     """Accumulate bounded eviction evidence without discarding unknown metadata."""
-    timestamp = (now or datetime.now(tz=timezone.utc)).isoformat()
     existing = state.data.truncation or {}
+    previous = existing.get(DurableStateFields.EVICTED_MESSAGE_COUNT, 0)
+    validate_counter(previous, "truncation.evictedMessageCount", minimum=1 if existing else 0)
+    validate_counter(removed, "removed message count")
+    count = int(previous) + int(removed)
+    validate_counter(count, "truncation.evictedMessageCount", minimum=1)
+    timestamp = (now or datetime.now(tz=timezone.utc)).isoformat()
     state.data.truncation = {
         **existing,
-        DurableStateFields.EVICTED_MESSAGE_COUNT: int(existing.get(DurableStateFields.EVICTED_MESSAGE_COUNT, 0))
-        + removed,
+        DurableStateFields.EVICTED_MESSAGE_COUNT: count,
         DurableStateFields.FIRST_EVICTED_AT: existing.get(DurableStateFields.FIRST_EVICTED_AT, timestamp),
         DurableStateFields.LAST_EVICTED_AT: timestamp,
     }

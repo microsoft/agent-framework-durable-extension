@@ -37,7 +37,7 @@ CONTENT_CASES: list[tuple[str, dict[str, Any]]] = [
     ("functionResult", {"callId": "c"}),
     ("hostedFile", {"fileId": "f"}),
     ("hostedVectorStore", {"vectorStoreId": "v"}),
-    ("usage", {"usage": {"inputTokenCount": 2**65, "extensionData": {"opaque": [None]}, "future": False}}),
+    ("usage", {"usage": {"inputTokenCount": 2**63 - 1, "extensionData": {"opaque": [None]}, "future": False}}),
     ("text", {"text": ""}),
     ("reasoning", {}),
     ("uri", {"uri": "urn:test"}),
@@ -366,8 +366,8 @@ def test_duplicate_public_ids_keep_unique_reconciliation_across_reload() -> None
 
 @pytest.mark.parametrize("field", ["input_token_count", "output_token_count", "total_token_count"])
 @pytest.mark.parametrize("value", [None, False, 0.0, 1.5, "provider-value", [], {"value": None}])
-def test_noninteger_provider_usage_remains_explicit_detached_metadata(field: str, value: Any) -> None:
-    source = {field: deepcopy(value), "provider": {"labels": [False, None]}}
+def test_nullable_native_usage_and_provider_metadata_remain_detached(field: str, value: Any) -> None:
+    source: dict[str, Any] = {field: None, "provider": {"value": deepcopy(value), "labels": [False, None]}}
     before = deepcopy(source)
     usage = DurableAgentStateUsage.from_usage(source)
     assert usage is not None

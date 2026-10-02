@@ -47,6 +47,7 @@ from dateutil import parser as date_parser
 
 from ._constants import ContentTypes, DurableStateFields
 from ._models import RunRequest, serialize_response_format
+from ._shared_state_validation import load_state_json, validate_legacy_counters
 
 logger = logging.getLogger("agent_framework.durabletask")
 
@@ -71,6 +72,7 @@ def _validate_legacy_state_layout(state: dict[str, Any]) -> None:
         raise ValueError("Durable entity state data must be a JSON object.")
     if any(name in data for name in ("terminalResults", "completionReceipts", "historyBinding")):
         raise ValueError("Legacy mutable state cannot contain shared v2 delivery or binding fields.")
+    validate_legacy_counters(cast(dict[str, Any], data))
 
 
 class DurableAgentStateEntryJsonType(str, Enum):
@@ -440,9 +442,11 @@ class DurableAgentState:
 
     def to_dict(self) -> dict[str, Any]:
         _validate_legacy_state_layout({"schemaVersion": self.schema_version, "data": {}})
+        data = self.data.to_dict()
+        validate_legacy_counters(data)
         return {
             DurableStateFields.SCHEMA_VERSION: self.schema_version,
-            DurableStateFields.DATA: self.data.to_dict(),
+            DurableStateFields.DATA: data,
         }
 
     def to_json(self) -> str:
@@ -467,7 +471,7 @@ class DurableAgentState:
     @classmethod
     def from_json(cls, json_str: str) -> DurableAgentState:
         try:
-            obj = json.loads(json_str)
+            obj = load_state_json(json_str)
         except json.JSONDecodeError as e:
             raise ValueError("The durable agent state is not valid JSON.") from e
 

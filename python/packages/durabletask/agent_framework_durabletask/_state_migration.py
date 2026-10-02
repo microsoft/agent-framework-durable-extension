@@ -18,7 +18,7 @@ from ._shared_agent_state import (
     DurableAgentStateRequest,
     _validate_json,  # pyright: ignore[reportPrivateUsage]
 )
-from ._shared_state_validation import validate_identifier, validate_shared_data
+from ._shared_state_validation import validate_counter, validate_identifier, validate_shared_data
 from ._state_capacity import StateCapacityError
 
 __all__ = ["migrate_legacy_state", "state_snapshot_digest"]
@@ -85,6 +85,7 @@ def _legacy_positions(data: dict[str, Any]) -> dict[str, int]:
     positions: dict[str, int] = {}
     for producer, position in cast(dict[str, Any], raw).items():
         _nonblank(producer, "ingestedPositions producer")
+        validate_counter(position, "ingested position")
         # The published JSON Schema integer type admits integral floating-point
         # representations. Normalize only the detached comparison value.
         if isinstance(position, float) and position.is_integer():

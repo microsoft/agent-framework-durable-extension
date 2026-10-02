@@ -99,7 +99,11 @@ def _root() -> dict[str, Any]:
                         "createdAt": "2026-09-17T09:59:59.123456789Z",
                         "finishReason": "stop",
                         "continuationToken": "AQID",
-                        "usage": {"inputTokenCount": 2**70, "extensionData": {"provider": None}, "unknownUsage": False},
+                        "usage": {
+                            "inputTokenCount": 2**63 - 1,
+                            "extensionData": {"provider": None},
+                            "unknownUsage": False,
+                        },
                         "extensionData": {"provider": {"flag": False}},
                         "unknownResponse": {"keep": [False, 0]},
                     },

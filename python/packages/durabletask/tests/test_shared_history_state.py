@@ -103,7 +103,7 @@ def _canonical_v2_state() -> dict[str, Any]:
                         }
                     ],
                     "usage": {
-                        "inputTokenCount": 2**70,
+                        "inputTokenCount": 2**63 - 1,
                         "extensionData": {"provider": None},
                         "unknownUsage": False,
                     },

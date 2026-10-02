@@ -10,10 +10,13 @@ from typing import Any, NewType, cast
 from durabletask.serialization import DataConverter
 from durabletask.worker import TaskHubGrpcWorker
 
+from ._shared_state_validation import load_state_json
+
 # A trusted target annotation, never a wire marker or a concrete state class.
 # NewType survives SDK type discovery without triggering StateShim's isinstance
 # check for concrete intended_type values.
 JsonPayload = NewType("JsonPayload", object)
+JsonState = NewType("JsonState", object)
 
 
 class _JsonPayloadConverter(DataConverter):
@@ -24,7 +27,7 @@ class _JsonPayloadConverter(DataConverter):
 
     def can_reconstruct(self, target_type: Any) -> bool:
         """Recognize the framework tag without changing native type discovery."""
-        return target_type is JsonPayload or self._inner.can_reconstruct(target_type)
+        return target_type is JsonPayload or target_type is JsonState or self._inner.can_reconstruct(target_type)
 
     def serialize(self, value: Any) -> str | None:
         """Keep the caller's serializer, including its native custom types."""
@@ -32,6 +35,8 @@ class _JsonPayloadConverter(DataConverter):
 
     def deserialize(self, data: str | None, target_type: Any = None) -> Any:
         """Read framework JSON without interpreting SDK object markers."""
+        if target_type is JsonState:
+            return None if data is None or data == "" else load_state_json(data)
         if target_type is JsonPayload:
             return None if data is None or data == "" else json.loads(data)
         return self._inner.deserialize(data, target_type)

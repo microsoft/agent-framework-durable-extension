@@ -45,6 +45,7 @@ from agent_framework_durabletask._retention import (
     _token_budget,
     enforce_budget,
     prunes_excluded,
+    record_truncation,
 )
 
 BUDGET = 40_000
@@ -57,6 +58,51 @@ def _size(state: DurableAgentState) -> int:
 
 def _message_ids(state: DurableAgentState) -> list[str]:
     return [m.message_id or "" for entry in state.data.conversation_history for m in entry.messages]
+
+
+def test_truncation_int64_boundary_and_overflow_leave_state_unchanged() -> None:
+    state = _state(turns=2)
+    record_truncation(state, 2**63 - 2)
+    record_truncation(state, 1)
+    assert state.data.truncation is not None
+    assert state.data.truncation["evictedMessageCount"] == 2**63 - 1
+    before = state.to_json()
+    with pytest.raises(ValueError, match="Int64"):
+        record_truncation(state, 1)
+    assert state.to_json() == before
+
+
+@pytest.mark.parametrize("value", [True, -1, 1.5, "1", None, 2**63])
+def test_invalid_truncation_increment_does_not_create_a_record(value: Any) -> None:
+    state = _state(turns=2)
+    before = state.to_json()
+    with pytest.raises(ValueError):
+        record_truncation(state, value)
+    assert state.to_json() == before
+
+
+async def test_pressure_overflow_preserves_transcript_and_existing_truncation() -> None:
+    state = _state(turns=60)
+    record_truncation(state, 2**63 - 1)
+    before = state.to_json()
+    with pytest.raises(ValueError, match="Int64"):
+        await enforce_budget(state, max_state_bytes=BUDGET)
+    assert state.to_json() == before
+
+
+async def test_pressure_checks_actual_increment_not_hypothetical_full_eviction() -> None:
+    control = _state(turns=60)
+    record_truncation(control, 2**63 - 121)
+    removed = await enforce_budget(control, max_state_bytes=BUDGET)
+    assert 0 < removed < 118
+
+    state = _state(turns=60)
+    record_truncation(state, 2**63 - 1 - removed)
+    assert await enforce_budget(state, max_state_bytes=BUDGET) == removed
+    assert state.data.truncation is not None
+    assert state.data.truncation["evictedMessageCount"] == 2**63 - 1
+    assert _size(state) <= BUDGET * LOW_WATERMARK
+    assert _message_ids(state) == _message_ids(control)
 
 
 class TestRetentionModes:

@@ -16,6 +16,7 @@ from agent_framework import AgentResponse
 
 from agent_framework_durabletask import DurableAgentState, LegacyDurableAgentState
 from agent_framework_durabletask import _state_reader as reader_module
+from agent_framework_durabletask._durable_agent_state import DurableAgentStateResponse as LegacyResponse
 from agent_framework_durabletask._response_utils import is_terminal_agent_response
 from agent_framework_durabletask._shared_state_validation import validate_shared_state
 from agent_framework_durabletask._state_reader import SharedAgentStateReader, read_agent_state
@@ -59,6 +60,45 @@ def _empty() -> dict[str, Any]:
     return json.loads(
         '{"schemaVersion":"2.0.0","data":{"conversationHistory":[],"terminalResults":{},"completionReceipts":{}}}'
     )
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+@pytest.mark.parametrize("field", ["inputTokenCount", "outputTokenCount", "totalTokenCount", "position", "evicted"])
+@pytest.mark.parametrize("value", [0, 1, 1.0, 2**53 + 1, 2**63 - 1, -1, 2**63, 2**80, True, 1.5, "1", None])
+def test_shared_counter_int64_bounds_are_read_only(version: str, field: str, value: Any) -> None:
+    raw = _empty()
+    raw["schemaVersion"] = version
+    if version != "2.0.0":
+        raw["data"] = {"conversationHistory": []}
+    if field == "position":
+        raw["data"]["ingestedPositions"] = {"producer": value}
+    elif field == "evicted":
+        raw["data"]["truncation"] = {
+            "evictedMessageCount": value,
+            "firstEvictedAt": COMPLETED,
+            "lastEvictedAt": COMPLETED,
+        }
+    else:
+        raw["data"]["conversationHistory"] = [
+            {
+                "$type": "response",
+                "messages": [{"role": "assistant", "contents": [{"$type": "usage", "usage": {field: value}}]}],
+            }
+        ]
+    before = deepcopy(raw)
+    minimum = 1 if field == "evicted" else 0
+    valid = type(value) in (int, float) and value >= minimum and value <= 2**63 - 1 and int(value) == value
+    if valid:
+        validate_shared_state(raw)
+        if version == "2.0.0":
+            _same(read_agent_state(raw).to_dict(), before)
+    else:
+        with pytest.raises(ValueError):
+            validate_shared_state(raw)
+        if version == "2.0.0" or value is not None or field in ("position", "evicted"):
+            with pytest.raises(ValueError):
+                read_agent_state(raw)
+    _same(raw, before)
 
 
 def _raw(*, outcome: str = "succeeded", expiry: bool = False, unavailable: bool = False) -> dict[str, Any]:
@@ -133,6 +173,14 @@ def _case_root(reference: str, value: Any) -> dict[str, Any]:
         raw["data"]["terminalResults"]["c"]["response"] = deepcopy(value)
     elif fragment == "/$defs/data/properties/ingestedPositions":
         raw["data"]["ingestedPositions"] = deepcopy(value)
+    elif fragment == "/$defs/usage":
+        raw["data"]["conversationHistory"] = [{"$type": "response", "usage": deepcopy(value)}]
+    elif fragment == "/$defs/data/properties/truncation/properties/evictedMessageCount":
+        raw["data"]["truncation"] = {
+            "evictedMessageCount": value,
+            "firstEvictedAt": COMPLETED,
+            "lastEvictedAt": COMPLETED,
+        }
     else:
         pytest.fail(f"Add a valid envelope for shared schema fragment {fragment}")
     return raw
@@ -140,15 +188,145 @@ def _case_root(reference: str, value: Any) -> dict[str, Any]:
 
 def test_shared_corpus_enumeration_and_exact_versions() -> None:
     assert len(FIXTURES) == 4
-    assert len(CASES) == 96
+    bounded_contract = "nonNegativeInt64" in SCHEMA["$defs"]
+    assert len(CASES) == (126 if bounded_contract else 96)
     assert VERSIONS == ("1.0.0", "1.1.0", "1.2.0", "2.0.0")
     assert {group["schema"]["$ref"].partition("#")[0] for _, group in CASE_GROUPS} == {SCHEMA["$id"]}
-    assert {group["schema"]["$ref"].partition("#")[2] for _, group in CASE_GROUPS} == {
+    fragments = {
         "",
         "/$defs/v2ChatMessage",
         "/$defs/terminalResponse",
         "/$defs/data/properties/ingestedPositions",
     }
+    if bounded_contract:
+        fragments.update({"/$defs/usage", "/$defs/data/properties/truncation/properties/evictedMessageCount"})
+    assert {group["schema"]["$ref"].partition("#")[2] for _, group in CASE_GROUPS} == fragments
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_request_usage_is_opaque_in_all_versions(version: str) -> None:
+    raw: dict[str, Any] = {
+        "schemaVersion": version,
+        "data": {"conversationHistory": [{"$type": "request", "usage": {"totalTokenCount": 2**80}}]},
+    }
+    if version == "2.0.0":
+        raw["data"].update(terminalResults={}, completionReceipts={})
+    before = deepcopy(raw)
+    validate_shared_state(raw)
+    read_agent_state(raw)
+    _same(raw, before)
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+@pytest.mark.parametrize("value", [-1, 2**63, True, 1.5])
+def test_entry_usage_bounds_cover_direct_state_loaders(version: str, value: Any) -> None:
+    raw: dict[str, Any] = {
+        "schemaVersion": version,
+        "data": {"conversationHistory": [{"$type": "response", "usage": {"totalTokenCount": value}}]},
+    }
+    if version == "2.0.0":
+        raw["data"].update(terminalResults={}, completionReceipts={})
+    before = deepcopy(raw)
+    with pytest.raises(ValueError):
+        validate_shared_state(raw)
+    with pytest.raises(ValueError):
+        (DurableAgentState if version == "2.0.0" else LegacyDurableAgentState).from_dict(raw)
+    _same(raw, before)
+
+
+@pytest.mark.parametrize("value", [-1, 2**63, True, 1.5])
+def test_legacy_state_writer_rejects_invalid_usage(value: Any) -> None:
+    state = LegacyDurableAgentState.from_dict({
+        "schemaVersion": "1.1.0",
+        "data": {"conversationHistory": [{"$type": "response", "usage": {"inputTokenCount": 1}}]},
+    })
+    response = state.data.conversation_history[0]
+    assert isinstance(response, LegacyResponse)
+    assert response.usage is not None
+    response.usage.input_token_count = value
+    with pytest.raises(ValueError):
+        state.to_dict()
+
+
+@pytest.mark.parametrize("field", ["ingested_positions", "truncation"])
+@pytest.mark.parametrize("value", [-1, 2**63, True, 1.5])
+def test_canonical_counter_writers_reject_invalid_values(field: str, value: Any) -> None:
+    state = DurableAgentState()
+    stored = (
+        {"producer": value}
+        if field == "ingested_positions"
+        else {"evictedMessageCount": value, "firstEvictedAt": COMPLETED, "lastEvictedAt": COMPLETED}
+    )
+    setattr(state.data, field, stored)
+    before = deepcopy(stored)
+    with pytest.raises(ValueError):
+        state.to_dict()
+    _same(getattr(state.data, field), before)
+
+
+def test_response_counter_overflow_preserves_previous_delivery() -> None:
+    state = DurableAgentState()
+    state.record_response("prior", AgentResponse(messages=[]), delivery_window_seconds=60)
+    before = state.to_json()
+    with pytest.raises(ValueError, match="Int64"):
+        state.record_response(
+            "overflow",
+            AgentResponse(messages=[], usage_details={"total_token_count": 2**63}),
+            delivery_window_seconds=60,
+        )
+    assert state.to_json() == before
+
+
+@pytest.mark.parametrize("token", ["1e-9999999999999999999", "1.00000000000000001", "0e9999999999999999999"])
+def test_opaque_number_decoding_keeps_existing_float_semantics(token: str) -> None:
+    raw = (
+        '{"schemaVersion":"2.0.0","data":{"conversationHistory":[],"terminalResults":{},"completionReceipts":{},"session":{"tiny":'
+        + token
+        + "}}}"
+    )
+    expected = json.loads(raw)
+    _same(read_agent_state(raw).to_dict(), expected)
+    _same(DurableAgentState.from_json(raw).to_dict()["data"]["session"], expected["data"]["session"])
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+@pytest.mark.parametrize(
+    "token,expected",
+    [
+        ("9223372036854775807.0", 2**63 - 1),
+        ("9.223372036854775807e18", 2**63 - 1),
+        ("9007199254740993.0", 2**53 + 1),
+        ("1e0", 1),
+        ("1.00000000000000001", None),
+        ("9223372036854775807.1", None),
+        ("9223372036854775808.0", None),
+        ("1e9999", None),
+    ],
+)
+@pytest.mark.parametrize("field", ["usage", "ingestedPositions", "truncation"])
+def test_json_counter_lexemes_are_checked_before_float_rounding(
+    version: str, token: str, expected: int | None, field: str
+) -> None:
+    parts = {
+        "usage": '"conversationHistory":[{"$type":"response","usage":{"totalTokenCount":' + token + "}}]",
+        "ingestedPositions": '"conversationHistory":[],"ingestedPositions":{"producer":' + token + "}",
+        "truncation": '"conversationHistory":[],"truncation":{"evictedMessageCount":'
+        + token
+        + ',"firstEvictedAt":"2026-09-16T00:00:00Z","lastEvictedAt":"2026-09-16T00:00:00Z"}',
+    }
+    data = parts[field] + (',"terminalResults":{},"completionReceipts":{}' if version == "2.0.0" else "")
+    raw = '{"schemaVersion":"' + version + '","data":{' + data + "}}"
+    loaders = [read_agent_state, (DurableAgentState if version == "2.0.0" else LegacyDurableAgentState).from_json]
+    for loader in loaders:
+        if expected is None:
+            with pytest.raises(ValueError):
+                loader(raw)
+        else:
+            decoded = loader(raw).to_dict()["data"]
+            if field == "usage":
+                assert decoded["conversationHistory"][0]["usage"]["totalTokenCount"] == expected
+            elif version == "2.0.0":
+                assert decoded[field]["producer" if field == "ingestedPositions" else "evictedMessageCount"] == expected
 
 
 @pytest.mark.parametrize(("reference", "case"), CASES)
@@ -460,7 +638,7 @@ def _rich_raw() -> dict[str, Any]:
         agentId="agent-id",
         finishReason="stop",
         continuationToken="AP8B",
-        usage={"inputTokenCount": 2**80, "outputTokenCount": 0.0, "extensionData": deepcopy(OPAQUE)},
+        usage={"inputTokenCount": 2**63 - 1, "outputTokenCount": 0.0, "extensionData": deepcopy(OPAQUE)},
     )
     response["messages"][0].update(messageId="", authorName="", createdAt="2026-09-16T17:30:00.123456789+05:30")
     response["messages"][0]["contents"].extend([

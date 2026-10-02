@@ -212,6 +212,42 @@ def test_unmarked_native_entity_keeps_sdk_custom_object_semantics(marked: bool) 
     assert client.options == []
 
 
+@pytest.mark.parametrize(
+    "token,expected",
+    [
+        ("9223372036854775807.0", 2**63 - 1),
+        ("1.00000000000000001", None),
+        ("9223372036854775808.0", None),
+        ("0e9999999999999999999", 0),
+        ("1e-9999999999999999999", None),
+    ],
+)
+def test_entity_batch_checks_exact_state_counter_tokens(token: str, expected: int | None) -> None:
+    from agent_framework_azurefunctions._entity_json import create_json_entity
+
+    observed: list[Any] = []
+
+    def entity(context: df.DurableEntityContext) -> None:
+        state = DurableAgentState.from_dict(context.get_state())
+        observed.append(state.data.ingested_positions)
+        context.set_result("read")
+
+    raw = (
+        '{"schemaVersion":"2.0.0","data":{"conversationHistory":[],"terminalResults":{},"completionReceipts":{},"ingestedPositions":{"producer":'
+        + token
+        + "}}}"
+    )
+    handle = create_json_entity(entity)
+    if expected is None:
+        with pytest.raises(ValueError):
+            handle(_wire([("read", None)], raw))
+        assert observed == []
+    else:
+        batch = json.loads(handle(_wire([("read", None)], raw)))
+        assert observed == [{"producer": expected}]
+        assert not batch["results"][0]["isError"]
+
+
 def test_json_wrapper_preserves_sdk_batch_order_errors_and_live_state() -> None:
     from agent_framework_azurefunctions._entity_json import create_json_entity
 

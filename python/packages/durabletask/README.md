@@ -31,6 +31,18 @@ Other schema versions are rejected. Within an accepted `2.0.0` snapshot, unknown
 unknown protocol content remain preserved in detached raw JSON until a caller explicitly asks for
 a narrower projection.
 
+Named shared counters are bounded to signed Int64. Usage token counts and ingested
+positions accept `0..9223372036854775807`. A present `evictedMessageCount` accepts
+`1..9223372036854775807`. Readers and writers reject invalid counts, and eviction
+increments reject overflow before changing state. These bounds also apply when
+loading legacy snapshots. Legacy nullable usage fields remain readable, and nullable
+Core usage counts retain their existing metadata representation. Other invalid known
+counts cannot be moved into metadata to bypass validation.
+
+Integral JSON numbers such as `1.0` remain accepted. Exact integer tokens are not
+rounded through floating point. These bounds do not restrict opaque user payloads,
+provider metadata, session data, or unknown fields.
+
 The v2 reader preserves the original JSON, including unknown fields, shared-value metadata,
 session state, receipts, and protocol details. `to_dict()` returns detached original JSON.
 `try_get_agent_response(correlation_id)` reads canonical results and receipts without writing

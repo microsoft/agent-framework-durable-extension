@@ -8,6 +8,7 @@ import json
 from collections.abc import Callable
 from typing import Any, cast
 
+from agent_framework_durabletask._shared_state_validation import load_state_json
 from azure.durable_functions import DurableEntityContext
 from azure.durable_functions.entity import Entity
 
@@ -19,7 +20,7 @@ class _JsonEntityContext(DurableEntityContext):
         # Do not call the SDK's from_json: 1.3.1 eagerly constructs custom state
         # there. Passing a decoded value to the constructor also leaves 1.6's
         # _state_is_raw false, so its get_state/set_state lifecycle is unchanged.
-        super().__init__(name=name, key=key, exists=exists, state=None if state is None else json.loads(state))
+        super().__init__(name=name, key=key, exists=exists, state=None if state is None else load_state_json(state))
 
     def get_input(self, expected_type: type | None = None) -> Any:
         """Unwrap the two native input layers without object reconstruction."""
