@@ -33,7 +33,7 @@ from ._configuration import (
 from ._constants import DELIVERY_WINDOW_SECONDS
 from ._entities import AgentEntity, DurableTaskEntityStateProvider
 from ._feature_usage import FeatureIndex
-from ._json_payload import JsonPayload, install_json_payload_converter
+from ._json_payload import JsonMigration, JsonPayload, install_json_payload_converter
 from ._response_utils import serialize_agent_response
 from ._retention import (
     DEFAULT_RETENTION,
@@ -649,7 +649,7 @@ class DurableAIAgentWorker:
                 """Remove expired payloads when signaled by application-owned maintenance."""
                 return self._agent_entity.expire_responses()
 
-            def migrate(self, request: JsonPayload) -> dict[str, str]:
+            def migrate(self, request: JsonMigration) -> dict[str, str]:
                 """Import an authorized legacy export into a separate empty destination."""
                 return self._agent_entity.migrate(cast(Any, request))
 
