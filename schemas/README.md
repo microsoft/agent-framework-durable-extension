@@ -180,12 +180,11 @@ bookkeeping with explicit producer/delivery identity, preservation, and migratio
 semantics, independent of transcript retention. This contract neither defines
 that wire format nor backfills receipts from the scalar.
 
-JSON integer counters are not bounded to a runtime's native integer width.
-Compatible readers preserve the original integer value and representation,
-including values outside Int64 and mathematically integral decimal or exponent
-forms. A runtime API that exposes Int64 projects only values that are exactly
-integral and in range; projection failure must not discard or rewrite the stored
-JSON value.
+Recognized usage, ingestion, and truncation counters are bounded as described
+below and out-of-range values must be rejected. Integral decimal or exponent
+forms remain valid when their exact mathematical value is in range. These bounds
+do not apply to opaque application JSON, extension data, or unknown properties,
+whose original values and representations must remain preserved.
 
 `truncation` records evicted message count and first/last eviction
 instants (last must be no earlier than first). It is diagnostic evidence, not
