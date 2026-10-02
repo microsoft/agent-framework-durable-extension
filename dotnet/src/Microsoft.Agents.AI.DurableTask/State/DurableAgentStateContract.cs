@@ -17,8 +17,6 @@ internal static class DurableAgentStateContract
     public const int MaxIdentifierLength = 256;
     public const int MaxMetadataKeyLength = 256;
     public const int MaxMetadataStringLength = 16 * 1024;
-    // This bounds materializing compact exponent notation. Durable raw integer tokens remain unbounded.
-    internal const int MaxExpandedIntegerDigits = 4_096;
 
     /// <summary>
     /// Validates an identifier before it is stored in durable state.
@@ -51,28 +49,6 @@ internal static class DurableAgentStateContract
     public static bool TryGetInt64(JsonElement value, out long result)
     {
         result = default;
-        if (!TryGetBigInteger(value, maximumExpandedDigits: 19, out BigInteger integer) ||
-            integer < long.MinValue ||
-            integer > long.MaxValue)
-        {
-            return false;
-        }
-
-        result = (long)integer;
-        return true;
-    }
-
-    public static bool TryGetBigInteger(
-        JsonElement value,
-        out BigInteger result) =>
-        TryGetBigInteger(value, MaxExpandedIntegerDigits, out result);
-
-    private static bool TryGetBigInteger(
-        JsonElement value,
-        int maximumExpandedDigits,
-        out BigInteger result)
-    {
-        result = default;
         if (!IsJsonInteger(value))
         {
             return false;
@@ -83,9 +59,12 @@ internal static class DurableAgentStateContract
         ReadOnlySpan<char> significand = exponentIndex >= 0
             ? raw.AsSpan(0, exponentIndex)
             : raw.AsSpan();
-        ReadOnlySpan<char> exponentText = exponentIndex >= 0
-            ? raw.AsSpan(exponentIndex + 1)
-            : default;
+        BigInteger exponent = exponentIndex >= 0
+            ? BigInteger.Parse(
+                raw.AsSpan(exponentIndex + 1),
+                NumberStyles.AllowLeadingSign,
+                CultureInfo.InvariantCulture)
+            : BigInteger.Zero;
         bool negative = significand[0] == '-';
         int decimalIndex = significand.IndexOf('.');
         int fractionalDigitCount = decimalIndex >= 0
@@ -103,25 +82,14 @@ internal static class DurableAgentStateContract
         string digits = digitsBuilder.ToString().TrimStart('0');
         if (digits.Length == 0)
         {
-            result = BigInteger.Zero;
+            result = 0;
             return true;
         }
 
-        if (!TryParseJsonExponent(
-            exponentText,
-            maximumPositiveMagnitude: (long)fractionalDigitCount + maximumExpandedDigits,
-            maximumNegativeMagnitude: Math.Max(
-                0,
-                (long)digits.Length - fractionalDigitCount),
-            out long exponent))
-        {
-            return false;
-        }
-
-        long scale = exponent - fractionalDigitCount;
+        BigInteger scale = exponent - fractionalDigitCount;
         if (scale < 0)
         {
-            long digitsToRemove = -scale;
+            BigInteger digitsToRemove = -scale;
             if (digitsToRemove > digits.Length)
             {
                 return false;
@@ -131,8 +99,7 @@ internal static class DurableAgentStateContract
         }
         else if (scale > 0)
         {
-            if (scale > maximumExpandedDigits ||
-                digits.Length + scale > maximumExpandedDigits)
+            if (scale > 19)
             {
                 return false;
             }
@@ -141,18 +108,14 @@ internal static class DurableAgentStateContract
         }
 
         digits = digits.TrimStart('0');
-        if (digits.Length > maximumExpandedDigits)
-        {
-            return false;
-        }
         if (digits.Length == 0)
         {
-            result = BigInteger.Zero;
+            result = 0;
             return true;
         }
 
         string integerText = negative ? $"-{digits}" : digits;
-        return BigInteger.TryParse(
+        return long.TryParse(
             integerText,
             NumberStyles.AllowLeadingSign,
             CultureInfo.InvariantCulture,
@@ -224,88 +187,12 @@ internal static class DurableAgentStateContract
             return true;
         }
 
-        return IsJsonExponentAtLeast(
-            exponentText,
-            fractionalDigitCount - trailingZeroCount);
-    }
-
-    private static bool IsJsonExponentAtLeast(
-        ReadOnlySpan<char> exponentText,
-        int minimum)
-    {
-        if (exponentText.IsEmpty)
-        {
-            return minimum <= 0;
-        }
-
-        bool negative = exponentText[0] == '-';
-        int digitIndex = exponentText[0] is '+' or '-' ? 1 : 0;
-        while (digitIndex < exponentText.Length &&
-            exponentText[digitIndex] == '0')
-        {
-            digitIndex++;
-        }
-
-        if (digitIndex == exponentText.Length)
-        {
-            return minimum <= 0;
-        }
-
-        ReadOnlySpan<char> magnitude = exponentText[digitIndex..];
-        if (!negative)
-        {
-            return minimum <= 0 ||
-                CompareDecimalMagnitude(magnitude, minimum) >= 0;
-        }
-
-        return minimum < 0 &&
-            CompareDecimalMagnitude(magnitude, -(long)minimum) <= 0;
-    }
-
-    private static int CompareDecimalMagnitude(
-        ReadOnlySpan<char> digits,
-        long value)
-    {
-        string valueText = value.ToString(CultureInfo.InvariantCulture);
-        int lengthComparison = digits.Length.CompareTo(valueText.Length);
-        return lengthComparison != 0
-            ? lengthComparison
-            : digits.SequenceCompareTo(valueText.AsSpan());
-    }
-
-    private static bool TryParseJsonExponent(
-        ReadOnlySpan<char> exponentText,
-        long maximumPositiveMagnitude,
-        long maximumNegativeMagnitude,
-        out long result)
-    {
-        result = 0;
-        if (exponentText.IsEmpty)
-        {
-            return true;
-        }
-
-        bool negative = exponentText[0] == '-';
-        long maximumMagnitude = negative
-            ? maximumNegativeMagnitude
-            : maximumPositiveMagnitude;
-        int digitIndex = exponentText[0] is '+' or '-' ? 1 : 0;
-        long magnitude = 0;
-        for (; digitIndex < exponentText.Length; digitIndex++)
-        {
-            int digit = exponentText[digitIndex] - '0';
-            if ((uint)digit > 9 ||
-                magnitude > maximumMagnitude / 10 ||
-                magnitude == maximumMagnitude / 10 &&
-                digit > maximumMagnitude % 10)
-            {
-                return false;
-            }
-
-            magnitude = (magnitude * 10) + digit;
-        }
-
-        result = negative ? -magnitude : magnitude;
-        return true;
+        BigInteger exponent = exponentText.IsEmpty
+            ? BigInteger.Zero
+            : BigInteger.Parse(
+                exponentText,
+                NumberStyles.AllowLeadingSign,
+                CultureInfo.InvariantCulture);
+        return exponent >= fractionalDigitCount - trailingZeroCount;
     }
 }

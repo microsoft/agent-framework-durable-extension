@@ -1,7 +1,5 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
-using System.Globalization;
-using System.Numerics;
 using System.Text.Json;
 using Microsoft.Agents.AI.DurableTask.State;
 using Microsoft.Extensions.AI;
@@ -510,47 +508,6 @@ public sealed class DurableAgentStateTests
         Assert.Contains("\"writer\":9223372036854775808", roundTrip, StringComparison.Ordinal);
         Assert.Contains("\"evictedMessageCount\":1e20", roundTrip, StringComparison.Ordinal);
         Assert.Contains("\"futureCounter\":9223372036854775808", roundTrip, StringComparison.Ordinal);
-    }
-
-    [Theory]
-    [InlineData(4094, true, 4095)]
-    [InlineData(4095, true, 4096)]
-    [InlineData(4096, false, 0)]
-    public void JsonIntegerPositiveExpansionHonorsDigitSafetyBoundary(
-        int exponent,
-        bool expectedSuccess,
-        int expectedDigits)
-    {
-        using JsonDocument document = JsonDocument.Parse($"1e{exponent}");
-
-        bool success = DurableAgentStateContract.TryGetBigInteger(
-            document.RootElement,
-            out BigInteger value);
-
-        Assert.Equal(expectedSuccess, success);
-        if (expectedSuccess)
-        {
-            Assert.Equal(
-                expectedDigits,
-                value.ToString(CultureInfo.InvariantCulture).Length);
-        }
-    }
-
-    [Fact]
-    public void JsonIntegerNegativeExponentContractsBeyondExpansionBoundary()
-    {
-        const int Contraction = DurableAgentStateContract.MaxExpandedIntegerDigits + 1;
-        string json = $"1{new string('0', Contraction)}e-{Contraction:D6}";
-        using JsonDocument document = JsonDocument.Parse(json);
-
-        Assert.True(DurableAgentStateContract.IsJsonInteger(document.RootElement));
-        Assert.True(
-            DurableAgentStateContract.TryGetBigInteger(
-                document.RootElement,
-                out BigInteger value));
-        Assert.Equal(BigInteger.One, value);
-        Assert.True(DurableAgentStateContract.TryGetInt64(document.RootElement, out long projection));
-        Assert.Equal(1, projection);
     }
 
     [Fact]

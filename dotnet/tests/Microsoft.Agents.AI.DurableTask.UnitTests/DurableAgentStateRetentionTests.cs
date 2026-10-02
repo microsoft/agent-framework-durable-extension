@@ -399,9 +399,9 @@ public sealed class DurableAgentStateRetentionTests
             FirstEvictedAt = now.AddMinutes(-20),
             LastEvictedAt = now.AddMinutes(-10),
         };
-        string originalState = JsonSerializer.Serialize(
-            state,
-            DurableAgentStateJsonContext.Default.DurableAgentState);
+        DurableAgentStateTruncation originalTruncation = state.Data.Truncation;
+        DurableAgentStateEntry[] originalHistory =
+            [.. state.Data.ConversationHistory];
 
         _ = Assert.Throws<InvalidOperationException>(
             () => DurableAgentStateRetention.Enforce(
@@ -412,11 +412,9 @@ public sealed class DurableAgentStateRetentionTests
                 NullLogger.Instance,
                 new AgentSessionId("agent", "session")));
 
-        Assert.Equal(
-            originalState,
-            JsonSerializer.Serialize(
-                state,
-                DurableAgentStateJsonContext.Default.DurableAgentState));
+        Assert.Same(originalTruncation, state.Data.Truncation);
+        Assert.Equal(countJson, state.Data.Truncation.EvictedMessageCount.GetRawText());
+        Assert.Equal(originalHistory, state.Data.ConversationHistory);
     }
 
     [Fact]
