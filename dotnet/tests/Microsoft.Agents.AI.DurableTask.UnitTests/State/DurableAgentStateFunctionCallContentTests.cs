@@ -84,12 +84,18 @@ public sealed class DurableAgentStateFunctionCallContentTests
     }
 
     [Fact]
-    public void NoArgumentsRoundTrip()
+    public void OmittedAndEmptyArgumentsRemainDistinct()
     {
-        FunctionCallContent result = RoundTrip(new("call-5", "get_time", arguments: null));
+        FunctionCallContent omitted = RoundTrip(new("call-5", "get_time", arguments: null));
+        const string EmptyArgumentsJson =
+            """{"$type":"functionCall","arguments":{},"callId":"call-6","name":"get_time"}""";
+        DurableAgentStateContent emptyStored = Assert.IsType<DurableAgentStateFunctionCallContent>(
+            JsonSerializer.Deserialize(EmptyArgumentsJson, s_stateContentTypeInfo));
+        FunctionCallContent empty = Assert.IsType<FunctionCallContent>(emptyStored.ToAIContent());
 
-        Assert.Equal("get_time", result.Name);
-        Assert.Empty(result.Arguments!);
+        Assert.Null(omitted.Arguments);
+        Assert.NotNull(empty.Arguments);
+        Assert.Empty(empty.Arguments);
     }
 
     [Fact]

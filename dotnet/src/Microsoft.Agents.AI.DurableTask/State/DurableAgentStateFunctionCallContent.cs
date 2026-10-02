@@ -86,8 +86,7 @@ internal sealed class DurableAgentStateFunctionCallContent : DurableAgentStateCo
             };
         }
 
-        Dictionary<string, object?>? arguments =
-            this.Arguments.ValueKind == JsonValueKind.Undefined ? [] : null;
+        Dictionary<string, object?>? arguments = null;
         if (this.Arguments.ValueKind == JsonValueKind.Object)
         {
             arguments = [];
