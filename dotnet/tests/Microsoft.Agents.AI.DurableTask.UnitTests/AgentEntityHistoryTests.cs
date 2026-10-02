@@ -235,6 +235,23 @@ public sealed class AgentEntityHistoryTests
                 "second new request",
             ],
             secondClient.LastMessages.Select(message => message.Text));
+
+        DurableAgentState secondWrite = Assert.IsType<DurableAgentState>(secondHarness.PersistedState);
+        RecordingChatClient thirdClient = new();
+        EntityHarness thirdHarness = CreateHarness(
+            new ChatClientAgent(thirdClient, name: "agent"),
+            DeserializeState(SerializeState(secondWrite)),
+            enableMailboxWrites: false);
+        await thirdHarness.RunAsync(new RunRequest("third new request") { CorrelationId = "new-3" });
+
+        Assert.Equal(
+            ["old request", "old response", "first new request", "response", "second new request", "response", "third new request"],
+            thirdClient.LastMessages.Select(message => message.Text));
+        Assert.Equal(1, thirdClient.InvocationCount);
+        Assert.DoesNotContain(
+            nameof(InMemoryChatHistoryProvider),
+            Assert.IsType<DurableAgentState>(thirdHarness.PersistedState)
+                .Data.Session!.Value.GetProperty("stateBag").EnumerateObject().Select(property => property.Name));
     }
 
     [Fact]
@@ -1502,6 +1519,170 @@ public sealed class AgentEntityHistoryTests
     [Theory]
     [InlineData(null)]
     [InlineData("configured-history")]
+    public async Task LegacyExplicitInMemoryProviderHasOneHistorySourceAcrossThreeColdTurnsAsync(
+        string? stateKey)
+    {
+        DurableAgentState state = new();
+        List<(ChatRole Role, string Text)> expectedMessages = [];
+        for (int turn = 1; turn <= 3; turn++)
+        {
+            RecordingChatClient client = new();
+            InMemoryChatHistoryProvider provider = stateKey is null
+                ? new()
+                : new(new InMemoryChatHistoryProviderOptions { StateKey = stateKey });
+            ChatClientAgent agent = new(
+                client,
+                new ChatClientAgentOptions
+                {
+                    Name = "agent",
+                    ChatHistoryProvider = provider,
+                });
+            EntityHarness harness = CreateHarness(agent, state, enableMailboxWrites: false);
+            string request = $"request {turn}";
+
+            await harness.RunAsync(new RunRequest(request) { CorrelationId = $"c{turn}" });
+
+            state = DeserializeState(
+                SerializeState(Assert.IsType<DurableAgentState>(harness.PersistedState)));
+            expectedMessages.Add((ChatRole.User, request));
+            Assert.Equal(
+                expectedMessages,
+                client.LastMessages.Select(message => (message.Role, message.Text)));
+            Assert.Equal(1, client.InvocationCount);
+            Assert.Equal(DurableAgentState.CurrentSchemaVersion, state.SchemaVersion);
+            Assert.Equal(turn * 2, state.Data.ConversationHistory.Count);
+            AgentSession restored = await agent.DeserializeSessionAsync(state.Data.Session!.Value);
+            expectedMessages.Add((ChatRole.Assistant, "response"));
+            Assert.Equal(
+                expectedMessages,
+                provider.GetMessages(restored).Select(message => (message.Role, message.Text)));
+        }
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("configured-history")]
+    public async Task LegacyExplicitInMemoryProviderKeepsEmptyFilteredHistoryAcrossColdTurnsAsync(
+        string? stateKey)
+    {
+        DurableAgentState state = new();
+        for (int turn = 1; turn <= 3; turn++)
+        {
+            RecordingChatClient client = new();
+            InMemoryChatHistoryProvider provider = new(
+                new InMemoryChatHistoryProviderOptions
+                {
+                    StateKey = stateKey,
+                    StorageInputRequestMessageFilter = _ => [],
+                    StorageInputResponseMessageFilter = _ => [],
+                });
+            ChatClientAgent agent = new(
+                client,
+                new ChatClientAgentOptions { Name = "agent", ChatHistoryProvider = provider });
+            EntityHarness harness = CreateHarness(agent, state, enableMailboxWrites: false);
+            string request = $"request {turn}";
+
+            await harness.RunAsync(new RunRequest(request) { CorrelationId = $"c{turn}" });
+
+            Assert.Equal([request], client.LastMessages.Select(message => message.Text));
+            Assert.Equal(1, client.InvocationCount);
+            state = DeserializeState(
+                SerializeState(Assert.IsType<DurableAgentState>(harness.PersistedState)));
+            AgentSession restored = await agent.DeserializeSessionAsync(state.Data.Session!.Value);
+            Assert.Empty(provider.GetMessages(restored));
+            Assert.Equal(turn * 2, state.Data.ConversationHistory.Count);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyExplicitInMemoryProviderToolLoopDoesNotDuplicateHistoryOrCallbacksAsync()
+    {
+        int toolCalls = 0;
+        int loadCallbacks = 0;
+        int storeCallbacks = 0;
+        AIFunction tool = AIFunctionFactory.Create(
+            (string value) =>
+            {
+                toolCalls++;
+                return $"tool result: {value}";
+            },
+            name: "echo");
+        InMemoryChatHistoryProvider CreateProvider() => new(
+            new InMemoryChatHistoryProviderOptions
+            {
+                ProvideOutputMessageFilter = messages =>
+                {
+                    loadCallbacks++;
+                    return messages;
+                },
+                StorageInputRequestMessageFilter = messages =>
+                {
+                    storeCallbacks++;
+                    return messages;
+                },
+            });
+        ToolLoopChatClient firstClient = new(tool.Name);
+        InMemoryChatHistoryProvider firstProvider = CreateProvider();
+        ChatClientAgent firstAgent = new(
+            firstClient,
+            new ChatClientAgentOptions
+            {
+                Name = "agent",
+                ChatHistoryProvider = firstProvider,
+                ChatOptions = new ChatOptions { Tools = [tool] },
+            });
+        EntityHarness firstHarness = CreateHarness(firstAgent, new DurableAgentState(), enableMailboxWrites: false);
+        await firstHarness.RunAsync(new RunRequest("first request") { CorrelationId = "first" });
+        Assert.Equal(2, firstClient.InvocationCount);
+        Assert.Equal(1, toolCalls);
+        Assert.Equal(1, loadCallbacks);
+        Assert.Equal(1, storeCallbacks);
+        DurableAgentState state = DeserializeState(
+            SerializeState(Assert.IsType<DurableAgentState>(firstHarness.PersistedState)));
+        AgentSession restored = await firstAgent.DeserializeSessionAsync(state.Data.Session!.Value);
+        List<ChatMessage> expectedMessages = firstProvider.GetMessages(restored).ToList();
+        Assert.Equal([ChatRole.User, ChatRole.Assistant, ChatRole.Tool, ChatRole.Assistant], expectedMessages.Select(message => message.Role));
+        Assert.IsType<FunctionCallContent>(Assert.Single(expectedMessages[1].Contents));
+        Assert.IsType<FunctionResultContent>(Assert.Single(expectedMessages[2].Contents));
+
+        RecordingChatClient secondClient = new();
+        ChatClientAgent secondAgent = new(
+            secondClient,
+            new ChatClientAgentOptions
+            {
+                Name = "agent",
+                ChatHistoryProvider = CreateProvider(),
+                ChatOptions = new ChatOptions { Tools = [tool] },
+            });
+        EntityHarness secondHarness = CreateHarness(secondAgent, state, enableMailboxWrites: false);
+        await secondHarness.RunAsync(new RunRequest("second request") { CorrelationId = "second" });
+        expectedMessages.Add(new ChatMessage(ChatRole.User, "second request"));
+        Assert.Equal(
+            expectedMessages.Select(message => (message.Role, message.Text)),
+            secondClient.LastMessages.Select(message => (message.Role, message.Text)));
+        Assert.Single(secondClient.LastMessages.SelectMany(message => message.Contents).OfType<FunctionCallContent>());
+        Assert.Single(secondClient.LastMessages.SelectMany(message => message.Contents).OfType<FunctionResultContent>());
+        Assert.Equal(1, secondClient.InvocationCount);
+        Assert.Equal(1, toolCalls);
+        Assert.Equal(2, loadCallbacks);
+        Assert.Equal(2, storeCallbacks);
+
+        DurableAgentState secondWrite = DeserializeState(
+            SerializeState(Assert.IsType<DurableAgentState>(secondHarness.PersistedState)));
+        EntityHarness duplicateHarness = CreateHarness(secondAgent, secondWrite, enableMailboxWrites: false);
+        await duplicateHarness.RunAsync(new RunRequest("second request") { CorrelationId = "second" });
+        Assert.Equal(1, secondClient.InvocationCount);
+        Assert.Equal(1, toolCalls);
+        Assert.Equal(2, loadCallbacks);
+        Assert.Equal(2, storeCallbacks);
+        Assert.Equal(
+            SerializeState(secondWrite),
+            SerializeState(Assert.IsType<DurableAgentState>(duplicateHarness.PersistedState)));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("configured-history")]
     public async Task LegacyInMemoryProviderPreservesReducedFilteredHistoryAcrossColdTurnsAsync(
         string? stateKey)
     {
@@ -1561,15 +1742,13 @@ public sealed class AgentEntityHistoryTests
                     ? ["provider initialization", request, "response"]
                     : [$"summary: {previousRequest}", "response", request, "response"],
                 reducer.LastMessages.Select(message => message.Text));
-            Assert.DoesNotContain(
-                client.LastMessages,
-                message => message.Text == "provider initialization");
-            if (previousRequest is not null)
-            {
-                Assert.Single(
-                    client.LastMessages,
-                    message => message.Text == $"summary: {previousRequest}");
-            }
+            Assert.Equal(
+                previousRequest is null
+                    ? [$"filtered request {turn}", request]
+                    : [$"summary: {previousRequest}", $"filtered request {turn}", request],
+                client.LastMessages.Select(message => message.Text));
+            Assert.Equal(1, client.InvocationCount);
+            Assert.Equal(1, reducer.InvocationCount);
 
             JsonElement sessionState = state.Data.Session!.Value;
             foreach (string key in provider.StateKeys)
@@ -3288,12 +3467,15 @@ public sealed class AgentEntityHistoryTests
 
     private sealed class SummarizingChatReducer : IChatReducer
     {
+        public int InvocationCount { get; private set; }
+
         public IReadOnlyList<ChatMessage> LastMessages { get; private set; } = [];
 
         public Task<IEnumerable<ChatMessage>> ReduceAsync(
             IEnumerable<ChatMessage> messages,
             CancellationToken cancellationToken)
         {
+            this.InvocationCount++;
             this.LastMessages = messages.ToList();
             return Task.FromResult<IEnumerable<ChatMessage>>(
                 [

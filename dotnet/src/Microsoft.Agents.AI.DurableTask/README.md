@@ -234,6 +234,13 @@ the entity retains the completed outer turn, and no fixed `historyBinding` is cr
 history options below become enforceable only with the internal schema 2 rollout gate; they do not
 silently activate schema 2.
 
+**Upgrade warning:** start new durable sessions after upgrading; do not silently reuse sessions from
+an older deployment, including legacy sessions with custom history providers. Legacy session migration
+is deferred until explicit migration support is certified. Keep old sessions on their original deployment
+or read them without running new turns, consistent with the
+[isolated rollout](../../../docs/features/durable-agents/durable-state-architecture.md) and the
+[maintainer-approved migration follow-up](https://github.com/microsoft/agent-framework-durable-extension/pull/95#discussion_r4168013434).
+
 The default in-memory history pipeline is entity-owned and appends its model transcript to
 `conversationHistory`. Custom providers, model services, and opaque `CurrentRequestOnly` agents remain
 authoritative for their own transcripts. They append no new request or response mirrors to

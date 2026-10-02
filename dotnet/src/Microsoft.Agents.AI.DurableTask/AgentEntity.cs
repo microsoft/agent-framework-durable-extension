@@ -351,13 +351,19 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                 this._services,
                 durableHistoryProvider);
 
+            // Restored configured provider state, including intentionally empty history, supersedes legacy entity replay.
             bool contextPipelineSuppliesHistory =
                 fixedOwnershipContractActive
                     ? chatClientAgent is not null &&
                         (durableHistoryProvider is not null || !entityOwnedHistory)
                     : resolvedOwnership is
                         DurableAgentHistoryOwnership.ExternalProvider or
-                        DurableAgentHistoryOwnership.Service;
+                        DurableAgentHistoryOwnership.Service ||
+                        (ConfiguredProviderOwnsHistory(chatClientAgent, durableHistoryProvider) &&
+                            chatClientAgent?.ChatHistoryProvider is InMemoryChatHistoryProvider inMemoryHistoryProvider &&
+                            inMemoryHistoryProvider.StateKeys.Any(key =>
+                                session.StateBag.TryGetValue(key, out InMemoryChatHistoryProvider.State? providerState) &&
+                                providerState is not null));
             IEnumerable<ChatMessage> inputMessages = BuildAgentInputMessages(
                 workingState,
                 request,
@@ -873,6 +879,18 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             DurableAgentStateRequest.FromRunRequestV2(request, logger));
     }
 
+    private static bool ConfiguredProviderOwnsHistory(
+        ChatClientAgent? chatClientAgent,
+        DurableChatHistoryProvider? durableHistoryProvider)
+    {
+        // A configured legacy provider remains authoritative unless the invocation replaces it
+        // with the durable adapter. The implicit default still mirrors entity replay or service history.
+#pragma warning disable MAAI001
+        return durableHistoryProvider is null &&
+            chatClientAgent?.GetService<ChatClientAgentOptions>()?.ChatHistoryProvider is not null;
+#pragma warning restore MAAI001
+    }
+
     private static ValueTask<JsonElement> SerializeSessionWithoutDuplicateHistoryAsync(
         AIAgent agent,
         AgentSession session,
@@ -881,15 +899,8 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         DurableAgentHistoryOwnership ownership,
         CancellationToken cancellationToken)
     {
-        // A configured legacy provider remains authoritative unless the invocation replaces it
-        // with the durable adapter. The implicit default still mirrors entity replay or service history.
-#pragma warning disable MAAI001
-        bool configuredProviderOwnsHistory =
-            durableHistoryProvider is null &&
-            chatClientAgent?.GetService<ChatClientAgentOptions>()?.ChatHistoryProvider is not null;
-#pragma warning restore MAAI001
         IEnumerable<string> excludedStateKeys =
-            !configuredProviderOwnsHistory &&
+            !ConfiguredProviderOwnsHistory(chatClientAgent, durableHistoryProvider) &&
             chatClientAgent?.ChatHistoryProvider is InMemoryChatHistoryProvider inMemoryHistoryProvider &&
             ownership is DurableAgentHistoryOwnership.Entity or DurableAgentHistoryOwnership.Service
                 ? inMemoryHistoryProvider.StateKeys
