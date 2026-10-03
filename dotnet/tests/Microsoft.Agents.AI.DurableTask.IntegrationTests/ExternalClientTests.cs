@@ -69,7 +69,7 @@ public sealed class ExternalClientTests(ITestOutputHelper outputHelper) : IDispo
         // Assert: verify the expected log entries were created in the expected category
         IReadOnlyCollection<LogEntry> logs = testHelper.GetLogs();
         Assert.NotEmpty(logs);
-        List<LogEntry> agentLogs = [.. logs.Where(log => log.Category.Contains(simpleAgent.Name!)).ToList()];
+        IReadOnlyCollection<LogEntry> agentLogs = testHelper.GetAgentLogs(simpleAgent.Name!);
         Assert.NotEmpty(agentLogs);
         Assert.Contains(agentLogs, log => log.EventId.Name == "LogAgentRequest" && log.Message.Contains("Hello!"));
         Assert.Contains(agentLogs, log => log.EventId.Name == "LogAgentResponse");
@@ -117,7 +117,7 @@ public sealed class ExternalClientTests(ITestOutputHelper outputHelper) : IDispo
         IReadOnlyCollection<LogEntry> logs = testHelper.GetLogs();
         Assert.NotEmpty(logs);
 
-        List<LogEntry> agentLogs = [.. logs.Where(log => log.Category.Contains(tripPlanningAgent.Name!)).ToList()];
+        IReadOnlyCollection<LogEntry> agentLogs = testHelper.GetAgentLogs(tripPlanningAgent.Name!);
         Assert.NotEmpty(agentLogs);
         Assert.Contains(agentLogs, log => log.EventId.Name == "LogAgentRequest" && log.Message.Contains("Seattle trip"));
         Assert.Contains(agentLogs, log => log.EventId.Name == "LogAgentResponse");
