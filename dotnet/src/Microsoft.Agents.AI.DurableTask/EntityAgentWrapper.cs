@@ -16,7 +16,9 @@ namespace Microsoft.Agents.AI.DurableTask;
 /// The wrapper runs inside the <see cref="DurableAgentContext"/> established by
 /// <see cref="AgentEntity"/>, supplies entity-scoped identity and services to tool middleware,
 /// applies request-specific tool and response options, and can inject an operation-scoped
-/// <see cref="ChatHistoryProvider"/> override. The provider and wrapper only stage changes in the
+/// <see cref="ChatHistoryProvider"/> override. A successful service-managed response releases only
+/// the durable override before SDK provider notification; it does not reconfigure the registered
+/// agent or authorize a durable ownership change. The provider and wrapper only stage changes in the
 /// entity operation's working state; <see cref="AgentEntity"/> owns the final durable-state commit.
 /// </remarks>
 internal sealed class EntityAgentWrapper(
@@ -122,6 +124,12 @@ internal sealed class EntityAgentWrapper(
         chatAgentRunOptions.ChatClientFactory = chatClient =>
         {
             ChatClientBuilder builder = chatClient.AsBuilder();
+            if (this._chatHistoryProvider is DurableChatHistoryProvider durableProvider)
+            {
+                // Observe the SDK's options before any inner factory/configuration clones them.
+                builder.Use(inner => new DurableChatHistoryProviderChatClient(inner, durableProvider));
+            }
+
             if (originalFactory is not null)
             {
                 builder.Use(originalFactory);
