@@ -80,7 +80,7 @@ sequenceDiagram
     E-->>C: AgentResponse
 ```
 
-The operation begins by resolving the correlation before constructing or invoking the agent. A new request operates on a clone so cancellation, model failure, provider failure, validation failure, or serialization failure leaves the hydrated entity state unchanged.
+The operation begins by resolving the correlation before constructing or invoking the agent. A new request operates on a clone so cancellation, model failure, provider failure, validation failure, or serialization failure cannot publish partial session or history changes. Internally active schema 2 can separately commit a failed provider outcome as described below.
 
 After the outer agent response completes, `AgentEntity` re-evaluates history ownership because a model service can establish a conversation ID during the call. It then finalizes only the transcript owned by the entity, serializes the session without duplicating entity-owned in-memory history, seals the fixed binding, and calls `DurableAgentStateOutcomeResolver.AddSuccessfulResult`. The result and receipt are therefore part of the same working state as session continuation, binding, transcript, TTL, ingestion bookkeeping, and retention evidence.
 
@@ -129,6 +129,27 @@ External providers must declare continuation `StateKeys`, and every declared key
 
 The application or external provider remains responsible for availability, authorization, retention, deletion, residency, consistency, idempotency, and uncertain acknowledgement handling for history stored outside the entity. The durable extension is responsible for restoring the recorded continuation, selecting only one context source, and failing closed when it cannot prove a compatible owner.
 
+### Pending provider initialization profile
+
+The internal .NET schema-2 writer uses a separately identified version-1 profile in the existing opaque `historyBinding` carrier for an observed external-provider callback failure before any provider continuation was durably committed:
+
+```json
+{
+  "profile": "Microsoft.Agents.AI.DurableTask.pendingProviderInitialization",
+  "version": 1,
+  "providerKey": "orders-history.v1"
+}
+```
+
+This is not an ordinary fixed or provisional owner binding. Existing provisional profiles still require continuation and are not reinterpreted. Positive emission provenance comes from Durable Task .NET SDK 1.18.0 `TaskEntity<TState>.RunAsync`: it calls `InitializeState` only when `operation.State.GetState` returns no current state. `AgentEntity` captures the newly created mailbox object's identity, resets that evidence at each `ITaskEntity` dispatch, and also requires a pristine pre-invocation shape: no session, binding, transcript, ingestion positions, truncation or prior results/receipts. Only an observed callback failure in that operation can commit the pending profile with its sanitized failed result and receipt. Migration, import, pruning and cleanup never mint it. Empty state, failed-only receipts and result-expiry bookkeeping cannot prove this provenance.
+
+Before a new correlation invokes callbacks, the execution reader validates the discriminator, version, original trusted configured provider key, external-provider pipeline and compatible failed-only mailbox shape, rejecting malformed, unsupported or contradictory profiles. After payload expiry, the persisted profile supplies the initialization authority; the unavailable failed receipt alone does not. Further observed callback failures preserve the profile and earlier receipts. A successful new request replaces it with the ordinary fixed binding only after real declared provider continuation and the serialized session's ability to restore it validate. Cancellation, ownership, serialization and entity commit failures roll back that transition. Old correlations are resolved first and remain typed terminal failures or unavailable results with zero provider/model callbacks.
+
+The profile proves only that no provider continuation was durably committed. Initialization uses a new correlation; it does not replay, reconcile or undo the failed external operation, prove that input was not accepted, or make external effects atomic. The inline version-1 fixtures and malformed/unsupported/unknown variants in `AgentEntityProviderFailureTests` exercise SDK batch dispatch and serialized cold reload, including actual legacy-migrated failed-mailbox rejection.
+
+> [!WARNING]
+> Supporting this root schema version does not imply support for this runtime profile. Passive readers preserve unknown `historyBinding` profiles opaquely; execution requires a reader implementing these pending-initialization semantics or deployment isolation. Older .NET execution readers do not universally reject opaque profiles in every ownership path, so unknown-field preservation is not safe older-worker rollback certification. This profile adds no root/shared-schema fields or version bump and makes no Python behavior or cross-language activation guarantee.
+
 ## History configuration
 
 Closed public replay choices are represented by `DurableAgentHistoryReplayMode`, with `PreloadEntityHistory` and `CurrentRequestOnly`. Pressure-retention choices remain an internal enum alongside the default-off schema-2 writer gate; applications are not offered an activation surface that the public rollout cannot yet support. History ownership is also a closed internal enum after resolution.
@@ -160,10 +181,14 @@ Model-context compaction is not pressure retention. `CompactionProvider` may red
 Only a successful outer entity operation publishes a new terminal result. The following failures leave the prior entity state authoritative and the request retryable unless a separately committed terminal contract says otherwise:
 
 - Cancellation or incomplete response-stream consumption.
-- Model, tool, provider, or session serialization failure.
+- Model, tool, or session serialization failure.
 - History-owner or provider-key mismatch.
 - State validation, serialization, or protected-capacity failure.
 - Backend failure before the Durable Entity operation commits.
+
+With the internal schema-2 writer active, unrecovered configured external `ChatHistoryProvider` load (including deferred enumeration/filtering) or store callback errors publish a sanitized failed result and matching completion receipt through that successful outer operation. The runtime delegates the provider's callback/filter/state-key contract unchanged; it does not infer finality from exception text or status or add retries beyond the provider's own recovery policy. Cancellation, invalid input, JSON/unsupported serialization, local corruption and ownership failures retain the separate rollback behavior above. No test-only attestor is required for these observed callback failures.
+
+The failure path discards partial provider/session mutations and uses the pre-invocation durable session, history, binding and ingestion state as its baseline without inventing accepted-input evidence. Ordinary result cleanup, configured transcript retention and TTL bookkeeping still apply before state replacement: `KeepAll` does not prune history, while configured `Auto` may prune eligible transcript and update truncation evidence. The existing failure-bearing response envelope allows the SDK's transactional entity dispatcher to commit state and outbox before callers surface failure; replacing `State` and rethrowing would roll them back. Serialized cold-reload regressions use that real SDK dispatcher, not a mock state setter, but do not certify hosted backend acknowledgements or provider durability. Schema 1.2 behavior, default `KeepAll`, and the separate migration, deletion and public activation gates remain unchanged.
 
 An external service or provider may have observed a call even when the entity commit fails. Schema 2 prevents a committed completion from being forgotten; it cannot make external side effects atomic with the entity store.
 
