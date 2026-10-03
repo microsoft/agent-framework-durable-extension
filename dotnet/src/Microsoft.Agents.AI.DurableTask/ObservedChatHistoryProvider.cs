@@ -1,5 +1,6 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
 
@@ -56,15 +57,56 @@ internal sealed class ObservedChatHistoryProvider(ChatHistoryProvider inner) : C
         }
     }
 
-    private static bool CanFinalize(Exception exception, CancellationToken cancellationToken) =>
-        !cancellationToken.IsCancellationRequested &&
-        exception is not (OperationCanceledException or
-            ArgumentException or
-            JsonException or
-            NotSupportedException or
-            OutOfMemoryException or
-            AccessViolationException or
-            DurableAgentStateCorruptionException or
-            DurableAgentHistoryBindingMismatchException or
-            DurableAgentHistoryOwnershipNotSupportedException);
+    private static bool CanFinalize(Exception exception, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        Stack<Exception> pending = new();
+        HashSet<Exception> visited = new(ReferenceEqualityComparer.Instance);
+        pending.Push(exception);
+        while (pending.TryPop(out Exception? current))
+        {
+            if (!visited.Add(current))
+            {
+                continue;
+            }
+
+            if (current is OperationCanceledException or
+                ArgumentException or
+                JsonException or
+                NotSupportedException or
+                OutOfMemoryException or
+                StackOverflowException or
+                AccessViolationException or
+                AppDomainUnloadedException or
+                BadImageFormatException or
+                CannotUnloadAppDomainException or
+                InvalidProgramException or
+                SEHException or
+                DurableAgentStateCorruptionException or
+                DurableAgentHistoryBindingMismatchException or
+                DurableAgentHistoryOwnershipNotSupportedException)
+            {
+                return false;
+            }
+
+            // Any excluded cause vetoes finality; AggregateException.InnerException exposes only its first child.
+            if (current is AggregateException aggregate)
+            {
+                foreach (Exception innerException in aggregate.InnerExceptions)
+                {
+                    pending.Push(innerException);
+                }
+            }
+            else if (current.InnerException is Exception innerException)
+            {
+                pending.Push(innerException);
+            }
+        }
+
+        return true;
+    }
 }

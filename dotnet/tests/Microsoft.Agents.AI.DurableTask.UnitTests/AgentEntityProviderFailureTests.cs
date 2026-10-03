@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using DurableTask.Core.Entities;
@@ -28,11 +29,15 @@ public sealed class AgentEntityProviderFailureTests
     private static readonly DurableDataConverter s_converter = new();
 
     [Theory]
-    [InlineData("load")]
-    [InlineData("lazyLoad")]
-    [InlineData("storeBefore")]
-    [InlineData("storeAfter")]
-    public async Task CallbackFailureCommitsThroughSdkBatchAndColdDuplicatesNeverExecuteAsync(string stage)
+    [InlineData("load", "plain")]
+    [InlineData("lazyLoad", "plain")]
+    [InlineData("storeBefore", "plain")]
+    [InlineData("storeAfter", "plain")]
+    [InlineData("load", "nested")]
+    [InlineData("storeAfter", "nested")]
+    [InlineData("load", "aggregate")]
+    [InlineData("storeAfter", "aggregate")]
+    public async Task CallbackFailureCommitsThroughSdkBatchAndColdDuplicatesNeverExecuteAsync(string stage, string kind)
     {
         ProbeProvider provider = new();
         ProbeClient client = new();
@@ -47,7 +52,14 @@ public sealed class AgentEntityProviderFailureTests
         };
         string original = s_converter.Serialize(before);
         provider.Stage = stage;
-        provider.Failure = new InvalidOperationException(PrivateMarker);
+        provider.Failure = kind switch
+        {
+            "nested" => new InvalidOperationException(PrivateMarker, new IOException(PrivateMarker)),
+            "aggregate" => new AggregateException(
+                new IOException(PrivateMarker),
+                new InvalidOperationException(PrivateMarker, new IOException(PrivateMarker))),
+            _ => new InvalidOperationException(PrivateMarker),
+        };
         RecordingLogger logger = new();
 
         EntityBatchResult failed = await DispatchAsync(agent, original, "failed", logger: logger);
@@ -655,6 +667,157 @@ public sealed class AgentEntityProviderFailureTests
         {
             Assert.False(ReadState(failed).Data.CompletionReceipts!.ContainsKey("failed"));
         }
+    }
+
+    [Theory]
+    [InlineData("load", "aggregateCancellation", false)]
+    [InlineData("storeAfter", "aggregateCancellation", false)]
+    [InlineData("load", "argument", false)]
+    [InlineData("storeAfter", "argument", false)]
+    [InlineData("load", "json", false)]
+    [InlineData("storeAfter", "json", false)]
+    [InlineData("load", "secondCancellation", false)]
+    [InlineData("storeAfter", "secondCancellation", false)]
+    [InlineData("load", "aggregateCancellation", true)]
+    [InlineData("storeAfter", "aggregateCancellation", true)]
+    [InlineData("load", "argument", true)]
+    [InlineData("storeAfter", "argument", true)]
+    [InlineData("load", "json", true)]
+    [InlineData("storeAfter", "json", true)]
+    [InlineData("load", "secondCancellation", true)]
+    [InlineData("storeAfter", "secondCancellation", true)]
+    public async Task WrappedExcludedCallbackFailuresRollBackThroughSdkBatchAndRemainRetryableAsync(
+        string stage, string kind, bool first)
+    {
+        ProbeProvider provider = new();
+        ProbeClient client = new();
+        ChatClientAgent agent = CreateAgent(client, provider);
+        string? initialState = first ? null : (await DispatchAsync(agent, null, "seed")).EntityState;
+        provider.Stage = stage;
+        provider.Failure = kind switch
+        {
+            "aggregateCancellation" => new AggregateException(new OperationCanceledException(PrivateMarker)),
+            "argument" => new InvalidOperationException(PrivateMarker, new ArgumentException(PrivateMarker)),
+            "json" => new InvalidOperationException(PrivateMarker, new JsonException(PrivateMarker)),
+            _ => new AggregateException(new IOException(PrivateMarker), new OperationCanceledException(PrivateMarker)),
+        };
+
+        EntityBatchResult failed = await DispatchAsync(agent, initialState, "failed", stopping: CancellationToken.None);
+
+        if (Result(failed).FailureDetails is null)
+        {
+            DurableAgentState committed = ReadState(failed);
+            Assert.Fail($"Excluded callback committed: code={committed.Data.TerminalResults!["failed"].Error?.Code}, " +
+                $"outcome={committed.Data.CompletionReceipts!["failed"].Outcome}, " +
+                $"pending={DurableAgentHistoryBinding.IsPendingProviderInitialization(committed.Data.HistoryBinding)}, " +
+                $"outbox={Actions(failed).Count}.");
+        }
+        Assert.Equal(provider.Failure.GetType().FullName, Failure(failed).ErrorType);
+        Assert.Null(failed.FailureDetails);
+        Assert.Equal(initialState, failed.EntityState);
+        Assert.Empty(Actions(failed));
+        Assert.Equal(first ? 1 : 2, provider.LoadCount);
+        Assert.Equal((first ? 0 : 1) + (stage == "storeAfter" ? 1 : 0), provider.StoreCount);
+        Assert.Equal(provider.StoreCount, client.Count);
+        if (!first)
+        {
+            DurableAgentState rolledBack = ReadState(failed);
+            Assert.False(rolledBack.Data.TerminalResults!.ContainsKey("failed"));
+            Assert.False(rolledBack.Data.CompletionReceipts!.ContainsKey("failed"));
+            Assert.False(DurableAgentHistoryBinding.IsPendingProviderInitialization(rolledBack.Data.HistoryBinding));
+        }
+
+        ProbeProvider recoveredProvider = new();
+        ProbeClient recoveredClient = new();
+        EntityBatchResult retry = await DispatchAsync(
+            CreateAgent(recoveredClient, recoveredProvider), failed.EntityState, "failed");
+        Assert.Null(Result(retry).FailureDetails);
+        Assert.Equal(1, recoveredProvider.LoadCount);
+        Assert.Equal(1, recoveredProvider.StoreCount);
+        Assert.Equal(1, recoveredClient.Count);
+        Assert.Equal(first ? null : 1, recoveredProvider.RestoredVersion);
+        DurableAgentState succeeded = ReadState(retry);
+        Assert.Equal(DurableAgentStateCompletionReceipt.SucceededOutcome, succeeded.Data.CompletionReceipts!["failed"].Outcome);
+        Assert.False(DurableAgentHistoryBinding.IsPendingProviderInitialization(succeeded.Data.HistoryBinding));
+    }
+
+    [Theory]
+    [InlineData("cancel")]
+    [InlineData("argument")]
+    [InlineData("json")]
+    [InlineData("unsupported")]
+    [InlineData("corrupt")]
+    [InlineData("binding")]
+    [InlineData("ownership")]
+    [InlineData("outOfMemory")]
+    [InlineData("stackOverflow")]
+    [InlineData("accessViolation")]
+    [InlineData("appDomainUnloaded")]
+    [InlineData("badImage")]
+    [InlineData("cannotUnloadAppDomain")]
+    [InlineData("invalidProgram")]
+    [InlineData("seh")]
+    public async Task ObservationRejectsExcludedNodesInsideNestedMixedAggregatesAsync(string kind)
+    {
+#pragma warning disable CA2201 // Construct fatal exceptions to test classification without triggering runtime failures.
+        Exception excluded = kind switch
+        {
+            "cancel" => new OperationCanceledException(PrivateMarker),
+            "argument" => new ArgumentException(PrivateMarker),
+            "json" => new JsonException(PrivateMarker),
+            "unsupported" => new NotSupportedException(PrivateMarker),
+            "corrupt" => new DurableAgentStateCorruptionException(PrivateMarker),
+            "binding" => new DurableAgentHistoryBindingMismatchException(PrivateMarker),
+            "ownership" => new DurableAgentHistoryOwnershipNotSupportedException(PrivateMarker),
+            "outOfMemory" => new OutOfMemoryException(PrivateMarker),
+            "stackOverflow" => new StackOverflowException(PrivateMarker),
+            "accessViolation" => new AccessViolationException(PrivateMarker),
+            "appDomainUnloaded" => new AppDomainUnloadedException(PrivateMarker),
+            "badImage" => new BadImageFormatException(PrivateMarker),
+            "cannotUnloadAppDomain" => new CannotUnloadAppDomainException(PrivateMarker),
+            "invalidProgram" => new InvalidProgramException(PrivateMarker),
+            _ => new SEHException(PrivateMarker),
+        };
+#pragma warning restore CA2201
+        Exception failure = new InvalidOperationException(PrivateMarker,
+            new AggregateException(
+                new IOException(PrivateMarker),
+                new AggregateException(
+                    new InvalidOperationException(PrivateMarker),
+                    new InvalidOperationException(PrivateMarker, excluded))));
+
+        await AssertObservationAsync(failure, canFinalize: false);
+        await AssertObservationAsync(new AggregateException(excluded, new IOException(PrivateMarker)), canFinalize: false);
+        await AssertObservationAsync(excluded, canFinalize: false);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ObservationHandlesDeepSharedExceptionGraphsWithoutRecursiveTraversalAsync(bool excluded)
+    {
+        Exception failure = excluded
+            ? new OperationCanceledException(PrivateMarker)
+            : new IOException(PrivateMarker);
+        for (int i = 0; i < 4096; i++)
+        {
+            failure = new InvalidOperationException(PrivateMarker, failure);
+        }
+        failure = new AggregateException(failure, failure);
+
+        await AssertObservationAsync(failure, canFinalize: !excluded);
+    }
+
+    private static async Task AssertObservationAsync(Exception failure, bool canFinalize)
+    {
+        ProbeProvider provider = new() { Stage = "load", Failure = failure };
+        ChatClientAgent agent = CreateAgent(new ProbeClient(), provider);
+        AgentSession session = await agent.CreateSessionAsync();
+        ObservedChatHistoryProvider observed = new(provider);
+        Exception? thrown = await Record.ExceptionAsync(async () =>
+            await observed.InvokingAsync(new ChatHistoryProvider.InvokingContext(agent, session, [])));
+        Assert.Same(failure, thrown);
+        Assert.Equal(canFinalize, observed.FailedWith(failure));
     }
 
     [Fact]

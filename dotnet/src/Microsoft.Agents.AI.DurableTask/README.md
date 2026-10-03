@@ -87,13 +87,15 @@ still owns any retries inside its callback; the durable extension does not add g
 classify failures from exception messages or HTTP status. Cancellation, invalid arguments, JSON/unsupported
 serialization, local corruption and ownership-contract failures are not finalized this way.
 
-This path preserves the pre-invocation durable session, history, binding and ingestion state. It discards
-provider mutations made before the exception, does not invent accepted-input receipts or new continuation
-data, and does not mirror partial model output. The public callback contract cannot prove the accepted
-input subset or that a partially mutated session is resumable. External provider/model/tool effects may
-already have occurred; their acknowledgement remains uncertain. Only the failed outcome, normal expiry
-bookkeeping and TTL are staged through the existing validated entity commit path. The entity returns the
-existing failure-bearing response envelope so the SDK can commit the operation; throwing after replacing
+This path discards partial provider/session mutations and uses the pre-invocation durable session,
+history, binding and ingestion state as its baseline. It does not invent accepted-input receipts or new
+continuation data, and does not mirror partial model output. The public callback contract cannot prove
+the accepted input subset or that a partially mutated session is resumable. External provider/model/tool effects may
+already have occurred; their acknowledgement remains uncertain. Ordinary result cleanup, configured
+transcript retention and TTL bookkeeping still apply through the existing validated entity commit path:
+`KeepAll` does not prune history, while configured `Auto` may prune eligible transcript and update truncation
+evidence before state replacement. The entity returns the existing failure-bearing response envelope so
+the SDK can commit the operation; throwing after replacing
 `State` would roll back both state and outbox. Polling and duplicate delivery then surface the recorded
 failure, and payload expiry preserves its failed, nonexecutable completion.
 
