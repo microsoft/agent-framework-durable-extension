@@ -294,6 +294,8 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         AgentSession? providerSession = null;
         ChatClientAgent? invocationChatClientAgent = null;
         DurableChatHistoryProvider? durableHistoryProvider = null;
+        ObservedChatHistoryProvider? observedHistoryProvider = null;
+        DurableAgentState? providerFailureState = null;
         DurableAgentHistoryOwnership? invocationOwnership = null;
         bool providerInvocationActive = false;
         try
@@ -379,12 +381,22 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                     workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion
                     ? DurableAgentStateRequest.FromRunRequestV2(request, logger)
                     : null);
+            if (fixedOwnershipContractActive &&
+                effectiveOwnership == DurableAgentHistoryOwnership.ExternalProvider &&
+                chatClientAgent?.ChatHistoryProvider is ChatHistoryProvider configuredProvider)
+            {
+                observedHistoryProvider = new(configuredProvider);
+                // Provider callbacks can mutate the session before throwing, without proving input
+                // acceptance or a resumable continuation. Keep only the pre-invocation durable slice.
+                providerFailureState = workingState.Clone();
+            }
+
             agentWrapper = new(
                 agent,
                 this.Context,
                 request,
                 this._services,
-                durableHistoryProvider);
+                (ChatHistoryProvider?)observedHistoryProvider ?? durableHistoryProvider);
 
             // Restored configured provider state, including intentionally empty history, supersedes legacy entity replay.
             bool contextPipelineSuppliesHistory =
@@ -552,7 +564,18 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         }
         catch (Exception exception)
         {
-            logger.LogDurableAgentExecutionFailed(exception, sessionId);
+            bool observedProviderFailure = observedHistoryProvider?.FailedWith(exception) is true;
+            if (observedProviderFailure)
+            {
+                logger.LogDurableAgentExecutionFailed(
+                    new InvalidOperationException(ObservedChatHistoryProvider.FailureMessage),
+                    sessionId);
+            }
+            else
+            {
+                logger.LogDurableAgentExecutionFailed(exception, sessionId);
+            }
+
             if (providerInvocationActive &&
                 providerSession is not null &&
                 invocationOwnership.HasValue)
@@ -578,6 +601,22 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                 {
                     return committedFailure;
                 }
+            }
+
+            if (providerInvocationActive &&
+                observedProviderFailure &&
+                !this._cancellationToken.IsCancellationRequested)
+            {
+                return this.CommitFailedResult(
+                    providerFailureState!,
+                    new DurableAgentStateTerminalError
+                    {
+                        Code = ObservedChatHistoryProvider.FailureCode,
+                        Message = ObservedChatHistoryProvider.FailureMessage,
+                    },
+                    correlationId,
+                    sessionId,
+                    logger);
             }
 
             throw;
@@ -762,14 +801,24 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             durableHistoryProvider,
             logger).ConfigureAwait(false);
 
-        DateTimeOffset completedAt = this._timeProvider.GetUtcNow();
         DurableAgentStateTerminalError error = new()
         {
             Code = certified.Code,
             Message = certified.Message,
             Details = certified.Details,
         };
+        return this.CommitFailedResult(workingState, error, correlationId, sessionId, logger);
+    }
+
+    private AgentResponse CommitFailedResult(
+        DurableAgentState workingState,
+        DurableAgentStateTerminalError error,
+        string correlationId,
+        AgentSessionId sessionId,
+        ILogger logger)
+    {
         error.Validate();
+        DateTimeOffset completedAt = this._timeProvider.GetUtcNow();
 
         AgentResponse response = new()
         {

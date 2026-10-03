@@ -80,7 +80,7 @@ sequenceDiagram
     E-->>C: AgentResponse
 ```
 
-The operation begins by resolving the correlation before constructing or invoking the agent. A new request operates on a clone so cancellation, model failure, provider failure, validation failure, or serialization failure leaves the hydrated entity state unchanged.
+The operation begins by resolving the correlation before constructing or invoking the agent. A new request operates on a clone so cancellation, model failure, provider failure, validation failure, or serialization failure cannot publish partial session or history changes. Internally active schema 2 can separately commit a failed provider outcome as described below.
 
 After the outer agent response completes, `AgentEntity` re-evaluates history ownership because a model service can establish a conversation ID during the call. It then finalizes only the transcript owned by the entity, serializes the session without duplicating entity-owned in-memory history, seals the fixed binding, and calls `DurableAgentStateOutcomeResolver.AddSuccessfulResult`. The result and receipt are therefore part of the same working state as session continuation, binding, transcript, TTL, ingestion bookkeeping, and retention evidence.
 
@@ -160,10 +160,14 @@ Model-context compaction is not pressure retention. `CompactionProvider` may red
 Only a successful outer entity operation publishes a new terminal result. The following failures leave the prior entity state authoritative and the request retryable unless a separately committed terminal contract says otherwise:
 
 - Cancellation or incomplete response-stream consumption.
-- Model, tool, provider, or session serialization failure.
+- Model, tool, or session serialization failure.
 - History-owner or provider-key mismatch.
 - State validation, serialization, or protected-capacity failure.
 - Backend failure before the Durable Entity operation commits.
+
+With the internal schema-2 writer active, unrecovered configured external `ChatHistoryProvider` load (including deferred enumeration/filtering) or store callback errors publish a sanitized failed result and matching completion receipt through that successful outer operation. The runtime delegates the provider's callback/filter/state-key contract unchanged; it does not infer finality from exception text or status or add retries beyond the provider's own recovery policy. Cancellation, invalid input, JSON/unsupported serialization, local corruption and ownership failures retain the separate rollback behavior above. No test-only attestor is required for these observed callback failures.
+
+The failure path preserves the pre-invocation durable session, history, binding and ingestion state rather than publishing a partially mutated provider session or inventing accepted-input evidence. The existing failure-bearing response envelope allows the SDK's transactional entity dispatcher to commit state and outbox before callers surface failure; replacing `State` and rethrowing would roll them back. Serialized cold-reload regressions use that real SDK dispatcher, not a mock state setter, but do not certify hosted backend acknowledgements or provider durability. Schema 1.2 behavior, default `KeepAll`, and the separate migration, deletion and public activation gates remain unchanged.
 
 An external service or provider may have observed a call even when the entity commit fails. Schema 2 prevents a committed completion from being forgotten; it cannot make external side effects atomic with the entity store.
 

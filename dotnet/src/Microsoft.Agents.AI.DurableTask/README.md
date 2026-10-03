@@ -78,18 +78,42 @@ tool effects are **not** part of this entity-local transaction; tool implementat
 own idempotency guarantees.
 
 Only a successfully committed outer invocation creates a new success receipt. Validation failures,
-cancellation, ordinary model/provider errors, serialization/capacity failures, and failed entity commits
-remain retryable; they are not converted into terminal receipts. A separate internal capability can commit
+cancellation, ordinary model/tool errors, serialization/capacity failures, and failed entity commits
+remain retryable; they are not converted into terminal receipts. With the internal schema-2 writer active,
+the runtime observes the configured external `ChatHistoryProvider`'s load (including deferred retrieval and
+output filtering) and store callbacks. An unrecovered callback exception commits a sanitized
+`historyProviderFailure` result and matching failed completion receipt without a test attestor. The provider
+still owns any retries inside its callback; the durable extension does not add generic provider retries or
+classify failures from exception messages or HTTP status. Cancellation, invalid arguments, JSON/unsupported
+serialization, local corruption and ownership-contract failures are not finalized this way.
+
+This path preserves the pre-invocation durable session, history, binding and ingestion state. It discards
+provider mutations made before the exception, does not invent accepted-input receipts or new continuation
+data, and does not mirror partial model output. The public callback contract cannot prove the accepted
+input subset or that a partially mutated session is resumable. External provider/model/tool effects may
+already have occurred; their acknowledgement remains uncertain. Only the failed outcome, normal expiry
+bookkeeping and TTL are staged through the existing validated entity commit path. The entity returns the
+existing failure-bearing response envelope so the SDK can commit the operation; throwing after replacing
+`State` would roll back both state and outbox. Polling and duplicate delivery then surface the recorded
+failure, and payload expiry preserves its failed, nonexecutable completion.
+
+A separate internal capability can commit
 a provider failure only when a certified adapter explicitly attests the provider phase (`Load`, `Invoke`,
 or `Store`), finality (`NonRetryable` or `RetriesExhausted`), and accepted input. The runtime then serializes
 the resulting session, validates sanitized error metadata, and commits the failed result and receipt through
-the same finalization path. No adapter is registered and the capability is disabled by default. Exception
+the same finalization path. No adapter is registered and that capability is disabled by default. Exception
 messages, HTTP status codes, factory/session creation failures, cancellation, reconciliation, serialization,
 scheduling, state replacement, or uncertain commit acknowledgement never establish finality.
 Existing explicitly committed terminal
 failure evidence can be read and migrated, but a transient exception does not establish such a contract.
 Legacy conversion is evidence-only and idempotent. It never calls the model or tools and cannot
 reconstruct receipts for results already evicted from legacy state.
+
+Focused regressions execute the real Durable Task SDK transactional entity batch dispatcher and reload its
+serialized state. They cover callback failure, failure transport, polling, cold duplicates, payload expiry
+and state/result/outbox rollback. They do not certify a hosted backend, provider acknowledgement, external
+exactly-once effects, cross-language activation, or any public schema-2 rollout. Schema 1.2 and `KeepAll`
+remain the public defaults; migration and receipt-deleting TTL gates remain unchanged.
 
 The Agent Framework 1.13 .NET abstractions do not expose a provider-neutral structured classifier for
 `previous_response_not_found`. Provider-specific clients can expose raw response content, but this generic
