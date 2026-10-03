@@ -22,6 +22,9 @@ SESSION = "poll-session"
 SENTINEL = "PRIVATE-STORED-PAYLOAD"
 READ_ERROR = "Failed to read the stored agent response."
 PROVIDER_ERROR = "Approved provider diagnostic."
+DEPRECATION_WARNING = (
+    "[HTTP Trigger] Deprecated agent HTTP field names were used. Use sessionId and waitForResponse for new code."
+)
 
 
 def _state(*, failed: bool = False) -> dict[str, Any]:
@@ -82,33 +85,63 @@ def _storage(*states: Any) -> Mock:
     return client
 
 
-async def _invoke(registered: SimpleNamespace, client: Mock, surface: str) -> tuple[int, str, dict[str, Any]]:
+async def _invoke(
+    registered: SimpleNamespace,
+    client: Mock,
+    surface: str,
+    *,
+    legacy_names: bool = True,
+    session_id: str = SESSION,
+) -> tuple[int, str, dict[str, Any]]:
     if surface == "mcp":
         text = await registered.mcp(
-            context=json.dumps({"arguments": {"query": "question", "sessionId": SESSION}}), client=client
+            context=json.dumps({"arguments": {"query": "question", "sessionId": session_id}}), client=client
         )
         return 200, text, {}
     content_type = "text/plain" if surface == "text" else "application/json"
+    session_field = "session_id" if legacy_names else "sessionId"
     request = func.HttpRequest(
         method="POST",
         url=f"https://example.test/api/agents/{AGENT}/run",
         headers={"Content-Type": content_type, "Accept": content_type},
-        params={"session_id": SESSION},
-        body=b"question" if surface == "text" else json.dumps({"message": "question", "session_id": SESSION}).encode(),
+        params={session_field: session_id},
+        body=b"question"
+        if surface == "text"
+        else json.dumps({"message": "question", session_field: session_id}).encode(),
     )
     response = await registered.http(req=request, client=client)
     body = response.get_body().decode()
     return response.status_code, body, json.loads(body) if surface == "json" else {}
 
 
-def _assert_polls(registered: SimpleNamespace, client: Mock, count: int) -> None:
+def _assert_polls(registered: SimpleNamespace, client: Mock, count: int, session_id: str = SESSION) -> None:
     client.signal_entity.assert_awaited_once()
     entity, operation, request = client.signal_entity.call_args.args
-    assert entity.name == f"dafx-{AGENT}" and entity.key == SESSION
+    assert entity.name == f"dafx-{AGENT}" and entity.key == session_id
     assert operation == "run" and request["correlationId"] == CORRELATION and request["message"] == "question"
     assert client.read_entity_state.await_args_list == [call(entity)] * count
     assert registered.sleep.await_args_list == [call(0.01)] * count
     registered.agent.run.assert_not_called()
+
+
+def _assert_private_failure_warnings(
+    warnings: list[logging.LogRecord], surface: str, diagnostic: str, *, legacy_names: bool = True
+) -> None:
+    failure_message = f"[HTTP Trigger] {diagnostic}"
+    expected = [failure_message]
+    if surface != "mcp" and legacy_names:
+        expected.insert(0, DEPRECATION_WARNING)
+    assert [record.getMessage() for record in warnings] == expected
+    assert sum(record.getMessage() == failure_message for record in warnings) == 1
+    assert sum(record.getMessage() == DEPRECATION_WARNING for record in warnings) == len(expected) - 1
+    for record in warnings:
+        assert record.name == "agent_framework.azurefunctions" and record.levelno == logging.WARNING
+        assert record.exc_info is None and record.stack_info is None
+        if record.getMessage() == failure_message:
+            assert record.msg == "[HTTP Trigger] %s" and record.args == (diagnostic,)
+        else:
+            assert record.msg == DEPRECATION_WARNING and record.args == ()
+        assert SENTINEL not in repr((record.msg, record.args))
 
 
 @pytest.mark.parametrize("surface", ["json", "text", "mcp"])
@@ -159,12 +192,45 @@ async def test_decode_failure_is_constant_private_and_terminal(
         for record in caplog.records
         if record.name == "agent_framework.azurefunctions" and record.levelno == logging.WARNING
     ]
-    assert len(warnings) == 1
-    assert warnings[0].getMessage() == f"[HTTP Trigger] {READ_ERROR}"
-    assert warnings[0].exc_info is None and warnings[0].stack_info is None
+    _assert_private_failure_warnings(warnings, surface, READ_ERROR)
     decoder_warnings = [record for record in caplog.records if record.name == "agent_framework.durabletask"]
     assert len(decoder_warnings) == (2 if invalid_timestamp else 0)  # Direct control and actual HTTP/MCP decode.
     assert all(record.exc_info is None and record.stack_info is None for record in decoder_warnings)
+
+
+@pytest.mark.parametrize("surface", ["json", "text"])
+@pytest.mark.parametrize("legacy_names", [False, True], ids=["canonical", "legacy"])
+async def test_http_alias_warnings_never_include_private_session_or_stored_values(
+    surface: str, legacy_names: bool, registered: SimpleNamespace, caplog: pytest.LogCaptureFixture
+) -> None:
+    private_session = f"{SENTINEL}-session"
+    bad = {
+        "schemaVersion": "1.1.0",
+        "data": {"conversationHistory": [{"$type": SENTINEL, "createdAt": "2026-09-23T11:00:00Z", "messages": []}]},
+    }
+    before = json.dumps(bad, sort_keys=True)
+    good = _state()
+    good_before = json.dumps(good, sort_keys=True)
+    client = _storage(bad, good)
+
+    with caplog.at_level(logging.WARNING, logger="agent_framework.azurefunctions"):
+        status, public, payload = await _invoke(
+            registered, client, surface, legacy_names=legacy_names, session_id=private_session
+        )
+
+    assert status == 500
+    if surface == "json":
+        assert payload["error"] == READ_ERROR and payload["response"] is None
+        assert payload["errorCode"] == payload["error_code"] == "state_read_error"
+        assert payload["sessionId"] == payload["session_id"] == private_session
+        assert payload["correlationId"] == payload["correlation_id"] == CORRELATION
+    else:
+        assert public == READ_ERROR
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    _assert_private_failure_warnings(warnings, surface, READ_ERROR, legacy_names=legacy_names)
+    assert SENTINEL not in caplog.text
+    _assert_polls(registered, client, 1, session_id=private_session)
+    assert json.dumps(bad, sort_keys=True) == before and json.dumps(good, sort_keys=True) == good_before
 
 
 @pytest.mark.parametrize("surface", ["json", "text", "mcp"])
@@ -237,8 +303,7 @@ async def test_targeted_profile_failure_is_a_private_terminal_projection_error(
     assert SENTINEL not in public + caplog.text
     assert json.dumps(stored, sort_keys=True) == before
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
-    assert len(warnings) == 1 and warnings[0].getMessage() == f"[HTTP Trigger] {diagnostic}"
-    assert warnings[0].exc_info is None and warnings[0].stack_info is None
+    _assert_private_failure_warnings(warnings, surface, diagnostic)
 
 
 @pytest.mark.parametrize("surface", ["json", "text", "mcp"])
@@ -276,5 +341,4 @@ async def test_delivery_serialization_failure_is_a_private_terminal_processing_e
     assert SENTINEL not in public + caplog.text
     assert json.dumps(stored, sort_keys=True) == before
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
-    assert len(warnings) == 1 and warnings[0].getMessage() == f"[HTTP Trigger] {diagnostic}"
-    assert warnings[0].exc_info is None and warnings[0].stack_info is None
+    _assert_private_failure_warnings(warnings, surface, diagnostic)

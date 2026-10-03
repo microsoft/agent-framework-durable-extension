@@ -35,7 +35,7 @@ Invoke-RestMethod -Method Post -Uri http://localhost:7071/api/agents/Joker/run `
 The agent responds with a JSON payload that includes the generated joke.
 
 > [!TIP]
-> To return immediately with an HTTP 202 response instead of waiting for the agent output, set the `x-ms-wait-for-response` header or include `"wait_for_response": false` in the request body. The default behavior waits for the response.
+> To return immediately with an HTTP 202 response instead of waiting for the agent output, set the `x-ms-wait-for-response` header or include `"waitForResponse": false` in the request body. The default behavior waits for the response.
 
 ## Expected Output
 
@@ -51,14 +51,14 @@ Why did the cloud break up with the server?
 Because it found someone more "uplifting"!
 ```
 
-When you specify the `x-ms-wait-for-response` header or include `"wait_for_response": false` in the request body, the Functions host responds with an HTTP 202 and queues the request to run in the background. A typical response body looks like the following:
+When you specify the `x-ms-wait-for-response` header or include `"waitForResponse": false` in the request body, the Functions host responds with an HTTP 202 and queues the request to run in the background. A typical response body looks like the following:
 
 ```json
 {
   "status": "accepted",
   "response": "Agent request accepted",
   "message": "Tell me a short joke about cloud computing.",
-  "session_id": "<guid>",
-  "correlation_id": "<guid>"
+  "sessionId": "<guid>",
+  "correlationId": "<guid>"
 }
 ```

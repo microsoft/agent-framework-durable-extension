@@ -43,7 +43,7 @@ The agent executes in a durable entity. Request non-blocking execution explicitl
 acceptance response while `RedisStreamCallback` writes generation output to Redis:
 
 ```bash
-curl -X POST "http://localhost:7071/api/agents/TravelPlanner/run?wait_for_response=false" \
+curl -X POST "http://localhost:7071/api/agents/TravelPlanner/run?waitForResponse=false" \
   -H "Content-Type: text/plain" \
   -H "Accept: application/json" \
   -d "Plan a 3-day trip to Tokyo"
@@ -54,7 +54,9 @@ Response (202 Accepted):
 {
   "status": "accepted",
   "response": "Agent request accepted",
+  "sessionId": "abc-123-def-456",
   "session_id": "abc-123-def-456",
+  "correlationId": "xyz-789",
   "correlation_id": "xyz-789"
 }
 ```
