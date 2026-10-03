@@ -81,14 +81,16 @@ public sealed class BuiltInFunctionsSessionIdAliasTests
     {
         // Arrange
         AgentResponse agentResponse = new(new ChatMessage(ChatRole.Assistant, "hello"));
-        BuiltInFunctions.AgentRunSuccessResponse response = new(200, "session-1", agentResponse);
+        BuiltInFunctions.AgentRunSuccessResponse response =
+            new("success", 200, "session-1", agentResponse);
 
         // Act
         using JsonDocument document = JsonDocument.Parse(JsonSerializer.Serialize(response));
 
         // Assert
         Assert.Equal("session-1", document.RootElement.GetProperty("session_id").GetString());
-        Assert.Equal(200, document.RootElement.GetProperty("status").GetInt32());
+        Assert.Equal("success", document.RootElement.GetProperty("status").GetString());
+        Assert.Equal(200, document.RootElement.GetProperty("status_code").GetInt32());
         Assert.False(document.RootElement.TryGetProperty("thread_id", out _));
     }
 
@@ -96,15 +98,47 @@ public sealed class BuiltInFunctionsSessionIdAliasTests
     public void AgentRunAcceptedResponse_EmitsOnlySessionId()
     {
         // Arrange
-        BuiltInFunctions.AgentRunAcceptedResponse response = new(202, "session-2");
+        BuiltInFunctions.AgentRunAcceptedResponse response = new("accepted", 202, "session-2");
 
         // Act
         using JsonDocument document = JsonDocument.Parse(JsonSerializer.Serialize(response));
 
         // Assert
         Assert.Equal("session-2", document.RootElement.GetProperty("session_id").GetString());
-        Assert.Equal(202, document.RootElement.GetProperty("status").GetInt32());
+        Assert.Equal("accepted", document.RootElement.GetProperty("status").GetString());
+        Assert.Equal(202, document.RootElement.GetProperty("status_code").GetInt32());
         Assert.False(document.RootElement.TryGetProperty("thread_id", out _));
+    }
+
+    [Fact]
+    public void AgentRunFailureResponse_PreservesOutcomeAndErrorMetadata()
+    {
+        BuiltInFunctions.AgentRunFailureResponse response = new(
+            "completedResultUnavailable",
+            410,
+            "session-3",
+            "succeeded",
+            new BuiltInFunctions.AgentRunError(
+                "resultUnavailable",
+                "The result payload is unavailable.",
+                JsonSerializer.SerializeToElement(new { expired = true })),
+            "succeeded");
+
+        using JsonDocument document =
+            JsonDocument.Parse(JsonSerializer.Serialize(response));
+
+        Assert.Equal("completedResultUnavailable", document.RootElement.GetProperty("status").GetString());
+        Assert.Equal(410, document.RootElement.GetProperty("status_code").GetInt32());
+        Assert.Equal("session-3", document.RootElement.GetProperty("session_id").GetString());
+        Assert.Equal(
+            "succeeded",
+            document.RootElement.GetProperty("outcome").GetString());
+        Assert.Equal(
+            "succeeded",
+            document.RootElement.GetProperty("completion_outcome").GetString());
+        JsonElement error = document.RootElement.GetProperty("error");
+        Assert.Equal("resultUnavailable", error.GetProperty("code").GetString());
+        Assert.True(error.GetProperty("details").GetProperty("expired").GetBoolean());
     }
 
     [Theory]

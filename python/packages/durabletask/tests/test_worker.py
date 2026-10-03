@@ -370,9 +370,9 @@ class TestSubworkflowRegistration:
 
         agent_worker.configure_workflow(outer)
 
-        # Only the outer 'router' non-agent executor becomes an activity.
+        # The child node is not an activity. Agent workflows also own one neutral checkpoint.
         registered_activities = {call.args[0].__name__ for call in mock_grpc_worker.add_activity.call_args_list}
-        assert registered_activities == {"dafx-outer-router"}
+        assert registered_activities == {"dafx-outer-router", "dafx__hitl-inner"}
 
     def test_top_level_names_exclude_nested_workflows(self, agent_worker: DurableAIAgentWorker) -> None:
         """``registered_workflow_names`` reports only top-level workflows."""

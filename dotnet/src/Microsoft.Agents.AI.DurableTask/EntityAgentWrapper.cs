@@ -8,17 +8,30 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace Microsoft.Agents.AI.DurableTask;
 
+/// <summary>
+/// Adapts a registered agent for one durable entity invocation without replacing or reconfiguring
+/// the registered agent instance.
+/// </summary>
+/// <remarks>
+/// The wrapper runs inside the <see cref="DurableAgentContext"/> established by
+/// <see cref="AgentEntity"/>, supplies entity-scoped identity and services to tool middleware,
+/// applies request-specific tool and response options, and can inject an operation-scoped
+/// <see cref="ChatHistoryProvider"/> override. The provider and wrapper only stage changes in the
+/// entity operation's working state; <see cref="AgentEntity"/> owns the final durable-state commit.
+/// </remarks>
 internal sealed class EntityAgentWrapper(
     AIAgent innerAgent,
     TaskEntityContext entityContext,
     RunRequest runRequest,
-    IServiceProvider? entityScopedServices = null) : DelegatingAIAgent(innerAgent)
+    IServiceProvider? entityScopedServices = null,
+    ChatHistoryProvider? chatHistoryProvider = null) : DelegatingAIAgent(innerAgent)
 {
     private readonly TaskEntityContext _entityContext = entityContext;
     private readonly RunRequest _runRequest = runRequest;
     private readonly IServiceProvider? _entityScopedServices = entityScopedServices;
+    private readonly ChatHistoryProvider? _chatHistoryProvider = chatHistoryProvider;
 
-    // The ID of the agent is always the entity ID.
+    // Durable callers address the entity-backed proxy, not the inner agent's local/server resource.
     protected override string? IdCore => this._entityContext.Id.ToString();
 
     protected override async Task<AgentResponse> RunCoreAsync(
@@ -33,6 +46,7 @@ internal sealed class EntityAgentWrapper(
             this.GetAgentEntityRunOptions(options),
             cancellationToken);
 
+        // The durable proxy identity is authoritative even when the wrapped agent supplies its own ID.
         response.AgentId = this.Id;
         return response;
     }
@@ -49,6 +63,8 @@ internal sealed class EntityAgentWrapper(
             this.GetAgentEntityRunOptions(options),
             cancellationToken))
         {
+            // Aggregation copies AgentId from streaming updates, so normalize every update rather
+            // than allowing a wrapped Foundry/server agent ID to leak into the durable response.
             update.AgentId = this.Id;
             yield return update;
         }
@@ -75,6 +91,10 @@ internal sealed class EntityAgentWrapper(
         {
             options = new ChatClientAgentRunOptions();
         }
+        else
+        {
+            options = options.Clone();
+        }
 
         if (options is not ChatClientAgentRunOptions chatAgentRunOptions)
         {
@@ -82,6 +102,22 @@ internal sealed class EntityAgentWrapper(
         }
 
         Func<IChatClient, IChatClient>? originalFactory = chatAgentRunOptions.ChatClientFactory;
+
+        if (this._chatHistoryProvider is not null)
+        {
+            chatAgentRunOptions.AdditionalProperties ??= [];
+
+            // MAF's typed AdditionalProperties API stores the provider instance under
+            // typeof(ChatHistoryProvider).FullName and resolves that exact instance for this run.
+            // A type name alone could not carry the operation-scoped working state and correlation.
+            if (!chatAgentRunOptions.AdditionalProperties.TryAdd(
+                this._chatHistoryProvider))
+            {
+                throw new InvalidOperationException(
+                    "A ChatHistoryProvider override is already present in the agent run options. " +
+                    "Durable entity-owned history requires its operation-scoped provider to be authoritative.");
+            }
+        }
 
         chatAgentRunOptions.ChatClientFactory = chatClient =>
         {

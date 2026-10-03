@@ -37,6 +37,367 @@ You can alternatively just reference the `Microsoft.Agents.AI.Hosting.AzureFunct
 
 For a comprehensive tour of all the functionality, concepts, and APIs, check out the [.NET Durable Task samples](https://github.com/microsoft/agent-framework-durable-extension/tree/main/dotnet/samples).
 
+## Durable completion and delivery
+
+An invocation correlation ID is an idempotency key, not a transcript position. Do not reuse it for
+different work. Legacy state resolves terminal responses and errors from the retained transcript.
+Schema 2.0 resolves only the result mailbox and permanent completion receipts: pruning the transcript
+does not make a completed correlation runnable again. A recorded completion with an expired or removed
+payload is **completed but result unavailable**, not pending and not a new invocation.
+
+| Recorded state | Client behavior |
+| --- | --- |
+| No terminal evidence | Pending; a polling handle continues waiting |
+| Successful completion with a result | Return the original response and its retained metadata |
+| Supported committed terminal failure | Throw `DurableAgentTerminalException` with its code and details |
+| Completion without an available payload | Throw `DurableAgentResultUnavailableException`, retaining whether the completion succeeded or failed |
+| Inconsistent or unsupported state | Fail closed; do not invoke the model as a recovery fallback |
+
+These failure semantics also apply to direct orchestration calls and workflow agent executors.
+A committed duplicate failure (including a legacy `errorResponse` and an empty retry) throws before
+validation, agent construction, history/tool work, or migration; it cannot become downstream success.
+This intentionally changes mixed-runtime schema-1 delivery: a Python-written `errorResponse` is surfaced
+as `DurableAgentTerminalException` instead of an HTTP 200/ordinary response, and duplicate correlated
+legacy responses fail closed as corrupt rather than selecting the first entry.
+The Durable Task SDK serializes exception type, message, and inner failures, but drops custom exception
+properties. The entity therefore includes a versioned metadata snapshot in a
+`DurableAgentFailureMetadataException` inner exception. `DurableAIAgent` restores the typed terminal or
+unavailable exception from either `EntityOperationFailedException` or `TaskFailedException`, retaining
+the SDK failure as a nested cause. Only these framework exception types select this contract;
+model/user text is never used to infer outcomes. Unsupported metadata remains an SDK failure.
+This is an additive failure-only transport change: `Run`/`RunAgentAsync` operation names, request and
+successful-response wire formats, and entity-state schemas are unchanged. Older orchestration clients
+still receive an SDK exception, not an ordinary successful response. Historical message-only failures
+remain typed failures, without inventing metadata that was not recorded.
+
+One successful outer entity operation stages the immutable result and its receipt in an independent
+working copy with the existing session/continuation, ingestion, entity transcript, whole-entity TTL,
+binding, and other local state. Publishing that copy participates in the Durable Task entity commit.
+Appending transcript text alone is not delivery acknowledgement. External history-provider writes and
+tool effects are **not** part of this entity-local transaction; tool implementations still need their
+own idempotency guarantees.
+
+Only a successfully committed outer invocation creates a new success receipt. Validation failures,
+cancellation, ordinary model/provider errors, serialization/capacity failures, and failed entity commits
+remain retryable; they are not converted into terminal receipts. A separate internal capability can commit
+a provider failure only when a certified adapter explicitly attests the provider phase (`Load`, `Invoke`,
+or `Store`), finality (`NonRetryable` or `RetriesExhausted`), and accepted input. The runtime then serializes
+the resulting session, validates sanitized error metadata, and commits the failed result and receipt through
+the same finalization path. No adapter is registered and the capability is disabled by default. Exception
+messages, HTTP status codes, factory/session creation failures, cancellation, reconciliation, serialization,
+scheduling, state replacement, or uncertain commit acknowledgement never establish finality.
+Existing explicitly committed terminal
+failure evidence can be read and migrated, but a transient exception does not establish such a contract.
+Legacy conversion is evidence-only and idempotent. It never calls the model or tools and cannot
+reconstruct receipts for results already evicted from legacy state.
+
+The Agent Framework 1.13 .NET abstractions do not expose a provider-neutral structured classifier for
+`previous_response_not_found`. Provider-specific clients can expose raw response content, but this generic
+durable layer does not infer service codes from exception messages or HTTP status. The ADR 0032 bounded
+0.5/1.0/1.5-second pre-progress retry therefore remains a provider-adapter dependency: a certified adapter
+must expose the structured code and prove that no streaming, tool, session, or continuation progress occurred
+before this layer can implement that retry safely.
+
+Completion receipts last until entity deletion. `DurableAgentsOptions.ResultRetentionPeriod` defaults
+to the shared 60-second delivery window and accepts another positive duration or `null` for no payload
+expiry. Result-payload retention and whole-entity TTL are separate policies. Deleting the entity also deletes its
+idempotency evidence. Keep schema 2.0 writes disabled until the shared rollout gates are agreed and every
+participating reader/worker is mailbox-aware or explicitly rejects the new major version.
+Producer activation and receipt-deleting entity TTL are internal test gates only, disabled by default.
+Automatic transcript retention is part of that same internal rollout surface rather than a public option.
+It requires a mailbox-aware state writer and remains inaccessible to applications until Python, dashboards,
+pollers, and every other participating reader can safely consume or reject schema 2. Internal activation
+fails closed when the writer gate is disabled or legacy migration is not explicitly authorized from
+independently authoritative complete history.
+Legacy TTL behavior is preserved, but old deadlines cannot delete schema-2 receipts without a separately agreed
+deletion policy. Unknown-field
+preservation by an older worker is not sufficient. See [state compatibility](State/README.md).
+
+Under the internal mailbox-writer gate, a successful new run also removes already-expired mailbox
+payloads and maintains one logical entity-local `CheckAndExpireResults` schedule for the earliest
+remaining expiry. The optional version-1 runtime profile
+`extensionData["Microsoft.Agents.AI.DurableTask.resultExpiry"]` stores the entity identity, UTC scheduled
+deadline, and an unpredictable token. It uses the existing root extension map, not a new shared schema
+field or `historyBinding`. The replacement state, profile and signal outbox participate in the same
+entity operation commit.
+Cleanup preserves each completion's outcome, completion/expiry timestamps and unknown receipt metadata,
+marks its result unavailable, and records the first cleanup time. It does not delete receipts, invoke
+the agent/factory/tools, create a session, or refresh entity TTL. The independent entity-deletion gate
+is not required for payload cleanup.
+
+Entity operations are serialized. New runs reuse a pending check that already covers the earliest
+deadline; an earlier deadline replaces it once with a new token. Moving the earliest expiry later reuses
+the earlier check, which will schedule one successor when consumed. Superseded physical signals may
+still arrive, but only an exact entity/token/deadline match can consume the logical schedule. Stale,
+duplicate, timestamp-only pre-profile, and previous-generation signals are no-ops: no state setter,
+outgoing signal, model invocation or TTL update. A signal against a deleted entity does not recreate it.
+A matching cleanup deep-clones and validates authoritative current state and uses the host's
+`TimeProvider`, not the signal, to decide expiry. Consuming it atomically clears or rotates the token.
+Early matching checks schedule at most one successor, at least one minute after both the current clock
+and the prior scheduled check, avoiding repeated scheduling at the same timestamp when the worker
+clock moves backward. Duplicates of that early check cannot advance the chain again. This scheduling floor
+is **not** a default retention period. Physical cleanup can lag logical expiry by that floor and scheduler
+delivery/clock skew; polling reports unavailability at the recorded expiry without mutating state.
+Repeated successful cleanup preserves the original unavailable timestamp.
+
+Serialization, scheduling, cancellation, and commit failures leave hydrated state unchanged; operation
+errors propagate rather than being acknowledged as cleanup. Recovery/retry uses the same
+idempotent operation. There is no background entity scan: for an imported state with no signal, or a
+signal lost/failed during rollout, the host can explicitly invoke the `CheckAndExpireResults` entity
+operation (no input required) on the known entity. One successful turn sweeps its existing due payloads
+and installs a missing schedule or supersedes an overdue/stuck token once. A valid future schedule is
+reused, so repeated recovery cannot multiply the chain. An early failed check retains its token and
+can be retried with the same input, or recovered without input once its persisted deadline is due.
+A later successful **new** run also performs this recovery. A host
+requiring a cleanup-time bound for otherwise idle imported entities must enqueue that operation as part
+of import/recovery and monitor failed operations. Read-only polling and terminal duplicate calls do not
+provide durable cleanup. Cleanup never migrates legacy state and rejects mailbox writes while the gate
+is off.
+
+Malformed/unsupported scheduling profiles fail closed before a new model invocation or cleanup.
+Other extensions and unknown fields in a supported profile are preserved. This is a .NET-local profile,
+not a shared-schema requirement: foreign runtimes preserve it opaquely but need not honor it. Compatible
+.NET writers honor its scheduling contract; preserving unknown JSON alone does not make another scheduler
+safe to deploy alongside this writer.
+
+**Merge and release gate:** this draft must not merge or release until the actual real-backend atomicity
+test passes in an explicitly isolated environment. A clearly documented gated skip is acceptable only
+for draft readiness, not for merge or release. Schema-2 production writing remains inaccessible in this
+layer, even when public
+`ResultRetentionPeriod` is set. Activation requires coordinated reader/writer/rollback compatibility,
+late-duplicate/deletion policy agreement, and an executed real-backend atomicity test in an explicitly
+isolated environment. The [gated integration test](../../tests/Microsoft.Agents.AI.DurableTask.IntegrationTests/README.md)
+checks state plus outgoing delayed signals, worker restart, duplicate delivery and a failure after
+state/outbox staging. A skipped test or passing mock tests **does not verify backend atomicity** and
+does not satisfy either the merge gate or the release gate.
+
+`response.GetDurableResult()` returns the canonical retained terminal-response JSON for a durable
+delivery, including optional `value` and unknown metadata that the native `AgentResponse` cannot
+represent. An absent value remains absent, not explicit null. The registered `DurableDataConverter`
+transports this JSON-only snapshot in additive namespaced response metadata, preserving native response
+fields and plain legacy response reads. Direct native serialization does not preserve this association.
+The metadata is result data, never a workflow control envelope or a runtime type selector.
+When complete legacy history is independently authorized for promotion, the retained mailbox snapshot
+also preserves declared response extension data and unknown response fields independently of the
+transcript. First delivery, cold polling, and repeated duplicates retain that canonical metadata;
+JSON-looking response text never supplies a missing canonical `value`.
+
+## Workflow output trust boundary
+
+Agent/model output and request-port responses are data, never workflow control envelopes. The framework
+wraps their exact text in result-only values, including text that happens to be valid JSON or matches an
+activity envelope. Only trusted regular activity/subworkflow results may supply state updates, scope
+clears, events, routed messages, or halt requests. Invalid known activity-envelope fields fail closed to
+plain result text without applying partial controls. Legacy plain-text activity results remain supported.
+Each trusted activity or child-workflow `sentMessages` entry must contain a nonblank string `typeName`
+and `data`; null entries or missing/null/empty/whitespace fields reject the **whole** collection before
+any routing. Activity JSON also rejects ambiguous repeated known fields and invalid field kinds.
+An invalid child collection discards all its messages, events and halt controls, matching the
+all-or-nothing activity trust boundary. Its exact `Result` text, not the serialized invalid envelope,
+is the fallback; it is never decoded again as controls. Child shared state is always isolated.
+These are CLR string fields: serialized JSON payloads such as `null`, `false`, `0`, and `""` remain valid
+inside the `data` string. Payload text is not recursively interpreted as controls or required to resolve
+a runtime type during envelope validation. Unknown fields cannot override known controls. A nonblank
+unknown type name is structurally valid and travels unchanged to the target activity. If that activity
+cannot resolve it or match a registered input type by name, it fails rather than choosing the first
+handler. Resolution alone does not authorize a type: every selected non-string input type must be in
+the receiving executor's `InputTypes` before payload deserialization, including fan-in array elements.
+Rejected hints cannot invoke payload constructors, JSON converters, or handlers; the executor factory
+may run to obtain its registered contract. Type resolution is not added to orchestration code.
+Existing registered-name/version matching and string/string-array adaptation to a registered type
+remain supported. Absent, null, and empty hints retain legacy default-type selection; whitespace-only
+or surrounding-whitespace names do not. A recognized top-level `inputTypeName` (case-insensitive)
+identifies an activity input envelope: duplicate hints, invalid hint field kinds, and malformed
+envelopes cannot discard that provenance and retry as untyped payloads. Legacy raw input without a
+recognized top-level hint remains supported, including opaque non-JSON string input.
+The child runner tags its non-empty final result as a CLR string when routing it to parent successors,
+so an executor supporting several input types receives the original text through its string handler
+even when another supported type is listed first. Child result-only fallback (including legacy missing,
+null or empty message collections) also retains string provenance. Whitespace-only `Result` text is
+preserved exactly, even though a whitespace-only typed `data` field is invalid. Null/empty results do
+not enqueue a fallback message. Legacy absent collections preserve trusted events/halt; invalid entries
+discard those controls. Valid typed child halt requests and superstep limits are unchanged.
+
+This is a structural provenance boundary, not a signing/authenticity mechanism. No new discriminator or
+entity-state schema field is needed. The C# workflow output format is not asserted to match Python's
+workflow format; shared entity-state fixture compatibility is a separate contract.
+
+## C# history ownership profile
+
+The shared schema 2 `historyBinding` remains optional, provisional configuration metadata. It does not
+pin an effective owner or prohibit Python or other runtimes from supporting per-run transitions.
+When the internal schema 2 writer is active, the C# durable-agent runtime applies a stricter profile:
+after the first successful turn it marks and seals one logical owner using the binding version, owner
+kind, and a stable non-secret provider key.
+Later C# turns must restore the same continuation and resolve the same identity; mismatches fail instead
+of silently resetting, migrating, or starting another logical conversation.
+
+Schema 2 production writes remain default-off and have no public activation API in this release.
+Under the public defaults, schema 1 operations preserve the existing Agent Framework behavior:
+custom history providers, explicit in-memory providers, and model-service conversation IDs can execute,
+the entity retains the completed outer turn, and no fixed `historyBinding` is created. The registration
+history options below become enforceable only with the internal schema 2 rollout gate; they do not
+silently activate schema 2.
+
+**Upgrade warning:** start new durable sessions after upgrading; do not silently reuse sessions from
+an older deployment, including legacy sessions with custom history providers. Legacy session migration
+is deferred until explicit migration support is certified. Keep old sessions on their original deployment
+or read them without running new turns, consistent with the
+[isolated rollout](../../../docs/features/durable-agents/durable-state-architecture.md) and the
+[maintainer-approved migration follow-up](https://github.com/microsoft/agent-framework-durable-extension/pull/95#discussion_r4168013434).
+
+The default in-memory history pipeline is entity-owned and appends its model transcript to
+`conversationHistory`. Custom providers, model services, and opaque `CurrentRequestOnly` agents remain
+authoritative for their own transcripts. They append no new request or response mirrors to
+`conversationHistory`; durable delivery still uses the schema 2 terminal-result mailbox and completion
+receipts, and the opaque serialized session preserves provider state, conversation IDs, approvals, and
+other continuation. Mailbox results are never replayed as model history.
+
+Configure non-entity owners with a stable logical key:
+
+```csharp
+DurableAgentHistoryProviderKey historyProviderKey = new("contoso.support-history.v1");
+
+services.ConfigureDurableAgents(options =>
+{
+  options.AddAIAgent(
+    agent,
+    timeToLive: null,
+    configureHistory: history => history.ProviderKey = historyProviderKey);
+});
+```
+
+The key must not contain credentials or be inferred from CLR type names, process instances, or opaque
+session keys. Legacy non-entity adoption requires owner-specific public evidence: a normal service
+conversation ID or a custom provider's declared `StateKeys`. Opaque `CurrentRequestOnly` and legacy
+per-service-call sessions cannot prove their prior owner through the pinned public contracts and require
+a new durable session. When an imported provisional binding already supplies a valid key, C# intentionally
+uses that persisted key if registration omits one, then seals the same identity; a later explicit key must
+match it.
+
+Provider/model/session work, mailbox completion, TTL preparation, and entity transcript updates share
+one isolated working-state commit boundary. External provider and model-service stores are outside that
+transaction. Their adapters must make writes idempotent and treat an exception or lost acknowledgement as
+an uncertain outcome rather than assuming that the remote write did not occur. Remote services can still
+observe a call before a genuinely response-discovered ownership transition or later serialization failure;
+those transition errors report that limitation explicitly. Owner, key, and continuation conflicts that are
+determinable from registration options and the restored session are rejected before provider/model callbacks.
+Local per-service-call provider persistence remains unsupported because public callbacks do not identify
+the final outer tool-loop response.
+
+`CompactionProvider` remains supported for model-input compaction. Its opaque provider state is serialized
+inside the durable session and therefore counts toward the complete entity-state size budget, while the
+authoritative durable transcript is not pruned or rewritten to follow that compaction. Store-pruning
+`FollowCompaction` behavior remains deferred. Explicitly configured `InMemoryChatHistoryProvider` instances
+are rejected only by the active fixed-owner profile because the pinned public API does not expose their
+initializer and message-filter delegates for faithful transfer to the durable adapter. Use the implicit
+default in-memory provider for schema 2 entity-owned history, or a custom external provider with a key.
+The pinned Agent Framework API cannot universally inspect builder-installed or privately nested provider
+decorators; this implementation does not use reflection, type-name scanning, guessed session keys, or
+factory double invocation.
+
+Pressure retention is default-off and internal in this release. `KeepAll` performs no proactive history
+eviction; backend or provider size limits can still reject a write. The internal `Auto` path requires an
+explicit positive byte budget: there is no implicit 1 MiB portable default. Supplying a budget or watermark
+while retention remains `KeepAll` is rejected instead of being silently ignored.
+
+The high and low watermarks default to 0.85 and 0.70 and can be overridden only with finite values satisfying
+`0 < low < high <= 1`. The high watermark starts a retention attempt, which removes the oldest eligible
+transcript groups toward the low watermark. Measurement serializes the complete extension state through the
+durable converter and then measures its JSON-string storage envelope, including quote, backslash, and non-ASCII
+escaping. The state includes terminal-result mailboxes, completion receipts, fixed history binding, opaque
+provider or agent continuation, TTL, ingestion and workflow bookkeeping, truncation evidence, media, and
+metadata. Backend framing outside that stored string remains backend-specific.
+
+When the internal rollout gate is enabled, existing legacy sessions are migrated only when the configured
+migration authorization confirms independently authoritative complete history. Otherwise the operation fails
+before model or provider side effects. A deterministically impossible protected floor, including the accepted
+request for entity-owned history, is also rejected before model/provider invocation.
+
+Only `conversationHistory` transcript entries are eligible for pressure eviction. Mailbox result envelopes,
+completion receipts, fixed history binding, serialized continuation, TTL, and other execution controls are
+protected. Protection is a fixed-point connected-component closure over correlation membership and
+tool-call/result links. The actual newest entry and every entry containing a system message seed protection.
+Every entry in any reached non-null correlation is protected, and every occurrence of a reached non-empty tool
+ID is protected; newly reached entries recursively expand protection through their own correlation and tool
+links until closure. Missing or empty tool IDs create no cross-entry edge. Eviction removes only an oldest
+prefix of atomic components that remain disconnected from the protected closure. A component containing the
+newest entry or a system message can therefore connect to older history and raise the protected floor above
+the budget, in which case retention fails atomically without committing the working state.
+
+> [!WARNING]
+> Pressure retention is internal and unreleased. In long client-side tool or approval flows, transitive
+> correlation and tool links can connect most or all of the transcript to the protected newest component.
+> If the protected floor reaches the configured budget, later writes fail atomically without corrupting the
+> session. When testing an internal activation, use `KeepAll` or disable pressure retention as a workaround.
+> The public default is unaffected. Linked-flow support remains tracked under
+> [#4](https://github.com/microsoft/agent-framework-durable-extension/issues/4); the release deferral is recorded
+> in [the accepted review follow-up](https://github.com/microsoft/agent-framework-durable-extension/pull/97#discussion_r4168013183).
+
+Schema 2 mailbox results remain authoritative after their transcript copies are removed, so duplicate execution
+and polling return the same retained result. Legacy state is converted to schema 2 before entity retention once
+history ownership can be resolved. Retention itself fails closed if legacy transcript terminals are still the
+only completion evidence.
+
+If all eligible transcript is removed and the protected floor still reaches the high watermark,
+the operation fails with an `InvalidOperationException` describing the protected floor without committing the
+working state. Auto does not expire mailbox payloads; delivery expiry is a separate mailbox policy. Large
+inline image and tool-result offload is not part of this implementation.
+
+Retention telemetry uses the `agent_framework.durabletask` meter and nine `durable.retention.*` instruments.
+These instrument names align with the Python retention implementation proposed in
+[microsoft/agent-framework-durable-extension#123](https://github.com/microsoft/agent-framework-durable-extension/pull/123).
+Retention measurements carry `mechanism`, `outcome`, and
+`commit_status`; size measurements add `phase`, while write attempts add `stage` and operations identify
+whether deletion was staged. A host state setter returning is reported as commit status `unknown`, never as
+durable commit confirmation. Metrics contain no agent, session, correlation, or payload dimensions. Persisted
+`evictedMessageCount` evidence is a nonnegative signed `Int64`. Automatic retention uses the shared exact
+integer projection for recognized JSON integer spellings and checks every increment. If the selected eviction
+would exceed `Int64.MaxValue`, the operation fails atomically without committing transcript deletion, mailbox
+changes, receipts, or serialized session state. Sizing-only probes may project a larger hypothetical prefix at
+the maximum value so they do not reject a smaller feasible eviction; persisted evidence is never wrapped,
+clamped, saturated, or left stale. Telemetry continues to report the bounded message count removed by the
+current attempt rather than substituting for cumulative durable evidence.
+
+Retention is separate from model-context compaction: retention destructively removes durable history only under
+storage pressure, while compaction changes the context supplied to the model. `Auto` is not
+`FollowCompaction`, and stateful compaction remains unsupported.
+
+### Retention metrics
+
+The package emits automatic-retention metrics through the
+`agent_framework.durabletask` meter, with the package assembly version as its instrumentation scope version.
+Applications can subscribe by using the public `DurableAgentTelemetry.MeterName` constant. The OpenTelemetry SDK
+and exporter remain application choices; the product package depends only on `System.Diagnostics.Metrics`.
+
+| Instrument | Type | Unit | Tags | Meaning |
+| --- | --- | --- | --- | --- |
+| `durable.retention.evaluations` | Counter | `{evaluation}` | `mechanism`, `outcome`, `commit_status` | Local pressure-retention evaluations. |
+| `durable.retention.budget` | Histogram | `By` | `mechanism`, `outcome`, `commit_status` | Requested resolved whole-entity pressure budget. |
+| `durable.retention.state.size` | Histogram | `By` | `mechanism`, `outcome`, `commit_status`, `phase` | Exact escaped storage-envelope bytes before and after the attempt. |
+| `durable.retention.removed_messages` | Counter | `{message}` | `mechanism`, `outcome`, `commit_status` | Transcript messages removed from staged state by this attempt. |
+| `durable.retention.removed_entries` | Counter | `{entry}` | `mechanism`, `outcome`, `commit_status` | Transcript entries removed from staged state, including zero-message entries. |
+| `durable.retention.reclaimed_bytes` | Counter | `By` | `mechanism`, `outcome`, `commit_status` | Positive net serialized bytes reclaimed in staged state. |
+| `durable.retention.capacity_failures` | Counter | `{failure}` | `mechanism`, `outcome`, `commit_status` | Attempts whose protected floor cannot reach the safe threshold. |
+| `durable.retention.write_attempts` | Counter | `{attempt}` | `stage`, `outcome`, `commit_status`, `deletion_staged` | Serialization and host set-state outcomes, not durable commit confirmation. |
+| `durable.retention.operations` | Counter | `{operation}` | `outcome`, `commit_status`, `deletion_staged` | Entity-operation outcome and the strongest host write status observed. |
+
+Pressure evaluation outcomes are `below_threshold`, `staged`, and `protected_floor`; write and operation
+outcomes are `returned` or `failed`. `commit_status` is `not_attempted` until a host state setter is reached
+and `unknown` afterward because this layer cannot observe durable confirmation. `phase` is `before` or `after`,
+and `stage` is `serialization` or `set_state`.
+Removing a zero-message entry increments the entry counter without incrementing the message counter, and
+reclaimed bytes are emitted only for a positive net reduction so truncation metadata never creates a negative
+measurement. `KeepAll` emits no retention metrics. Session IDs, correlation IDs, message IDs, content,
+exception text, and provider paths are never tags.
+
+These are **attempt-level operational metrics**, not durable-state truth. Retention is evaluated before the
+entity operation commits, so a later scheduling, persistence, or retry failure can leave measurements for state
+that was not committed; retries can also record an attempt more than once. Exporters can buffer or drop
+telemetry. Reload persisted state and inspect model input or mailbox outcomes when validating committed behavior;
+do not rely on emitted counters alone or exact-once metric delivery. A metric observation is never evidence that
+the corresponding retained state committed.
+
 ## Feedback & Contributing
 
 We welcome feedback and contributions in [our GitHub repo](https://github.com/microsoft/agent-framework-durable-extension).

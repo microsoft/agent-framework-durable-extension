@@ -1,0 +1,13 @@
+{
+  "_comment": "Required before running: replace TASKHUB_NAME with a fresh, unique hub unused by older workers. The shipped host uses Azure Storage via AzureWebJobsStorage, not DTS. The DTS connection string alone does not select a backend. If explicitly opting into azureManaged with a supporting host extension, replace its TaskHub with the same hub. Only then set DURABLE_AGENTS_DEPLOYMENT_MODE to isolated_v2 after confirming isolation and compatible schema 2 workers and clients. Leave it blank until then.",
+  "IsEncrypted": false,
+  "Values": {
+    "DURABLE_AGENTS_DEPLOYMENT_MODE": "",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "DURABLE_TASK_SCHEDULER_CONNECTION_STRING": "Endpoint=http://localhost:8080;TaskHub=durablesamplev2UNIQUE;Authentication=None",
+    "TASKHUB_NAME": "durablesamplev2UNIQUE",
+    "FOUNDRY_PROJECT_ENDPOINT": "<FOUNDRY_PROJECT_ENDPOINT>",
+    "FOUNDRY_MODEL": "<FOUNDRY_MODEL>"
+  }
+}

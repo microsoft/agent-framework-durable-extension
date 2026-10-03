@@ -60,6 +60,7 @@ def __getattr__(name: str) -> str:
 # Polling configuration
 DEFAULT_MAX_POLL_RETRIES: int = 30
 DEFAULT_POLL_INTERVAL_SECONDS: float = 1.0
+DELIVERY_WINDOW_SECONDS: int = 60
 
 
 # =============================================================================
@@ -130,6 +131,23 @@ class DurableStateFields:
 
     # History field
     CONVERSATION_HISTORY: Final[str] = "conversationHistory"
+
+    # Canonical shared-state history, session and delivery fields.
+    MESSAGE_ID: Final[str] = "messageId"
+    SESSION: Final[str] = "session"
+    INGESTED_POSITIONS: Final[str] = "ingestedPositions"
+    INGESTED_MESSAGES: Final[str] = "ingestedMessages"
+    RESPONSE_MAILBOX: Final[str] = "terminalResults"
+    COMPLETED_CORRELATIONS: Final[str] = "completionReceipts"
+    RESPONSE: Final[str] = "response"
+    COMPLETED_AT: Final[str] = "completedAt"
+    OUTCOME: Final[str] = "outcome"
+
+    # Canonical truncation evidence for staged transcript eviction.
+    TRUNCATION: Final[str] = "truncation"
+    EVICTED_MESSAGE_COUNT: Final[str] = "evictedMessageCount"
+    FIRST_EVICTED_AT: Final[str] = "firstEvictedAt"
+    LAST_EVICTED_AT: Final[str] = "lastEvictedAt"
 
 
 class ContentTypes:

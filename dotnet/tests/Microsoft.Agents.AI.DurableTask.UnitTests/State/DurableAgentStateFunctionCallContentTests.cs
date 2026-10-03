@@ -84,12 +84,18 @@ public sealed class DurableAgentStateFunctionCallContentTests
     }
 
     [Fact]
-    public void NoArgumentsRoundTrip()
+    public void OmittedAndEmptyArgumentsRemainDistinct()
     {
-        FunctionCallContent result = RoundTrip(new("call-5", "get_time", arguments: null));
+        FunctionCallContent omitted = RoundTrip(new("call-5", "get_time", arguments: null));
+        const string EmptyArgumentsJson =
+            """{"$type":"functionCall","arguments":{},"callId":"call-6","name":"get_time"}""";
+        DurableAgentStateContent emptyStored = Assert.IsType<DurableAgentStateFunctionCallContent>(
+            JsonSerializer.Deserialize(EmptyArgumentsJson, s_stateContentTypeInfo));
+        FunctionCallContent empty = Assert.IsType<FunctionCallContent>(emptyStored.ToAIContent());
 
-        Assert.Equal("get_time", result.Name);
-        Assert.Empty(result.Arguments!);
+        Assert.Null(omitted.Arguments);
+        Assert.NotNull(empty.Arguments);
+        Assert.Empty(empty.Arguments);
     }
 
     [Fact]
@@ -108,6 +114,93 @@ public sealed class DurableAgentStateFunctionCallContentTests
         Assert.Equal("call-6", result.CallId);
         Assert.Equal("Seattle", Assert.IsType<JsonElement>(result.Arguments!["city"]).GetString());
         Assert.Equal(3, Assert.IsType<JsonElement>(result.Arguments["days"]).GetInt32());
+    }
+
+    [Fact]
+    public void StringArgumentsRoundTripVerbatimWithoutParsing()
+    {
+        const string Json =
+            """{"$type":"functionCall","arguments":" { \"partial\": ","callId":"call-7","name":"incomplete"}""";
+
+        DurableAgentStateContent? deserialized =
+            (DurableAgentStateContent?)JsonSerializer.Deserialize(Json, s_stateContentTypeInfo);
+        DurableAgentStateFunctionCallContent durable =
+            Assert.IsType<DurableAgentStateFunctionCallContent>(deserialized);
+        string roundTrip = JsonSerializer.Serialize(durable, s_stateContentTypeInfo);
+        using JsonDocument roundTripDocument = JsonDocument.Parse(roundTrip);
+        FunctionCallContent runtime = Assert.IsType<FunctionCallContent>(durable.ToAIContent());
+
+        Assert.Equal(" { \"partial\": ", durable.Arguments.GetString());
+        Assert.Equal(" { \"partial\": ", runtime.RawRepresentation);
+        Assert.Equal(
+            " { \"partial\": ",
+            roundTripDocument.RootElement.GetProperty("arguments").GetString());
+    }
+
+    [Theory]
+    [InlineData("verbatim")]
+    [InlineData(" { \"partial\": ")]
+    public void ProductionMappingsPreserveRawStringArguments(string rawArguments)
+    {
+        FunctionCallContent runtime = new("call-8", "future")
+        {
+            RawRepresentation = rawArguments,
+        };
+
+        DurableAgentStateFunctionCallContent legacy =
+            Assert.IsType<DurableAgentStateFunctionCallContent>(
+                DurableAgentStateContent.FromAIContent(runtime));
+        DurableAgentStateFunctionCallContent revised =
+            Assert.IsType<DurableAgentStateFunctionCallContent>(
+                DurableAgentStateContent.FromAIContentV2(runtime));
+
+        Assert.Equal(rawArguments, legacy.Arguments.GetString());
+        Assert.Equal(rawArguments, revised.Arguments.GetString());
+        Assert.Equal(
+            rawArguments,
+            Assert.IsType<FunctionCallContent>(legacy.ToAIContent()).RawRepresentation);
+        Assert.Equal(
+            rawArguments,
+            Assert.IsType<FunctionCallContent>(revised.ToAIContent()).RawRepresentation);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void LegacyRequestAndResponsePreserveRawStringArgumentsAcrossRuntime(bool request)
+    {
+        const string RawArguments = " { \"partial\": ";
+        ChatMessage message = new(
+            ChatRole.Assistant,
+            [new FunctionCallContent("call-9", "future") { RawRepresentation = RawArguments }])
+        {
+            CreatedAt = DateTimeOffset.Parse("2026-10-02T10:00:00Z"),
+        };
+
+        DurableAgentStateMessage rewrittenMessage;
+        if (request)
+        {
+            DurableAgentStateRequest stored =
+                DurableAgentStateRequest.FromRunRequest(new RunRequest([message]));
+            ChatMessage runtime = Assert.Single(stored.Messages).ToChatMessage();
+            rewrittenMessage = Assert.Single(
+                DurableAgentStateRequest.FromRunRequest(new RunRequest([runtime])).Messages);
+        }
+        else
+        {
+            DurableAgentStateResponse stored =
+                DurableAgentStateResponse.FromResponse("correlation", new AgentResponse([message]));
+            ChatMessage runtime = Assert.Single(stored.ToResponse().Messages);
+            rewrittenMessage = Assert.Single(
+                DurableAgentStateResponse.FromResponse(
+                    "correlation",
+                    new AgentResponse([runtime])).Messages);
+        }
+
+        DurableAgentStateFunctionCallContent rewritten =
+            Assert.IsType<DurableAgentStateFunctionCallContent>(
+                Assert.Single(rewrittenMessage.Contents));
+        Assert.Equal(RawArguments, rewritten.Arguments.GetString());
     }
 
     private sealed record Location(string City, string State);

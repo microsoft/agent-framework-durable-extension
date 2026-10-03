@@ -82,11 +82,12 @@ public sealed class DurableAIAgent : AIAgent
         AgentRunOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        CurrentRunContext = new(this, session, messages as IReadOnlyCollection<ChatMessage> ?? messages.ToList(), options);
+        IReadOnlyCollection<ChatMessage> requestMessages = messages as IReadOnlyCollection<ChatMessage> ?? messages.ToList();
+        CurrentRunContext = new(this, session, requestMessages, options);
 
         // AIAgent's non-virtual wrapper uses ConfigureAwait(false). Await the core directly
         // so completion stays on the orchestration thread and the ambient run context is restored.
-        return await this.RunCoreAsync(messages, session, options, cancellationToken);
+        return await this.RunCoreAsync(requestMessages, session, options, cancellationToken);
     }
 
     /// <inheritdoc cref="AIAgent.RunStreamingAsync(AgentSession, AgentRunOptions, CancellationToken)"/>
@@ -127,9 +128,10 @@ public sealed class DurableAIAgent : AIAgent
         AgentRunOptions? options = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        AgentRunContext context = new(this, session, messages as IReadOnlyCollection<ChatMessage> ?? messages.ToList(), options);
+        IReadOnlyCollection<ChatMessage> requestMessages = messages as IReadOnlyCollection<ChatMessage> ?? messages.ToList();
+        AgentRunContext context = new(this, session, requestMessages, options);
         CurrentRunContext = context;
-        await foreach (AgentResponseUpdate update in this.RunCoreStreamingAsync(messages, session, options, cancellationToken))
+        await foreach (AgentResponseUpdate update in this.RunCoreStreamingAsync(requestMessages, session, options, cancellationToken))
         {
             yield return update;
             CurrentRunContext = context;
@@ -230,14 +232,29 @@ public sealed class DurableAIAgent : AIAgent
 
         try
         {
-            return await this._context.Entities.CallEntityAsync<AgentResponse>(
+            AgentResponse response = await this._context.Entities.CallEntityAsync<AgentResponse>(
                 durableSession.SessionId,
                 nameof(AgentEntity.Run),
                 request);
+            if (DurableAgentJsonUtilities.GetCommittedFailure(response) is DurableAgentFailureData failure)
+            {
+                throw new DurableAgentTerminalException(
+                    failure.CorrelationId,
+                    failure.Code!,
+                    failure.Message!,
+                    failure.Details,
+                    response);
+            }
+
+            return response;
         }
         catch (EntityOperationFailedException e) when (e.FailureDetails.ErrorType == "EntityTaskNotFound")
         {
             throw new AgentNotRegisteredException(this._agentName, e);
+        }
+        catch (Exception e) when (DurableAgentFailure.TryRestore(e, out Exception? failure))
+        {
+            throw failure;
         }
     }
 
@@ -388,6 +405,11 @@ public sealed class DurableAIAgent : AIAgent
         // the orchestration.
         AgentResponse response = await this.RunAsync(messages, session, options, cancellationToken);
 
-        return new AgentResponse<T>(response, serializerOptions) { IsWrappedInObject = isWrappedInObject };
+        AgentResponse<T> typedResponse = new(response, serializerOptions) { IsWrappedInObject = isWrappedInObject };
+        // Constructing AgentResponse<T> creates a new object. The canonical durable result is kept in an identity-based
+        // sidecar rather than in AgentResponse itself, so it would not follow this conversion automatically. Copy it to
+        // keep GetDurableResult() lossless and consistent between the typed and untyped APIs.
+        DurableAgentJsonUtilities.CopyRetainedResult(response, typedResponse);
+        return typedResponse;
     }
 }

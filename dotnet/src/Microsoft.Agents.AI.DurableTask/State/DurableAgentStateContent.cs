@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Agents.AI.DurableTask.State;
 
@@ -42,29 +43,82 @@ internal abstract class DurableAgentStateContent
         JsonSerializer.SerializeToElement(value: null, jsonTypeInfo: s_objectTypeInfo);
 
     /// <summary>
-    /// Gets any additional data found during deserialization that does not map to known properties.
+    /// Gets producer-defined content metadata from the schema's declared <c>extensionData</c> field.
+    /// </summary>
+    /// <remarks>
+    /// This field is converted to and from <see cref="AIContent.AdditionalProperties"/>. Undeclared
+    /// sibling properties remain in <see cref="UnknownProperties"/> and are never promoted into the
+    /// framework metadata bag.
+    /// </remarks>
+    [JsonPropertyName("extensionData")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IDictionary<string, JsonElement>? AdditionalProperties { get; set; }
+
+    /// <summary>
+    /// Gets unknown content properties that are outside the declared schema.
     /// </summary>
     [JsonExtensionData]
-    public IDictionary<string, JsonElement>? ExtensionData { get; set; }
+    public IDictionary<string, JsonElement>? UnknownProperties { get; set; }
 
     /// <summary>
     /// Converts this durable agent state content to an <see cref="AIContent"/>.
     /// </summary>
     /// <returns>A converted <see cref="AIContent"/> instance.</returns>
-    public abstract AIContent ToAIContent();
+    public AIContent ToAIContent()
+    {
+        AIContent content = this.ToAIContentCore();
+        if (this.AdditionalProperties is null)
+        {
+            return content;
+        }
+
+        content.AdditionalProperties ??= [];
+        foreach ((string key, JsonElement value) in this.AdditionalProperties)
+        {
+            if (content.AdditionalProperties.ContainsKey(key))
+            {
+                throw new InvalidOperationException(
+                    $"Durable agent content extension data contains duplicate framework metadata key '{key}'.");
+            }
+
+            content.AdditionalProperties[key] = value.Clone();
+        }
+
+        return content;
+    }
+
+    protected abstract AIContent ToAIContentCore();
+
+    /// <summary>
+    /// Validates semantic constraints for the specified state schema version.
+    /// </summary>
+    internal virtual void Validate(DurableAgentStateSchemaVersion version)
+    {
+    }
 
     /// <summary>
     /// Creates a <see cref="DurableAgentStateContent"/> from an <see cref="AIContent"/>.
     /// </summary>
     /// <param name="content">The <see cref="AIContent"/> to convert.</param>
+    /// <param name="logger">The logger used to report safe unknown-content fallbacks.</param>
     /// <returns>A <see cref="DurableAgentStateContent"/> representing the original <see cref="AIContent"/>.</returns>
-    public static DurableAgentStateContent FromAIContent(AIContent content)
+    public static DurableAgentStateContent FromAIContent(AIContent content, ILogger? logger = null)
+        => FromAIContent(content, allowLosslessV2: false, logger);
+
+    internal static DurableAgentStateContent FromAIContentV2(AIContent content, ILogger? logger = null)
+        => FromAIContent(content, allowLosslessV2: true, logger);
+
+    private static DurableAgentStateContent FromAIContent(
+        AIContent content,
+        bool allowLosslessV2,
+        ILogger? logger)
     {
-        return content switch
+        DurableAgentStateContent durableContent = content switch
         {
             DataContent dataContent => DurableAgentStateDataContent.FromDataContent(dataContent),
             ErrorContent errorContent => DurableAgentStateErrorContent.FromErrorContent(errorContent),
-            FunctionCallContent functionCallContent => DurableAgentStateFunctionCallContent.FromFunctionCallContent(functionCallContent),
+            FunctionCallContent functionCallContent =>
+                DurableAgentStateFunctionCallContent.FromFunctionCallContent(functionCallContent),
             FunctionResultContent functionResultContent => DurableAgentStateFunctionResultContent.FromFunctionResultContent(functionResultContent),
             HostedFileContent hostedFileContent => DurableAgentStateHostedFileContent.FromHostedFileContent(hostedFileContent),
             HostedVectorStoreContent hostedVectorStoreContent => DurableAgentStateHostedVectorStoreContent.FromHostedVectorStoreContent(hostedVectorStoreContent),
@@ -72,8 +126,25 @@ internal abstract class DurableAgentStateContent
             TextReasoningContent textReasoningContent => DurableAgentStateTextReasoningContent.FromTextReasoningContent(textReasoningContent),
             UriContent uriContent => DurableAgentStateUriContent.FromUriContent(uriContent),
             UsageContent usageContent => DurableAgentStateUsageContent.FromUsageContent(usageContent),
-            _ => DurableAgentStateUnknownContent.FromUnknownContent(content)
+            _ => DurableAgentStateUnknownContent.FromUnknownContent(content, logger)
         };
+
+        if (content is not AIContent { AdditionalProperties: not null } ||
+            durableContent is DurableAgentStateUnknownContent)
+        {
+            return durableContent;
+        }
+
+        Dictionary<string, JsonElement> additionalProperties = [];
+        foreach ((string key, object? value) in content.AdditionalProperties)
+        {
+            additionalProperties[key] = allowLosslessV2
+                ? DurableAgentStateTerminalResponse.ConvertMetadata(value, key)
+                : ToJsonElement(value);
+        }
+
+        durableContent.AdditionalProperties = additionalProperties;
+        return durableContent;
     }
 
     /// <summary>
@@ -95,7 +166,7 @@ internal abstract class DurableAgentStateContent
         return value switch
         {
             null => s_nullElement,
-            JsonElement element => element,
+            JsonElement element => element.Clone(),
             _ => JsonSerializer.SerializeToElement(value: value, jsonTypeInfo: s_objectTypeInfo)
         };
     }

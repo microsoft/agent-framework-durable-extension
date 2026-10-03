@@ -31,7 +31,7 @@ internal sealed class DurableAgentStateTextReasoningContent : DurableAgentStateC
     }
 
     /// <inheritdoc/>
-    public override AIContent ToAIContent()
+    protected override AIContent ToAIContentCore()
     {
         return new TextReasoningContent(this.Text);
     }

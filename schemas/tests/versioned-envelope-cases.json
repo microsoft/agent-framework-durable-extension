@@ -9,24 +9,24 @@
         "valid": true
       },
       {
-        "description": "Developer role is not a historical correction",
+        "description": "Historical free-form developer role remains readable",
         "data": { "schemaVersion": "1.0.0", "data": { "conversationHistory": [{ "$type": "request", "messages": [{ "role": "developer" }] }] } },
-        "valid": false
+        "valid": true
       },
       {
-        "description": "String arguments are v2-only",
+        "description": "Historical string arguments remain readable",
         "data": { "schemaVersion": "1.0.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": " { \"partial\": " }] }] }] } },
-        "valid": false
+        "valid": true
       },
       {
-        "description": "Empty string arguments are also v2-only",
+        "description": "Historical empty string arguments remain readable",
         "data": { "schemaVersion": "1.0.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": "" }] }] }] } },
-        "valid": false
+        "valid": true
       },
       {
-        "description": "Omitted URI media type is v2-only even on a legacy error entry",
+        "description": "Historical URI without media type remains readable",
         "data": { "schemaVersion": "1.0.0", "data": { "conversationHistory": [{ "$type": "errorResponse", "messages": [{ "role": "assistant", "contents": [{ "$type": "uri", "uri": "https://example.test/media" }] }] }] } },
-        "valid": false
+        "valid": true
       },
       {
         "description": "Historical explicit opaque object, scalar and null remain valid",
@@ -55,24 +55,24 @@
         "valid": true
       },
       {
-        "description": "Developer role is not a historical correction",
+        "description": "Historical free-form developer role remains readable",
         "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "$type": "request", "messages": [{ "role": "developer" }] }] } },
-        "valid": false
+        "valid": true
       },
       {
-        "description": "String arguments are v2-only",
+        "description": "Historical string arguments remain readable",
         "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": " { \"partial\": " }] }] }] } },
-        "valid": false
+        "valid": true
       },
       {
-        "description": "Empty string arguments are also v2-only",
+        "description": "Historical empty string arguments remain readable",
         "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": "" }] }] }] } },
-        "valid": false
+        "valid": true
       },
       {
-        "description": "Omitted URI media type is v2-only even on a legacy error entry",
+        "description": "Historical URI without media type remains readable",
         "data": { "schemaVersion": "1.1.0", "data": { "conversationHistory": [{ "$type": "errorResponse", "messages": [{ "role": "assistant", "contents": [{ "$type": "uri", "uri": "https://example.test/media" }] }] }] } },
-        "valid": false
+        "valid": true
       },
       {
         "description": "Historical explicit opaque object, scalar and null remain valid",
@@ -101,24 +101,24 @@
         "valid": true
       },
       {
-        "description": "Developer role is not a historical correction",
+        "description": "Historical free-form developer role remains readable",
         "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "$type": "request", "messages": [{ "role": "developer" }] }] } },
-        "valid": false
+        "valid": true
       },
       {
-        "description": "String arguments are v2-only",
+        "description": "Historical string arguments remain readable",
         "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": " { \"partial\": " }] }] }] } },
-        "valid": false
+        "valid": true
       },
       {
-        "description": "Empty string arguments are also v2-only",
+        "description": "Historical empty string arguments remain readable",
         "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "$type": "response", "messages": [{ "role": "assistant", "contents": [{ "$type": "functionCall", "callId": "c", "name": "f", "arguments": "" }] }] }] } },
-        "valid": false
+        "valid": true
       },
       {
-        "description": "Omitted URI media type is v2-only even on a legacy error entry",
+        "description": "Historical URI without media type remains readable",
         "data": { "schemaVersion": "1.2.0", "data": { "conversationHistory": [{ "$type": "errorResponse", "messages": [{ "role": "assistant", "contents": [{ "$type": "uri", "uri": "https://example.test/media" }] }] }] } },
-        "valid": false
+        "valid": true
       },
       {
         "description": "Historical explicit opaque object, scalar and null remain valid",

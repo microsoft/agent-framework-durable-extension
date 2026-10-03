@@ -17,14 +17,14 @@ See the [README.md](../README.md) file in the parent directory for more informat
 
 With the environment setup, you can run the sample using the combined approach or separate worker and client processes:
 
-**Option 1: Combined (Recommended for Testing)**
+### Option 1: Combined (Recommended for Testing)
 
 ```bash
 cd samples/02_multi_agent
 python sample.py
 ```
 
-**Option 2: Separate Processes**
+### Option 2: Separate Processes
 
 Start the worker in one terminal:
 
@@ -40,9 +40,9 @@ python client.py
 
 The client will interact with both agents:
 
-```
+```text
 Starting Durable Task Multi-Agent Client...
-Using taskhub: default
+Using taskhub: durablesamplev2UNIQUE
 Using endpoint: http://localhost:8080
 
 ================================================================================
@@ -69,6 +69,9 @@ User: Calculate a 20% tip on a $50 bill
 
 MathAgent: For a $50 bill with a 20% tip, the tip amount is $10.00 and the total is $60.00.
 ```
+
+If `TASKHUB` is missing, blank, or set to `default`, the sample raises `ValueError`
+before connecting to the scheduler. Set the same unique non-default hub name in both terminals.
 
 ## Viewing Agent State
 

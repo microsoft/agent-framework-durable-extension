@@ -35,9 +35,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _resolve_taskhub(taskhub: str | None) -> str:
+    taskhub_name = taskhub if taskhub is not None else os.getenv("TASKHUB")
+    if not taskhub_name or taskhub_name != taskhub_name.strip() or taskhub_name.strip().casefold() == "default":
+        raise ValueError("Set TASKHUB to a non-default, non-blank hub name before running this sample.")
+    return taskhub_name
+
+
 def get_client(taskhub: str | None = None, endpoint: str | None = None) -> DurableTaskSchedulerClient:
     """Create a configured DurableTaskSchedulerClient."""
-    taskhub_name = taskhub or os.getenv("TASKHUB", "default")
+    taskhub_name = _resolve_taskhub(taskhub)
     endpoint_url = endpoint or os.getenv("ENDPOINT", "http://localhost:8080")
 
     credential = None if endpoint_url == "http://localhost:8080" else AzureCliCredential()
@@ -52,7 +59,7 @@ def get_client(taskhub: str | None = None, endpoint: str | None = None) -> Durab
 
 async def main() -> None:
     """Start a workflow and stream its typed progress events to the console."""
-    client = DurableWorkflowClient(get_client())
+    client = DurableWorkflowClient(get_client(), workflow_name="content_pipeline")
 
     # Start without waiting so we can stream progress as it happens.
     instance_id = await client.run_workflow(input="Write a short note about durable workflows.", wait=False)
@@ -66,7 +73,7 @@ async def main() -> None:
             logger.info("  [%s] %s", event.type, event.executor_id)
 
     # The stream ends when the workflow reaches a terminal state; read the result.
-    output = await client.await_workflow_output(instance_id)
+    output = await asyncio.to_thread(client.await_workflow_output, instance_id)
     logger.info("Final output: %s", output)
 
 

@@ -9,6 +9,8 @@ internal static class DurableAgentSamples
 {
     private const string AzureFunctionsSkipReason =
         "Requires Azure Functions Core Tools runtime and starts a web host.";
+    private const string ExperimentalMailboxSkipReason =
+        "Draft only: schema 2 mailbox writes remain behind an internal, default-disabled rollout gate.";
 
     public static IReadOnlyList<SampleDefinition> ConsoleApps { get; } =
     [
@@ -88,6 +90,46 @@ internal static class DurableAgentSamples
             ExpectedOutputDescription =
             [
                 "The output should show reliable streaming for durable agent responses.",
+                "The output should not contain error messages or stack traces.",
+            ],
+        },
+        new SampleDefinition
+        {
+            Name = "DurableAgents_Console_08_FoundryManagedAgent",
+            ProjectPath = "samples/DurableAgents/ConsoleApps/08_FoundryManagedAgent",
+            SkipReason = ExperimentalMailboxSkipReason,
+            RequiredEnvironmentVariables =
+            [
+                "FOUNDRY_PROJECT_ENDPOINT",
+                "FOUNDRY_MODEL",
+                "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
+            ],
+            MustContain =
+            [
+                "Host stopped. Starting a new host to force durable state restoration.",
+                "Marker recall after durable restart: PASS",
+                "The fixed service-owner binding and restored service conversation identity are verified by deterministic tests.",
+                "Deleted Foundry agent version:",
+            ],
+            IsDeterministic = true,
+        },
+        new SampleDefinition
+        {
+            Name = "DurableAgents_Console_09_CustomHistoryProvider",
+            ProjectPath = "samples/DurableAgents/ConsoleApps/09_CustomHistoryProvider",
+            SkipReason = ExperimentalMailboxSkipReason,
+            RequiredEnvironmentVariables =
+            [
+                "FOUNDRY_PROJECT_ENDPOINT",
+                "FOUNDRY_MODEL",
+                "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
+            ],
+            Inputs = ["SAMPLE-MARKER-09"],
+            ExpectedOutputDescription =
+            [
+                "The output should state that cumulative external history exceeds 1 MiB using moderate records, not one oversized durable request.",
+                "The output should show a bounded provider-supplied model-history window.",
+                "The output should show that the marker and the same logical external history reference survive a host restart.",
                 "The output should not contain error messages or stack traces.",
             ],
         },

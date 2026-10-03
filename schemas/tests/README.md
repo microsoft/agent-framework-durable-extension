@@ -1,6 +1,6 @@
 # Language-neutral schema validation cases
 
-`validation-cases.json` and `versioned-envelope-cases.json` record positive and negative review expectations using
+`validation-cases.json` and `versioned-envelope-cases.json` record positive and negative contract expectations using
 the JSON Schema Test Suite's group shape: `description`, `schema`, and `tests`;
 each test has `description`, `data`, and `valid`. These are test data, not durable
 state fixtures, product implementation, or runtime test-project integration.
@@ -10,11 +10,15 @@ do not fetch it from GitHub, which might contain a different revision. Use a
 Draft 2020-12 validator. The cases cover v2-only correlation constraints,
 unchanged legacy/compaction handling, opaque runtime profiles, v2 lossless
 message shapes, structured-value presence, and historical ingestion scalars.
+Known usage, ingestion and truncation counters cover the nonnegative Int64
+boundary, the positive truncation minimum, invalid types, unchanged integral-number
+semantics and preservation of larger integers in opaque data.
 
 The versioned cases use complete root envelopes for every version rather than
-just testing `$defs` fragments. Historical `1.0.0`, `1.1.0`, and `1.2.0` reject
-the newly widened developer role, string-form function arguments, and URI content
-without media type; v2 accepts them in its transcript and terminal payload paths.
+just testing `$defs` fragments. Historical `1.0.0`, `1.1.0`, and `1.2.0`
+continue accepting free-form roles, string-form function arguments, and URI
+content without media type; v2 narrows roles while retaining the two lossless
+content forms in transcript and terminal payload paths.
 Historical explicit `unknown` JSON was already valid and stays valid in all
 versions. The unchanged legacy fixture remains additional compatibility evidence.
 Profile cases distinguish opaque shared preservation from validation by a relying
@@ -49,10 +53,11 @@ print(f"Passed {count} structural validation cases")
 '@ | python -
 ```
 
-These cases have no timestamp-format assertions. Validate the separate state
-fixtures with date-time format checking as well as the cross-map/time invariants
-in the shared proposal. Test data alone cannot prove serializer round-tripping,
+Validate the separate state fixtures with date-time format checking as well as
+the cross-map/time invariants in the shared contract. The lossless fixture also
+contains nanosecond RFC 3339 text that serializers must preserve verbatim.
+Test data alone cannot prove serializer round-tripping,
 atomic entity commits, per-run ownership transitions, or runtime lookup behavior.
-Future runtime implementations must additionally verify that original string
+Compatible runtime implementations must additionally verify that original string
 arguments, absent media types, opaque JSON metadata, and all present `value`
 forms survive persistence without conversion, omission, or invented data.

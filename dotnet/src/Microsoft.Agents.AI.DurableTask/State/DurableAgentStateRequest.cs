@@ -3,6 +3,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Agents.AI.DurableTask.State;
 
@@ -15,6 +16,7 @@ internal sealed class DurableAgentStateRequest : DurableAgentStateEntry
     /// Gets the ID of the orchestration that initiated this request (if any).
     /// </summary>
     [JsonPropertyName("orchestrationId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? OrchestrationId { get; init; }
 
     /// <summary>
@@ -24,6 +26,7 @@ internal sealed class DurableAgentStateRequest : DurableAgentStateEntry
     /// If omitted, the expectation is that the agent will respond in plain text.
     /// </remarks>
     [JsonPropertyName("responseType")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ResponseType { get; init; }
 
     /// <summary>
@@ -41,15 +44,49 @@ internal sealed class DurableAgentStateRequest : DurableAgentStateEntry
     /// Creates a <see cref="DurableAgentStateRequest"/> from a <see cref="RunRequest"/>.
     /// </summary>
     /// <param name="request">The <see cref="RunRequest"/> to convert.</param>
+    /// <param name="logger">The logger used to report safe unknown-content fallbacks.</param>
     /// <returns>A <see cref="DurableAgentStateRequest"/> representing the original request.</returns>
-    public static DurableAgentStateRequest FromRunRequest(RunRequest request)
+    public static DurableAgentStateRequest FromRunRequest(
+        RunRequest request,
+        ILogger? logger = null)
+        => FromRunRequestCore(request, request.Messages, allowLosslessV2: false, logger);
+
+    internal static DurableAgentStateRequest FromRunRequestV2(
+        RunRequest request,
+        ILogger? logger = null)
+        => FromRunRequestCore(request, request.Messages, allowLosslessV2: true, logger);
+
+    internal static DurableAgentStateRequest FromRunRequest(
+        RunRequest request,
+        IEnumerable<ChatMessage> messages,
+        bool allowLosslessV2,
+        ILogger? logger = null)
+        => FromRunRequestCore(request, messages, allowLosslessV2, logger);
+
+    private static DurableAgentStateRequest FromRunRequestCore(
+        RunRequest request,
+        IEnumerable<ChatMessage> messages,
+        bool allowLosslessV2,
+        ILogger? logger)
     {
+        DateTimeOffset createdAt = request.Messages.Min(m => m.CreatedAt) ?? DateTimeOffset.UtcNow;
         return new DurableAgentStateRequest()
         {
             CorrelationId = request.CorrelationId,
             OrchestrationId = request.OrchestrationId,
-            Messages = request.Messages.Select(DurableAgentStateMessage.FromChatMessage).ToList(),
-            CreatedAt = request.Messages.Min(m => m.CreatedAt) ?? DateTimeOffset.UtcNow,
+            Messages = messages.Select(
+                (message, index) =>
+                {
+                    string messageId = DurableAgentStateMessageIdentity.Create(
+                        "request",
+                        request.CorrelationId,
+                        createdAt,
+                        index);
+                    return allowLosslessV2
+                        ? DurableAgentStateMessage.FromTerminalChatMessage(message, messageId, logger)
+                        : DurableAgentStateMessage.FromChatMessage(message, messageId, logger);
+                }).ToList(),
+            CreatedAt = createdAt,
             ResponseType = request.ResponseFormat is ChatResponseFormatJson ? "json" : "text",
             ResponseSchema = (request.ResponseFormat as ChatResponseFormatJson)?.Schema
         };

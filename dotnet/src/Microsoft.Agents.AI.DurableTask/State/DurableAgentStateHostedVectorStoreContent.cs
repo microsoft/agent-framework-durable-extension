@@ -32,7 +32,7 @@ internal sealed class DurableAgentStateHostedVectorStoreContent : DurableAgentSt
     }
 
     /// <inheritdoc/>
-    public override AIContent ToAIContent()
+    protected override AIContent ToAIContentCore()
     {
         return new HostedVectorStoreContent(this.VectorStoreId);
     }

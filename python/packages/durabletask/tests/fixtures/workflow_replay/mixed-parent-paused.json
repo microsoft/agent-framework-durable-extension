@@ -1,0 +1,69 @@
+[
+  {
+    "eventId": -1,
+    "timestamp": "2026-09-20T22:10:04.126996Z",
+    "orchestratorStarted": {}
+  },
+  {
+    "eventId": -1,
+    "timestamp": "1970-01-01T00:00:00Z",
+    "executionStarted": {
+      "name": "dafx-audit-mixed",
+      "input": "{\"_durable_workflow_version\": 2, \"input\": \"go\"}",
+      "orchestrationInstance": {
+        "instanceId": "audit-mixed"
+      }
+    }
+  },
+  {
+    "eventId": 1,
+    "timestamp": "1970-01-01T00:00:00Z",
+    "taskScheduled": {
+      "name": "dafx-audit-mixed-seed",
+      "input": "\"{\\\"executor_id\\\": \\\"seed\\\", \\\"message\\\": \\\"go\\\", \\\"shared_state_snapshot\\\": {}, \\\"source_executor_ids\\\": [\\\"__workflow_start__\\\"], \\\"is_hitl_response\\\": false, \\\"host_context\\\": {\\\"instance_id\\\": \\\"audit-mixed\\\", \\\"workflow_name\\\": \\\"audit-mixed\\\", \\\"request_path_prefix\\\": \\\"\\\"}}\""
+    }
+  },
+  {
+    "eventId": -1,
+    "timestamp": "2026-09-20T22:10:04.136270Z",
+    "orchestratorStarted": {}
+  },
+  {
+    "eventId": -1,
+    "timestamp": "1970-01-01T00:00:00Z",
+    "taskCompleted": {
+      "taskScheduledId": 1,
+      "result": "\"{\\\"sent_messages\\\": [{\\\"message\\\": \\\"go\\\", \\\"target_id\\\": null, \\\"source_id\\\": \\\"seed\\\"}], \\\"outputs\\\": [], \\\"events\\\": [{\\\"type\\\": \\\"executor_invoked\\\", \\\"executor_id\\\": \\\"seed\\\", \\\"data\\\": \\\"go\\\"}, {\\\"type\\\": \\\"executor_completed\\\", \\\"executor_id\\\": \\\"seed\\\", \\\"data\\\": [\\\"go\\\"]}], \\\"shared_state_updates\\\": {}, \\\"shared_state_deletes\\\": [], \\\"pending_request_info_events\\\": []}\""
+    }
+  },
+  {
+    "eventId": 2,
+    "timestamp": "1970-01-01T00:00:00Z",
+    "taskScheduled": {
+      "name": "dafx-audit-mixed-a",
+      "input": "\"{\\\"executor_id\\\": \\\"a\\\", \\\"message\\\": \\\"go\\\", \\\"shared_state_snapshot\\\": {}, \\\"source_executor_ids\\\": [\\\"seed\\\"], \\\"is_hitl_response\\\": false, \\\"host_context\\\": {\\\"instance_id\\\": \\\"audit-mixed\\\", \\\"workflow_name\\\": \\\"audit-mixed\\\", \\\"request_path_prefix\\\": \\\"\\\"}}\""
+    }
+  },
+  {
+    "eventId": 3,
+    "timestamp": "1970-01-01T00:00:00Z",
+    "subOrchestrationInstanceCreated": {
+      "instanceId": "audit-mixed::sub::0",
+      "name": "dafx-audit-inner",
+      "input": "{\"_durable_workflow_version\": 2, \"input\": {\"__subworkflow_input__\": \"go\", \"__subworkflow_address__\": {\"root_instance_id\": \"audit-mixed\", \"root_workflow_name\": \"audit-mixed\", \"request_path_prefix\": \"sub~0~\"}}}"
+    }
+  },
+  {
+    "eventId": -1,
+    "timestamp": "2026-09-20T22:10:04.149679Z",
+    "orchestratorStarted": {}
+  },
+  {
+    "eventId": -1,
+    "timestamp": "1970-01-01T00:00:00Z",
+    "taskCompleted": {
+      "taskScheduledId": 2,
+      "result": "\"{\\\"sent_messages\\\": [], \\\"outputs\\\": [], \\\"events\\\": [{\\\"type\\\": \\\"executor_invoked\\\", \\\"executor_id\\\": \\\"a\\\", \\\"data\\\": \\\"go\\\"}, {\\\"type\\\": \\\"request_info\\\", \\\"data\\\": \\\"decision\\\", \\\"request_id\\\": \\\"a\\\", \\\"source_executor_id\\\": \\\"a\\\", \\\"response_type\\\": \\\"builtins:int\\\"}, {\\\"type\\\": \\\"executor_completed\\\", \\\"executor_id\\\": \\\"a\\\"}], \\\"shared_state_updates\\\": {}, \\\"shared_state_deletes\\\": [], \\\"pending_request_info_events\\\": [{\\\"request_id\\\": \\\"a\\\", \\\"source_executor_id\\\": \\\"a\\\", \\\"data\\\": \\\"decision\\\", \\\"request_type\\\": \\\"builtins:str\\\", \\\"response_type\\\": \\\"builtins:int\\\"}]}\""
+    }
+  }
+]
