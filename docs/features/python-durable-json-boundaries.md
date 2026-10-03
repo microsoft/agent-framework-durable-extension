@@ -109,6 +109,10 @@ rewrite that detached snapshot. This is local completion evidence, not remote re
 an external exactly-once guarantee. Tokenizer-only preparation and unclassified wrappers
 retain their conservative completion-only behavior.
 
+The observer relies on helpers exported by Core 1.19's compaction module; not
+every helper is re-exported by the top-level package. These source-level adapters
+do not certify all versions allowed by the dependency range.
+
 Core 1.19 recursively omits non-JSON metadata during ordinary serialization. The durable
 message snapshot retains nested metadata containers so strict JSON admission rejects an
 invalid member rather than committing only its serializable siblings. Flush and append
