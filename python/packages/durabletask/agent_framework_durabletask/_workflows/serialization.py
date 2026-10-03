@@ -102,9 +102,9 @@ def serialize_response_type(annotation: Any) -> str | dict[str, Any] | None:
     Concrete types retain the legacy module:qualname string representation. New
     generic requests use a closed, versioned JSON profile, never pickle or Python
     expressions. Core's HITL assignability supports list, dict, tuple, set, unions
-    and Any. Literal/Annotated/forward references are deliberately rejected here:
-    Core 1.13/1.16 cannot admit them through is_instance_of. Literal fields inside
-    a declared Pydantic model remain the model's responsibility.
+    and Any. Literal/Annotated/forward references remain deliberately rejected by
+    this closed durable descriptor, even when a newer Core can admit them.
+    Literal fields inside a declared Pydantic model remain the model's responsibility.
 
     Only registered executor request-info events may supply this annotation.
     Readers require custom types to be loaded by the application's registration,

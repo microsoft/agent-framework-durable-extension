@@ -955,7 +955,39 @@ def test_core_categories_keep_full_typed_content(kind: str, fields: dict[str, An
     expected = load_agent_response(source)
     shared = serialize_terminal_response(expected if as_instance else source)
     actual = _roundtrip(shared)
+    if as_instance and expected.messages[0].contents[0].exception is not None:
+        # Host diagnostics are not channel-visible data in Core 1.19.
+        expected.messages[0].contents[0].exception = "FunctionInvocationError"
     _assert_core_projection(actual.messages[0].contents[0], expected.messages[0].contents[0])
+
+
+@pytest.mark.parametrize("edge", ["self", "function_call", "items", "inputs", "outputs"])
+def test_core_exception_redaction_preserves_failure_marker_and_public_result(edge: str) -> None:
+    sensitive = "private-host-diagnostic-sentinel"
+    leaf = Content("function_result", call_id="call", result={"failed": True}, exception=sensitive)
+    outer = (
+        leaf
+        if edge == "self"
+        else Content(
+            "shell_tool_result" if edge == "outputs" else "function_result",
+            call_id="outer",
+            function_call=leaf if edge == "function_call" else None,
+            items=[leaf] if edge == "items" else None,
+            inputs=[leaf] if edge == "inputs" else None,
+            outputs=[leaf] if edge == "outputs" else None,
+        )
+    )
+    response = AgentResponse(messages=[Message("tool", [outer])])
+    shared = serialize_terminal_response(response)
+    assert sensitive not in json.dumps(shared)
+    loaded = load_terminal_response(shared).messages[0].contents[0]
+    result = loaded if edge == "self" else getattr(loaded, edge)
+    if isinstance(result, list):
+        result = result[0]
+    assert type(result) is Content
+    assert result.exception == "FunctionInvocationError"
+    assert result.result == {"failed": True}
+    assert leaf.exception == sensitive
 
 
 @pytest.mark.parametrize("approved", [False, True])

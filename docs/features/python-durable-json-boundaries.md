@@ -99,6 +99,29 @@ Compatibility tests pair literal shared-wire expectations and fixed projected fi
 round-trip/parity checks. Core constructor coverage tests detect new fields to review, but
 are not the sole oracle for the supported wire behavior.
 
+### Core 1.19 preparation and serialization
+
+The service observer snapshots the configured strategy's **post-compaction** dispatch,
+including Core's group, exclusion and token-count annotations. It uses Core's exported
+incremental annotation helpers, preserves a strategy-owned tokenizer, and records inputs
+only after the service response completes. Provider or outer-middleware mutations cannot
+rewrite that detached snapshot. This is local completion evidence, not remote receipt or
+an external exactly-once guarantee. Tokenizer-only preparation and unclassified wrappers
+retain their conservative completion-only behavior.
+
+Core 1.19 recursively omits non-JSON metadata during ordinary serialization. The durable
+message snapshot retains nested metadata containers so strict JSON admission rejects an
+invalid member rather than committing only its serializable siblings. Flush and append
+staging still roll back their local changes on rejection.
+
+Core assigns a function-call occurrence `Content.id` independently of the provider
+`call_id`. Approval delivery preserves both identities; they must not be conflated.
+Host-internal `Content.exception` diagnostics serialize as Core's fixed
+`FunctionInvocationError` marker, while public results remain intact. The existing
+durable HITL descriptor still rejects `Literal` and other unsupported annotations,
+even though newer Core admission supports `Literal`. No persisted descriptor or
+shared-state schema is expanded by these compatibility adapters.
+
 ## Polling failure boundaries
 
 SDK retrieval failures retain bounded retry. Missing state or an absent completion remains
