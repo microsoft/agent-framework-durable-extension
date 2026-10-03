@@ -3,6 +3,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
 using System.Text.Json;
+using AutoHistoryRetention;
 using Microsoft.Agents.AI.Compaction;
 using Microsoft.Agents.AI.DurableTask.State;
 using Microsoft.DurableTask.Client;
@@ -2730,6 +2731,126 @@ public sealed class AgentEntityHistoryTests
         Assert.Equal(1, client.InvocationCount);
         Assert.False(harness.StateWasPersisted);
         Assert.Equal(originalState, SerializeState(initialState));
+    }
+
+    [Fact]
+    public async Task DraftSampleProfileEvictsTranscriptButPreservesCompletionAndIdempotencyAsync()
+    {
+        const string FirstCorrelationId = "sample-first";
+        const string NewestCorrelationId = "sample-newest";
+        const string Marker = "FIRST-MARKER-ABC123";
+        const string ToolCallId = "sample-connected-tool-call";
+        ConcurrentQueue<string> measuredInstruments = new();
+        using MeterListener listener = new();
+        listener.InstrumentPublished = static (instrument, meterListener) =>
+        {
+            if (instrument.Meter.Name == DurableAgentTelemetry.MeterName)
+            {
+                meterListener.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>(
+            (instrument, _, _, _) => measuredInstruments.Enqueue(instrument.Name));
+        listener.Start();
+
+        RecordingChatClient client = new();
+        ChatClientAgent agent = new(client, name: "agent");
+        DurableAgentState state = new();
+        RunRequest firstRequest = new(
+            [
+                new ChatMessage(
+                    ChatRole.User,
+                    HistoryRetentionDemo.CreateFirstNote(
+                        "sample",
+                        Marker,
+                        new string('a', HistoryRetentionDemo.NotesPerTurn))),
+                new ChatMessage(
+                    ChatRole.Assistant,
+                    [new FunctionCallContent(ToolCallId, "remember_note")]),
+                new ChatMessage(
+                    ChatRole.Tool,
+                    [new FunctionResultContent(ToolCallId, "stored")]),
+            ])
+        {
+            CorrelationId = FirstCorrelationId,
+        };
+
+        state = await RunEntityAsync(
+            agent,
+            state,
+            firstRequest,
+            configureOptions: ConfigureDraftSampleRetention);
+        for (int turn = 2; turn <= HistoryRetentionDemo.ScenarioTurns; turn++)
+        {
+            string marker = turn == HistoryRetentionDemo.ScenarioTurns
+                ? "NEWEST-PRESSURE"
+                : $"MIDDLE-{turn}";
+            state = await RunEntityAsync(
+                agent,
+                DeserializeState(SerializeState(state)),
+                new RunRequest(
+                    HistoryRetentionDemo.CreateLaterNote(
+                        "sample",
+                        turn,
+                        $"{marker} {new string((char)('a' + turn - 1), HistoryRetentionDemo.NotesPerTurn)}"))
+                {
+                    CorrelationId = turn == HistoryRetentionDemo.ScenarioTurns
+                        ? NewestCorrelationId
+                        : $"sample-middle-{turn}",
+                },
+                configureOptions: ConfigureDraftSampleRetention);
+        }
+
+        Assert.NotNull(state.Data.Truncation);
+        Assert.DoesNotContain(
+            state.Data.ConversationHistory,
+            entry => entry.CorrelationId == FirstCorrelationId);
+        Assert.Contains(
+            state.Data.ConversationHistory,
+            entry => entry.CorrelationId == NewestCorrelationId);
+        Assert.DoesNotContain(
+            state.Data.ConversationHistory
+                .SelectMany(entry => entry.Messages)
+                .SelectMany(message => message.Contents),
+            content =>
+                content is DurableAgentStateFunctionCallContent { CallId: ToolCallId } ||
+                content is DurableAgentStateFunctionResultContent { CallId: ToolCallId });
+        Assert.Contains(FirstCorrelationId, state.Data.TerminalResults!.Keys);
+        Assert.Contains(FirstCorrelationId, state.Data.CompletionReceipts!.Keys);
+        Assert.Contains(
+            measuredInstruments,
+            instrumentName => instrumentName.EndsWith(
+                ".operations",
+                StringComparison.Ordinal));
+
+        DurableAgentState reloaded = DeserializeState(SerializeState(state));
+        RecordingChatClient duplicateClient = new();
+        AgentResponse duplicate = await CreateHarness(
+            new ChatClientAgent(duplicateClient, name: "agent"),
+            reloaded,
+            configureOptions: ConfigureDraftSampleRetention).RunAsync(
+                new RunRequest("different request") { CorrelationId = FirstCorrelationId });
+        Assert.Equal("response", duplicate.Text);
+        Assert.Equal(0, duplicateClient.InvocationCount);
+
+        RecordingChatClient diagnosticClient = new();
+        _ = await RunEntityAsync(
+            new ChatClientAgent(diagnosticClient, name: "agent"),
+            DeserializeState(SerializeState(state)),
+            new RunRequest(HistoryRetentionDemo.DiagnosticQuestion)
+            {
+                CorrelationId = "sample-diagnostic",
+            },
+            configureOptions: ConfigureDraftSampleRetention);
+        Assert.DoesNotContain(
+            diagnosticClient.LastMessages,
+            message => message.Text?.Contains(Marker, StringComparison.Ordinal) is true);
+
+        static void ConfigureDraftSampleRetention(DurableAgentsOptions options)
+        {
+            options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+            options.MaxStateBytes = HistoryRetentionDemo.MaxStateBytes;
+        }
     }
 
     [Fact]

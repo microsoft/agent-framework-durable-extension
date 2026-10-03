@@ -31,6 +31,15 @@ internal sealed class TestLoggerProvider(ITestOutputHelper output) : ILoggerProv
             .AsReadOnly();
     }
 
+    public IReadOnlyCollection<LogEntry> GetAgentLogs(string agentName)
+    {
+        // Entity names are case-insensitive and normalized by the Durable Task SDK.
+        string categoryPrefix = $"Microsoft.DurableTask.Agents.{agentName}.";
+        return this.GetAllLogs()
+            .Where(log => log.Category.StartsWith(categoryPrefix, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+    }
+
     public void Clear()
     {
         foreach (TestLogger logger in this._loggers.Values.OfType<TestLogger>())
