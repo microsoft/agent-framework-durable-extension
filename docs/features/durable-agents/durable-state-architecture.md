@@ -129,6 +129,27 @@ External providers must declare continuation `StateKeys`, and every declared key
 
 The application or external provider remains responsible for availability, authorization, retention, deletion, residency, consistency, idempotency, and uncertain acknowledgement handling for history stored outside the entity. The durable extension is responsible for restoring the recorded continuation, selecting only one context source, and failing closed when it cannot prove a compatible owner.
 
+### Pending provider initialization profile
+
+The internal .NET schema-2 writer uses a separately identified version-1 profile in the existing opaque `historyBinding` carrier for an observed external-provider callback failure before any provider continuation was durably committed:
+
+```json
+{
+  "profile": "Microsoft.Agents.AI.DurableTask.pendingProviderInitialization",
+  "version": 1,
+  "providerKey": "orders-history.v1"
+}
+```
+
+This is not an ordinary fixed or provisional owner binding. Existing provisional profiles still require continuation and are not reinterpreted. Positive emission provenance comes from Durable Task .NET SDK 1.18.0 `TaskEntity<TState>.RunAsync`: it calls `InitializeState` only when `operation.State.GetState` returns no current state. `AgentEntity` captures the newly created mailbox object's identity, resets that evidence at each `ITaskEntity` dispatch, and also requires a pristine pre-invocation shape: no session, binding, transcript, ingestion positions, truncation or prior results/receipts. Only an observed callback failure in that operation can commit the pending profile with its sanitized failed result and receipt. Migration, import, pruning and cleanup never mint it. Empty state, failed-only receipts and result-expiry bookkeeping cannot prove this provenance.
+
+Before a new correlation invokes callbacks, the execution reader validates the discriminator, version, original trusted configured provider key, external-provider pipeline and compatible failed-only mailbox shape, rejecting malformed, unsupported or contradictory profiles. After payload expiry, the persisted profile supplies the initialization authority; the unavailable failed receipt alone does not. Further observed callback failures preserve the profile and earlier receipts. A successful new request replaces it with the ordinary fixed binding only after real declared provider continuation and the serialized session's ability to restore it validate. Cancellation, ownership, serialization and entity commit failures roll back that transition. Old correlations are resolved first and remain typed terminal failures or unavailable results with zero provider/model callbacks.
+
+The profile proves only that no provider continuation was durably committed. Initialization uses a new correlation; it does not replay, reconcile or undo the failed external operation, prove that input was not accepted, or make external effects atomic. The inline version-1 fixtures and malformed/unsupported/unknown variants in `AgentEntityProviderFailureTests` exercise SDK batch dispatch and serialized cold reload, including actual legacy-migrated failed-mailbox rejection.
+
+> [!WARNING]
+> Supporting this root schema version does not imply support for this runtime profile. Passive readers preserve unknown `historyBinding` profiles opaquely; execution requires a reader implementing these pending-initialization semantics or deployment isolation. Older .NET execution readers do not universally reject opaque profiles in every ownership path, so unknown-field preservation is not safe older-worker rollback certification. This profile adds no root/shared-schema fields or version bump and makes no Python behavior or cross-language activation guarantee.
+
 ## History configuration
 
 Closed public replay choices are represented by `DurableAgentHistoryReplayMode`, with `PreloadEntityHistory` and `CurrentRequestOnly`. Pressure-retention choices remain an internal enum alongside the default-off schema-2 writer gate; applications are not offered an activation surface that the public rollout cannot yet support. History ownership is also a closed internal enum after resolution.

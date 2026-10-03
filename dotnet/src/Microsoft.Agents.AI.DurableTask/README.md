@@ -97,6 +97,17 @@ existing failure-bearing response envelope so the SDK can commit the operation; 
 `State` would roll back both state and outbox. Polling and duplicate delivery then surface the recorded
 failure, and payload expiry preserves its failed, nonexecutable completion.
 
+If that observed failure occurs in a mailbox generation created by the SDK dispatcher during this
+operation, with no pre-invocation session, binding, transcript, ingestion, truncation or prior completion,
+the same commit records a version-1 .NET `pendingProviderInitialization` profile in opaque `historyBinding`.
+It binds the configured logical provider key without inventing a session or claiming input was not accepted.
+A genuinely new correlation may initialize the same external provider; old correlations still resolve their
+failed or unavailable outcome before profile handling and never execute. The profile survives payload cleanup
+and further observed callback failures. Only validated real continuation, including restoration from the
+serialized session, replaces it with the ordinary fixed-owner binding in a successful commit. Empty imported
+or migrated mailboxes and failed-only receipts cannot mint this profile.
+See the [profile shape and compatibility requirements](../../../docs/features/durable-agents/durable-state-architecture.md#pending-provider-initialization-profile).
+
 A separate internal capability can commit
 a provider failure only when a certified adapter explicitly attests the provider phase (`Load`, `Invoke`,
 or `Store`), finality (`NonRetryable` or `RetriesExhausted`), and accepted input. The runtime then serializes
@@ -111,7 +122,8 @@ reconstruct receipts for results already evicted from legacy state.
 
 Focused regressions execute the real Durable Task SDK transactional entity batch dispatcher and reload its
 serialized state. They cover callback failure, failure transport, polling, cold duplicates, payload expiry
-and state/result/outbox rollback. They do not certify a hosted backend, provider acknowledgement, external
+and state/result/outbox rollback, including first-generation recovery and rejected pruned legacy-failure
+adoption. They do not certify a hosted backend, provider acknowledgement, external
 exactly-once effects, cross-language activation, or any public schema-2 rollout. Schema 1.2 and `KeepAll`
 remain the public defaults; migration and receipt-deleting TTL gates remain unchanged.
 

@@ -2,6 +2,7 @@
 
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using DurableTask.Core.Entities;
 using DurableTask.Core.Entities.OperationFormat;
 using Microsoft.Agents.AI.DurableTask.State;
@@ -109,7 +110,7 @@ public sealed class AgentEntityProviderFailureTests
     [Theory]
     [InlineData("load")]
     [InlineData("storeAfter")]
-    public async Task FirstFailureDoesNotInventSessionBindingOrInputAcceptanceAsync(string stage)
+    public async Task FirstFailureRecordsOnlyPendingProfileWithoutContinuationOrInputAcceptanceAsync(string stage)
     {
         ProbeProvider provider = new() { Stage = stage, Failure = new IOException(PrivateMarker) };
         EntityBatchResult failed = await DispatchAsync(CreateAgent(new ProbeClient(), provider), null, "failed");
@@ -117,10 +118,437 @@ public sealed class AgentEntityProviderFailureTests
         Assert.Null(Result(failed).FailureDetails);
         DurableAgentState state = ReadState(failed);
         Assert.Null(state.Data.Session);
-        Assert.Equal(JsonValueKind.Undefined, state.Data.HistoryBinding.ValueKind);
+        Assert.Equal(PendingProfileJson, state.Data.HistoryBinding.GetRawText());
+        Assert.Null(DurableAgentHistoryBinding.Parse(state.Data.HistoryBinding));
         Assert.Empty(state.Data.ConversationHistory);
         Assert.Null(state.Data.IngestedPositions);
         Assert.Equal(DurableAgentStateCompletionReceipt.FailedOutcome, Assert.Single(state.Data.CompletionReceipts!).Value.Outcome);
+    }
+
+    [Theory]
+    [InlineData("load", false)]
+    [InlineData("storeAfter", false)]
+    [InlineData("load", true)]
+    [InlineData("storeAfter", true)]
+    public async Task FirstFailureAllowsNewCorrelationAfterColdRecoveryAsync(string stage, bool expire)
+    {
+        ProbeProvider provider = new() { Stage = stage, Failure = new IOException(PrivateMarker) };
+        EntityBatchResult failed = await DispatchAsync(CreateAgent(new ProbeClient(), provider), null, "failed");
+        Assert.Null(Result(failed).FailureDetails);
+        DurableAgentState committed = ReadState(failed);
+        string failedReceipt = JsonSerializer.Serialize(committed.Data.CompletionReceipts!["failed"]);
+        string failedResult = JsonSerializer.Serialize(committed.Data.TerminalResults!["failed"]);
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(5));
+        DurableAgentTerminalException polled = await Assert.ThrowsAsync<DurableAgentTerminalException>(
+            () => AgentRunHandleTests.CreateHandle(committed, correlationId: "failed", timeProvider: new Clock())
+                .ReadAgentResponseAsync(timeout.Token));
+        Assert.Equal(ObservedChatHistoryProvider.FailureCode, polled.Code);
+
+        ProbeProvider recoveredProvider = new();
+        ProbeClient recoveredClient = new();
+        ChatClientAgent recoveredAgent = CreateAgent(recoveredClient, recoveredProvider);
+        DateTimeOffset now = expire ? s_now.AddMinutes(2) : s_now;
+        string coldState = s_converter.Serialize(committed);
+        if (expire)
+        {
+            EntityBatchResult cleanup = await DispatchAsync(recoveredAgent, coldState, "unused",
+                operationName: nameof(AgentEntity.CheckAndExpireResults), now: now);
+            Assert.Null(Result(cleanup).FailureDetails);
+            Assert.Equal(PendingProfileJson, ReadState(cleanup).Data.HistoryBinding.GetRawText());
+            coldState = s_converter.Serialize(ReadState(cleanup));
+        }
+        EntityBatchResult duplicate = await DispatchAsync(recoveredAgent, coldState, "failed", emptyInput: true, now: now);
+        Assert.Equal(expire
+            ? typeof(DurableAgentResultUnavailableException).FullName
+            : typeof(DurableAgentTerminalException).FullName, Failure(duplicate).ErrorType);
+        Assert.Equal(coldState, duplicate.EntityState);
+        Assert.Equal(0, recoveredProvider.LoadCount);
+        Assert.Equal(0, recoveredProvider.StoreCount);
+        Assert.Equal(0, recoveredClient.Count);
+
+        EntityBatchResult next = await DispatchAsync(recoveredAgent, duplicate.EntityState, "next", now: now);
+
+        Assert.Null(Result(next).FailureDetails);
+        Assert.Equal(1, recoveredProvider.LoadCount);
+        Assert.Equal(1, recoveredProvider.StoreCount);
+        Assert.Equal(1, recoveredClient.Count);
+        Assert.Null(recoveredProvider.RestoredVersion);
+        DurableAgentState succeeded = ReadState(next);
+        Assert.Equal(DurableAgentStateCompletionReceipt.FailedOutcome, succeeded.Data.CompletionReceipts!["failed"].Outcome);
+        if (expire)
+        {
+            Assert.False(succeeded.Data.TerminalResults!.ContainsKey("failed"));
+            Assert.Equal(DurableAgentStateCompletionReceipt.UnavailableResult, succeeded.Data.CompletionReceipts["failed"].ResultState);
+        }
+        else
+        {
+            Assert.Equal(failedReceipt, JsonSerializer.Serialize(succeeded.Data.CompletionReceipts["failed"]));
+            Assert.Equal(failedResult, JsonSerializer.Serialize(succeeded.Data.TerminalResults!["failed"]));
+        }
+        Assert.Equal(DurableAgentStateCompletionReceipt.SucceededOutcome, succeeded.Data.CompletionReceipts["next"].Outcome);
+        Assert.NotNull(succeeded.Data.Session);
+        DurableAgentStateHistoryBinding binding = Assert.IsType<DurableAgentStateHistoryBinding>(
+            DurableAgentHistoryBinding.Parse(succeeded.Data.HistoryBinding));
+        Assert.True(DurableAgentHistoryBinding.IsSealedByCSharp(binding));
+        Assert.Equal("probe.v1", binding.ProviderKey);
+        Assert.Equal(DurableAgentStateHistoryBinding.HistoryProviderOwner, binding.OwnerKind);
+
+        ProbeProvider continuationProvider = new();
+        ProbeClient continuationClient = new();
+        EntityBatchResult continued = await DispatchAsync(CreateAgent(continuationClient, continuationProvider),
+            s_converter.Serialize(succeeded), "continued", now: now);
+        Assert.Null(Result(continued).FailureDetails);
+        Assert.Equal(1, continuationProvider.RestoredVersion);
+        Assert.Equal(1, continuationProvider.LoadCount);
+        Assert.Equal(1, continuationProvider.StoreCount);
+        Assert.Equal(1, continuationClient.Count);
+        Assert.Equal(DurableAgentStateCompletionReceipt.FailedOutcome, ReadState(continued).Data.CompletionReceipts!["failed"].Outcome);
+        EntityBatchResult oldDuplicate = await DispatchAsync(CreateAgent(continuationClient, continuationProvider),
+            continued.EntityState, "failed", emptyInput: true, now: now);
+        Assert.Equal(expire
+            ? typeof(DurableAgentResultUnavailableException).FullName
+            : typeof(DurableAgentTerminalException).FullName, Failure(oldDuplicate).ErrorType);
+        Assert.Equal(continued.EntityState, oldDuplicate.EntityState);
+        Assert.Equal(1, continuationProvider.LoadCount);
+        Assert.Equal(1, continuationProvider.StoreCount);
+        Assert.Equal(1, continuationClient.Count);
+    }
+
+    private const string PendingProfileJson =
+        "{\"profile\":\"Microsoft.Agents.AI.DurableTask.pendingProviderInitialization\",\"version\":1,\"providerKey\":\"probe.v1\"}";
+
+    [Theory]
+    [InlineData("load")]
+    [InlineData("storeAfter")]
+    public async Task RepeatedInitializationFailuresKeepProfileUntilGenuineContinuationAsync(string stage)
+    {
+        string? coldState = null;
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            ProbeProvider provider = new() { Stage = stage, Failure = new IOException(PrivateMarker) };
+            ProbeClient client = new();
+            EntityBatchResult failed = await DispatchAsync(CreateAgent(client, provider), coldState, $"failed-{attempt}");
+            Assert.Null(Result(failed).FailureDetails);
+            DurableAgentState state = ReadState(failed);
+            Assert.Equal(PendingProfileJson, state.Data.HistoryBinding.GetRawText());
+            Assert.Null(state.Data.Session);
+            Assert.Empty(state.Data.ConversationHistory);
+            Assert.Equal(attempt, state.Data.CompletionReceipts!.Count);
+            Assert.All(state.Data.CompletionReceipts.Values,
+                receipt => Assert.Equal(DurableAgentStateCompletionReceipt.FailedOutcome, receipt.Outcome));
+            Assert.Equal(1, provider.LoadCount);
+            Assert.Equal(stage == "load" ? 0 : 1, client.Count);
+            coldState = s_converter.Serialize(state);
+        }
+        ProbeProvider recovered = new();
+        EntityBatchResult success = await DispatchAsync(CreateAgent(new ProbeClient(), recovered), coldState, "recovered");
+        Assert.Null(Result(success).FailureDetails);
+        Assert.NotNull(ReadState(success).Data.Session);
+        Assert.True(DurableAgentHistoryBinding.IsSealedByCSharp(
+            DurableAgentHistoryBinding.Parse(ReadState(success).Data.HistoryBinding)));
+        Assert.Equal(4, ReadState(success).Data.CompletionReceipts!.Count);
+    }
+
+    [Theory]
+    [InlineData("different.v1")]
+    [InlineData(null)]
+    public async Task PendingInitializationRejectsWrongOrMissingConfiguredKeyAsync(string? providerKey)
+    {
+        EntityBatchResult failed = await CreateFirstFailureAsync();
+        ProbeProvider provider = new();
+        ProbeClient client = new();
+        EntityBatchResult next = await DispatchAsync(CreateAgent(client, provider), failed.EntityState, "next",
+            providerKey: providerKey);
+        Assert.Equal(typeof(DurableAgentHistoryBindingMismatchException).FullName, Failure(next).ErrorType);
+        Assert.Equal(failed.EntityState, next.EntityState);
+        Assert.Empty(Actions(next));
+        Assert.Equal(0, provider.LoadCount);
+        Assert.Equal(0, provider.StoreCount);
+        Assert.Equal(0, client.Count);
+        EntityBatchResult duplicate = await DispatchAsync(CreateAgent(client, provider), failed.EntityState, "failed",
+            providerKey: providerKey);
+        Assert.Equal(typeof(DurableAgentTerminalException).FullName, Failure(duplicate).ErrorType);
+        Assert.Equal(0, provider.LoadCount);
+        Assert.Equal(0, client.Count);
+    }
+
+    [Fact]
+    public async Task PendingInitializationRejectsEntityOwnedReplacementBeforeModelAsync()
+    {
+        EntityBatchResult failed = await CreateFirstFailureAsync();
+        ProbeClient client = new();
+        ChatClientAgent agent = new(client, new ChatClientAgentOptions { Name = "agent" });
+        EntityBatchResult next = await DispatchAsync(agent, failed.EntityState, "next");
+        Assert.Equal(typeof(DurableAgentHistoryBindingMismatchException).FullName, Failure(next).ErrorType);
+        Assert.Equal(failed.EntityState, next.EntityState);
+        Assert.Equal(0, client.Count);
+    }
+
+    [Theory]
+    [InlineData("unsupported")]
+    [InlineData("versionType")]
+    [InlineData("missingVersion")]
+    [InlineData("invalidKey")]
+    [InlineData("missingKey")]
+    [InlineData("fixedOwner")]
+    [InlineData("provisionalOwner")]
+    [InlineData("unknown")]
+    public async Task PendingProfileValidationPreservesOpaqueStateAndRejectsBeforeCallbacksAsync(string mutation)
+    {
+        EntityBatchResult failed = await CreateFirstFailureAsync();
+        JsonNode root = JsonNode.Parse(failed.EntityState!)!;
+        JsonNode binding = root["data"]!["historyBinding"]!;
+        switch (mutation)
+        {
+            case "unsupported": binding["version"] = 2; break;
+            case "versionType": binding["version"] = "1"; break;
+            case "missingVersion": binding.AsObject().Remove("version"); break;
+            case "invalidKey": binding["providerKey"] = " "; break;
+            case "missingKey": binding.AsObject().Remove("providerKey"); break;
+            case "fixedOwner": binding["csharpFixedOwner"] = true; break;
+            case "provisionalOwner": binding["ownerKind"] = "historyProvider"; break;
+            default: binding["profile"] = "future.pendingInitialization"; break;
+        }
+        string original = root.ToJsonString();
+        DurableAgentState roundtrip = Assert.IsType<DurableAgentState>(
+            s_converter.Deserialize(original, typeof(DurableAgentState)));
+        Assert.Equal(binding.ToJsonString(), roundtrip.Data.HistoryBinding.GetRawText());
+        ProbeProvider provider = new();
+        ProbeClient client = new();
+        EntityBatchResult next = await DispatchAsync(CreateAgent(client, provider), original, "next");
+        Assert.Equal(typeof(DurableAgentHistoryBindingMismatchException).FullName, Failure(next).ErrorType);
+        Assert.Equal(original, next.EntityState);
+        Assert.Empty(Actions(next));
+        Assert.Equal(0, provider.LoadCount);
+        Assert.Equal(0, provider.StoreCount);
+        Assert.Equal(0, client.Count);
+    }
+
+    [Theory]
+    [InlineData("session")]
+    [InlineData("transcript")]
+    [InlineData("ingestion")]
+    [InlineData("truncation")]
+    [InlineData("success")]
+    [InlineData("otherFailure")]
+    [InlineData("corrupt")]
+    public async Task PendingProfileRejectsContradictoryContinuityAndCorruptionAsync(string evidence)
+    {
+        EntityBatchResult failed = await CreateFirstFailureAsync();
+        DurableAgentState state = ReadState(failed);
+        switch (evidence)
+        {
+            case "session": state.Data.Session = JsonSerializer.SerializeToElement(new { }); break;
+            case "transcript":
+                state.Data.ConversationHistory.Add(DurableAgentStateRequest.FromRunRequestV2(
+                    new RunRequest("history") { CorrelationId = "prior" }));
+                break;
+            case "ingestion": state.Data.IngestedPositions = new Dictionary<string, JsonElement>(); break;
+            case "truncation":
+                state.Data.Truncation = new()
+                {
+                    EvictedMessageCount = JsonSerializer.SerializeToElement(1),
+                    FirstEvictedAt = s_now,
+                    LastEvictedAt = s_now,
+                };
+                break;
+            case "success":
+                DurableAgentStateOutcomeResolver.AddSuccessfulResult(
+                    state, "prior", new AgentResponse(new ChatMessage(ChatRole.Assistant, "response")), s_now);
+                break;
+            case "otherFailure":
+                DurableAgentStateOutcomeResolver.AddFailedResult(
+                    state, "prior", new AgentResponse(), new() { Code = "other", Message = "other" }, s_now);
+                break;
+        }
+        string original = s_converter.Serialize(state);
+        if (evidence == "corrupt")
+        {
+            JsonNode root = JsonNode.Parse(original)!;
+            root["data"]!["completionReceipts"]!["failed"]!["outcome"] = "succeeded";
+            original = root.ToJsonString();
+        }
+        ProbeProvider provider = new();
+        ProbeClient client = new();
+        EntityBatchResult next = await DispatchAsync(CreateAgent(client, provider), original, "next");
+        Assert.NotNull(Result(next).FailureDetails);
+        Assert.Equal(original, next.EntityState);
+        Assert.Empty(Actions(next));
+        Assert.Equal(0, provider.LoadCount);
+        Assert.Equal(0, provider.StoreCount);
+        Assert.Equal(0, client.Count);
+    }
+
+    [Fact]
+    public async Task PendingInitializationCannotSealWithoutRealContinuationAsync()
+    {
+        EntityBatchResult failed = await CreateFirstFailureAsync();
+        ProbeProvider provider = new() { SkipContinuationWrite = true };
+        ProbeClient client = new();
+        EntityBatchResult next = await DispatchAsync(CreateAgent(client, provider), failed.EntityState, "next");
+        Assert.Equal(typeof(DurableAgentHistoryBindingMismatchException).FullName, Failure(next).ErrorType);
+        Assert.Equal(failed.EntityState, next.EntityState);
+        Assert.Empty(Actions(next));
+        Assert.Equal(1, provider.LoadCount);
+        Assert.Equal(1, provider.StoreCount);
+        Assert.Equal(1, client.Count);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PendingInitializationRequiresRestorableSerializedContinuationAsync(bool throwOnSerialize)
+    {
+        EntityBatchResult failed = await CreateFirstFailureAsync();
+        ProbeProvider provider = new();
+        ProbeClient client = new();
+        DamagedSerializationAgent agent = new(CreateAgent(client, provider), throwOnSerialize);
+        EntityBatchResult next = await DispatchAsync(agent, failed.EntityState, "next");
+        Assert.Equal(throwOnSerialize
+            ? typeof(JsonException).FullName
+            : typeof(DurableAgentHistoryBindingMismatchException).FullName, Failure(next).ErrorType);
+        Assert.Equal(failed.EntityState, next.EntityState);
+        Assert.Empty(Actions(next));
+        Assert.Equal(1, provider.LoadCount);
+        Assert.Equal(1, provider.StoreCount);
+        Assert.Equal(1, client.Count);
+    }
+
+    [Theory]
+    [InlineData("state")]
+    [InlineData("response")]
+    [InlineData("afterDispatch")]
+    public async Task PendingToFixedBindingCommitFailurePreservesInitializationAuthorityAsync(string boundary)
+    {
+        EntityBatchResult failed = await CreateFirstFailureAsync();
+        ProbeProvider provider = new();
+        ProbeClient client = new();
+        ChatClientAgent agent = CreateAgent(client, provider);
+        EntityBatchResult rejected = await DispatchAsync(agent, failed.EntityState, "next", failBoundary: boundary);
+        Assert.Equal(typeof(CommitFailureException).FullName, Failure(rejected).ErrorType);
+        Assert.Equal(failed.EntityState, rejected.EntityState);
+        Assert.Empty(Actions(rejected));
+        EntityBatchResult next = await DispatchAsync(agent, rejected.EntityState, "next");
+        Assert.Null(Result(next).FailureDetails);
+        Assert.Equal(2, provider.LoadCount);
+        Assert.Equal(2, client.Count);
+        Assert.True(DurableAgentHistoryBinding.IsSealedByCSharp(
+            DurableAgentHistoryBinding.Parse(ReadState(next).Data.HistoryBinding)));
+        Assert.Equal(DurableAgentStateCompletionReceipt.FailedOutcome, ReadState(next).Data.CompletionReceipts!["failed"].Outcome);
+    }
+
+    [Fact]
+    public async Task FirstFailureAndNewInitializationInSameSdkBatchKeepOperationScopedProvenanceAsync()
+    {
+        ProbeProvider provider = new() { Stage = "load", Failure = new IOException(PrivateMarker) };
+        provider.BeforeFailure = () => provider.Stage = null;
+        ProbeClient client = new();
+        EntityBatchResult batch = await DispatchAsync(CreateAgent(client, provider), null, "failed",
+            correlations: ["failed", "next", "failed"]);
+        List<OperationResult> results = Assert.IsType<List<OperationResult>>(batch.Results);
+        Assert.Equal(3, results.Count);
+        Assert.Null(results[0].FailureDetails);
+        Assert.Null(results[1].FailureDetails);
+        Assert.Equal(typeof(DurableAgentTerminalException).FullName, results[2].FailureDetails!.ErrorType);
+        Assert.Equal(2, provider.LoadCount);
+        Assert.Equal(1, provider.StoreCount);
+        Assert.Equal(1, client.Count);
+        Assert.Null(provider.RestoredVersion);
+        DurableAgentState state = ReadState(batch);
+        Assert.Equal(2, state.Data.CompletionReceipts!.Count);
+        Assert.True(DurableAgentHistoryBinding.IsSealedByCSharp(DurableAgentHistoryBinding.Parse(state.Data.HistoryBinding)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExistingOrMigratedEmptyMailboxFailureDoesNotMintPendingInitializationAsync(bool migrate)
+    {
+        DurableAgentState empty = new()
+        {
+            SchemaVersion = DurableAgentState.RevisedSchemaVersion,
+            PersistentRequestOutcomesAuthorized = true,
+            Data = new()
+            {
+                TerminalResults = new Dictionary<string, DurableAgentStateTerminalResult>(),
+                CompletionReceipts = new Dictionary<string, DurableAgentStateCompletionReceipt>(),
+            },
+        };
+        EntityBatchResult failed = await DispatchAsync(
+            CreateAgent(new ProbeClient(), new ProbeProvider { Stage = "load", Failure = new IOException(PrivateMarker) }),
+            s_converter.Serialize(migrate ? new DurableAgentState() : empty), "failed", authorizeMigration: migrate);
+        Assert.Null(Result(failed).FailureDetails);
+        Assert.Equal(JsonValueKind.Undefined, ReadState(failed).Data.HistoryBinding.ValueKind);
+        ProbeProvider recovered = new();
+        ProbeClient client = new();
+        EntityBatchResult next = await DispatchAsync(CreateAgent(client, recovered), failed.EntityState, "next");
+        Assert.Equal(typeof(DurableAgentHistoryBindingMismatchException).FullName, Failure(next).ErrorType);
+        Assert.Equal(0, recovered.LoadCount);
+        Assert.Equal(0, client.Count);
+    }
+
+    [Theory]
+    [InlineData("state")]
+    [InlineData("response")]
+    [InlineData("afterDispatch")]
+    public async Task FirstFailureCommitRollbackDoesNotPublishPendingProfileAsync(string boundary)
+    {
+        EntityBatchResult failed = await DispatchAsync(
+            CreateAgent(new ProbeClient(), new ProbeProvider { Stage = "storeAfter", Failure = new IOException(PrivateMarker) }),
+            null, "failed", failBoundary: boundary);
+        Assert.Equal(typeof(CommitFailureException).FullName, Failure(failed).ErrorType);
+        Assert.Null(failed.EntityState);
+        Assert.Empty(Actions(failed));
+        EntityBatchResult recovered = await DispatchAsync(CreateAgent(new ProbeClient(), new ProbeProvider()), failed.EntityState, "next");
+        Assert.Null(Result(recovered).FailureDetails);
+        Assert.Single(ReadState(recovered).Data.CompletionReceipts!);
+    }
+
+    private static Task<EntityBatchResult> CreateFirstFailureAsync() => DispatchAsync(
+        CreateAgent(new ProbeClient(), new ProbeProvider { Stage = "load", Failure = new IOException(PrivateMarker) }),
+        null, "failed");
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PrunedMigratedFailedMailboxCannotInitializeReplacementProviderAsync(bool unavailable)
+    {
+        DurableAgentState legacy = new();
+        legacy.Data.ConversationHistory.Add(new DurableAgentStateErrorResponse
+        {
+            CorrelationId = "failed",
+            CreatedAt = s_now,
+        });
+        DurableAgentState migrated = DurableAgentStateOutcomeResolver.PrepareRevisedWorkingState(
+            legacy, hasAuthoritativeLegacyHistory: true);
+        migrated.Data.ConversationHistory.Clear();
+        if (unavailable)
+        {
+            migrated.Data.TerminalResults!.Clear();
+            migrated.Data.CompletionReceipts!["failed"] = new DurableAgentStateCompletionReceipt
+            {
+                CorrelationId = "failed",
+                Outcome = DurableAgentStateCompletionReceipt.FailedOutcome,
+                CompletedAt = s_now,
+                ResultState = DurableAgentStateCompletionReceipt.UnavailableResult,
+                ResultUnavailableAt = s_now.AddMinutes(1),
+            };
+        }
+        ProbeProvider provider = new();
+        ProbeClient client = new();
+        ChatClientAgent agent = CreateAgent(client, provider);
+        EntityBatchResult cleanup = await DispatchAsync(agent, s_converter.Serialize(migrated), "unused",
+            operationName: nameof(AgentEntity.CheckAndExpireResults), now: s_now.AddMinutes(2));
+        Assert.Null(Result(cleanup).FailureDetails);
+
+        EntityBatchResult next = await DispatchAsync(agent, cleanup.EntityState, "next", now: s_now.AddMinutes(2));
+
+        Assert.Equal(typeof(DurableAgentHistoryBindingMismatchException).FullName, Failure(next).ErrorType);
+        Assert.Equal(cleanup.EntityState, next.EntityState);
+        Assert.Empty(Actions(next));
+        Assert.Equal(0, provider.LoadCount);
+        Assert.Equal(0, provider.StoreCount);
+        Assert.Equal(0, client.Count);
     }
 
     [Fact]
@@ -186,18 +614,24 @@ public sealed class AgentEntityProviderFailureTests
     }
 
     [Theory]
-    [InlineData("load", "cancel")]
-    [InlineData("storeAfter", "cancel")]
-    [InlineData("load", "argument")]
-    [InlineData("storeAfter", "json")]
-    [InlineData("load", "corrupt")]
-    [InlineData("storeAfter", "shutdown")]
-    public async Task CancellationInvalidInputAndCorruptionDoNotCreateCompletionAsync(string stage, string kind)
+    [InlineData("load", "cancel", false)]
+    [InlineData("storeAfter", "cancel", false)]
+    [InlineData("load", "argument", false)]
+    [InlineData("storeAfter", "json", false)]
+    [InlineData("load", "corrupt", false)]
+    [InlineData("storeAfter", "shutdown", false)]
+    [InlineData("load", "cancel", true)]
+    [InlineData("storeAfter", "cancel", true)]
+    [InlineData("load", "argument", true)]
+    [InlineData("storeAfter", "json", true)]
+    [InlineData("load", "corrupt", true)]
+    [InlineData("storeAfter", "shutdown", true)]
+    public async Task CancellationInvalidInputAndCorruptionDoNotCreateCompletionAsync(string stage, string kind, bool first)
     {
         using CancellationTokenSource stopping = new();
         ProbeProvider provider = new();
         ChatClientAgent agent = CreateAgent(new ProbeClient(), provider);
-        EntityBatchResult seed = await DispatchAsync(agent, null, "seed");
+        string? initialState = first ? null : (await DispatchAsync(agent, null, "seed")).EntityState;
         provider.Stage = stage;
         provider.Failure = kind switch
         {
@@ -212,12 +646,15 @@ public sealed class AgentEntityProviderFailureTests
             provider.BeforeFailure = stopping.Cancel;
         }
 
-        EntityBatchResult failed = await DispatchAsync(agent, seed.EntityState, "failed", stopping: stopping.Token);
+        EntityBatchResult failed = await DispatchAsync(agent, initialState, "failed", stopping: stopping.Token);
 
         Assert.NotNull(Result(failed).FailureDetails);
-        Assert.Equal(seed.EntityState, failed.EntityState);
+        Assert.Equal(initialState, failed.EntityState);
         Assert.Empty(Actions(failed));
-        Assert.False(ReadState(failed).Data.CompletionReceipts!.ContainsKey("failed"));
+        if (!first)
+        {
+            Assert.False(ReadState(failed).Data.CompletionReceipts!.ContainsKey("failed"));
+        }
     }
 
     [Fact]
@@ -282,7 +719,7 @@ public sealed class AgentEntityProviderFailureTests
         new(client, new ChatClientAgentOptions { Name = "agent", ChatHistoryProvider = provider });
 
     private static async Task<EntityBatchResult> DispatchAsync(
-        ChatClientAgent agent,
+        AIAgent agent,
         string? state,
         string correlation,
         bool mailbox = true,
@@ -292,6 +729,9 @@ public sealed class AgentEntityProviderFailureTests
         string? failBoundary = null,
         TimeSpan? resultRetention = null,
         RecordingLogger? logger = null,
+        string? providerKey = "probe.v1",
+        bool authorizeMigration = false,
+        IReadOnlyList<string>? correlations = null,
         CancellationToken stopping = default)
     {
         DurableAgentsOptions options = new()
@@ -299,8 +739,10 @@ public sealed class AgentEntityProviderFailureTests
             EnablePersistentRequestOutcomes = mailbox,
             DefaultTimeToLive = null,
             ResultRetentionPeriod = resultRetention ?? TimeSpan.FromMinutes(1),
+            AuthorizeLegacyMigration = authorizeMigration ? _ => true : null,
         };
-        options.AddAIAgent(agent, timeToLive: null, configureHistory: history => history.ProviderKey = new("probe.v1"));
+        options.AddAIAgent(agent, timeToLive: null,
+            configureHistory: history => history.ProviderKey = providerKey is null ? null : new(providerKey));
         using ServiceProvider services = new ServiceCollection()
             .AddSingleton(options)
             .AddSingleton(options.GetAgentFactories())
@@ -322,8 +764,7 @@ public sealed class AgentEntityProviderFailureTests
         {
             InstanceId = s_entityId.ToString(),
             EntityState = state,
-            Operations =
-            [
+            Operations = (correlations ?? [correlation]).Select(id =>
                 new OperationRequest
                 {
                     Id = Guid.NewGuid(),
@@ -331,11 +772,10 @@ public sealed class AgentEntityProviderFailureTests
                     Input = operationName == nameof(AgentEntity.Run)
                         ? s_converter.Serialize(new RunRequest(emptyInput ? [] : [new ChatMessage(ChatRole.User, "request")])
                         {
-                            CorrelationId = correlation,
+                            CorrelationId = id,
                         })
                         : null,
-                },
-            ],
+                }).ToList(),
         });
     }
 
@@ -365,6 +805,7 @@ public sealed class AgentEntityProviderFailureTests
         public int LoadCount { get; private set; }
         public int StoreCount { get; private set; }
         public int? RestoredVersion { get; private set; }
+        public bool SkipContinuationWrite { get; init; }
 
         protected override ValueTask<IEnumerable<ChatMessage>> ProvideChatHistoryAsync(
             InvokingContext context, CancellationToken cancellationToken = default)
@@ -394,10 +835,13 @@ public sealed class AgentEntityProviderFailureTests
             {
                 this.ThrowIfFailed(context.Session!);
             }
-            context.Session!.StateBag.SetValue("continuation", new Continuation { Version = this.StoreCount });
+            if (!this.SkipContinuationWrite)
+            {
+                context.Session!.StateBag.SetValue("continuation", new Continuation { Version = this.StoreCount });
+            }
             if (this.Stage == "storeAfter")
             {
-                this.ThrowIfFailed(context.Session);
+                this.ThrowIfFailed(context.Session!);
             }
             return default;
         }
@@ -462,6 +906,24 @@ public sealed class AgentEntityProviderFailureTests
     private sealed class Continuation
     {
         public int Version { get; set; }
+    }
+
+    private sealed class DamagedSerializationAgent(AIAgent inner, bool throwOnSerialize) : DelegatingAIAgent(inner)
+    {
+        protected override async ValueTask<JsonElement> SerializeSessionCoreAsync(
+            AgentSession session,
+            JsonSerializerOptions? jsonSerializerOptions = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (throwOnSerialize)
+            {
+                throw new JsonException("invalid serialized continuation");
+            }
+            JsonElement serialized = await base.SerializeSessionCoreAsync(session, jsonSerializerOptions, cancellationToken);
+            JsonNode root = JsonNode.Parse(serialized.GetRawText())!;
+            root["stateBag"]!.AsObject().Remove("continuation");
+            return JsonSerializer.SerializeToElement(root);
+        }
     }
 
     private sealed class CommitFailureException : Exception
