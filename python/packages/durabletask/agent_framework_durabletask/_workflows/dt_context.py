@@ -20,8 +20,8 @@ from durabletask.task import (
 )
 
 from .._executors import OrchestrationAgentExecutor
-from .._models import AgentSessionId, DurableAgentSession
-from .._shim import DurableAIAgent
+from .._json_payload import JsonPayload
+from .._shim import build_agent_task
 from .context import WorkflowOrchestrationContext
 
 logger = logging.getLogger(__name__)
@@ -57,17 +57,33 @@ class DurableTaskWorkflowContext:
 
     # -- Agent / Activity dispatch --------------------------------------------
 
-    def prepare_agent_task(self, executor_id: str, message: str, orchestration_instance_id: str) -> Any:
-        session_id = AgentSessionId(name=executor_id, key=orchestration_instance_id)
-        session = DurableAgentSession(durable_session_id=session_id)
-        agent = DurableAIAgent(self._executor, executor_id)
-        return agent.run(message, session=session)
+    def prepare_agent_task(
+        self,
+        executor_id: str,
+        message: str,
+        orchestration_instance_id: str,
+        context_messages: list[dict[str, Any]] | None = None,
+        context_message_ids: list[str] | None = None,
+    ) -> Any:
+        return build_agent_task(
+            self._executor,
+            executor_id,
+            message,
+            orchestration_instance_id,
+            context_messages,
+            context_message_ids,
+        )
 
     def prepare_activity_task(self, activity_name: str, input_json: str) -> Any:
         return cast(Any, self._context.call_activity(activity_name, input=input_json))
 
     def call_sub_orchestrator(self, name: str, input: Any, instance_id: str | None = None) -> Any:
-        return cast(Any, self._context.call_sub_orchestrator(name, input=input, instance_id=instance_id))
+        return cast(
+            Any,
+            self._context.call_sub_orchestrator(
+                name, input=input, instance_id=instance_id, return_type=cast(Any, JsonPayload)
+            ),
+        )
 
     # -- Composite tasks ------------------------------------------------------
 
@@ -80,7 +96,7 @@ class DurableTaskWorkflowContext:
     # -- External events / timers ---------------------------------------------
 
     def wait_for_external_event(self, name: str) -> Any:
-        return cast(Any, self._context).wait_for_external_event(name)
+        return cast(Any, self._context).wait_for_external_event(name, data_type=JsonPayload)
 
     def create_timer(self, fire_at: datetime) -> Any:
         return cast(Any, self._context).create_timer(fire_at)

@@ -12,9 +12,15 @@ Use these names for new code:
 | `wait_for_response` | `waitForResponse` | Agent run query parameter and Python JSON request field |
 | `correlation_id` | `correlationId` | Python agent run JSON response field; not a request field |
 | `message_count` | `messageCount` | Python synchronous agent run JSON response field |
+| `agent_response` | `agentResponse` | Python shared-state agent run JSON response field |
+| `error_code` | `errorCode` | Python agent run JSON error field where present |
+| `status_code` | `statusCode` | .NET agent run JSON response field |
+| `completion_outcome` | `completionOutcome` | .NET agent run JSON completion alias where present |
 | `thread_id` | `sessionId` | Deprecated alias for the same session key |
 
 The `x-ms-session-id` and `x-ms-wait-for-response` headers did not change.
+
+This naming migration preserves current main's durable outcome behavior: .NET JSON `status` is a string such as `success` or `accepted`, and the numeric HTTP code is available as `statusCode` and the temporary `status_code` alias. It does not restore the older numeric `status` contract. Result availability, error metadata, and durable outcome headers remain unchanged.
 
 ## Compatibility window
 

@@ -1,12 +1,16 @@
 # Durable Agent State
 
-Durable agents are represented as durable entities, with each session of conversation history stored as JSON-serialized state for an individual entity instance.
+Durable agents are represented as durable entities, with conversation history stored as JSON-serialized
+state for an individual entity instance.
+
+For the ownership and lifecycle boundaries around this representation, see the
+[durable agent state architecture](../../../../docs/features/durable-agents/durable-state-architecture.md).
 
 ## State Schema
 
 The [schema](../../../../schemas/durable-agent-entity-state.json) for durable agent state is a distillation of the prompt and response messages accumulated over the lifetime of a session. While these messages and content originate from Microsoft Agent Framework types (for .NET, see [ChatMessage](https://github.com/dotnet/extensions/blob/main/src/Libraries/Microsoft.Extensions.AI.Abstractions/ChatCompletion/ChatMessage.cs) and [AIContent](https://github.com/dotnet/extensions/blob/main/src/Libraries/Microsoft.Extensions.AI.Abstractions/Contents/AIContent.cs)), durable agent state uses its own, parallel, types in order to (1) better manage the versioning and compatibility of serialized state over time, (2) account for agent implementations across languages/platforms (e.g. .NET and Python), as well as (3) ensure consistency for external tools that make use of state data.
 
-> When new AI content types are added to the Microsoft Agent Framework, equivalent types should be added to the entity state schema as well. The durable agent state "unknown" type can be used when an AI content type is encountered but no equivalent type exists.
+> When new AI content types are added to the Microsoft Agent Framework, equivalent types should be added to the entity state schema. If no equivalent exists, durable state uses the `unknown` content type. Arbitrary `unknown.content` JSON is opaque: .NET preserves generic producer fields, including `$runtimeType`, without interpreting them. The namespaced `$microsoftAgentFrameworkDurableTask` metadata envelope contains no runtime type name and can restore only the common `AIContent` contract (`Annotations`, `AdditionalProperties`, and safely serializable `RawRepresentation`); it can never select or construct a CLR type. Within that envelope, unsupported or invalid values are omitted independently so safe sibling values remain, omission details are recorded, and warnings contain only the value type and a fixed failure category. Response and message `AdditionalProperties` use a stricter boundary for schema 2 terminal results: supported scalar values and explicit `JsonElement` values are persisted, while unsupported runtime objects cause conversion to fail. Values that reach durable state are therefore JSON-safe and do not depend on CLR runtime type activation.
 
 ## State Versioning
 
@@ -14,16 +18,175 @@ The serialized state contains a root `schemaVersion` property, which represents 
 
 Some versioning considerations:
 
-- Versions should use semver notation (e.g. `"<major>.<minor>.<patch>"`)
+- Versions use the strict numeric SemVer core grammar `"<major>.<minor>.<patch>"`: exactly three
+  non-negative decimal components, with no leading zeroes except the single digit `0`. Prerelease
+  suffixes, build metadata, a `v` prefix, missing/extra components, and whitespace are rejected.
 - Durable agents should use the version property to determine how to deserialize that state and should not attempt to deserialize semver-incompatible versions
 - Newer versions of durable agents should strive to be compatible with older schema versions (e.g. new properties and objects should be optional)
 - Durable agents should preserve existing, but unrecognized, properties when serializing state
 
-## Sample State
+Schema version 1.2 adds optional message identity and extension metadata, opaque session state, workflow
+`ingestedPositions`, and truncation evidence. The .NET workflow path preserves but does not currently
+populate `ingestedPositions`. Older 1.x state remains readable. `DurableAgentState.Clone()` promotes older
+supported versions to 1.2 when a caller uses that write-clone path. Versions outside the exact contract
+snapshots are rejected until compatibility is explicitly reviewed. Entity execution uses an independent
+working-state clone so failed operations do not mutate the hydrated state. New
+`DurableAgentState` instances default to the current version, while deserialization preserves the persisted
+version through an init-only property.
+
+The historical 1.0–1.2 message boundaries remain unchanged on both reads and writes: supported roles
+are `user`, `assistant`, `system`, and `tool`; function-call arguments are objects when present; URI
+content requires a media type. Legacy runtime adapters continue to use typed function arguments,
+not string-valued `RawRepresentation`. Developer messages and verbatim string arguments use the
+explicit schema-2 adapters only. The production legacy writer validates the serialized transcript
+before publishing it, so directly constructed DTOs cannot bypass these boundaries. A failed write
+leaves the hydrated state unchanged and does not record completion.
+Schema-2 history and terminal delivery share an explicit message projection. A shared URI without
+`mediaType` is opaque `AIContent` carrying its canonical JSON, including unknown content properties;
+no media type is invented. Normal URI content remains native `UriContent`. Message roles, IDs, authors,
+timestamps and additional properties survive projection, and canonical message/response JSON retains
+unknown metadata that the native types cannot express. Cold next-invocation history uses this projection,
+not the stricter legacy conversion.
+
+The schema's declared `extensionData` objects and forward-compatible unknown JSON properties are distinct.
+The .NET model names declared metadata `ExtensionData` (or message/content `AdditionalProperties`) and names
+`[JsonExtensionData]` catch-all dictionaries `UnknownProperties`. Both coexist and round-trip independently
+at root, data, entry, message, content, and usage boundaries. Unknown content siblings remain in
+`UnknownProperties` and are never promoted into framework metadata or folded into an application-defined
+`extensionData` object.
+
+Usage counts and `extensionData` are preserved as arbitrary JSON integers and JSON metadata for forward
+compatibility. When a durable response is projected to `UsageDetails`, only exact integral values representable
+as `Int64` become runtime counts; strings, objects, arrays, fractional numbers, and out-of-range numbers remain
+in durable state but are ignored by the runtime projection. Malformed known count fields fail deserialization
+rather than being silently reinterpreted. Automatic retention uses the same exact projection for recognized
+`evictedMessageCount` integer spellings. The projected value must be a nonnegative signed `Int64`; retention
+checks the cumulative increment and rejects overflow before committing any staged deletion or other working-state
+change. Opaque JSON and unknown metadata retain their existing exact preservation behavior.
+
+Mailbox lookup, delivery, and guarded entity-local commit behavior are implemented. Session ownership,
+replay filtering, transcript compaction, and provider behavior remain deferred to later stack layers.
+
+Version-aware validation is symmetric: historical 1.x free-form roles, string function-call `arguments`, and
+URI content without `mediaType` remain readable and writable, while schema 2 applies its closed role set and
+other revised semantic checks consistently on read and write.
+
+## Revised execution-state foundation
+
+> [!IMPORTANT]
+> Schema `2.0.0` is being adopted through a staged cross-runtime rollout. Production .NET readers and writers currently default to
+> schema `1.2.0` and reject schema 2 until the mailbox-aware runtime rollout requirements are met.
+
+The mailbox contract and optional opaque history profile use schema `2.0.0`. This is intentionally a fail-closed major
+version: a 1.x worker preserves unknown fields but does not understand completion receipts, so allowing it to
+process revised state could rerun work whose transcript result was already removed. The .NET reader now
+supports mailbox-aware 2.0 lookup, while new state continues to default to `1.2.0`.
+Producer activation is an internal test-only gate, disabled by default. There is no public opt-in until
+the compatible-reader deployment floor is enforced; this draft does not authorize production activation. Existing 2.0 state
+is preserved rather than downgraded, and committed duplicates remain readable with writes disabled.
+New requests against existing 2.0 state fail before agent execution when the internal write gate is disabled.
+The internal passive contract path remains available for serializer/fixture tests without authorizing new
+production writes.
+
+In revised state, `terminalResults` stores immutable result envelopes by correlation ID outside
+`conversationHistory`, while `completionReceipts` retains completion evidence after a result payload expires.
+An `available` receipt requires a matching result; an `unavailable` receipt proves completion without a result
+payload while retaining its outcome. Absence of a receipt means only that no terminal completion is recorded;
+it does not distinguish an accepted pending request from an unknown identity. Optional `historyBinding` is an
+opaque, separately versioned runtime profile. Non-relying consumers preserve it without interpreting any
+nested field. Only a relying runtime may validate a profile it recognizes against trusted host configuration;
+the shared contract defines no owner kind, provider key, default, or transition policy.
+Missing and explicit-null profiles remain distinct, and scalar, array, and object values round-trip
+unchanged through the independent working clone. This layer never selects a provider from this data.
+
+The shared DTOs retain their schema contract. Delivery lookup and polling use the same resolver for both
+layouts. `ResultRetentionPeriod` defaults to the portable 60-second delivery window and accepts another
+positive duration or `null` for no payload expiry; expiry never removes the completion receipt. Binding
+selection/enforcement and transcript retention are not implemented by this layer.
+With the internal mailbox-writer gate enabled, successful new runs and the scheduled/explicit
+`CheckAndExpireResults` entity operation durably remove due `terminalResults` entries and transition
+their existing receipts to `unavailable`. The operation uses an independent state copy and commits its
+next self-signal with that state; it does not refresh whole-entity TTL or require the independent deletion
+gate. Expiry is rechecked against current state and `TimeProvider` on every serialized turn; stale signals
+are not authority to remove a newer result. Polling is read-only. Imported/idle states without a scheduling
+chain require an explicit cleanup operation or a later successful new run; there is no automatic scan.
+See the [cleanup, retry, and scheduling limits](../README.md#durable-completion-and-delivery).
+The [schema 2 contract](../../../../schemas/README.md) defines the complete semantic invariants and rollout gate.
+
+### Optional result-expiry runtime extension
+
+This writer uses the existing root `extensionData` map for its scheduling protocol. No schema DTO or
+`schemas/` field is added. `historyBinding` remains opaque and is not an ownership/scheduling profile.
 
 ```json
 {
-  "schemaVersion": "1.0.0",
+  "extensionData": {
+    "Microsoft.Agents.AI.DurableTask.resultExpiry": {
+      "version": 1,
+      "entityId": "@dafx-agent@session",
+      "scheduledResultExpiryUtc": "2026-09-12T00:20:00+00:00",
+      "token": "5b9ddf23b2d94e42b1dd4d946134f043"
+    }
+  }
+}
+```
+
+This fragment illustrates extension metadata, not a complete mailbox state. `scheduledResultExpiryUtc`
+is the scheduled check time (including backoff), not result-retention authority. The self-signal carries
+`scheduledTime`, `token`, and `entityId`; all must match the persisted pending check. A fresh random GUID
+token per schedule invalidates duplicate deliveries, superseded deadlines, and old entity generations.
+When no expiring payload remains, the deadline and token become explicit null together. Other profile
+fields and other extensions are retained. A missing profile is compatible for import/first use:
+a successful new run or explicit no-input cleanup installs it when needed. Old timestamp-only signals
+cannot install or consume a profile; import/upgrade recovery must explicitly enqueue no-input cleanup.
+
+.NET writers that rely on this profile validate version, entity identity, UTC deadline, nonempty GUID
+token, paired nulls and duplicate properties, failing closed rather than dropping an unsupported/malformed
+profile. A new run validates before constructing the model. Legacy writes do not interpret/create this
+profile, and foreign runtimes preserve it opaquely without any requirement to honor it. Compatible .NET
+schedulers honor the token contract. Do not roll back to an older scheduler that merely preserves the
+extension but starts a fresh chain on every run.
+
+Under the internal schema-2 test gate, one successful durable entity operation atomically stages the
+terminal result and receipt together with that operation's session continuation, ingestion bookkeeping,
+entity-local transcript, whole-entity TTL, optional binding, and other local control state. External provider
+writes and tool side effects are outside that entity-local transaction. A failed outer invocation or durable
+commit does not establish a new completion receipt. The only exception is an internal, default-off provider
+finalization capability: a certified adapter must explicitly attest accepted input, provider phase, and
+non-retryable/exhausted finality; the resulting session must serialize and the failed result, receipt, session,
+and accepted request evidence must pass the normal commit path. No generic exception/message/status inference
+is permitted. Legacy conversion uses only retained authoritative
+terminal evidence, never calls the model/tools, and cannot invent receipts for already-evicted results.
+Previously persisted legacy state stays legacy unless independently authorized as complete history;
+retained transcript alone does not establish that authorization. Known truncation/compaction prevents
+conversion. New missing-state generations can initialize 2.0 only under the internal gate.
+Whole-entity deletion of 2.0 state has a separate internal gate, disabled by default. Stored legacy
+deadlines cannot erase receipts, and there is no implicit schema-2 entity TTL.
+
+Schema 2.0 must not be activated as a cross-language write format until every participating runtime either
+implements the mailbox/binding contract or explicitly rejects the new major version. The current C# reader is
+fail-closed for unsupported versions and defaults new writes to 1.2. Other runtimes require coordinated version
+gating before a 2.0 producer is enabled; preserving unknown fields alone is not sufficient because an
+unaware worker could ignore completion receipts and rerun completed work.
+Production activation remains inaccessible through public options in this layer. An actual isolated
+backend/worker run proving state-and-outbox rollback, restart and duplicate dispatch is a mandatory
+**merge and release gate**, not a claim established by mock-only coverage or a skipped integration test.
+A clearly documented gated skip permits draft readiness only: do not merge or release this correction
+until the actual isolated-backend test passes. See the
+[integration safety and execution instructions](../../../tests/Microsoft.Agents.AI.DurableTask.IntegrationTests/README.md).
+
+## State Examples
+
+### Current schema 1.2
+
+This illustrative document uses the current production write format. It includes conversation history and
+representative optional fields that may be written by interoperating producers; producers omit fields they do
+not use. The current .NET runtime preserves but does not populate `ingestedPositions`. Each value is a scalar
+highest-seen position for one producer, not an array or proof that every earlier position was delivered.
+
+```json
+{
+  "schemaVersion": "1.2.0",
   "data": {
     "conversationHistory": [
       {
@@ -133,7 +296,84 @@ Some versioning considerations:
           }
         ]
       }
-    ]
+    ],
+    "session": {
+      "conversationId": "service-conversation-42",
+      "stateBag": {}
+    },
+    "ingestedPositions": {
+      "legacy-producer": 3
+    },
+    "truncation": {
+      "evictedMessageCount": 2,
+      "firstEvictedAt": "2025-11-04T18:00:00+00:00",
+      "lastEvictedAt": "2025-11-04T18:30:00+00:00"
+    },
+    "extensionData": {
+      "producer": "example"
+    }
+  }
+}
+```
+
+### Schema 2.0
+
+This example is for contract review and contributor guidance only. Production runtimes must not emit schema 2
+until the activation requirements above are met. An `available` receipt has a matching terminal result; an
+`unavailable` receipt remains after its result payload has been removed.
+
+```json
+{
+  "schemaVersion": "2.0.0",
+  "data": {
+    "conversationHistory": [],
+    "terminalResults": {
+      "request-42": {
+        "correlationId": "request-42",
+        "outcome": "succeeded",
+        "completedAt": "2026-09-10T05:00:03+00:00",
+        "resultExpiresAt": "2026-09-11T05:00:03+00:00",
+        "response": {
+          "messages": [
+            {
+              "role": "assistant",
+              "messageId": "response-42",
+              "contents": [
+                {
+                  "$type": "text",
+                  "text": "Artifact generated."
+                }
+              ]
+            }
+          ],
+          "value": {
+            "artifactId": "artifact-42"
+          }
+        }
+      }
+    },
+    "completionReceipts": {
+      "request-42": {
+        "correlationId": "request-42",
+        "outcome": "succeeded",
+        "completedAt": "2026-09-10T05:00:03+00:00",
+        "resultState": "available",
+        "resultExpiresAt": "2026-09-11T05:00:03+00:00"
+      },
+      "request-expired": {
+        "correlationId": "request-expired",
+        "outcome": "failed",
+        "completedAt": "2026-09-09T05:00:03+00:00",
+        "resultState": "unavailable",
+        "resultExpiresAt": "2026-09-10T05:00:03+00:00",
+        "resultUnavailableAt": "2026-09-10T05:00:04+00:00"
+      }
+    },
+    "historyBinding": {
+      "version": 1,
+      "ownerKind": "historyProvider",
+      "providerKey": "contoso.support-history.v1"
+    }
   }
 }
 ```

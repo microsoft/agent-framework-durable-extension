@@ -133,14 +133,29 @@ public sealed class DurableAIAgent : AIAgent
 
         try
         {
-            return await this._context.Entities.CallEntityAsync<AgentResponse>(
+            AgentResponse response = await this._context.Entities.CallEntityAsync<AgentResponse>(
                 durableSession.SessionId,
                 nameof(AgentEntity.Run),
                 request);
+            if (DurableAgentJsonUtilities.GetCommittedFailure(response) is DurableAgentFailureData failure)
+            {
+                throw new DurableAgentTerminalException(
+                    failure.CorrelationId,
+                    failure.Code!,
+                    failure.Message!,
+                    failure.Details,
+                    response);
+            }
+
+            return response;
         }
         catch (EntityOperationFailedException e) when (e.FailureDetails.ErrorType == "EntityTaskNotFound")
         {
             throw new AgentNotRegisteredException(this._agentName, e);
+        }
+        catch (Exception e) when (DurableAgentFailure.TryRestore(e, out Exception? failure))
+        {
+            throw failure;
         }
     }
 
@@ -291,6 +306,11 @@ public sealed class DurableAIAgent : AIAgent
         // the orchestration.
         AgentResponse response = await this.RunAsync(messages, session, options, cancellationToken);
 
-        return new AgentResponse<T>(response, serializerOptions) { IsWrappedInObject = isWrappedInObject };
+        AgentResponse<T> typedResponse = new(response, serializerOptions) { IsWrappedInObject = isWrappedInObject };
+        // Constructing AgentResponse<T> creates a new object. The canonical durable result is kept in an identity-based
+        // sidecar rather than in AgentResponse itself, so it would not follow this conversion automatically. Copy it to
+        // keep GetDurableResult() lossless and consistent between the typed and untyped APIs.
+        DurableAgentJsonUtilities.CopyRetainedResult(response, typedResponse);
+        return typedResponse;
     }
 }

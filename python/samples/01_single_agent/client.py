@@ -29,20 +29,27 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _resolve_taskhub(taskhub: str | None) -> str:
+    taskhub_name = taskhub if taskhub is not None else os.getenv("TASKHUB")
+    if not taskhub_name or taskhub_name != taskhub_name.strip() or taskhub_name.strip().casefold() == "default":
+        raise ValueError("Set TASKHUB to a non-default, non-blank hub name before running this sample.")
+    return taskhub_name
+
+
 def get_client(
     taskhub: str | None = None, endpoint: str | None = None, log_handler: logging.Handler | None = None
 ) -> DurableAIAgentClient:
     """Create a configured DurableAIAgentClient.
 
     Args:
-        taskhub: Task hub name (defaults to TASKHUB env var or "default")
+        taskhub: Task hub name, or TASKHUB from the environment
         endpoint: Scheduler endpoint (defaults to ENDPOINT env var or "http://localhost:8080")
         log_handler: Optional logging handler for client logging
 
     Returns:
         Configured DurableAIAgentClient instance
     """
-    taskhub_name = taskhub or os.getenv("TASKHUB", "default")
+    taskhub_name = _resolve_taskhub(taskhub)
     endpoint_url = endpoint or os.getenv("ENDPOINT", "http://localhost:8080")
 
     logger.debug(f"Using taskhub: {taskhub_name}")

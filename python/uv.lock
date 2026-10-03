@@ -45,7 +45,7 @@ overrides = [
 
 [[package]]
 name = "agent-framework-azurefunctions"
-version = "1.0.0b260709"
+version = "1.0.0b260922"
 source = { editable = "packages/azurefunctions" }
 dependencies = [
     { name = "agent-framework-core", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -80,7 +80,7 @@ wheels = [
 
 [[package]]
 name = "agent-framework-durable-extension"
-version = "1.0.0b260709"
+version = "1.0.0b260922"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -109,6 +109,7 @@ test = [
     { name = "agent-framework-foundry", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "agent-framework-openai", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "azure-monitor-opentelemetry", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "jsonschema", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "mcp", extra = ["ws"], marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "redis", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
@@ -141,18 +142,21 @@ test = [
     { name = "agent-framework-foundry", specifier = ">=1.10.1,<2" },
     { name = "agent-framework-openai", specifier = ">=1.10.1,<2" },
     { name = "azure-monitor-opentelemetry" },
+    { name = "jsonschema" },
     { name = "mcp", extras = ["ws"] },
     { name = "redis" },
 ]
 
 [[package]]
 name = "agent-framework-durabletask"
-version = "1.0.0b260709"
+version = "1.0.0b260922"
 source = { editable = "packages/durabletask" }
 dependencies = [
     { name = "agent-framework-core", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "durabletask", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "durabletask-azuremanaged", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "opentelemetry-api", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "pydantic", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "python-dateutil", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 
@@ -164,8 +168,10 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agent-framework-core", specifier = ">=1.13.0,<2" },
-    { name = "durabletask", specifier = ">=1.5.0,<2" },
+    { name = "durabletask", specifier = ">=1.7.1,<2" },
     { name = "durabletask-azuremanaged", specifier = ">=1.4.0,<2" },
+    { name = "opentelemetry-api", specifier = ">=1.39.0,<2" },
+    { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "python-dateutil", specifier = ">=2.8.0,<3" },
 ]
 

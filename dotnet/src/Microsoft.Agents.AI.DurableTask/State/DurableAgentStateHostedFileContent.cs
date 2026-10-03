@@ -32,7 +32,7 @@ internal sealed class DurableAgentStateHostedFileContent : DurableAgentStateCont
     }
 
     /// <inheritdoc/>
-    public override AIContent ToAIContent()
+    protected override AIContent ToAIContentCore()
     {
         return new HostedFileContent(this.FileId);
     }

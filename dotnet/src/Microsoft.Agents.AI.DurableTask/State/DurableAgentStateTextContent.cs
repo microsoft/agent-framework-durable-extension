@@ -31,7 +31,7 @@ internal sealed class DurableAgentStateTextContent : DurableAgentStateContent
     }
 
     /// <inheritdoc/>
-    public override AIContent ToAIContent()
+    protected override AIContent ToAIContentCore()
     {
         return new TextContent(this.Text);
     }

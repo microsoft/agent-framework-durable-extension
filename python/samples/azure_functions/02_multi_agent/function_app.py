@@ -91,7 +91,8 @@ app = AgentFunctionApp(agents=[weather_agent, math_agent], enable_health_check=T
 # app.add_agent(math_agent)
 
 """
-Expected output when invoking `POST /api/agents/WeatherAgent/run`:
+Expected output when invoking `POST /api/agents/WeatherAgent/run?waitForResponse=false`
+with `Accept: application/json`:
 
 HTTP/1.1 202 Accepted
 {
@@ -99,10 +100,13 @@ HTTP/1.1 202 Accepted
   "response": "Agent request accepted",
   "message": "What is the weather in Seattle?",
   "sessionId": "<guid>",
-  "correlationId": "<guid>"
+  "session_id": "<guid>",
+  "correlationId": "<guid>",
+  "correlation_id": "<guid>"
 }
 
-Expected output when invoking `POST /api/agents/MathAgent/run`:
+Expected output when invoking `POST /api/agents/MathAgent/run?waitForResponse=false`
+with `Accept: application/json`:
 
 HTTP/1.1 202 Accepted
 {
@@ -110,6 +114,8 @@ HTTP/1.1 202 Accepted
   "response": "Agent request accepted",
   "message": "Calculate a 20% tip on a $50 bill",
   "sessionId": "<guid>",
-  "correlationId": "<guid>"
+  "session_id": "<guid>",
+  "correlationId": "<guid>",
+  "correlation_id": "<guid>"
 }
 """

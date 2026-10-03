@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -30,9 +31,198 @@ namespace Microsoft.Agents.AI.DurableTask;
 internal static partial class DurableAgentJsonUtilities
 {
     /// <summary>
+    /// Associates each materialized <see cref="AgentResponse"/> instance with its canonical durable result JSON.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Durable state stores the exact terminal response that was committed for a correlation ID. The public
+    /// <see cref="AgentResponse"/> created from that state is a convenient SDK projection, but it cannot represent every
+    /// detail in the persisted contract. For example, projection can discard unknown fields written by a newer version
+    /// and cannot preserve the difference between an absent <c>value</c> property and an explicit JSON null.
+    /// </para>
+    /// <para>
+    /// Those details matter when a completed request is delivered back to an orchestration, especially when a duplicate
+    /// request returns the previously committed outcome instead of running the model again. Returning JSON reconstructed
+    /// from the lossy SDK projection would mean the caller did not receive the same outcome that the entity committed.
+    /// </para>
+    /// <para>
+    /// <see cref="AgentResponse"/> has no framework-owned property for this lossless snapshot. Storing it in response
+    /// additional properties would also expose an internal transport detail and change the response's normal serialized
+    /// shape for every serializer. This sidecar table solves both problems by associating the canonical JSON with the
+    /// exact response object without modifying that object.
+    /// </para>
+    /// <para>
+    /// A <see cref="ConditionalWeakTable{TKey,TValue}"/> is used instead of a dictionary so the sidecar does not become
+    /// a memory leak. The table does not keep its response keys alive; when application code releases a response, its
+    /// retained snapshot becomes collectible as well.
+    /// </para>
+    /// <para>
+    /// This table is process-local, not durable storage. When Durable Task serializes a response from an entity and later
+    /// creates a different response object in an orchestration, <see cref="DurableDataConverter"/> writes the canonical
+    /// snapshot into a private transport envelope and restores this association on the new object.
+    /// </para>
+    /// </remarks>
+    private static readonly ConditionalWeakTable<AgentResponse, RetainedResultHolder>
+        s_retainedResultsByResponse = new();
+
+    private static readonly ConditionalWeakTable<AgentResponse, CommittedFailureHolder>
+        s_committedFailuresByResponse = new();
+
+    /// <summary>
     /// Gets the singleton <see cref="JsonSerializerOptions"/> used for Durable Agent serialization.
     /// </summary>
     public static JsonSerializerOptions DefaultOptions { get; } = CreateDefaultOptions();
+
+    /// <summary>
+    /// Gets the canonical retained terminal-response JSON associated with a durable delivery response.
+    /// </summary>
+    /// <remarks>
+    /// The snapshot is the exact durable contract that accompanied this response, not JSON regenerated from the
+    /// response's text or other projected properties. It therefore preserves absent versus explicit-null <c>value</c>,
+    /// opaque content, and unknown metadata. A response created outside durable delivery has no such association and
+    /// returns null rather than fabricating a result that was never committed.
+    /// </remarks>
+    /// <param name="response">The response returned by durable polling or its proxy.</param>
+    /// <returns>The immutable retained JSON, or null for a response not produced by durable delivery.</returns>
+    internal static JsonElement? GetRetainedResult(AgentResponse response)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        HashSet<AgentResponse> visited = new(ReferenceEqualityComparer.Instance);
+        for (AgentResponse? current = response;
+            current is not null && visited.Add(current);
+            current = current.RawRepresentation as AgentResponse)
+        {
+            if (s_retainedResultsByResponse.TryGetValue(current, out RetainedResultHolder? retained))
+            {
+                return retained.Value;
+            }
+        }
+
+        return null;
+    }
+
+    internal static DurableAgentFailureData? GetCommittedFailure(AgentResponse response)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        return s_committedFailuresByResponse.TryGetValue(response, out CommittedFailureHolder? failure)
+            ? failure.Value
+            : null;
+    }
+
+    /// <summary>
+    /// Serializes a persisted terminal-response DTO into the canonical JSON associated with a runtime response.
+    /// </summary>
+    /// <remarks>
+    /// This is used while resolving a committed entity outcome into an SDK response. Serializing the persisted DTO
+    /// directly, before it is reduced to the SDK projection, preserves unknown future metadata and the distinction
+    /// between an absent value and JSON null.
+    /// </remarks>
+    internal static void CaptureRetainedResult(
+        AgentResponse response,
+        DurableAgentStateTerminalResponse terminalResponse)
+    {
+        JsonElement snapshot = JsonSerializer.SerializeToElement(
+            terminalResponse, DurableAgentStateJsonContext.Default.DurableAgentStateTerminalResponse);
+        CaptureRetainedResult(response, snapshot);
+    }
+
+    /// <summary>
+    /// Associates an already-canonical JSON snapshot with one response instance.
+    /// </summary>
+    /// <remarks>
+    /// The element is cloned because callers may supply a value backed by a disposable <see cref="JsonDocument"/>. The
+    /// clone gives the response association independent ownership, so reading <c>GetDurableResult()</c> remains valid
+    /// after the source document has been disposed.
+    ///
+    /// <see cref="ConditionalWeakTable{TKey,TValue}.Add"/> intentionally rejects a second snapshot for the same
+    /// response instance; silently replacing it could make one response object represent two different committed
+    /// outcomes.
+    /// </remarks>
+    internal static void CaptureRetainedResult(AgentResponse response, JsonElement snapshot) =>
+        s_retainedResultsByResponse.Add(response, new RetainedResultHolder(snapshot.Clone()));
+
+    internal static void CaptureCommittedFailure(
+        AgentResponse response,
+        DurableAgentFailureData failure)
+    {
+        if (GetRetainedResult(response) is null)
+        {
+            throw new InvalidOperationException(
+                "A committed durable failure requires its canonical terminal response.");
+        }
+
+        s_committedFailuresByResponse.Add(
+            response,
+            new CommittedFailureHolder(new DurableAgentFailureData
+            {
+                Version = failure.Version,
+                CorrelationId = failure.CorrelationId,
+                Code = failure.Code,
+                Message = failure.Message,
+                Details = failure.Details.ValueKind == JsonValueKind.Undefined
+                    ? default
+                    : failure.Details.Clone(),
+                CompletedAt = failure.CompletedAt,
+                ResultExpiresAt = failure.ResultExpiresAt,
+                Outcome = failure.Outcome,
+            }));
+    }
+
+    /// <summary>
+    /// Converts a legacy transcript response into the canonical terminal-response shape and associates it with the
+    /// projected runtime response.
+    /// </summary>
+    /// <remarks>
+    /// Older persisted state predates the dedicated terminal-response contract. This conversion preserves the legacy
+    /// fields that are available so old completed requests can participate in the same delivery path without pretending
+    /// that information absent from the old schema was present.
+    /// </remarks>
+    internal static void CaptureRetainedLegacyResult(AgentResponse response, DurableAgentStateResponse source) =>
+        CaptureRetainedResult(response, new DurableAgentStateTerminalResponse
+        {
+            Messages = source.Messages,
+            Usage = source.Usage,
+            CreatedAt = source.CreatedAt,
+            AdditionalProperties = source.ExtensionData,
+            UnknownProperties = source.UnknownProperties,
+        });
+
+    /// <summary>
+    /// Copies the canonical durable association when code creates a different response object for the same outcome.
+    /// </summary>
+    /// <remarks>
+    /// Associations are keyed by object identity, so creating an <see cref="AgentResponse{T}"/> wrapper or another
+    /// response instance does not inherit the source association automatically. Without this copy, the typed API would
+    /// return the correct visible response but <c>GetDurableResult()</c> would unexpectedly become null.
+    /// </remarks>
+    internal static void CopyRetainedResult(AgentResponse source, AgentResponse target)
+    {
+        if (GetRetainedResult(source) is JsonElement result)
+        {
+            CaptureRetainedResult(target, result);
+        }
+
+        if (GetCommittedFailure(source) is DurableAgentFailureData failure)
+        {
+            CaptureCommittedFailure(target, failure);
+        }
+    }
+
+    /// <summary>
+    /// Reference-type holder required because <see cref="ConditionalWeakTable{TKey,TValue}"/> values must be classes.
+    /// </summary>
+    private sealed class RetainedResultHolder(JsonElement value)
+    {
+        /// <summary>
+        /// Gets the immutable, independently owned canonical result JSON.
+        /// </summary>
+        public JsonElement Value { get; } = value;
+    }
+
+    private sealed class CommittedFailureHolder(DurableAgentFailureData value)
+    {
+        public DurableAgentFailureData Value { get; } = value;
+    }
 
     /// <summary>
     /// Serializes a sequence of chat messages using the durable agent default options.
@@ -89,6 +279,9 @@ internal static partial class DurableAgentJsonUtilities
 
     // Request Types
     [JsonSerializable(typeof(RunRequest))]
+    [JsonSerializable(typeof(AgentEntityDeletionCheck))]
+    [JsonSerializable(typeof(AgentEntityResultExpirationCheck))]
+    [JsonSerializable(typeof(DurableAgentFailureData))]
 
     // Primitive / Supporting Types
     [JsonSerializable(typeof(ChatMessage))]

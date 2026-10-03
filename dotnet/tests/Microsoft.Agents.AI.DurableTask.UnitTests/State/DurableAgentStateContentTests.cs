@@ -1,9 +1,12 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using Microsoft.Agents.AI.DurableTask.State;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Agents.AI.DurableTask.Tests.Unit.State;
 
@@ -40,6 +43,74 @@ public sealed class DurableAgentStateContentTests
         Assert.Equal(errorContent.Message, convertedErrorContent.Message);
         Assert.Equal(errorContent.Details, convertedErrorContent.Details);
         Assert.Equal(errorContent.ErrorCode, convertedErrorContent.ErrorCode);
+    }
+
+    [Theory]
+    [InlineData("""{"retryable":true}""", """{"retryable":true}""")]
+    [InlineData("""[1,false]""", """[1,false]""")]
+    [InlineData("42", "42")]
+    [InlineData("null", null)]
+    [InlineData("\"details\"", "details")]
+    [InlineData(null, null)]
+    public void ErrorContentDetailsRemainStableAcrossRepeatedRuntimeConversions(
+        string? detailsJson,
+        string? expectedRuntimeDetails)
+    {
+        string json = detailsJson is null
+            ? """{"$type":"error","message":"failed"}"""
+            : $$"""{"$type":"error","message":"failed","details":{{detailsJson}}}""";
+        DurableAgentStateContent stored = Assert.IsType<DurableAgentStateErrorContent>(
+            JsonSerializer.Deserialize(json, s_stateContentTypeInfo));
+
+        for (int iteration = 0; iteration < 2; iteration++)
+        {
+            ErrorContent runtime = Assert.IsType<ErrorContent>(stored.ToAIContent());
+            Assert.Equal(expectedRuntimeDetails, runtime.Details);
+            stored = DurableAgentStateContent.FromAIContent(runtime);
+        }
+
+        string roundTrip = JsonSerializer.Serialize(stored, s_stateContentTypeInfo);
+        using JsonDocument roundTripDocument = JsonDocument.Parse(roundTrip);
+        bool hasDetails = roundTripDocument.RootElement.TryGetProperty("details", out JsonElement actualDetails);
+        Assert.Equal(detailsJson is not null, hasDetails);
+        if (detailsJson is not null)
+        {
+            using JsonDocument expectedDetails = JsonDocument.Parse(detailsJson);
+            Assert.True(JsonElement.DeepEquals(expectedDetails.RootElement, actualDetails));
+        }
+    }
+
+    [Fact]
+    public void ErrorContentChangedDetailsReplaceAssociatedOriginalJson()
+    {
+        const string Json = """
+            {
+              "$type": "error",
+              "message": "failed",
+              "details": { "retryable": true }
+            }
+            """;
+        DurableAgentStateContent stored = Assert.IsType<DurableAgentStateErrorContent>(
+            JsonSerializer.Deserialize(Json, s_stateContentTypeInfo));
+
+        ErrorContent changedToString = Assert.IsType<ErrorContent>(stored.ToAIContent());
+        changedToString.Details = "changed";
+        string stringJson = JsonSerializer.Serialize(
+            DurableAgentStateContent.FromAIContent(changedToString),
+            s_stateContentTypeInfo);
+
+        ErrorContent changedToNull = Assert.IsType<ErrorContent>(stored.ToAIContent());
+        changedToNull.Details = null;
+        string nullJson = JsonSerializer.Serialize(
+            DurableAgentStateContent.FromAIContent(changedToNull),
+            s_stateContentTypeInfo);
+
+        Assert.Equal(
+            "changed",
+            JsonDocument.Parse(stringJson).RootElement.GetProperty("details").GetString());
+        Assert.Equal(
+            JsonValueKind.Null,
+            JsonDocument.Parse(nullJson).RootElement.GetProperty("details").ValueKind);
     }
 
     [Fact]
@@ -265,6 +336,28 @@ public sealed class DurableAgentStateContentTests
     }
 
     [Fact]
+    public void UriContentWithoutMediaTypeIsPreservedForLegacyAndV2()
+    {
+        UriContent uriContent = new(new Uri("https://example.com"), "application/octet-stream");
+        typeof(UriContent).GetField(
+            "_mediaType",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(uriContent, null);
+
+        DurableAgentStateUriContent legacyContent = Assert.IsType<DurableAgentStateUriContent>(
+            DurableAgentStateContent.FromAIContent(uriContent));
+        DurableAgentStateUriContent revisedContent = Assert.IsType<DurableAgentStateUriContent>(
+            DurableAgentStateContent.FromAIContentV2(uriContent));
+        string jsonContent = JsonSerializer.Serialize(legacyContent, s_stateContentTypeInfo);
+
+        Assert.Null(legacyContent.MediaType);
+        Assert.Null(revisedContent.MediaType);
+        Assert.Equal(
+            "application/octet-stream",
+            Assert.IsType<UriContent>(legacyContent.ToAIContent()).MediaType);
+        Assert.DoesNotContain("\"mediaType\"", jsonContent, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void UsageContentSerializationDeserialization()
     {
         // Arrange
@@ -299,26 +392,653 @@ public sealed class DurableAgentStateContentTests
     }
 
     [Fact]
-    public void UnknownContentSerializationDeserialization()
+    public void UsageAdditionalCountsRoundTripThroughExtensionData()
     {
-        // Arrange
+        UsageDetails usageDetails = new()
+        {
+            InputTokenCount = 10,
+            AdditionalCounts = new AdditionalPropertiesDictionary<long>
+            {
+                ["providerCount"] = 7,
+            },
+        };
+
+        DurableAgentStateUsage stored = Assert.IsType<DurableAgentStateUsage>(
+            DurableAgentStateUsage.FromUsage(usageDetails));
+        string json = JsonSerializer.Serialize(
+            stored,
+            DurableAgentStateJsonContext.Default.GetTypeInfo(typeof(DurableAgentStateUsage))!);
+        DurableAgentStateUsage restored = Assert.IsType<DurableAgentStateUsage>(
+            JsonSerializer.Deserialize(
+                json,
+                DurableAgentStateJsonContext.Default.GetTypeInfo(typeof(DurableAgentStateUsage))!));
+        UsageDetails converted = restored.ToUsageDetails();
+
+        Assert.Contains("\"extensionData\":{\"providerCount\":7}", json, StringComparison.Ordinal);
+        Assert.Equal(7, converted.AdditionalCounts?["providerCount"]);
+    }
+
+    [Fact]
+    public void UsageProjectionIgnoresMalformedExtensionsAndPreservesTheirJson()
+    {
+        const string Json = """
+            {
+              "inputTokenCount": 10,
+              "extensionData": {
+                "providerCount": 7,
+                "futureString": "seven",
+                "futureObject": { "count": 8 },
+                "futureArray": [9],
+                "fractional": 1.5,
+                "tooLarge": 9223372036854775808
+              },
+              "futureTopLevelCount": 11,
+              "futureTopLevelObject": { "count": 12 }
+            }
+            """;
+        JsonTypeInfo usageTypeInfo =
+            DurableAgentStateJsonContext.Default.GetTypeInfo(typeof(DurableAgentStateUsage))!;
+        DurableAgentStateUsage stored = Assert.IsType<DurableAgentStateUsage>(
+            JsonSerializer.Deserialize(Json, usageTypeInfo));
+
+        UsageDetails usage = stored.ToUsageDetails();
+        string roundTrip = JsonSerializer.Serialize(stored, usageTypeInfo);
+
+        Assert.Equal(10, usage.InputTokenCount);
+        Assert.Equal(7, usage.AdditionalCounts?["providerCount"]);
+        Assert.Equal(11, usage.AdditionalCounts?["futureTopLevelCount"]);
+        Assert.DoesNotContain("futureString", usage.AdditionalCounts?.Keys ?? []);
+        Assert.DoesNotContain("futureObject", usage.AdditionalCounts?.Keys ?? []);
+        Assert.DoesNotContain("futureArray", usage.AdditionalCounts?.Keys ?? []);
+        Assert.DoesNotContain("fractional", usage.AdditionalCounts?.Keys ?? []);
+        Assert.DoesNotContain("tooLarge", usage.AdditionalCounts?.Keys ?? []);
+        Assert.DoesNotContain("futureTopLevelObject", usage.AdditionalCounts?.Keys ?? []);
+        Assert.Contains("\"futureString\":\"seven\"", roundTrip, StringComparison.Ordinal);
+        Assert.Contains("\"futureObject\":{\"count\":8}", roundTrip, StringComparison.Ordinal);
+        Assert.Contains("\"futureArray\":[9]", roundTrip, StringComparison.Ordinal);
+        Assert.Contains("\"futureTopLevelObject\":{\"count\":12}", roundTrip, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("0", 0L)]
+    [InlineData("9007199254740993", 9007199254740993L)]
+    [InlineData("9223372036854775807", long.MaxValue)]
+    [InlineData("9223372036854775807.0", long.MaxValue)]
+    [InlineData("9.223372036854775807e18", long.MaxValue)]
+    [InlineData("1.0", 1L)]
+    [InlineData("1e3", 1000L)]
+    public void UsageKnownCountsAcceptJsonIntegerFormsAndProjectExactInt64(
+        string countJson,
+        long expectedCount)
+    {
+        string json = $$"""{"inputTokenCount":{{countJson}}}""";
+        JsonTypeInfo usageTypeInfo =
+            DurableAgentStateJsonContext.Default.GetTypeInfo(typeof(DurableAgentStateUsage))!;
+
+        DurableAgentStateUsage stored = Assert.IsType<DurableAgentStateUsage>(
+            JsonSerializer.Deserialize(json, usageTypeInfo));
+        string roundTrip = JsonSerializer.Serialize(stored, usageTypeInfo);
+
+        Assert.Equal(countJson, JsonDocument.Parse(roundTrip).RootElement
+            .GetProperty("inputTokenCount").GetRawText());
+        Assert.Equal(expectedCount, stored.ToUsageDetails().InputTokenCount);
+    }
+
+    [Theory]
+    [InlineData("9223372036854775808")]
+    [InlineData("9.223372036854775808e18")]
+    [InlineData("-1")]
+    [InlineData("1.5")]
+    [InlineData("true")]
+    [InlineData("null")]
+    public void UsageKnownCountsRejectValuesOutsideNonNegativeInt64(string countJson)
+    {
+        string json = $$"""{"inputTokenCount":{{countJson}}}""";
+        JsonTypeInfo usageTypeInfo =
+            DurableAgentStateJsonContext.Default.GetTypeInfo(typeof(DurableAgentStateUsage))!;
+
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize(json, usageTypeInfo));
+    }
+
+    [Theory]
+    [InlineData("\"ten\"")]
+    [InlineData("{}")]
+    [InlineData("1.5")]
+    public void UsageDeserializationRejectsMalformedKnownNumericFields(string invalidValue)
+    {
+        string json = $$"""
+            {
+              "inputTokenCount": {{invalidValue}}
+            }
+            """;
+        JsonTypeInfo usageTypeInfo =
+            DurableAgentStateJsonContext.Default.GetTypeInfo(typeof(DurableAgentStateUsage))!;
+
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize(json, usageTypeInfo));
+    }
+
+    [Fact]
+    public void KnownContentDiscriminatorDoesNotUseUnknownEnvelope()
+    {
         TextContent originalContent = new("Some unknown content");
-
-        DurableAgentStateContent durableContent = DurableAgentStateUnknownContent.FromUnknownContent(originalContent);
-
-        // Act
+        DurableAgentStateContent durableContent =
+            DurableAgentStateContent.FromAIContent(originalContent);
         string jsonContent = JsonSerializer.Serialize(durableContent, s_stateContentTypeInfo);
-
         DurableAgentStateContent? convertedJsonContent =
             (DurableAgentStateContent?)JsonSerializer.Deserialize(jsonContent, s_stateContentTypeInfo);
 
-        // Assert
-        Assert.NotNull(convertedJsonContent);
-
-        AIContent convertedContent = convertedJsonContent.ToAIContent();
-
+        DurableAgentStateTextContent convertedState =
+            Assert.IsType<DurableAgentStateTextContent>(convertedJsonContent);
+        AIContent convertedContent = convertedState.ToAIContent();
         TextContent convertedTextContent = Assert.IsType<TextContent>(convertedContent);
 
         Assert.Equal(originalContent.Text, convertedTextContent.Text);
+        Assert.Contains("\"$type\":\"text\"", jsonContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("$microsoftAgentFrameworkDurableTask", jsonContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("$runtimeType", jsonContent, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void KnownContentAdditionalPropertiesRoundTripAcrossLegacyAndV2Paths()
+    {
+        AIContent[] contents =
+        [
+            new DataContent("data:;base64,QQ==", "text/plain"),
+            new ErrorContent("failed"),
+            new FunctionCallContent("call", "tool", new Dictionary<string, object?>()),
+            new FunctionResultContent("call", 42),
+            new HostedFileContent("file"),
+            new HostedVectorStoreContent("vector"),
+            new TextContent("hello"),
+            new TextReasoningContent("reasoning"),
+            new UriContent(new Uri("https://example.test"), "text/plain"),
+            new UsageContent(new UsageDetails()),
+        ];
+
+        foreach (AIContent content in contents)
+        {
+            content.AdditionalProperties = new AdditionalPropertiesDictionary
+            {
+                ["producer"] = "python",
+            };
+
+            foreach (DurableAgentStateContent durable in new[]
+            {
+                DurableAgentStateContent.FromAIContent(content),
+                DurableAgentStateContent.FromAIContentV2(content),
+            })
+            {
+                string json = JsonSerializer.Serialize(durable, s_stateContentTypeInfo);
+                DurableAgentStateContent restored = Assert.IsAssignableFrom<DurableAgentStateContent>(
+                    JsonSerializer.Deserialize(json, s_stateContentTypeInfo));
+                AIContent converted = restored.ToAIContent();
+
+                Assert.Equal(
+                    "python",
+                    Assert.IsType<JsonElement>(converted.AdditionalProperties?["producer"]).GetString());
+                Assert.Contains(
+                    "\"extensionData\":{\"producer\":\"python\"}",
+                    json,
+                    StringComparison.Ordinal);
+            }
+        }
+    }
+
+    [Fact]
+    public void KnownContentUnknownSiblingsAreNotPromotedToFrameworkMetadata()
+    {
+        const string Json = """
+            {
+              "$type": "text",
+              "text": "hello",
+              "extensionData": { "producer": "python" },
+              "futureSibling": "inert-unknown-sibling"
+            }
+            """;
+        DurableAgentStateTextContent stored = Assert.IsType<DurableAgentStateTextContent>(
+            JsonSerializer.Deserialize(Json, s_stateContentTypeInfo));
+
+        TextContent converted = Assert.IsType<TextContent>(stored.ToAIContent());
+        string roundTrip = JsonSerializer.Serialize(stored, s_stateContentTypeInfo);
+
+        Assert.Equal(
+            "python",
+            Assert.IsType<JsonElement>(converted.AdditionalProperties?["producer"]).GetString());
+        Assert.False(converted.AdditionalProperties?.ContainsKey("futureSibling"));
+        Assert.Equal(
+            "inert-unknown-sibling",
+            stored.UnknownProperties?["futureSibling"].GetString());
+        Assert.Contains("\"futureSibling\":\"inert-unknown-sibling\"", roundTrip, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UnknownContentWithUnrecognizedPayloadFallsBackWithoutDataLoss()
+    {
+        DurableAgentStateUnknownContent stored = new()
+        {
+            Content = JsonSerializer.SerializeToElement(
+                new { type = "future_content", value = 42 }),
+        };
+
+        AIContent restored = stored.ToAIContent();
+
+        JsonElement content = Assert.IsType<JsonElement>(restored.RawRepresentation);
+        Assert.Equal("future_content", content.GetProperty("type").GetString());
+        Assert.Equal(42, content.GetProperty("value").GetInt32());
+        Assert.Null(restored.AdditionalProperties);
+    }
+
+    [Fact]
+    public void OpaqueUnknownContentPreservesDeclaredExtensionDataAcrossRepeatedConversions()
+    {
+        DurableAgentStateUnknownContent stored = new()
+        {
+            Content = JsonSerializer.SerializeToElement(
+                new
+                {
+                    type = "future_content",
+                    value = 42,
+                }),
+            AdditionalProperties = new Dictionary<string, JsonElement>
+            {
+                ["content"] = JsonSerializer.SerializeToElement("producer-owned-metadata"),
+                ["producer"] = JsonSerializer.SerializeToElement("python"),
+            },
+        };
+
+        AIContent firstConversion = stored.ToAIContent();
+        DurableAgentStateUnknownContent restored = Assert.IsType<DurableAgentStateUnknownContent>(
+            DurableAgentStateContent.FromAIContent(firstConversion));
+        AIContent secondConversion = restored.ToAIContent();
+        string roundTrip = JsonSerializer.Serialize(restored, s_stateContentTypeInfo);
+
+        Assert.True(JsonElement.DeepEquals(stored.Content, restored.Content));
+        Assert.Equal(
+            "python",
+            Assert.IsType<JsonElement>(restored.AdditionalProperties?["producer"]).GetString());
+        Assert.Equal(
+            "producer-owned-metadata",
+            restored.AdditionalProperties?["content"].GetString());
+        Assert.Equal(
+            "python",
+            Assert.IsType<JsonElement>(secondConversion.AdditionalProperties?["producer"]).GetString());
+        Assert.Equal(
+            "producer-owned-metadata",
+            Assert.IsType<JsonElement>(secondConversion.AdditionalProperties?["content"]).GetString());
+        Assert.Contains(
+            "\"extensionData\":{\"content\":\"producer-owned-metadata\",\"producer\":\"python\"}",
+            roundTrip,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("$microsoftAgentFrameworkDurableTask", roundTrip, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PythonShapedOpaqueUnknownContentWithRuntimeTypeRoundTripsUnchanged()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """
+            {
+              "$runtimeType": "producer-owned-user-value",
+              "type": "future_python_content",
+              "annotations": [{ "kind": "citation", "value": "python-ref" }],
+              "additionalProperties": { "producer": "python" },
+              "future": { "nested": [1, 2, 3] }
+            }
+            """);
+        JsonElement original = document.RootElement.Clone();
+        DurableAgentStateUnknownContent stored = new() { Content = original };
+
+        AIContent restored = Assert.IsType<AIContent>(stored.ToAIContent());
+        DurableAgentStateUnknownContent roundTripped = Assert.IsType<DurableAgentStateUnknownContent>(
+            DurableAgentStateContent.FromAIContent(restored));
+
+        Assert.True(JsonElement.DeepEquals(original, roundTripped.Content));
+        Assert.Equal(
+            "producer-owned-user-value",
+            roundTripped.Content.GetProperty("$runtimeType").GetString());
+        Assert.Equal(
+            3,
+            roundTripped.Content.GetProperty("future").GetProperty("nested").GetArrayLength());
+    }
+
+    [Fact]
+    public void FutureDurableEnvelopeFieldsRemainOpaque()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """
+            {
+              "$microsoftAgentFrameworkDurableTask": {
+                "kind": "unknownAIContent",
+                "version": 1,
+                "futureMetadata": { "preserve": true }
+              }
+            }
+            """);
+        JsonElement original = document.RootElement.Clone();
+        DurableAgentStateUnknownContent stored = new() { Content = original };
+
+        AIContent restored = Assert.IsType<AIContent>(stored.ToAIContent());
+        DurableAgentStateUnknownContent roundTripped = Assert.IsType<DurableAgentStateUnknownContent>(
+            DurableAgentStateContent.FromAIContent(restored));
+
+        Assert.True(JsonElement.DeepEquals(original, roundTripped.Content));
+    }
+
+    [Fact]
+    public void MarkerShapedProducerContentWithoutEnvelopeMarkerRemainsOpaque()
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            """
+            {
+              "$microsoftAgentFrameworkDurableTask": {
+                "kind": "unknownAIContent",
+                "version": 1
+              }
+            }
+            """);
+        JsonElement original = document.RootElement.Clone();
+        DurableAgentStateUnknownContent stored = new() { Content = original };
+
+        AIContent restored = Assert.IsType<AIContent>(stored.ToAIContent());
+        DurableAgentStateUnknownContent roundTripped = Assert.IsType<DurableAgentStateUnknownContent>(
+            DurableAgentStateContent.FromAIContent(restored));
+
+        Assert.True(JsonElement.DeepEquals(original, roundTripped.Content));
+        Assert.Equal(
+            "unknownAIContent",
+            roundTripped.Content
+                .GetProperty("$microsoftAgentFrameworkDurableTask")
+                .GetProperty("kind")
+                .GetString());
+    }
+
+    [Fact]
+    public void UnregisteredAIContentSubtypePersistsCommonContractAsUnknown()
+    {
+        FutureContent original = new()
+        {
+            FutureValue = "not part of the common contract",
+            RawRepresentation = new { kind = "future", value = 42 },
+            AdditionalProperties = new()
+            {
+                ["providerFlag"] = true,
+            },
+            Annotations =
+            [
+                new AIAnnotation
+                {
+                    AdditionalProperties = new()
+                    {
+                        ["citation"] = "ref-1",
+                    },
+                },
+            ],
+        };
+
+        DurableAgentStateUnknownContent stored = Assert.IsType<DurableAgentStateUnknownContent>(
+            DurableAgentStateContent.FromAIContent(original));
+        string json = JsonSerializer.Serialize(stored, s_stateContentTypeInfo);
+        DurableAgentStateContent roundTripped = Assert.IsType<DurableAgentStateUnknownContent>(
+            JsonSerializer.Deserialize(json, s_stateContentTypeInfo));
+
+        using JsonDocument document = JsonDocument.Parse(json);
+        JsonElement persistedContent = document.RootElement.GetProperty("content");
+        JsonElement envelope =
+            persistedContent.GetProperty("$microsoftAgentFrameworkDurableTask");
+        Assert.Equal("unknownAIContent", envelope.GetProperty("kind").GetString());
+        Assert.StartsWith(
+            "Microsoft.Agents.AI.DurableTask.UnknownContent/",
+            envelope.GetProperty("marker").GetString(),
+            StringComparison.Ordinal);
+        Assert.Equal(1, envelope.GetProperty("version").GetInt32());
+        Assert.False(persistedContent.TryGetProperty("$runtimeType", out _));
+        Assert.DoesNotContain(typeof(FutureContent).FullName!, json, StringComparison.Ordinal);
+        Assert.False(envelope.TryGetProperty(nameof(FutureContent.FutureValue), out _));
+
+        AIContent restored = Assert.IsType<AIContent>(roundTripped.ToAIContent());
+        Assert.True(
+            Assert.IsType<JsonElement>(restored.AdditionalProperties?["providerFlag"]).GetBoolean());
+        Assert.Equal(
+            "ref-1",
+            Assert.IsType<JsonElement>(
+                Assert.Single(restored.Annotations!).AdditionalProperties?["citation"]).GetString());
+        JsonElement rawRepresentation = Assert.IsType<JsonElement>(restored.RawRepresentation);
+        Assert.Equal("future", rawRepresentation.GetProperty("kind").GetString());
+        Assert.Equal(42, rawRepresentation.GetProperty("value").GetInt32());
+    }
+
+    [Fact]
+    public void UnknownContentOmitsUnsafeValuesAndPreservesSafeMetadata()
+    {
+        CyclicPayload cyclicPayload = new();
+        cyclicPayload.Self = cyclicPayload;
+        JsonElement disposedElement;
+        using (JsonDocument disposedDocument = JsonDocument.Parse("""{"value":"disposed-secret"}"""))
+        {
+            disposedElement = disposedDocument.RootElement;
+        }
+
+        using MemoryStream stream = new([1, 2, 3]);
+        CollectingLogger logger = new();
+        FutureContent original = new()
+        {
+            RawRepresentation = new ThrowingGetterPayload(),
+            AdditionalProperties = new()
+            {
+                ["safeString"] = "kept",
+                ["safeObject"] = new { value = 42 },
+                ["cyclic"] = cyclicPayload,
+                ["delegate"] = () => { },
+                ["stream"] = stream,
+                ["disposedJson"] = disposedElement,
+                ["invalidNumber"] = double.NaN,
+                ["customConverter"] = new ThrowingConverterPayload(),
+            },
+            Annotations =
+            [
+                new AIAnnotation
+                {
+                    RawRepresentation = disposedElement,
+                    AdditionalProperties = new()
+                    {
+                        ["safeAnnotation"] = "annotation-kept",
+                        ["badAnnotation"] = new ThrowingConverterPayload(),
+                    },
+                },
+            ],
+        };
+
+        DurableAgentStateUnknownContent stored = Assert.IsType<DurableAgentStateUnknownContent>(
+            DurableAgentStateContent.FromAIContent(original, logger));
+        string json = JsonSerializer.Serialize(stored, s_stateContentTypeInfo);
+        DurableAgentState state = new();
+        state.Data.ConversationHistory.Add(
+            new DurableAgentStateRequest
+            {
+                CreatedAt = DateTimeOffset.UtcNow,
+                Messages =
+                [
+                    new DurableAgentStateMessage
+                    {
+                        Role = "assistant",
+                        Contents = [stored],
+                    },
+                ],
+            });
+        Exception? finalSerializationException = Record.Exception(
+            () => JsonSerializer.Serialize(
+                state,
+                DurableAgentStateJsonContext.Default.DurableAgentState));
+
+        using JsonDocument document = JsonDocument.Parse(json);
+        JsonElement envelope = document.RootElement.GetProperty("content")
+            .GetProperty("$microsoftAgentFrameworkDurableTask");
+        JsonElement additionalProperties = envelope.GetProperty("additionalProperties");
+        Assert.Equal("kept", additionalProperties.GetProperty("safeString").GetString());
+        Assert.Equal(42, additionalProperties.GetProperty("safeObject").GetProperty("value").GetInt32());
+        Assert.False(additionalProperties.TryGetProperty("cyclic", out _));
+        Assert.False(additionalProperties.TryGetProperty("delegate", out _));
+        Assert.False(additionalProperties.TryGetProperty("stream", out _));
+        Assert.False(additionalProperties.TryGetProperty("disposedJson", out _));
+        Assert.False(additionalProperties.TryGetProperty("invalidNumber", out _));
+        Assert.False(additionalProperties.TryGetProperty("customConverter", out _));
+        Assert.True(envelope.GetProperty("omitted").GetProperty("rawRepresentation").GetBoolean());
+        Assert.Equal(6, envelope.GetProperty("omitted").GetProperty("additionalProperties").GetInt32());
+
+        JsonElement annotation = envelope.GetProperty("annotations")[0];
+        Assert.Equal(
+            "annotation-kept",
+            annotation.GetProperty("additionalProperties").GetProperty("safeAnnotation").GetString());
+        Assert.False(
+            annotation.GetProperty("additionalProperties").TryGetProperty("badAnnotation", out _));
+        Assert.Equal(
+            1,
+            annotation.GetProperty("omitted").GetProperty("additionalProperties").GetInt32());
+        Assert.True(
+            annotation.GetProperty("omitted").GetProperty("rawRepresentation").GetBoolean());
+
+        AIContent restored = Assert.IsType<AIContent>(stored.ToAIContent());
+        Assert.Equal(
+            "kept",
+            Assert.IsType<JsonElement>(restored.AdditionalProperties?["safeString"]).GetString());
+        Assert.Equal(
+            "annotation-kept",
+            Assert.IsType<JsonElement>(
+                Assert.Single(restored.Annotations!).AdditionalProperties?["safeAnnotation"]).GetString());
+
+        Assert.Null(finalSerializationException);
+        Assert.True(logger.WarningCount >= 8);
+        Assert.All(logger.Exceptions, exception => Assert.Null(exception));
+        Assert.All(
+            logger.Messages,
+            message =>
+            {
+                Assert.DoesNotContain("disposed-secret", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("getter-secret", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("converter-secret", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("safeString", message, StringComparison.Ordinal);
+            });
+    }
+
+    [Fact]
+    public void UnknownSubtypePropertyGetterIsNeverInvoked()
+    {
+        ThrowingFutureContent.GetterInvocationCount = 0;
+        ThrowingFutureContent original = new()
+        {
+            AdditionalProperties = new()
+            {
+                ["safe"] = true,
+            },
+        };
+
+        DurableAgentStateUnknownContent stored = Assert.IsType<DurableAgentStateUnknownContent>(
+            DurableAgentStateContent.FromAIContent(original));
+        string json = JsonSerializer.Serialize(stored, s_stateContentTypeInfo);
+        AIContent restored = stored.ToAIContent();
+
+        Assert.Equal(0, ThrowingFutureContent.GetterInvocationCount);
+        Assert.IsType<AIContent>(restored);
+        Assert.True(
+            Assert.IsType<JsonElement>(restored.AdditionalProperties?["safe"]).GetBoolean());
+        Assert.DoesNotContain("$runtimeType", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("getter-secret", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UnknownContentDoesNotSwallowCancellation()
+    {
+        FutureContent original = new()
+        {
+            RawRepresentation = new CancelingGetterPayload(),
+        };
+
+        Assert.ThrowsAny<OperationCanceledException>(
+            () => DurableAgentStateContent.FromAIContent(original));
+    }
+
+    private sealed class FutureContent : AIContent
+    {
+        public string? FutureValue { get; init; }
+    }
+
+    private sealed class CyclicPayload
+    {
+        public CyclicPayload? Self { get; set; }
+    }
+
+    private sealed class ThrowingFutureContent : AIContent
+    {
+        public static int GetterInvocationCount { get; set; }
+
+        public string Dangerous
+        {
+            get
+            {
+                GetterInvocationCount++;
+                throw new InvalidOperationException("getter-secret");
+            }
+        }
+    }
+
+    private sealed class ThrowingGetterPayload
+    {
+        public string Dangerous => throw new InvalidOperationException("getter-secret");
+    }
+
+    private sealed class CancelingGetterPayload
+    {
+        public string Dangerous => throw new OperationCanceledException();
+    }
+
+    [JsonConverter(typeof(ThrowingConverterPayloadConverter))]
+    public sealed class ThrowingConverterPayload;
+
+    public sealed class ThrowingConverterPayloadConverter : JsonConverter<ThrowingConverterPayload>
+    {
+        public override ThrowingConverterPayload? Read(
+            ref Utf8JsonReader reader,
+            Type typeToConvert,
+            JsonSerializerOptions options)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override void Write(
+            Utf8JsonWriter writer,
+            ThrowingConverterPayload value,
+            JsonSerializerOptions options)
+        {
+            throw new FormatException("converter-secret");
+        }
+    }
+
+    private sealed class CollectingLogger : ILogger
+    {
+        public int WarningCount { get; private set; }
+
+        public List<string> Messages { get; } = [];
+
+        public List<Exception?> Exceptions { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning)
+            {
+                this.WarningCount++;
+                this.Messages.Add(formatter(state, exception));
+                this.Exceptions.Add(exception);
+            }
+        }
     }
 }

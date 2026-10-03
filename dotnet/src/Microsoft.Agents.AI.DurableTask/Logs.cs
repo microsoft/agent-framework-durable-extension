@@ -101,6 +101,57 @@ internal static partial class Logs
         this ILogger logger,
         AgentSessionId sessionId);
 
+    [LoggerMessage(
+        EventId = 12,
+        Level = LogLevel.Warning,
+        Message = "[{SessionId}] Durable state reached {InitialSizeBytes} bytes of a {MaxStateBytes} byte budget. Retention evicted {EvictedEntryCount} transcript entries containing {EvictedMessageCount} message(s), leaving {FinalSizeBytes} bytes.")]
+    public static partial void LogDurableHistoryTruncated(
+        this ILogger logger,
+        AgentSessionId sessionId,
+        int initialSizeBytes,
+        int maxStateBytes,
+        int evictedEntryCount,
+        int evictedMessageCount,
+        int finalSizeBytes);
+
+    [LoggerMessage(
+        EventId = 13,
+        Level = LogLevel.Error,
+        Message = "[{SessionId}] Durable state has a protected floor of {ProtectedStateSizeBytes} bytes against a {MaxStateBytes} byte budget after all eligible transcript eviction. Mailbox results, completion receipts, history binding, provider continuation, TTL, execution bookkeeping, system content, and the newest transcript exchange were not removed.")]
+    public static partial void LogDurableHistoryStillOverBudget(
+        this ILogger logger,
+        AgentSessionId sessionId,
+        int protectedStateSizeBytes,
+        int maxStateBytes);
+
+    [LoggerMessage(
+        EventId = 14,
+        Level = LogLevel.Error,
+        Message = "[{SessionId}] Durable agent operation failed before durable state commit.")]
+    public static partial void LogDurableAgentExecutionFailed(
+        this ILogger logger,
+        Exception exception,
+        AgentSessionId sessionId);
+
+    [LoggerMessage(
+        EventId = 16,
+        Level = LogLevel.Warning,
+        Message = "Unknown AI content metadata with runtime type '{RuntimeType}' could not be serialized. The value was omitted from durable state with failure category '{FailureCategory}'.")]
+    public static partial void LogUnknownContentSerializationFallback(
+        this ILogger logger,
+        string runtimeType,
+        string failureCategory);
+
+    [LoggerMessage(
+        EventId = 17,
+        Level = LogLevel.Error,
+        Message = "[{SessionId}] Durable agent outcome state is corrupted for correlation ID '{CorrelationId}'.")]
+    public static partial void LogDurableOutcomeStateCorruption(
+        this ILogger logger,
+        Exception exception,
+        AgentSessionId sessionId,
+        string correlationId);
+
     // Durable workflow logs (EventIds 100-199)
 
     [LoggerMessage(

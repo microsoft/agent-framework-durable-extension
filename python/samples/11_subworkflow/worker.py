@@ -68,6 +68,14 @@ SENTIMENT_AGENT_NAME = "SentimentAgent"
 INNER_WORKFLOW_NAME = "sentiment_analysis"
 OUTER_WORKFLOW_NAME = "review_pipeline"
 
+
+def _resolve_taskhub(taskhub: str | None) -> str:
+    taskhub_name = taskhub if taskhub is not None else os.getenv("TASKHUB")
+    if not taskhub_name or taskhub_name != taskhub_name.strip() or taskhub_name.strip().casefold() == "default":
+        raise ValueError("Set TASKHUB to a non-default, non-blank hub name before starting this sample.")
+    return taskhub_name
+
+
 SENTIMENT_INSTRUCTIONS = (
     "You classify the sentiment of a customer product review. "
     "Return JSON with fields sentiment (one of 'positive', 'neutral', 'negative') "
@@ -134,7 +142,11 @@ def create_inner_workflow(chat_client: FoundryChatClient) -> Workflow:
     sentiment_formatter = SentimentFormatterExecutor(id="sentiment_formatter")
 
     return (
-        WorkflowBuilder(name=INNER_WORKFLOW_NAME, start_executor=sentiment_agent)
+        WorkflowBuilder(
+            name=INNER_WORKFLOW_NAME,
+            start_executor=sentiment_agent,
+            output_from=[sentiment_formatter],
+        )
         .add_edge(sentiment_agent, sentiment_formatter)
         .build()
     )
@@ -152,7 +164,7 @@ def create_workflow() -> Workflow:
     reporter = ReporterExecutor(id="reporter")
 
     return (
-        WorkflowBuilder(name=OUTER_WORKFLOW_NAME, start_executor=intake)
+        WorkflowBuilder(name=OUTER_WORKFLOW_NAME, start_executor=intake, output_from=[reporter])
         .add_edge(intake, sentiment_sub)
         .add_edge(sentiment_sub, reporter)
         .build()
@@ -163,7 +175,7 @@ def get_worker(
     taskhub: str | None = None, endpoint: str | None = None, log_handler: logging.Handler | None = None
 ) -> DurableTaskSchedulerWorker:
     """Create a configured DurableTaskSchedulerWorker."""
-    taskhub_name = taskhub or os.getenv("TASKHUB", "default")
+    taskhub_name = _resolve_taskhub(taskhub)
     endpoint_url = endpoint or os.getenv("ENDPOINT", "http://localhost:8080")
 
     credential = None if endpoint_url == "http://localhost:8080" else AzureCliCredential()

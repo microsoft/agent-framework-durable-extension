@@ -3,8 +3,10 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Azure.Core.Serialization;
 using Microsoft.Agents.AI.DurableTask;
 using Microsoft.Agents.AI.DurableTask.Workflows;
 using Microsoft.Azure.Functions.Worker;
@@ -16,6 +18,7 @@ using Microsoft.DurableTask.Worker.Grpc;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Microsoft.Agents.AI.Hosting.AzureFunctions;
 
@@ -59,7 +62,10 @@ internal static class BuiltInFunctions
     private const string SessionIdHeaderName = "x-ms-session-id";
     private const string SessionIdParameterName = "sessionId";
     private const string LegacySessionIdParameterName = "session_id";
+    private const string DurableOutcomeHeaderName = "x-ms-durable-outcome";
+    private const string LegacyCompletionOutcomeHeaderName = "x-ms-agent-completion-outcome";
     private const string SessionIdMcpArgumentName = "sessionId";
+    private const string ResponseFormatMcpArgumentName = "responseFormat";
 
     /// <summary>
     /// Deprecated alias for <see cref="SessionIdParameterName"/>. Still accepted on incoming requests,
@@ -438,11 +444,42 @@ internal static class BuiltInFunctions
 
         if (waitForResponse)
         {
-            AgentResponse agentResponse = await agentProxy.RunAsync(
-                message: new ChatMessage(ChatRole.User, message),
-                session: new DurableAgentSession(sessionId),
-                options: options,
-                cancellationToken: context.CancellationToken);
+            AgentResponse agentResponse;
+            try
+            {
+                agentResponse = await agentProxy.RunAsync(
+                    message: new ChatMessage(ChatRole.User, message),
+                    session: new DurableAgentSession(sessionId),
+                    options: options,
+                    cancellationToken: context.CancellationToken);
+            }
+            catch (DurableAgentResultUnavailableException exception)
+            {
+                return await CreateAgentOutcomeErrorResponseAsync(
+                    req,
+                    context,
+                    HttpStatusCode.Gone,
+                    sessionId.Key,
+                    "completedResultUnavailable",
+                    "resultUnavailable",
+                    exception.Message,
+                    details: null,
+                    completionOutcome: exception.Outcome,
+                    addDeprecationHeaders: usedLegacyAgentHttpNames);
+            }
+            catch (DurableAgentTerminalException exception)
+            {
+                return await CreateAgentOutcomeErrorResponseAsync(
+                    req,
+                    context,
+                    HttpStatusCode.InternalServerError,
+                    sessionId.Key,
+                    "failed",
+                    exception.Code ?? "terminalFailure",
+                    exception.Message,
+                    exception.Details,
+                    addDeprecationHeaders: usedLegacyAgentHttpNames);
+            }
 
             return await CreateSuccessResponseAsync(
                 req,
@@ -482,6 +519,17 @@ internal static class BuiltInFunctions
             throw new ArgumentException("MCP Tool invocation is missing required 'query' argument of type string.");
         }
 
+        bool returnJson = false;
+        if (context.Arguments.TryGetValue(ResponseFormatMcpArgumentName, out object? responseFormat))
+        {
+            if (responseFormat is not string format || (format != "text" && format != "json"))
+            {
+                throw new ArgumentException("MCP Tool 'responseFormat' must be 'text' or 'json'.");
+            }
+
+            returnJson = format == "json";
+        }
+
         string agentName = context.Name;
 
         // Bind the caller-supplied session key under the current agent name, mirroring the behavior of
@@ -508,9 +556,24 @@ internal static class BuiltInFunctions
         AgentResponse agentResponse = await agentProxy.RunAsync(
             message: new ChatMessage(ChatRole.User, query),
             session: new DurableAgentSession(sessionId),
-            options: null);
+            options: null,
+            cancellationToken: functionContext.CancellationToken);
 
-        return agentResponse.Text;
+        if (!returnJson)
+        {
+            return agentResponse.Text;
+        }
+
+        ObjectSerializer serializer = functionContext.InstanceServices
+            .GetRequiredService<IOptions<WorkerOptions>>().Value.Serializer
+            ?? throw new InvalidOperationException("The Functions worker JSON serializer is not configured.");
+        using MemoryStream stream = new();
+        await serializer.SerializeAsync(
+            stream,
+            new AgentMcpSuccessResponse("success", (int)HttpStatusCode.OK, sessionId.Key, agentResponse),
+            typeof(AgentMcpSuccessResponse),
+            functionContext.CancellationToken);
+        return Encoding.UTF8.GetString(stream.ToArray());
     }
 
     /// <summary>
@@ -752,7 +815,8 @@ internal static class BuiltInFunctions
 
         if (AcceptsJson(req))
         {
-            AgentRunSuccessResponse successResponse = new((int)statusCode, sessionId, sessionId, agentResponse);
+            AgentRunSuccessResponse successResponse =
+                new("success", (int)statusCode, sessionId, agentResponse);
             await response.WriteAsJsonAsync(successResponse, context.CancellationToken);
         }
         else
@@ -784,7 +848,8 @@ internal static class BuiltInFunctions
 
         if (AcceptsJson(req))
         {
-            AgentRunAcceptedResponse acceptedResponse = new((int)HttpStatusCode.Accepted, sessionId, sessionId);
+            AgentRunAcceptedResponse acceptedResponse =
+                new("accepted", (int)HttpStatusCode.Accepted, sessionId);
             await response.WriteAsJsonAsync(acceptedResponse, context.CancellationToken);
         }
         else
@@ -812,6 +877,46 @@ internal static class BuiltInFunctions
 
     internal static bool UsesLegacyAgentHttpNames(params string?[] values) =>
         values.Any(value => !string.IsNullOrWhiteSpace(value));
+
+    private static async Task<HttpResponseData> CreateAgentOutcomeErrorResponseAsync(
+        HttpRequestData req,
+        FunctionContext context,
+        HttpStatusCode statusCode,
+        string sessionId,
+        string status,
+        string code,
+        string message,
+        JsonElement? details,
+        string? completionOutcome = null,
+        bool addDeprecationHeaders = false)
+    {
+        HttpResponseData response = req.CreateResponse(statusCode);
+        response.Headers.Add(SessionIdHeaderName, sessionId);
+        string durableOutcome = completionOutcome ?? "failed";
+        response.Headers.Add(DurableOutcomeHeaderName, durableOutcome);
+        response.Headers.Add(LegacyCompletionOutcomeHeaderName, durableOutcome);
+        AddAgentHttpDeprecationHeaders(response, addDeprecationHeaders);
+
+        if (AcceptsJson(req))
+        {
+            await response.WriteAsJsonAsync(
+                new AgentRunFailureResponse(
+                    status,
+                    (int)statusCode,
+                    sessionId,
+                    durableOutcome,
+                    new AgentRunError(code, message, details),
+                    completionOutcome),
+                context.CancellationToken);
+        }
+        else
+        {
+            response.Headers.Add("Content-Type", "text/plain");
+            await response.WriteStringAsync(message, context.CancellationToken);
+        }
+
+        return response;
+    }
 
     /// <summary>
     /// Returns <see langword="true"/> when the caller has requested waiting for the workflow/agent to complete,
@@ -1178,26 +1283,84 @@ internal static class BuiltInFunctions
     /// <summary>
     /// Represents a successful agent run response.
     /// </summary>
-    /// <param name="Status">The HTTP status code.</param>
+    /// <param name="Status">The portable agent-run status.</param>
+    /// <param name="StatusCode">The numeric HTTP status code.</param>
     /// <param name="SessionId">The session ID for the conversation.</param>
-    /// <param name="LegacySessionId">The legacy snake_case session ID field emitted during the migration window.</param>
     /// <param name="Response">The agent response.</param>
     internal sealed record AgentRunSuccessResponse(
-        [property: JsonPropertyName("status")] int Status,
+        [property: JsonPropertyName("status")] string Status,
+        [property: JsonPropertyName("statusCode")] int StatusCode,
         [property: JsonPropertyName("sessionId")] string SessionId,
-        [property: JsonPropertyName("session_id")] string LegacySessionId,
-        [property: JsonPropertyName("response")] AgentResponse Response);
+        [property: JsonPropertyName("response")] AgentResponse Response)
+    {
+        [JsonPropertyName("status_code")]
+        public int LegacyStatusCode => this.StatusCode;
+
+        [JsonPropertyName("session_id")]
+        public string LegacySessionId => this.SessionId;
+
+        [JsonPropertyName("result")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public JsonElement? Result => this.Response.GetDurableResult();
+    }
 
     /// <summary>
     /// Represents an accepted (fire-and-forget) agent run response.
     /// </summary>
-    /// <param name="Status">The HTTP status code.</param>
+    /// <param name="Status">The portable agent-run status.</param>
+    /// <param name="StatusCode">The numeric HTTP status code.</param>
     /// <param name="SessionId">The session ID for the conversation.</param>
-    /// <param name="LegacySessionId">The legacy snake_case session ID field emitted during the migration window.</param>
     internal sealed record AgentRunAcceptedResponse(
-        [property: JsonPropertyName("status")] int Status,
+        [property: JsonPropertyName("status")] string Status,
+        [property: JsonPropertyName("statusCode")] int StatusCode,
+        [property: JsonPropertyName("sessionId")] string SessionId)
+    {
+        [JsonPropertyName("status_code")]
+        public int LegacyStatusCode => this.StatusCode;
+
+        [JsonPropertyName("session_id")]
+        public string LegacySessionId => this.SessionId;
+    }
+
+    internal sealed record AgentRunFailureResponse(
+        [property: JsonPropertyName("status")] string Status,
+        [property: JsonPropertyName("statusCode")] int StatusCode,
         [property: JsonPropertyName("sessionId")] string SessionId,
-        [property: JsonPropertyName("session_id")] string LegacySessionId);
+        [property: JsonPropertyName("outcome")] string Outcome,
+        [property: JsonPropertyName("error")] AgentRunError Error,
+        [property: JsonPropertyName("completionOutcome")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        string? CompletionOutcome = null)
+    {
+        [JsonPropertyName("status_code")]
+        public int LegacyStatusCode => this.StatusCode;
+
+        [JsonPropertyName("session_id")]
+        public string LegacySessionId => this.SessionId;
+
+        [JsonPropertyName("completion_outcome")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? LegacyCompletionOutcome => this.CompletionOutcome;
+    }
+
+    internal sealed record AgentRunError(
+        [property: JsonPropertyName("code")] string Code,
+        [property: JsonPropertyName("message")] string Message,
+        [property: JsonPropertyName("details")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        JsonElement? Details);
+
+    // MCP's opt-in JSON contract is independent of the HTTP naming migration.
+    private sealed record AgentMcpSuccessResponse(
+        [property: JsonPropertyName("status")] string Status,
+        [property: JsonPropertyName("status_code")] int StatusCode,
+        [property: JsonPropertyName("session_id")] string SessionId,
+        [property: JsonPropertyName("response")] AgentResponse Response)
+    {
+        [JsonPropertyName("result")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public JsonElement? Result => this.Response.GetDurableResult();
+    }
 
     /// <summary>
     /// Represents a request to respond to a pending RequestPort in a workflow.

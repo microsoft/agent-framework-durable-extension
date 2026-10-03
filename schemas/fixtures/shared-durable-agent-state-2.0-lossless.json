@@ -22,7 +22,7 @@
       "corr-lossless": {
         "correlationId": "corr-lossless",
         "outcome": "succeeded",
-        "completedAt": "2026-09-11T10:00:00Z",
+        "completedAt": "2026-09-11T10:00:00.123456789Z",
         "response": {
           "messages": [
             {
@@ -66,7 +66,7 @@
       "corr-lossless": {
         "correlationId": "corr-lossless",
         "outcome": "succeeded",
-        "completedAt": "2026-09-11T10:00:00Z",
+        "completedAt": "2026-09-11T10:00:00.123456789Z",
         "resultState": "available"
       }
     },
