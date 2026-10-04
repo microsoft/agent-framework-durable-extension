@@ -35,6 +35,8 @@ public sealed class HistoryRetentionScenario
         Action<int>? beforeNote = null,
         CancellationToken cancellationToken = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(marker);
+
         for (int turn = 1; turn <= HistoryRetentionDemo.ScenarioTurns; turn++)
         {
             string notes = new((char)('a' + turn - 1), HistoryRetentionDemo.NotesPerTurn);
@@ -138,6 +140,8 @@ public static class HistoryRetentionDemo
 
     public static MarkerObservation ClassifyResponse(string marker, string? response)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(marker);
+
         string text = response ?? string.Empty;
         if (text.Contains(marker, StringComparison.Ordinal))
         {

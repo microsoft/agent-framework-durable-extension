@@ -32,6 +32,11 @@ The random-marker answer is illustrative only:
 - Only `UNKNOWN` with optional final punctuation is classified as `Unavailable`.
 - Every other response is `Inconclusive`.
 
+Both the scenario helper and diagnostic classifier reject null, empty, or whitespace-only markers
+with an argument exception. The scenario validates before invoking callbacks or the agent, so
+invalid markers cannot cause model calls or mutate the session. Valid markers are preserved
+unchanged and compared using exact, case-sensitive matching.
+
 The real `Microsoft.Agents.AI.DurableTask.UnitTests` project provides the white-box correctness
 proof. It captures later model input, inspects persisted and reloaded entity state, retrieves the
 original completed result from the mailbox, and redelivers the original correlation while checking
@@ -112,8 +117,8 @@ dotnet test --project tests\10_AutoHistoryRetention.Tests.csproj -c Release -f n
 ```
 
 The sample-local tests use only public APIs. They cover bounded agent options, prompt construction,
-the no-wait marker diagnostic, conservative result classification, and real OpenTelemetry meter
-registration/export.
+the no-wait marker diagnostic, conservative result classification, invalid-marker rejection before
+agent/model calls or output/session mutation, and real OpenTelemetry meter registration/export.
 
 The white-box retention regression lives in the real package unit-test project, which legitimately
 has friend access:
