@@ -37,7 +37,7 @@
         "$type": { "type": "string", "const": "data" },
         "uri": { "type": "string", "description": "The URI that comprises the data." },
         "mediaType": { "type": "string", "description": "The media type of the data." },
-        "extensionData": { "type": "object", "description": "Producer-defined content metadata." }
+        "extensionData": { "description": "Producer-defined content metadata; any JSON value, preserved without coercion." }
       },
       "required": ["$type", "uri"]
     },
@@ -49,7 +49,7 @@
         "message": { "type": "string", "description": "The error message." },
         "errorCode": { "type": "string", "description": "The error code." },
         "details": { "description": "Additional details about the error." },
-        "extensionData": { "type": "object", "description": "Producer-defined content metadata." }
+        "extensionData": { "description": "Producer-defined content metadata; any JSON value, preserved without coercion." }
       },
       "required": ["$type"]
     },
@@ -59,7 +59,7 @@
       "properties": {
         "$type": { "type": "string", "const": "hostedFile" },
         "fileId": { "type": "string", "description": "The identifier of the hosted file." },
-        "extensionData": { "type": "object", "description": "Producer-defined content metadata." }
+        "extensionData": { "description": "Producer-defined content metadata; any JSON value, preserved without coercion." }
       },
       "required": ["$type", "fileId"]
     },
@@ -69,7 +69,7 @@
       "properties": {
         "$type": { "type": "string", "const": "hostedVectorStore" },
         "vectorStoreId": { "type": "string", "description": "The identifier of the hosted vector store." },
-        "extensionData": { "type": "object", "description": "Producer-defined content metadata." }
+        "extensionData": { "description": "Producer-defined content metadata; any JSON value, preserved without coercion." }
       },
       "required": ["$type", "vectorStoreId"]
     },
@@ -79,7 +79,7 @@
       "properties": {
         "$type": { "type": "string", "const": "reasoning" },
         "text": { "type": "string", "description": "The reasoning text." },
-        "extensionData": { "type": "object", "description": "Producer-defined content metadata." }
+        "extensionData": { "description": "Producer-defined content metadata; any JSON value, preserved without coercion." }
       },
       "required": ["$type"]
     },
@@ -90,7 +90,7 @@
         "$type": { "type": "string", "const": "uri" },
         "uri": { "type": "string", "description": "The URI." },
         "mediaType": { "type": "string", "description": "The media type of the URI." },
-        "extensionData": { "type": "object", "description": "Producer-defined content metadata." }
+        "extensionData": { "description": "Producer-defined content metadata; any JSON value, preserved without coercion." }
       },
       "required": ["$type", "uri"]
     },
@@ -100,7 +100,7 @@
       "properties": {
         "$type": { "type": "string", "const": "usage" },
         "usage": { "$ref": "#/$defs/usage" },
-        "extensionData": { "type": "object", "description": "Producer-defined content metadata." }
+        "extensionData": { "description": "Producer-defined content metadata; any JSON value, preserved without coercion." }
       },
       "required": ["$type", "usage"]
     },
@@ -110,7 +110,7 @@
       "properties": {
         "$type": { "type": "string", "const": "text" },
         "text": { "type": "string", "description": "The text content of the message." },
-        "extensionData": { "type": "object", "description": "Producer-defined content metadata." }
+        "extensionData": { "description": "Producer-defined content metadata; any JSON value, preserved without coercion." }
       },
       "required": ["$type", "text"]
     },
@@ -122,7 +122,7 @@
         "callId": { "type": "string", "description": "The identifier of the function being called." },
         "name": { "type": "string", "description": "The name of the function being called." },
         "arguments": { "type": ["object", "string"], "description": "The arguments provided to the function call, preserving historical string values." },
-        "extensionData": { "type": "object", "description": "Producer-defined content metadata." }
+        "extensionData": { "description": "Producer-defined content metadata; any JSON value, preserved without coercion." }
       },
       "required": ["$type", "callId", "name"]
     },
@@ -133,7 +133,7 @@
         "$type": { "type": "string", "const": "functionResult" },
         "callId": { "type": "string", "description": "The identifier of the function being called." },
         "result": { "description": "The result returned by the function call." },
-        "extensionData": { "type": "object", "description": "Producer-defined content metadata." }
+        "extensionData": { "description": "Producer-defined content metadata; any JSON value, preserved without coercion." }
       },
       "required": ["$type", "callId"]
     },
@@ -143,7 +143,7 @@
       "properties": {
         "$type": { "type": "string", "const": "unknown" },
         "content": { "description": "Opaque JSON, including scalar or null values. Not an instruction or a runtime type selector." },
-        "extensionData": { "type": "object", "description": "Producer-defined content metadata." }
+        "extensionData": { "description": "Producer-defined content metadata; any JSON value, preserved without coercion." }
       },
       "required": ["$type", "content"]
     },
@@ -218,7 +218,7 @@
           "type": ["object", "string"],
           "description": "Original function arguments. Preserve string form verbatim, including incomplete or non-JSON text; do not parse, normalize, or replace it with an object."
         },
-        "extensionData": { "type": "object", "description": "Producer-defined content metadata." }
+        "extensionData": { "description": "Producer-defined content metadata; any JSON value, preserved without coercion." }
       },
       "required": ["$type", "callId", "name"]
     },
@@ -229,7 +229,7 @@
         "$type": { "type": "string", "const": "uri" },
         "uri": { "type": "string", "description": "The URI." },
         "mediaType": { "type": "string", "description": "The media type of the URI, if supplied." },
-        "extensionData": { "type": "object", "description": "Producer-defined content metadata." }
+        "extensionData": { "description": "Producer-defined content metadata; any JSON value, preserved without coercion." }
       },
       "required": ["$type", "uri"]
     },
