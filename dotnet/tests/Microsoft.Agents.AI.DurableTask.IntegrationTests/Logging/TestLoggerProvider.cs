@@ -8,7 +8,7 @@ namespace Microsoft.Agents.AI.DurableTask.IntegrationTests.Logging;
 internal sealed class TestLoggerProvider(ITestOutputHelper output) : ILoggerProvider
 {
     private readonly ITestOutputHelper _output = output ?? throw new ArgumentNullException(nameof(output));
-    private readonly ConcurrentDictionary<string, TestLogger> _loggers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, TestLogger> _loggers = new(StringComparer.Ordinal);
 
     public bool TryGetLogs(string category, out IReadOnlyCollection<LogEntry> logs)
     {
@@ -31,12 +31,13 @@ internal sealed class TestLoggerProvider(ITestOutputHelper output) : ILoggerProv
             .AsReadOnly();
     }
 
-    public IReadOnlyCollection<LogEntry> GetAgentLogs(string agentName)
+    public IReadOnlyCollection<LogEntry> GetAgentLogs(AgentSessionId sessionId)
     {
-        // Entity names are case-insensitive and normalized by the Durable Task SDK.
-        string categoryPrefix = $"Microsoft.DurableTask.Agents.{agentName}.";
+        // The SDK normalizes the entity name, but the session key remains case-sensitive.
+        AgentSessionId normalizedSessionId = (Microsoft.DurableTask.Entities.EntityInstanceId)sessionId;
+        string category = $"Microsoft.DurableTask.Agents.{normalizedSessionId.Name}.{sessionId.Key}";
         return this.GetAllLogs()
-            .Where(log => log.Category.StartsWith(categoryPrefix, StringComparison.OrdinalIgnoreCase))
+            .Where(log => string.Equals(log.Category, category, StringComparison.Ordinal))
             .ToArray();
     }
 
