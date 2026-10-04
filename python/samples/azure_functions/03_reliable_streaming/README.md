@@ -50,6 +50,7 @@ curl -X POST "http://localhost:7071/api/agents/TravelPlanner/run?waitForResponse
 ```
 
 Response (202 Accepted):
+
 ```json
 {
   "status": "accepted",
@@ -61,9 +62,14 @@ Response (202 Accepted):
 }
 ```
 
+Use `sessionId` and `correlationId` in new HTTP callers. The response's `session_id` and
+`correlation_id` fields are temporary compatibility fallbacks; legacy `wait_for_response`
+requests also remain accepted during the migration window.
+See the [agent HTTP camelCase migration guide](../../../../docs/features/durable-agents/http-api-camelcase-migration.md).
+
 ### Stream the response from Redis
 
-Use the returned `session_id` as `{conversation_id}` in the custom
+Use the returned `sessionId` as `{conversation_id}` in the custom
 `/api/agent/stream/{conversation_id}` endpoint to read Redis chunks:
 
 ```bash
@@ -72,7 +78,8 @@ curl http://localhost:7071/api/agent/stream/abc-123-def-456 \
 ```
 
 Response (SSE format):
-```
+
+```text
 id: 1734649123456-0
 event: message
 data: Here's a wonderful 3-day Tokyo itinerary...
@@ -91,7 +98,8 @@ data: [DONE]
 The stream route reads only Redis. It does **not** check committed entity state, and this sample
 does not supply a separate correlation-status endpoint.
 
-- Save both `session_id` and `correlation_id` from the accepted response. A session-scoped Redis
+- Save both `sessionId` and `correlationId` from the accepted response, assigning them to local Python
+  variables `session_id` and `correlation_id` for the SDK calls below. A session-scoped Redis
   marker or cursor cannot identify a committed result for the current request.
 - For non-blocking applications, implement an application-owned status path using the Functions
   durable client binding. Read `EntityId("dafx-TravelPlanner", session_id)` with `read_entity_state`
@@ -104,7 +112,7 @@ does not supply a separate correlation-status endpoint.
   from chunks or transcript history, and do not resubmit the POST as a status check.
 
 If a custom status path is not needed, submit the **original** request with
-`wait_for_response=true` instead. The standard run route polls the durable result for that request.
+`waitForResponse=true` instead. The standard run route polls the durable result for that request.
 Require its `status="success"` response, not a Redis marker or HTTP acceptance. A timeout is not
 confirmation of success or failure. This choice does not move the callback after the commit.
 
@@ -167,7 +175,7 @@ async def stream(req):
 
 Messages are stored in Redis Streams with automatic TTL (default: 10 minutes):
 
-```
+```text
 Stream Key: agent-stream:{conversation_id}
 Entry: {
   "text": "chunk content",

@@ -63,7 +63,9 @@ The expected `application/json` output will look something like:
 
 ```json
 {
-  "status": 200,
+  "status": "success",
+  "statusCode": 200,
+  "status_code": 200,
   "sessionId": "ee6e47a0-f24b-40b1-ade8-16fcebb9eb40",
   "session_id": "ee6e47a0-f24b-40b1-ade8-16fcebb9eb40",
   "response": {
@@ -88,3 +90,7 @@ The expected `application/json` output will look something like:
   }
 }
 ```
+
+`status` is the portable agent-run state, while `statusCode` carries the numeric HTTP status.
+The `status_code` and `session_id` fields are temporary compatibility aliases for `statusCode`
+and `sessionId`. See the [agent HTTP camelCase migration guide](../../../../../docs/features/durable-agents/http-api-camelcase-migration.md).
