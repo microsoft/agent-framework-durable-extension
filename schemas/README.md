@@ -192,12 +192,14 @@ model context. Optional `messageId` is message identity, not request identity.
 
 ### Lossless messages and JSON content
 
-For schema 2.0 only, message roles include `developer`. Function-call `arguments` accepts the
+Historical message roles are free-form strings, including `developer`; schema
+2.0 permits only `user`, `assistant`, `system`, `tool`, and `developer`.
+In every declared version, function-call `arguments` accepts the
 original object or string; preserve the entire string, including whitespace
 and incomplete/non-JSON text, without parsing it into an object. URI content
 requires a URI but not a media type; absence stays absent rather than being
-filled with guessed metadata. Versioned message/content definitions keep these
-expansions out of historical 1.x validation, including when the same message is
+filled with guessed metadata. Versioned message definitions keep the schema 2.0
+closed role set out of historical 1.x validation, including when the same message is
 placed in a request, response, error response, or compaction transcript entry.
 The terminal-response message path also uses the v2 definitions.
 
@@ -220,17 +222,41 @@ require byte-identical JSON formatting or object-property order. Wrapping is a
 producer mapping for supported unmodeled content, not permission for a reader
 to hide malformed known wire fields or accept unknown wire discriminators.
 
-Known content `extensionData` maps only to the framework content metadata bag.
+Content-level `extensionData` accepts any JSON value: object, array, string,
+number, boolean, or null. Preserve its value and its presence without coercing it
+to an object, dropping it, or moving it into an `unknown` wrapper. Only object
+metadata can project directly to a framework content metadata bag; other shapes
+require lossless storage preservation independently of that runtime projection.
+This does not widen object-only `extensionData` on root, data, entry, message,
+response, or usage objects. In particular, a usage content item's own metadata
+is arbitrary JSON, while its nested `usage.extensionData` remains an object.
+
+Known content object `extensionData` maps only to the framework content metadata bag.
 Undeclared sibling properties remain unknown wire data at their original
 location and must not be promoted into framework metadata, where they could
 impersonate framework-owned control values.
 
 Unknown properties are allowed and must round-trip **at their original object
-locations**, independently of explicit `extensionData` objects, including
+locations**, independently of explicit `extensionData` values, including
 nested content and mailbox fields. Known fields must still satisfy their
 declared types; do not hide malformed values in extension data. This preservation
 rule is a requirement on compatible readers/writers, not a description
 of every current serializer. Metadata cannot override known envelope fields.
+
+Schema acceptance is not consumer roundtrip certification. Python's shared
+model retains non-object content metadata independently of its Core projection.
+Its unprofiled `unknown` content projection likewise exposes the opaque payload,
+not the wrapper's separate metadata; the shared snapshot still preserves both.
+The separate historical Python loader accepts the declared legacy forms, but
+does not promise a lossless runtime projection: message IDs and unknown siblings
+are not retained, function arguments are JSON-encoded for Core, and absent URI
+media types become empty strings. Shared validation must not reject the original
+JSON or silently migrate it to work around these consumer limitations.
+The current .NET state converter requires object-valued content metadata and
+rejects scalar, array, and null values before projection. These .NET paths are
+not certified for arbitrary content
+metadata; this schema correction does not introduce a projection adapter,
+change a runtime's writer version, or enable schema 2 deployment or migration.
 
 Unknown properties are not unknown discriminators: 2.0 accepts only transcript
 `$type` values `request`, `response`, `errorResponse`, and `compaction`.

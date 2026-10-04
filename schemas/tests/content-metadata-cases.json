@@ -1,0 +1,730 @@
+[
+  {
+    "description": "dataContent metadata JSON boundary",
+    "schema": {"$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/dataContent"},
+    "tests": [
+      {
+        "description": "Content metadata preserves null",
+        "data": {"$type": "data", "uri": "data:text/plain;base64,QQ==", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": null},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves boolean",
+        "data": {"$type": "data", "uri": "data:text/plain;base64,QQ==", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": false},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves integer",
+        "data": {"$type": "data", "uri": "data:text/plain;base64,QQ==", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 0},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves decimal",
+        "data": {"$type": "data", "uri": "data:text/plain;base64,QQ==", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 1.25},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves string",
+        "data": {"$type": "data", "uri": "data:text/plain;base64,QQ==", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": ""},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves array",
+        "data": {"$type": "data", "uri": "data:text/plain;base64,QQ==", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": [null, false, 0, "", {"future": [1, 2]}]},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves object",
+        "data": {"$type": "data", "uri": "data:text/plain;base64,QQ==", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": {"future": [null, false, 0, "", 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Absent content metadata stays absent",
+        "data": {"$type": "data", "uri": "data:text/plain;base64,QQ==", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Known field types remain strict",
+        "data": {"$type": "data", "uri": false, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      },
+      {
+        "description": "Content discriminator remains required",
+        "data": {"uri": "data:text/plain;base64,QQ==", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "errorContent metadata JSON boundary",
+    "schema": {"$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/errorContent"},
+    "tests": [
+      {
+        "description": "Content metadata preserves null",
+        "data": {"$type": "error", "message": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": null},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves boolean",
+        "data": {"$type": "error", "message": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": false},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves integer",
+        "data": {"$type": "error", "message": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 0},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves decimal",
+        "data": {"$type": "error", "message": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 1.25},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves string",
+        "data": {"$type": "error", "message": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": ""},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves array",
+        "data": {"$type": "error", "message": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": [null, false, 0, "", {"future": [1, 2]}]},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves object",
+        "data": {"$type": "error", "message": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": {"future": [null, false, 0, "", 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Absent content metadata stays absent",
+        "data": {"$type": "error", "message": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Known field types remain strict",
+        "data": {"$type": false, "message": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      },
+      {
+        "description": "Content discriminator remains required",
+        "data": {"message": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "hostedFileContent metadata JSON boundary",
+    "schema": {"$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/hostedFileContent"},
+    "tests": [
+      {
+        "description": "Content metadata preserves null",
+        "data": {"$type": "hostedFile", "fileId": "file", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": null},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves boolean",
+        "data": {"$type": "hostedFile", "fileId": "file", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": false},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves integer",
+        "data": {"$type": "hostedFile", "fileId": "file", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 0},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves decimal",
+        "data": {"$type": "hostedFile", "fileId": "file", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 1.25},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves string",
+        "data": {"$type": "hostedFile", "fileId": "file", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": ""},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves array",
+        "data": {"$type": "hostedFile", "fileId": "file", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": [null, false, 0, "", {"future": [1, 2]}]},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves object",
+        "data": {"$type": "hostedFile", "fileId": "file", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": {"future": [null, false, 0, "", 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Absent content metadata stays absent",
+        "data": {"$type": "hostedFile", "fileId": "file", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Known field types remain strict",
+        "data": {"$type": "hostedFile", "fileId": false, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      },
+      {
+        "description": "Content discriminator remains required",
+        "data": {"fileId": "file", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "hostedVectorStoreContent metadata JSON boundary",
+    "schema": {"$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/hostedVectorStoreContent"},
+    "tests": [
+      {
+        "description": "Content metadata preserves null",
+        "data": {"$type": "hostedVectorStore", "vectorStoreId": "vector", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": null},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves boolean",
+        "data": {"$type": "hostedVectorStore", "vectorStoreId": "vector", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": false},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves integer",
+        "data": {"$type": "hostedVectorStore", "vectorStoreId": "vector", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 0},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves decimal",
+        "data": {"$type": "hostedVectorStore", "vectorStoreId": "vector", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 1.25},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves string",
+        "data": {"$type": "hostedVectorStore", "vectorStoreId": "vector", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": ""},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves array",
+        "data": {"$type": "hostedVectorStore", "vectorStoreId": "vector", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": [null, false, 0, "", {"future": [1, 2]}]},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves object",
+        "data": {"$type": "hostedVectorStore", "vectorStoreId": "vector", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": {"future": [null, false, 0, "", 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Absent content metadata stays absent",
+        "data": {"$type": "hostedVectorStore", "vectorStoreId": "vector", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Known field types remain strict",
+        "data": {"$type": "hostedVectorStore", "vectorStoreId": false, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      },
+      {
+        "description": "Content discriminator remains required",
+        "data": {"vectorStoreId": "vector", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "textReasoningContent metadata JSON boundary",
+    "schema": {"$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/textReasoningContent"},
+    "tests": [
+      {
+        "description": "Content metadata preserves null",
+        "data": {"$type": "reasoning", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": null},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves boolean",
+        "data": {"$type": "reasoning", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": false},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves integer",
+        "data": {"$type": "reasoning", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 0},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves decimal",
+        "data": {"$type": "reasoning", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 1.25},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves string",
+        "data": {"$type": "reasoning", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": ""},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves array",
+        "data": {"$type": "reasoning", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": [null, false, 0, "", {"future": [1, 2]}]},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves object",
+        "data": {"$type": "reasoning", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": {"future": [null, false, 0, "", 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Absent content metadata stays absent",
+        "data": {"$type": "reasoning", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Known field types remain strict",
+        "data": {"$type": false, "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      },
+      {
+        "description": "Content discriminator remains required",
+        "data": {"text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "uriContent metadata JSON boundary",
+    "schema": {"$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/uriContent"},
+    "tests": [
+      {
+        "description": "Content metadata preserves null",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": null},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves boolean",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": false},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves integer",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 0},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves decimal",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 1.25},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves string",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": ""},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves array",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": [null, false, 0, "", {"future": [1, 2]}]},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves object",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": {"future": [null, false, 0, "", 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Absent content metadata stays absent",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Known field types remain strict",
+        "data": {"$type": "uri", "uri": false, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      },
+      {
+        "description": "Content discriminator remains required",
+        "data": {"uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "usageContent metadata JSON boundary",
+    "schema": {"$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/usageContent"},
+    "tests": [
+      {
+        "description": "Content metadata preserves null",
+        "data": {"$type": "usage", "usage": {"inputTokenCount": 9223372036854775807}, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": null},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves boolean",
+        "data": {"$type": "usage", "usage": {"inputTokenCount": 9223372036854775807}, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": false},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves integer",
+        "data": {"$type": "usage", "usage": {"inputTokenCount": 9223372036854775807}, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 0},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves decimal",
+        "data": {"$type": "usage", "usage": {"inputTokenCount": 9223372036854775807}, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 1.25},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves string",
+        "data": {"$type": "usage", "usage": {"inputTokenCount": 9223372036854775807}, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": ""},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves array",
+        "data": {"$type": "usage", "usage": {"inputTokenCount": 9223372036854775807}, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": [null, false, 0, "", {"future": [1, 2]}]},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves object",
+        "data": {"$type": "usage", "usage": {"inputTokenCount": 9223372036854775807}, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": {"future": [null, false, 0, "", 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Absent content metadata stays absent",
+        "data": {"$type": "usage", "usage": {"inputTokenCount": 9223372036854775807}, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Known field types remain strict",
+        "data": {"$type": "usage", "usage": false, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      },
+      {
+        "description": "Content discriminator remains required",
+        "data": {"usage": {"inputTokenCount": 9223372036854775807}, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "textContent metadata JSON boundary",
+    "schema": {"$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/textContent"},
+    "tests": [
+      {
+        "description": "Content metadata preserves null",
+        "data": {"$type": "text", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": null},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves boolean",
+        "data": {"$type": "text", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": false},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves integer",
+        "data": {"$type": "text", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 0},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves decimal",
+        "data": {"$type": "text", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 1.25},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves string",
+        "data": {"$type": "text", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": ""},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves array",
+        "data": {"$type": "text", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": [null, false, 0, "", {"future": [1, 2]}]},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves object",
+        "data": {"$type": "text", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": {"future": [null, false, 0, "", 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Absent content metadata stays absent",
+        "data": {"$type": "text", "text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Known field types remain strict",
+        "data": {"$type": "text", "text": false, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      },
+      {
+        "description": "Content discriminator remains required",
+        "data": {"text": "synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "functionCallContent metadata JSON boundary",
+    "schema": {"$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/functionCallContent"},
+    "tests": [
+      {
+        "description": "Content metadata preserves null",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": " { \"partial\": ", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": null},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves boolean",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": " { \"partial\": ", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": false},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves integer",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": " { \"partial\": ", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 0},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves decimal",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": " { \"partial\": ", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 1.25},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves string",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": " { \"partial\": ", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": ""},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves array",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": " { \"partial\": ", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": [null, false, 0, "", {"future": [1, 2]}]},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves object",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": " { \"partial\": ", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": {"future": [null, false, 0, "", 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Absent content metadata stays absent",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": " { \"partial\": ", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Known field types remain strict",
+        "data": {"$type": "functionCall", "callId": false, "name": "f", "arguments": " { \"partial\": ", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      },
+      {
+        "description": "Content discriminator remains required",
+        "data": {"callId": "call", "name": "f", "arguments": " { \"partial\": ", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "functionResultContent metadata JSON boundary",
+    "schema": {"$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/functionResultContent"},
+    "tests": [
+      {
+        "description": "Content metadata preserves null",
+        "data": {"$type": "functionResult", "callId": "call", "result": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": null},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves boolean",
+        "data": {"$type": "functionResult", "callId": "call", "result": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": false},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves integer",
+        "data": {"$type": "functionResult", "callId": "call", "result": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 0},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves decimal",
+        "data": {"$type": "functionResult", "callId": "call", "result": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 1.25},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves string",
+        "data": {"$type": "functionResult", "callId": "call", "result": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": ""},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves array",
+        "data": {"$type": "functionResult", "callId": "call", "result": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": [null, false, 0, "", {"future": [1, 2]}]},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves object",
+        "data": {"$type": "functionResult", "callId": "call", "result": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": {"future": [null, false, 0, "", 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Absent content metadata stays absent",
+        "data": {"$type": "functionResult", "callId": "call", "result": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Known field types remain strict",
+        "data": {"$type": "functionResult", "callId": false, "result": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      },
+      {
+        "description": "Content discriminator remains required",
+        "data": {"callId": "call", "result": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "unknownContent metadata JSON boundary",
+    "schema": {"$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/unknownContent"},
+    "tests": [
+      {
+        "description": "Content metadata preserves null",
+        "data": {"$type": "unknown", "content": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": null},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves boolean",
+        "data": {"$type": "unknown", "content": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": false},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves integer",
+        "data": {"$type": "unknown", "content": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 0},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves decimal",
+        "data": {"$type": "unknown", "content": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 1.25},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves string",
+        "data": {"$type": "unknown", "content": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": ""},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves array",
+        "data": {"$type": "unknown", "content": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": [null, false, 0, "", {"future": [1, 2]}]},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves object",
+        "data": {"$type": "unknown", "content": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": {"future": [null, false, 0, "", 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Absent content metadata stays absent",
+        "data": {"$type": "unknown", "content": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Known field types remain strict",
+        "data": {"$type": false, "content": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      },
+      {
+        "description": "Content discriminator remains required",
+        "data": {"content": null, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "v2FunctionCallContent metadata JSON boundary",
+    "schema": {"$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/v2FunctionCallContent"},
+    "tests": [
+      {
+        "description": "Content metadata preserves null",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": "", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": null},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves boolean",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": "", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": false},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves integer",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": "", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 0},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves decimal",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": "", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 1.25},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves string",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": "", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": ""},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves array",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": "", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": [null, false, 0, "", {"future": [1, 2]}]},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves object",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": "", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": {"future": [null, false, 0, "", 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Absent content metadata stays absent",
+        "data": {"$type": "functionCall", "callId": "call", "name": "f", "arguments": "", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Known field types remain strict",
+        "data": {"$type": "functionCall", "callId": false, "name": "f", "arguments": "", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      },
+      {
+        "description": "Content discriminator remains required",
+        "data": {"callId": "call", "name": "f", "arguments": "", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      }
+    ]
+  },
+  {
+    "description": "v2UriContent metadata JSON boundary",
+    "schema": {"$ref": "https://github.com/microsoft/agent-framework-durable-extension/schemas/durable-agent-entity-state.json#/$defs/v2UriContent"},
+    "tests": [
+      {
+        "description": "Content metadata preserves null",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": null},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves boolean",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": false},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves integer",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 0},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves decimal",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": 1.25},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves string",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": ""},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves array",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": [null, false, 0, "", {"future": [1, 2]}]},
+        "valid": true
+      },
+      {
+        "description": "Content metadata preserves object",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}, "extensionData": {"future": [null, false, 0, "", 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Absent content metadata stays absent",
+        "data": {"$type": "uri", "uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": true
+      },
+      {
+        "description": "Known field types remain strict",
+        "data": {"$type": "uri", "uri": false, "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      },
+      {
+        "description": "Content discriminator remains required",
+        "data": {"uri": "urn:synthetic", "futureSibling": {"inert": [null, false, 18446744073709551616]}},
+        "valid": false
+      }
+    ]
+  }
+]
