@@ -29,6 +29,12 @@ namespace Microsoft.Agents.AI.DurableTask.Workflows;
 /// </remarks>
 internal static class DurableExecutorDispatcher
 {
+    private static readonly DurableWorkflowJsonContext s_childWorkflowJsonContext = new(
+        new JsonSerializerOptions(DurableWorkflowJsonContext.Default.Options)
+        {
+            AllowDuplicateProperties = false,
+        });
+
     /// <summary>
     /// Dispatches an executor based on its type (activity, AI agent, request port, or sub-workflow).
     /// </summary>
@@ -207,7 +213,7 @@ internal static class DurableExecutorDispatcher
         try
         {
             DurableWorkflowResult? workflowResult = resultElement.Deserialize(
-                DurableWorkflowJsonContext.Default.DurableWorkflowResult);
+                s_childWorkflowJsonContext.DurableWorkflowResult);
             DurableExecutorOutput.NormalizeLegacyChildTypedMessages(workflowResult?.SentMessages);
             return ConvertWorkflowResultToExecutorOutput(workflowResult);
         }

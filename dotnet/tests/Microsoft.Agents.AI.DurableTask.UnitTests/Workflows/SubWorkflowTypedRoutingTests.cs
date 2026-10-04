@@ -12,6 +12,64 @@ namespace Microsoft.Agents.AI.DurableTask.UnitTests.Workflows;
 
 public sealed class SubWorkflowTypedRoutingTests
 {
+    public static TheoryData<string, string> DuplicateChildControls
+    {
+        get
+        {
+            TheoryData<string, string> cases = new();
+            string wire = ChildResult([Message(typeof(string), "must-not-route")], "raw result", halt: true);
+            using JsonDocument document = JsonDocument.Parse(wire);
+            foreach (string propertyName in new[] { "result", "events", "sentMessages", "haltRequested" })
+            {
+                string originalValue = document.RootElement.GetProperty(propertyName).GetRawText();
+                string conflictingValue = propertyName switch
+                {
+                    "result" => "\"replacement\"",
+                    "haltRequested" => "false",
+                    _ => "[]",
+                };
+                foreach (string duplicateName in new[] { propertyName, propertyName.ToUpperInvariant() })
+                {
+                    foreach (string value in new[] { originalValue, conflictingValue })
+                    {
+                        string duplicate = $"\"{duplicateName}\":{value}";
+                        string expectedResult = propertyName == "result" ? string.Empty : "raw result";
+                        cases.Add($"{{{duplicate},{wire[1..]}", expectedResult);
+                        cases.Add($"{wire[..^1]},{duplicate}}}", expectedResult);
+                    }
+                }
+            }
+
+            return cases;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(DuplicateChildControls))]
+    public async Task DuplicateChildControlsFallBackToOpaqueResultAfterColdReplayAsync(string wire, string text)
+    {
+        await AssertOpaqueChildAndReplayAsync(wire, text);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task UnambiguousChildControlsPreserveCamelAndPascalCaseAfterColdReplayAsync(bool pascalCase, bool halt)
+    {
+        string wire = ChildResult([Message(typeof(string), "typed message")], "raw result", halt);
+        if (pascalCase)
+        {
+            using JsonDocument document = JsonDocument.Parse(wire);
+            wire = JsonSerializer.Serialize(document.RootElement.EnumerateObject().ToDictionary(
+                property => char.ToUpperInvariant(property.Name[0]) + property.Name[1..],
+                property => property.Value));
+        }
+
+        await AssertOpaqueChildAndReplayAsync(wire, halt ? "raw result" : "typed message", preserveEvent: true, halt);
+    }
+
     public static TheoryData<string, string> ChildOutputs
     {
         get
