@@ -235,9 +235,12 @@ def _serialize_input_message_fields(message: Message) -> dict[str, Any]:
     current.update(base.to_dict(exclude={"contents"}))
     # Core 1.19 recursively skips non-JSON members of metadata containers.
     # Durable admission must see those members, not silently accept a subset.
-    properties = current.get("additional_properties")
-    if isinstance(properties, dict):
-        for name, value in message.additional_properties.items():
+    source_properties = message.additional_properties
+    if isinstance(source_properties, dict):
+        properties = current.get("additional_properties")
+        if not isinstance(properties, dict):
+            properties = current["additional_properties"] = {}
+        for name, value in source_properties.items():
             properties[name] = deepcopy(value)
     raw_value = getattr(message, "_durable_original_core_message", None)
     if isinstance(raw_value, dict):
