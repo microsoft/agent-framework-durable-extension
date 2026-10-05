@@ -20,6 +20,7 @@ from agent_framework_durabletask._history_provider import (
     DurableHistoryBinding,
     DurableHistoryProvider,
 )
+from agent_framework_durabletask._response_utils import serialize_input_message
 from agent_framework_durabletask._shared_agent_state import (
     DurableAgentStateErrorResponse,
     DurableAgentStateMessage,
@@ -137,11 +138,10 @@ def _add_direct_opaque_metadata(message: Message) -> None:
     core = message.to_dict()
     assert "bad" not in core["additional_properties"]
     json.dumps(core, allow_nan=False)
-    # Unlike nested opaque metadata, this survives conversion, not durable admission.
-    stored = DurableAgentStateMessage.from_chat_message(deepcopy(message))
-    assert stored.extension_data is not None and type(stored.extension_data["bad"]) is object
-    with pytest.raises(ValueError, match="strict JSON"):
-        stored.to_dict()
+    durable = serialize_input_message(message)
+    assert type(durable["additional_properties"]["bad"]) is object
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        json.dumps(durable, allow_nan=False)
 
 
 @pytest.mark.parametrize("mode", ["none", "loaded"])
@@ -161,9 +161,9 @@ async def test_generic_request_rejects_direct_metadata_omitted_by_core_before_pu
             provider.flush(state)
             canonical_unchanged()
         assert _snapshot(owner.state.to_dict()) == before
-        with pytest.raises(ValueError, match="strict JSON"):
+        with pytest.raises(TypeError, match="not JSON serializable"):
             await provider.save_messages("session", messages, state=state)
-        provider.assert_unchanged()
+        assert provider.check_last_append is None
         assert _snapshot(owner.state.to_dict()) == before
         assert binding.append_response is None and binding.append_ordinal == 7
     assert owner.persist_count == 0
@@ -334,7 +334,7 @@ async def test_finalizer_rejects_direct_opaque_metadata_without_consuming_pendin
         binding.pending_inputs = pending
         binding.accepted_inputs.add(PRIOR)
         unchanged = _append_snapshot(binding, state, [], None)
-        with pytest.raises(ValueError, match="strict JSON"):
+        with pytest.raises(TypeError, match="not JSON serializable"):
             provider.finalize_failed_run(state)
         assert binding.pending_inputs is pending
         unchanged()

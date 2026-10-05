@@ -238,8 +238,7 @@ def _serialize_input_message_fields(message: Message) -> dict[str, Any]:
     properties = current.get("additional_properties")
     if isinstance(properties, dict):
         for name, value in message.additional_properties.items():
-            if isinstance(value, (dict, list)):
-                properties[name] = deepcopy(cast("dict[Any, Any] | list[Any]", value))
+            properties[name] = deepcopy(value)
     raw_value = getattr(message, "_durable_original_core_message", None)
     if isinstance(raw_value, dict):
         raw = cast("dict[str, Any]", raw_value)

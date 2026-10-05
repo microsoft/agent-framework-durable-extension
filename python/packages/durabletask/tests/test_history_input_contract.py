@@ -45,6 +45,16 @@ REVISIONS = [
 ]
 
 
+@pytest.mark.parametrize("value", [None, False, 0, 0.0, "", [], {}])
+def test_direct_message_metadata_keeps_every_json_value(value: Any) -> None:
+    message = Message("user", ["input"], additional_properties={"provider_extra": deepcopy(value)})
+
+    serialized = serialize_input_message(message)
+
+    assert _json(serialized["additional_properties"]["provider_extra"]) == _json(value)
+    assert _json(message.additional_properties["provider_extra"]) == _json(value)
+
+
 @pytest.mark.parametrize(("first", "second"), REVISIONS)
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("nested", [False, True])
