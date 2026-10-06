@@ -392,11 +392,13 @@ def test_generated_workflow_start_and_child_result_keep_envelopes_as_data(
         assert json.loads(_load_wire(scheduled.scheduleTask.input.value))["message"] == value
         final = host.activity("root", scheduled)
 
-    assert _load_wire(_completed(final).result.value) == [value]
+    completion = _completed(final)
+    if _payload_storage is not None:
+        token = json.loads(completion.result.value)
+        assert isinstance(token, str) and _payload_storage.is_known_token(token), "Workflow output was not offloaded"
+    assert _load_wire(completion.result.value) == [value]
     assert _load_wire(_completed(host.replay("root")).result.value) == [value]
     assert echo.seen == [value] and _CONSTRUCTIONS == []
-    if _payload_storage is not None:
-        assert _payload_storage.values
 
 
 @pytest.mark.parametrize("protocol", ["current", "legacy"])
