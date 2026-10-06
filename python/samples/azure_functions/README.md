@@ -48,6 +48,16 @@ application-owned maintenance, and retention metrics never confirm durable commi
 [Functions retention contract](../../packages/azurefunctions/README.md#retention-and-state-budgets)
 and [metric semantics](../../packages/azurefunctions/README.md#retention-metrics).
 
+## Optional Blob Payload Offloading
+
+Samples keep durable payloads inline by default. To opt in, install
+`agent-framework-azurefunctions[azure-blob-payloads]` and call
+`app.configure_large_payloads(payload_store=...)` at startup using the
+[configuration example and operational requirements](../../packages/azurefunctions/README.md#optional-blob-payload-offloading).
+Use a dedicated payload container and configure the same store on every worker.
+Offloading does not change sample state budgets or remove the need for Blob retention,
+least-privilege credentials and isolated task hubs.
+
 ## Quick Prerequisites Checklist
 
 Install and verify these tools before [Environment Setup](#environment-setup):
