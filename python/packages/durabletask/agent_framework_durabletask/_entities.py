@@ -29,7 +29,7 @@ from agent_framework import (
     SupportsAgentRun,
 )
 from agent_framework._sessions import is_local_history_conversation_id
-from durabletask.entities import DurableEntity
+from durabletask.entities import DurableEntity, EntityContext
 from pydantic import BaseModel, ValidationError
 
 from ._async_bridge import run_agent_coroutine
@@ -1502,6 +1502,11 @@ def create_agent_entity_class(
                 agent_name,
                 entity_name,
             )
+
+        def _initialize_entity_context(self, context: EntityContext) -> None:
+            if context.operation not in ("run", "reset", "expire_responses", "migrate", "delete"):
+                raise ValueError(f"Agent entity operation '{context.operation}' is not supported.")
+            super()._initialize_entity_context(context)
 
         def run(self, request: JsonPayload) -> Any:
             """Handle run requests from clients or orchestrations.
