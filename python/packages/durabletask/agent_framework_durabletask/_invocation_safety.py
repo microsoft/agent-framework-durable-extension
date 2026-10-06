@@ -18,14 +18,16 @@ from agent_framework import (
     ChatMiddlewareLayer,
     ChatResponse,
     ChatResponseUpdate,
+    CompactionStrategy,
     Content,
     FunctionInvocationContext,
     FunctionInvocationLayer,
     FunctionMiddleware,
     Message,
     ResponseStream,
+    TokenizerProtocol,
 )
-from agent_framework._compaction import project_included_messages
+from agent_framework._compaction import annotate_message_groups, annotate_token_counts, project_included_messages
 from agent_framework.observability import ChatTelemetryLayer
 from pydantic import BaseModel
 
@@ -153,12 +155,11 @@ class DurableServiceClient:
     pipeline it remains completion-only: completed early leaves are not reported
     if a later leaf fails.
 
-    Core 1.13 and 1.16 pass their loop-local prepared_messages list directly to
-    each service call. The first chat middleware copies that list, so compaction
-    insertions no longer reach the next iteration although shared message
-    exclusions do. Neither the outer caller's input nor the session is that
-    loop-local list. Supporting this path without changing its compaction behavior
-    needs an observation seam that preserves the loop's list ownership.
+    A compaction strategy runs on the loop-local working buffer, not necessarily
+    the outer caller's input or the session. The observer uses Core's exported
+    incremental annotation helpers before snapshotting the projected dispatch.
+    It preserves the strategy's tokenizer and does not add a first middleware
+    pipeline to an otherwise unobserved compacting function loop.
     Completion-only fallbacks do not claim acceptance or authorize whole-agent retry.
 
     No client attributes are written. Core may update its own counters and caches
@@ -362,6 +363,29 @@ def _effective_preparation(client: Any, kwargs: Mapping[str, Any]) -> tuple[Any,
     return strategy, tokenizer
 
 
+class _ObservedCompactionStrategy:
+    def __init__(
+        self,
+        strategy: CompactionStrategy,
+        tokenizer: TokenizerProtocol | None,
+        snapshot: Callable[[Sequence[Message]], None],
+    ) -> None:
+        self._strategy = strategy
+        self.tokenizer = tokenizer
+        self._snapshot = snapshot
+
+    async def __call__(self, messages: list[Message]) -> bool:
+        changed = await self._strategy(messages)
+        if changed:
+            # Core 1.19 re-annotates after a changed strategy. Run its exported,
+            # incremental helpers here; Core's subsequent pass reuses the cache.
+            annotate_message_groups(messages)
+            if self.tokenizer is not None:
+                annotate_token_counts(messages, tokenizer=self.tokenizer)
+        self._snapshot(project_included_messages(messages))
+        return changed
+
+
 class _ServiceReceipt:
     def __init__(
         self,
@@ -390,16 +414,15 @@ class _ServiceReceipt:
         self._retrieval = options is not None and options.get("continuation_token") is not None
         strategy, tokenizer = _effective_preparation(client, kwargs)
         if strategy is not None:
-            original_strategy = strategy
-
-            async def tapped_strategy(working_messages: list[Message]) -> bool:
-                changed = await original_strategy(working_messages)
-                # Core repeats this pure projection immediately after the strategy
-                # returns. Snapshot now, before provider or outer middleware writes.
-                self._snapshot(project_included_messages(working_messages), options, stream, provider_kwargs)
-                return cast(bool, changed)
-
-            kwargs["compaction_strategy"] = tapped_strategy
+            if tokenizer is None:
+                strategy_tokenizer = getattr(strategy, "tokenizer", None)
+                if isinstance(strategy_tokenizer, TokenizerProtocol):
+                    tokenizer = strategy_tokenizer
+            kwargs["compaction_strategy"] = _ObservedCompactionStrategy(
+                strategy,
+                tokenizer,
+                lambda prepared: self._snapshot(prepared, options, stream, provider_kwargs),
+            )
         elif tokenizer is None:
             # Core skips preparation entirely here, INCLUDING exclusion filtering.
             self._snapshot(messages, options, stream, provider_kwargs)

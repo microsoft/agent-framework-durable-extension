@@ -5,9 +5,15 @@
 from unittest.mock import Mock
 
 import pytest
-from agent_framework import WorkflowEvent, WorkflowMessage
+from agent_framework import RunnerContext, ToolTypes, WorkflowEvent, WorkflowMessage, tool
 
 from agent_framework_azurefunctions._context import CapturingRunnerContext
+
+
+@tool
+def echo(value: str) -> str:
+    """Echo a runtime tool argument."""
+    return value
 
 
 class TestCapturingRunnerContext:
@@ -17,6 +23,10 @@ class TestCapturingRunnerContext:
     def context(self) -> CapturingRunnerContext:
         """Create a fresh CapturingRunnerContext for each test."""
         return CapturingRunnerContext()
+
+    def test_runner_context_implements_current_protocol(self, context: CapturingRunnerContext) -> None:
+        """Verify the installed RunnerContext protocol is fully implemented."""
+        assert isinstance(context, RunnerContext)
 
     @pytest.mark.asyncio
     async def test_send_message_captures_message(self, context: CapturingRunnerContext) -> None:
@@ -123,6 +133,16 @@ class TestCapturingRunnerContext:
         context.set_streaming(False)
         assert context.is_streaming() is False
 
+    def test_runtime_tools_can_be_set_and_cleared(self, context: CapturingRunnerContext) -> None:
+        """Test request-scoped runtime tools are stored and cleared."""
+        tools: list[ToolTypes] = [echo]
+
+        context.set_runtime_tools(tools)
+
+        assert context.get_runtime_tools() == tools
+        context.clear_runtime_tools()
+        assert context.get_runtime_tools() is None
+
     def test_set_workflow_id(self, context: CapturingRunnerContext) -> None:
         """Test setting workflow ID."""
         context.set_workflow_id("workflow-123")
@@ -133,13 +153,25 @@ class TestCapturingRunnerContext:
         """Test that reset_for_new_run clears all state."""
         await context.send_message(WorkflowMessage(data="test", target_id="t", source_id="s"))
         await context.add_event(WorkflowEvent("output", executor_id="e", data="event"))
+        await context.add_request_info_event(WorkflowEvent.request_info("request-1", "executor", "approve", str))
         context.set_streaming(True)
+        tools: list[ToolTypes] = [echo]
+        context.set_runtime_tools(tools)
+        other = CapturingRunnerContext()
+        other.set_runtime_tools(tools)
 
         context.reset_for_new_run()
 
         assert await context.has_messages() is False
         assert await context.has_events() is False
         assert context.is_streaming() is False
+        assert context.get_runtime_tools() is None
+        assert await context.get_pending_request_info_events() == {}
+        assert other.get_runtime_tools() == tools
+        context.set_runtime_tools([])
+        assert context.get_runtime_tools() == []
+        context.set_runtime_tools(None)
+        assert context.get_runtime_tools() is None
 
     @pytest.mark.asyncio
     async def test_create_checkpoint_raises_not_implemented(self, context: CapturingRunnerContext) -> None:
@@ -156,6 +188,20 @@ class TestCapturingRunnerContext:
 
         with pytest.raises(NotImplementedError):
             await context.build_checkpoint("test_workflow", "abc123", State(), None, 1)
+
+    @pytest.mark.asyncio
+    async def test_cancel_request_info_events_removes_selected_requests(self, context: CapturingRunnerContext) -> None:
+        """Test selected pending request-info events are removed and returned."""
+        event = WorkflowEvent.request_info("request-1", "executor", {"question": "approve"}, str)
+        retained = WorkflowEvent.request_info("request-2", "executor", {"question": "keep"}, str)
+        await context.add_request_info_event(event)
+        await context.add_request_info_event(retained)
+
+        cancelled = await context.cancel_request_info_events({"request-1", "missing"})
+
+        assert cancelled == {"request-1": event}
+        assert await context.get_pending_request_info_events() == {"request-2": retained}
+        assert await context.cancel_request_info_events({"request-1"}) == {}
 
     @pytest.mark.asyncio
     async def test_load_checkpoint_raises_not_implemented(self, context: CapturingRunnerContext) -> None:
