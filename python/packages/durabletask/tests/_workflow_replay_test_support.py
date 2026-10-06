@@ -37,77 +37,10 @@ def _replay(native: Any, instance: str, old: list[Any], new: list[Any] | None = 
     )
 
 
-def _af_replay(history: list[Any], workflow: Workflow, *, instance: str = "audit-siblings") -> dict[str, Any]:
-    af = pytest.importorskip("agent_framework_azurefunctions")
-    from azure.durable_functions import DurableOrchestrationContext
-    from azure.durable_functions.models.ReplaySchema import ReplaySchema
-    from azure.durable_functions.models.TaskOrchestrationExecutor import TaskOrchestrationExecutor
-    from google.protobuf.json_format import MessageToDict
-
-    started = next(event.executionStarted for event in history if event.HasField("executionStarted"))
-    assert started.orchestrationInstance.instanceId == instance
-    # Preserve only service-shaped parent metadata already in the source event.
-    # Missing metadata stays missing, even when the input claims to be a child.
-    parent_instance_id = None
-    if started.HasField("parentInstance") and started.parentInstance.HasField("orchestrationInstance"):
-        parent_instance_id = started.parentInstance.orchestrationInstance.instanceId
-
-    kinds = {
-        "orchestratorStarted": 12,
-        "executionStarted": 0,
-        "taskScheduled": 4,
-        "taskCompleted": 5,
-        "taskFailed": 6,
-        "eventRaised": 15,
-        "subOrchestrationInstanceCreated": 7,
-        "subOrchestrationInstanceCompleted": 8,
-        "subOrchestrationInstanceFailed": 9,
-    }
-    rows: list[dict[str, Any]] = []
-    for original in history:
-        row = MessageToDict(original)
-        kind = next(key for key in kinds if key in row)
-        event: dict[str, Any] = {
-            "EventType": kinds[kind],
-            "EventId": row["eventId"] - 1 if row["eventId"] >= 1 else -1,
-            "IsPlayed": True,
-            "Timestamp": row.get("timestamp", "2026-09-20T23:00:00Z"),
-            "Version": None,
-        }
-        for key, value in row[kind].items():
-            if key == "taskScheduledId":
-                event["TaskScheduledId"] = value - 1
-            elif key in ("name", "input", "result"):
-                event[key.capitalize()] = value
-            elif key == "instanceId":
-                event["InstanceId"] = value
-            elif key == "failureDetails":
-                event["Reason"] = value["errorMessage"]
-                event["Details"] = value["errorType"]
-        rows.append(event)
-    rows.append({"EventType": 12, "EventId": -1, "IsPlayed": False, "Timestamp": "2026-09-20T23:00:00Z"})
-    app = af.AgentFunctionApp(workflow=workflow, enable_health_check=False, deployment_mode="isolated_v2")
-    function = next(
-        item.get_user_function().orchestrator_function
-        for item in app.get_functions()
-        if item.get_function_name() == started.name
-    )
-    context = DurableOrchestrationContext(
-        rows,
-        instanceId=instance,
-        isReplaying=True,
-        parentInstanceId=parent_instance_id,
-        input=started.input.value if started.HasField("input") else None,
-        upperSchemaVersion=ReplaySchema.V3.value,
-    )
-    # Verify the SDK-owned raw field without replacing it or invoking custom decoding.
-    assert vars(context)["_input"] == (started.input.value if started.HasField("input") else None)
-    return json.loads(TaskOrchestrationExecutor().execute(context, context.histories, function))
-
-
 class _Episodes:
-    def __init__(self, workflow: Workflow) -> None:
-        self.worker = _worker(workflow)
+    def __init__(self, workflow: Workflow, *, worker: Any = None) -> None:
+        # Another host may inject a worker holding its own registered functions.
+        self.worker = _worker(workflow) if worker is None else worker
         self.histories: dict[str, list[Any]] = {}
         self.actions: dict[str, dict[int, Any]] = defaultdict(dict)
         self.statuses: dict[str, dict[str, Any]] = {}

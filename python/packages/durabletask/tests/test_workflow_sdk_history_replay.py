@@ -4,8 +4,7 @@
 
 Fixtures are the JSON values recorded by third-holistic-audit/probe.py using
 durabletask 1.7.2's in-memory backend and Core 1.16.0. Sibling pause/partial
-snapshots are prefixes of the completed recording. Functions tests translate
-these DT records into the AF SDK's event schema, not a Functions-host capture.
+snapshots are prefixes of the completed recording.
 The historical sibling recording predates admission outcomes and rejection
 activities. It is kept unchanged to characterize the user-accepted break in
 old in-flight protocol-2 runs. Fresh starts are required despite the same marker.
@@ -42,7 +41,7 @@ from _workflow_lifecycle_test_support import (
     _Transport,
     _typed_workflow,
 )
-from _workflow_replay_test_support import _LOGGER, _af_replay, _replay, _worker
+from _workflow_replay_test_support import _LOGGER, _replay, _worker
 from agent_framework import (
     AgentResponse,
     Content,
@@ -220,10 +219,9 @@ def test_sdk_characterizes_historical_sibling_schedule_incompatibility(count: in
     assert [gate.seen for gate in gates] == [[], []]
 
 
-@pytest.mark.parametrize("host", ["dt", "af"])
 @pytest.mark.parametrize("malformed", [False, True], ids=["typed-rejection", "malformed-envelope"])
-def test_constructed_sibling_histories_replay_exact_registered_results(host: str, malformed: bool) -> None:
-    from _workflow_replay_test_support import _atomic_actions, _Episodes
+def test_constructed_sibling_histories_replay_exact_registered_results(malformed: bool) -> None:
+    from _workflow_replay_test_support import _Episodes
 
     workflow, gates = _graph()
     transport = _Episodes(workflow)
@@ -315,33 +313,15 @@ def test_constructed_sibling_histories_replay_exact_registered_results(host: str
     replay_worker = _worker(replay_workflow)
     for index, (history, status) in enumerate(snapshots):
         done = index == 3
-        if host == "dt":
-            replay = _replay(replay_worker, "root", history)
-            assert json.loads(replay.encoded_custom_status) == status
-            if done:
-                assert len(replay.actions) == 1 and replay.actions[0].HasField("completeOrchestration")
-                terminal = replay.actions[0].completeOrchestration
-                assert terminal.orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
-                assert json.loads(terminal.result.value) == [{"b": 22}, {"a": 11}]
-            else:
-                assert list(replay.actions) == []
+        replay = _replay(replay_worker, "root", history)
+        assert json.loads(replay.encoded_custom_status) == status
+        if done:
+            assert len(replay.actions) == 1 and replay.actions[0].HasField("completeOrchestration")
+            terminal = replay.actions[0].completeOrchestration
+            assert terminal.orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
+            assert json.loads(terminal.result.value) == [{"b": 22}, {"a": 11}]
         else:
-            translated = _af_replay(history, replay_workflow, instance="root")
-            assert translated["isDone"] is done
-            assert translated.get("output") == ([{"b": 22}, {"a": 11}] if done else None)
-            assert translated["customStatus"] == {key: value for key, value in status.items() if key != "events"}
-            actions = _atomic_actions(translated["actions"])
-            assert [
-                (action["functionName"], json.loads(json.loads(action["input"])))
-                for action in actions
-                if action["actionType"] == 0
-            ] == [
-                (event.taskScheduled.name, json.loads(json.loads(event.taskScheduled.input.value)))
-                for event in history
-                if event.HasField("taskScheduled")
-            ]
-            expected_waits = ["a", "b", *(["a"] if index else [])]
-            assert [action["externalEventName"] for action in actions if action["actionType"] == 6] == expected_waits
+            assert list(replay.actions) == []
         assert [gate.seen for gate in replay_gates] == [[], []]
         assert [gate.seen for gate in gates] == [[11], [22]]
 
@@ -603,47 +583,3 @@ def test_generic_response_rejection_is_checkpointed_by_registered_activity() -> 
         "shared_state_deletes": [],
         "pending_request_info_events": [],
     }
-
-
-@pytest.mark.parametrize("count", [11, 13, 18, 23], ids=["paused", "invalid", "partial", "completed"])
-def test_functions_sdk_exposes_historical_sibling_schedule_divergence(count: int) -> None:
-    from _workflow_replay_test_support import _atomic_actions
-
-    workflow, gates = _graph()
-    history = deepcopy(_history("siblings-completed")[:count])
-    result = _af_replay(history, workflow)
-    assert not result["isDone"] and result.get("output") is None
-    scheduled_names = [
-        action["functionName"] for action in _atomic_actions(result["actions"]) if action["actionType"] == 0
-    ]
-    recorded_names = [event.taskScheduled.name for event in history if event.HasField("taskScheduled")]
-    if count == 11:
-        assert scheduled_names == recorded_names
-        assert set(result["customStatus"]["pending_requests"]) == {"a", "b"}
-    else:
-        # The AF SDK does not validate historical activity names like DT does.
-        # Its divergent action graph is not successful old-history replay.
-        assert scheduled_names != recorded_names
-        assert scheduled_names[:4] == [
-            "dafx-audit-siblings-seed",
-            "dafx-audit-siblings-a",
-            "dafx-audit-siblings-b",
-            "dafx-audit-siblings-a",
-        ]
-        if count >= 18:
-            assert recorded_names[3] == "dafx-audit-siblings-b"
-    assert [gate.seen for gate in gates] == [[], []]
-
-
-def test_functions_sdk_reconstructs_service_shaped_mixed_parent_snapshot() -> None:
-    workflow, gates = _graph(mixed=True)
-    history, _ = _service_shaped_histories(_history("mixed-parent-paused"), _history("mixed-child-paused"))
-    result = _af_replay(history, workflow, instance="audit-mixed")
-    assert not result["isDone"]
-    status = result["customStatus"]
-    assert status["state"] == "waiting_for_human_input"
-    assert set(status["pending_requests"]) == {"a"}
-    assert status["subworkflows"] == {"sub": {"0": subworkflow_instance_id("audit-mixed", "sub", 0)}}
-    assert "events" not in status
-    assert _af_replay(history, workflow, instance="audit-mixed")["customStatus"] == status
-    assert [gate.seen for gate in gates] == [[], []]

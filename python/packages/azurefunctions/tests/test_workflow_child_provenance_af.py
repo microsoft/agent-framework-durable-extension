@@ -1,16 +1,14 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Generated Functions starts use raw JSON and actual SDK parent metadata.
+"""Generated Functions starts use framework JSON and actual SDK parent metadata.
 
-Registered SDK wrappers construct fresh contexts and replay constructed histories.
-Service metadata follows returned child actions, never application envelope keys.
-These offline histories do not establish live Functions-host persistence.
+The app's registered orchestrators replay constructed histories with the app's own
+converter. Service metadata follows returned child actions, never application
+envelope keys. These offline histories do not establish live Functions-host persistence.
 """
 
-import importlib
 import json
 from copy import deepcopy
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,10 +18,11 @@ from _workflow_provenance_test_support import (
     _internal,
     _invalid_child,
     _leaf,
+    _only_action,
     _PickleProbe,
     _tree,
 )
-from _workflow_provenance_test_support_af import _actions, _AFStarts, _last_action
+from _workflow_provenance_test_support_af import _af_starts
 from agent_framework_durabletask import wrap_workflow_input
 from agent_framework_durabletask._workflows.naming import subworkflow_instance_id
 from agent_framework_durabletask._workflows.serialization import (
@@ -31,9 +30,11 @@ from agent_framework_durabletask._workflows.serialization import (
     SUBWORKFLOW_INPUT_KEY,
     serialize_value,
 )
-from azure.functions import _durable_functions as sdk_codec
+from durabletask.internal import helpers
+from durabletask.internal import orchestrator_service_pb2 as pb
 
 _DECODER_CALLS: list[Any] = []
+# Not in sys.modules. The Functions object hook fails on it rather than importing it.
 _UNKNOWN_MODULE = "_workflow_start_unloaded_sentinel"
 
 
@@ -49,41 +50,25 @@ def _metadata(module: str = __name__) -> dict[str, Any]:
 
 
 @pytest.fixture(autouse=True)
-def _observe_construction(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def _reset_probes() -> None:
     _PICKLE_CALLS.clear()
     _DECODER_CALLS.clear()
-    attempts: list[str] = []
-    original = importlib.import_module
-
-    def observe(name: str, package: str | None = None) -> Any:
-        if name in (__name__, _UNKNOWN_MODULE):
-            attempts.append(name)
-        if name == _UNKNOWN_MODULE:
-            raise AssertionError("Start-selected module import before admission")
-        return original(name, package)
-
-    monkeypatch.setattr(importlib, "import_module", observe)
-    monkeypatch.setattr(sdk_codec, "import_module", observe)
-    return attempts
 
 
-def _failure(error: pytest.ExceptionInfo[Exception]) -> dict[str, Any]:
-    assert type(error.value.__cause__) is ValueError
-    marker = "\n\n$OutOfProcData$:"
-    assert marker in str(error.value)
-    state = json.loads(str(error.value).split(marker, 1)[1])
-    assert _actions(state["actions"]) == []
-    assert not state.get("customStatus") and state.get("output") is None
-    return state
+def _failed(result: Any, message: str) -> None:
+    failure = _only_action(result, "completeOrchestration").completeOrchestration
+    assert failure.orchestrationStatus == pb.ORCHESTRATION_STATUS_FAILED
+    # durabletask reports builtins by qualified name in newer releases.
+    assert failure.failureDetails.errorType.rsplit(".", 1)[-1] == "ValueError"
+    assert message in failure.failureDetails.errorMessage
+    assert not result.encoded_custom_status
 
 
 @pytest.mark.parametrize("parent", [None, "", " \t"])
 @pytest.mark.parametrize("marker", ["both", "input", "address"])
-def test_registered_af_root_rejects_before_pickle_or_sdk_custom_decoding(
-    parent: str | None, marker: str, _observe_construction: list[str]
-) -> None:
+def test_registered_af_root_rejects_before_pickle_or_sdk_custom_decoding(parent: str | None, marker: str) -> None:
     workflow, echo = _leaf()
-    host = _AFStarts(workflow)
+    host = _af_starts(workflow)
     value = _internal(serialize_value(_PickleProbe("rejected")))
     if marker == "input":
         del value[SUBWORKFLOW_ADDRESS_KEY]
@@ -92,29 +77,25 @@ def test_registered_af_root_rejects_before_pickle_or_sdk_custom_decoding(
     value["sdk_constructor"] = _metadata()
     value["parent_instance_id"] = "root"
     before = deepcopy(value)
-    with pytest.raises(Exception, match="requires SDK parent instance metadata") as error:
-        host.start(
-            "dafx-provenance-leaf", subworkflow_instance_id("root", "child", 0), wrap_workflow_input(value), parent
-        )
-    _failure(error)
-    assert _DECODER_CALLS == [] and _observe_construction == [] and _PICKLE_CALLS == [] and echo.seen == []
+    result = host.start(
+        "dafx-provenance-leaf", subworkflow_instance_id("root", "child", 0), wrap_workflow_input(value), parent
+    )
+    _failed(result, "requires SDK parent instance metadata")
+    assert _DECODER_CALLS == [] and _PICKLE_CALLS == [] and echo.seen == []
     assert value == before
 
 
 @pytest.mark.parametrize("case", _INVALID_CHILD_CASES)
-def test_registered_af_child_rejects_inconsistent_address_before_decoding(
-    case: str, _observe_construction: list[str]
-) -> None:
+def test_registered_af_child_rejects_inconsistent_address_before_decoding(case: str) -> None:
     workflow, echo = _leaf()
-    host = _AFStarts(workflow)
+    host = _af_starts(workflow)
     value = _invalid_child(case)
     value["sdk_constructor"] = _metadata()
-    with pytest.raises(Exception, match="workflow child") as error:
-        host.start(
-            "dafx-provenance-leaf", subworkflow_instance_id("root", "child", 0), wrap_workflow_input(value), "root"
-        )
-    _failure(error)
-    assert _DECODER_CALLS == [] and _observe_construction == [] and _PICKLE_CALLS == [] and echo.seen == []
+    result = host.start(
+        "dafx-provenance-leaf", subworkflow_instance_id("root", "child", 0), wrap_workflow_input(value), "root"
+    )
+    _failed(result, "workflow child")
+    assert _DECODER_CALLS == [] and _PICKLE_CALLS == [] and echo.seen == []
 
 
 @pytest.mark.parametrize(
@@ -125,113 +106,102 @@ def test_registered_af_child_rejects_inconsistent_address_before_decoding(
         ("root", subworkflow_instance_id(subworkflow_instance_id("root", "child", 0), "grand", 0)),
     ],
 )
-def test_registered_af_metadata_must_match_immediate_parent_and_current_child(
-    parent: str, instance: str, _observe_construction: list[str]
-) -> None:
+def test_registered_af_metadata_must_match_immediate_parent_and_current_child(parent: str, instance: str) -> None:
     workflow, echo = _leaf()
-    host = _AFStarts(workflow)
+    host = _af_starts(workflow)
     value = _internal(serialize_value(_PickleProbe("rejected")))
     value["sdk_constructor"] = _metadata()
-    with pytest.raises(Exception, match="does not match SDK instance metadata") as error:
-        host.start("dafx-provenance-leaf", instance, wrap_workflow_input(value), parent)
-    _failure(error)
-    assert _DECODER_CALLS == [] and _observe_construction == [] and _PICKLE_CALLS == [] and echo.seen == []
+    result = host.start("dafx-provenance-leaf", instance, wrap_workflow_input(value), parent)
+    _failed(result, "does not match SDK instance metadata")
+    assert _DECODER_CALLS == [] and _PICKLE_CALLS == [] and echo.seen == []
 
 
 @pytest.mark.parametrize("parent", [None, "native-parent"])
 @pytest.mark.parametrize("module", [__name__, _UNKNOWN_MODULE])
 def test_registered_af_plain_json_keeps_nested_markers_and_sdk_metadata_as_data(
-    parent: str | None, module: str, _observe_construction: list[str]
+    parent: str | None, module: str
 ) -> None:
     workflow, echo = _leaf()
-    host = _AFStarts(workflow)
+    host = _af_starts(workflow)
     value = {"business": [_internal({"ordinary": [False, None, "世界"]})], "sdk": _metadata(module)}
-    state = host.start("dafx-provenance-leaf", "arbitrary::native~id", wrap_workflow_input(value), parent)
-    action = _last_action(state, 0)
-    payload = json.loads(json.loads(action["input"]))
+    result = host.start("dafx-provenance-leaf", "arbitrary::native~id", wrap_workflow_input(value), parent)
+    action = _only_action(result, "scheduleTask")
+    payload = json.loads(json.loads(action.scheduleTask.input.value))
     assert payload["message"] == value
     assert payload["host_context"]["instance_id"] == "arbitrary::native~id"
     assert payload["host_context"]["request_path_prefix"] == ""
-    terminal = host.complete_activity("arbitrary::native~id", action)
-    assert terminal["isDone"] and not terminal.get("error") and terminal["output"] == [value]
-    assert echo.seen == [value] and _DECODER_CALLS == [] and _observe_construction == [] and _PICKLE_CALLS == []
+    finished = host.complete_activity("arbitrary::native~id", action)
+    terminal = _only_action(finished, "completeOrchestration").completeOrchestration
+    assert terminal.orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
+    assert json.loads(terminal.result.value) == [value]
+    assert echo.seen == [value] and _DECODER_CALLS == [] and _PICKLE_CALLS == []
 
 
-def test_registered_af_child_and_grandchild_preserve_typed_checkpoint_values(
-    _observe_construction: list[str],
-) -> None:
+def test_registered_af_child_and_grandchild_preserve_typed_checkpoint_values() -> None:
     workflow, echo = _tree()
-    host = _AFStarts(workflow)
+    host = _af_starts(workflow)
     root = "root::native~世界"
     initial = host.start("dafx-provenance-root", root, wrap_workflow_input({"value": "trusted"}))
-    parent = host.complete_activity(root, _last_action(initial, 0))
-    child_id, child = host.child(root, _last_action(parent, 2), 1)
-    grand_id, grand = host.child(child_id, _last_action(child, 2), 0)
+    parent = host.complete_activity(root, _only_action(initial, "scheduleTask"))
+    child_action = _only_action(parent, "createSubOrchestration")
+    child_id, child = host.child(root, child_action)
+    grand_action = _only_action(child, "createSubOrchestration")
+    grand_id, grand = host.child(child_id, grand_action)
     assert child_id == subworkflow_instance_id(root, "sub:: 世界", 0)
     assert grand_id == subworkflow_instance_id(child_id, "grand hop", 0)
-    assert host.starts[child_id]["parentInstanceId"] == root
-    assert host.starts[grand_id]["parentInstanceId"] == child_id
-    action = _last_action(grand, 0)
-    payload = json.loads(json.loads(action["input"]))
+    for instance, expected_parent in ((child_id, root), (grand_id, child_id)):
+        start = next(e.executionStarted for e in host.histories[instance] if e.HasField("executionStarted"))
+        assert start.parentInstance.orchestrationInstance.instanceId == expected_parent
+    leaf_action = _only_action(grand, "scheduleTask")
+    payload = json.loads(json.loads(leaf_action.scheduleTask.input.value))
     assert payload["host_context"] == {
         "instance_id": root,
         "workflow_name": "provenance-root",
         "request_path_prefix": "sub:: 世界~0~grand hop~0~",
     }
     assert _PICKLE_CALLS and echo.seen == []
-    terminal = host.complete_activity(grand_id, action)
-    assert terminal["isDone"] and not terminal.get("error")
+    completed = host.complete_activity(grand_id, leaf_action)
+    terminal = _only_action(completed, "completeOrchestration").completeOrchestration
+    assert terminal.orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
     assert len(echo.seen) == 1 and type(echo.seen[0]) is _PickleProbe and echo.seen[0].value == "trusted"
-    terminal = host.complete_child(child_id, 0, terminal["output"])
-    assert terminal["isDone"] and not terminal.get("error")
-    terminal = host.complete_child(root, 1, terminal["output"])
-    assert terminal["isDone"] and not terminal.get("error")
-    assert host.replay(root) == terminal and len(echo.seen) == 1
-    assert _DECODER_CALLS == [] and _observe_construction == []
+    for instance, action in ((child_id, grand_action), (root, child_action)):
+        result = host.replay(instance, helpers.new_sub_orchestration_completed_event(action.id, terminal.result.value))
+        terminal = _only_action(result, "completeOrchestration").completeOrchestration
+        assert terminal.orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
+    cold = host.replay(root)
+    assert _only_action(cold, "completeOrchestration").completeOrchestration.result == terminal.result
+    assert len(echo.seen) == 1 and _DECODER_CALLS == []
 
 
-def test_core_sdk_decoder_remains_active_for_unrelated_native_registration(
-    _observe_construction: list[str],
-) -> None:
+def test_core_sdk_decoder_remains_active_for_unrelated_native_registration() -> None:
     workflow, _ = _leaf()
-    host = _AFStarts(workflow)
+    host = _af_starts(workflow)
     value = {"ordinary": _metadata(), SUBWORKFLOW_INPUT_KEY: {"business": 1}}
-    state = host.start("native-input", "native-id", value)
-    assert state["isDone"] and state["output"] == {
+    result = host.start("native-input", "native-id", value)
+    terminal = _only_action(result, "completeOrchestration").completeOrchestration
+    assert terminal.orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
+    assert json.loads(terminal.result.value) == {
         "ordinary": {"constructed": {"value": 7}},
         SUBWORKFLOW_INPUT_KEY: {"business": 1},
     }
-    assert _DECODER_CALLS == [{"value": 7}] and _observe_construction == [__name__] and _PICKLE_CALLS == []
+    assert _DECODER_CALLS == [{"value": 7}] and _PICKLE_CALLS == []
 
 
 def test_registered_native_af_parent_can_call_generated_workflow_with_plain_application_json() -> None:
     workflow, echo = _leaf()
-    host = _AFStarts(workflow)
+    host = _af_starts(workflow)
     value = {"business": [False, None, "世界"], "parent_instance_id": "just data"}
     parent = host.start("native-parent", "native-root", value)
-    instance, child = host.child("native-root", _last_action(parent, 2), 0)
-    child_result = host.complete_activity(instance, _last_action(child, 0))
-    assert child_result["isDone"] and not child_result.get("error") and child_result["output"] == [value]
-    terminal = host.complete_child("native-root", 0, child_result["output"])
-    assert terminal["isDone"] and not terminal.get("error") and terminal["output"] == [value]
-    assert echo.seen == [value] and _PICKLE_CALLS == [] and _DECODER_CALLS == []
-
-
-@pytest.mark.parametrize("raw", [{}, [], b"{}", 1, SimpleNamespace()])
-def test_generated_start_reader_fails_closed_on_unknown_sdk_raw_representation(raw: Any) -> None:
-    from agent_framework_azurefunctions._workflow_af_context import get_workflow_start_input
-
-    context: Any = SimpleNamespace(_input=raw)
-    with pytest.raises(RuntimeError, match="Unsupported Durable Functions workflow start input representation"):
-        get_workflow_start_input(context)
-
-
-def test_generated_start_reader_does_not_fall_back_to_get_input() -> None:
-    from agent_framework_azurefunctions._workflow_af_context import get_workflow_start_input
-
-    def forbidden() -> Any:
-        raise AssertionError("SDK hook must not run")
-
-    context: Any = SimpleNamespace(get_input=forbidden)
-    with pytest.raises(RuntimeError, match="Unsupported Durable Functions workflow start input representation"):
-        get_workflow_start_input(context)
+    child_action = _only_action(parent, "createSubOrchestration")
+    instance, child = host.child("native-root", child_action)
+    child_result = host.complete_activity(instance, _only_action(child, "scheduleTask"))
+    terminal = _only_action(child_result, "completeOrchestration").completeOrchestration
+    assert terminal.orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
+    assert json.loads(terminal.result.value) == [value]
+    result = host.replay(
+        "native-root", helpers.new_sub_orchestration_completed_event(child_action.id, terminal.result.value)
+    )
+    completed = _only_action(result, "completeOrchestration").completeOrchestration
+    assert completed.orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
+    assert json.loads(completed.result.value) == [value] and echo.seen == [value]
+    assert _PICKLE_CALLS == [] and _DECODER_CALLS == []

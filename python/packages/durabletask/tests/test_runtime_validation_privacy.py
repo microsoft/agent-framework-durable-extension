@@ -36,9 +36,6 @@ from _validation_test_support import (
 from agent_framework import Agent, AgentResponse, AgentSession, tool
 from agent_framework.exceptions import ChatClientException
 from agent_framework.openai import OpenAIChatClient
-from agent_framework_azurefunctions._orchestration import AgentTask
-from azure.durable_functions.models.actions.NoOpAction import NoOpAction
-from azure.durable_functions.models.Task import AtomicTask
 from durabletask.entities import EntityContext, EntityInstanceId
 from durabletask.internal.entity_state_shim import StateShim
 from durabletask.serialization import JsonDataConverter
@@ -53,10 +50,9 @@ from agent_framework_durabletask._history_provider import current_durable_histor
 from agent_framework_durabletask._response_utils import serialize_agent_response
 
 
-@pytest.mark.parametrize("reader", ["durabletask", "functions"])
 @pytest.mark.parametrize("precompleted", [False, True])
 async def test_post_execution_revalidation_commits_safe_failure_and_cold_duplicate(
-    reader: str, precompleted: bool, caplog: pytest.LogCaptureFixture
+    precompleted: bool, caplog: pytest.LogCaptureFixture
 ) -> None:
     agent = StructuredAgent()
     provider = JsonStateProvider()
@@ -79,23 +75,13 @@ async def test_post_execution_revalidation_commits_safe_failure_and_cold_duplica
     assert PRIVATE not in json.dumps(provider.raw)
     assert_private_logs(caplog)
 
-    task: Any
-    if reader == "durabletask":
-        child: Any = CompletableTask()
-        if precompleted:
-            child.complete(wire)
-        task = DurableAgentTask(child, NormalizingAnswer, "private")
-        if not precompleted:
-            child.complete(wire)
-        delivered = task.get_result()
-    else:
-        child = AtomicTask(7, NoOpAction())
-        if precompleted:
-            child.set_value(is_error=False, value=wire)
-        task = AgentTask(child, NormalizingAnswer, "private")
-        if not precompleted:
-            child.set_value(is_error=False, value=wire)
-        delivered = task.result
+    child: Any = CompletableTask()
+    if precompleted:
+        child.complete(wire)
+    task = DurableAgentTask(child, NormalizingAnswer, "private")
+    if not precompleted:
+        child.complete(wire)
+    delivered = task.get_result()
     assert serialize_agent_response(delivered) == wire
 
     cold = JsonStateProvider(provider.raw)

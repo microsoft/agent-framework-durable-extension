@@ -21,10 +21,22 @@ JsonMigration = NewType("JsonMigration", object)
 
 
 class _JsonPayloadConverter(DataConverter):
-    """Delegate native behavior, opting into plain JSON only by target identity."""
+    """Delegate native behavior, with opt-in plain JSON for framework-owned values."""
 
-    def __init__(self, inner: DataConverter) -> None:
+    def __init__(self, inner: DataConverter, *, deserialize_untagged_json: bool = False) -> None:
         self._inner = inner
+        self._deserialize_untagged_json = deserialize_untagged_json
+
+    @property
+    def deserializes_untagged_json(self) -> bool:
+        """Return whether values without a framework target use plain JSON."""
+        return self._deserialize_untagged_json
+
+    def with_untagged_json(self) -> _JsonPayloadConverter:
+        """Return this converter or an upgraded copy that reads untagged JSON."""
+        if self._deserialize_untagged_json:
+            return self
+        return _JsonPayloadConverter(self._inner, deserialize_untagged_json=True)
 
     def can_reconstruct(self, target_type: Any) -> bool:
         """Recognize the framework tag without changing native type discovery."""
@@ -45,7 +57,7 @@ class _JsonPayloadConverter(DataConverter):
             return None if data is None or data == "" else load_migration_json(data)
         if target_type is JsonState:
             return None if data is None or data == "" else load_state_json(data)
-        if target_type is JsonPayload:
+        if target_type is JsonPayload or self._deserialize_untagged_json:
             return None if data is None or data == "" else json.loads(data)
         return self._inner.deserialize(data, target_type)
 
@@ -54,18 +66,23 @@ class _JsonPayloadConverter(DataConverter):
         return self._inner.coerce(value, target_type)
 
 
-def install_json_payload_converter(worker: TaskHubGrpcWorker) -> None:
+def install_json_payload_converter(worker: TaskHubGrpcWorker, *, deserialize_untagged_json: bool = False) -> None:
     """Install the worker-local decoder before processing any work.
 
     durabletask >=1.7.1 supplies converter-aware input discovery, task result
     types and deferred raw state decoding. It has no public converter setter,
     so this guarded private-field integration is confined to worker setup.
     Custom converters remain supported for native work. Framework payloads
-    still require JSON, not an arbitrary custom wire format.
+    still require JSON, not an arbitrary custom wire format. Generated Functions
+    agent entities also opt into plain JSON for untagged operation input.
     """
     native = cast(Any, worker)
     converter = getattr(native, "_data_converter", None)
     if isinstance(converter, _JsonPayloadConverter):
+        if deserialize_untagged_json and not converter.deserializes_untagged_json:
+            if getattr(native, "_is_running", False) is True:
+                raise RuntimeError("Configure framework JSON decoding before starting the Durable Task worker.")
+            native._data_converter = converter.with_untagged_json()
         return
     if getattr(native, "_is_running", False) is True:
         raise RuntimeError("Configure framework JSON decoding before starting the Durable Task worker.")
@@ -74,4 +91,7 @@ def install_json_payload_converter(worker: TaskHubGrpcWorker) -> None:
         for method in ("can_reconstruct", "serialize", "deserialize", "coerce")
     ):
         raise RuntimeError("Durable Task worker must expose the data converter interface from durabletask >=1.7.1.")
-    native._data_converter = _JsonPayloadConverter(converter)
+    native._data_converter = _JsonPayloadConverter(
+        converter,
+        deserialize_untagged_json=deserialize_untagged_json,
+    )

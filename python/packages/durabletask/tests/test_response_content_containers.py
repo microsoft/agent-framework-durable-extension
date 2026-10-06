@@ -238,40 +238,23 @@ def test_malformed_nested_content_keeps_its_private_value_error(edge: str, caplo
     assert raw == before
 
 
-@pytest.mark.parametrize("consumer", ["durabletask", "azurefunctions"])
 @pytest.mark.parametrize("precompleted", [False, True])
 def test_real_sdk_tasks_fail_malformed_delivery_without_logging_payload(
-    consumer: str, precompleted: bool, caplog: pytest.LogCaptureFixture
+    precompleted: bool, caplog: pytest.LogCaptureFixture
 ) -> None:
     raw = json.loads(json.dumps({"messages": [{"role": "assistant", "contents": {PRIVATE: "hello"}}]}))
     before = deepcopy(raw)
-    if consumer == "durabletask":
-        child: CompletableTask[Any] = CompletableTask()
-        if precompleted:
-            child.complete(raw)
-        task = DurableAgentTask(child, None, "contents-review")
-        if not precompleted:
-            child.complete(raw)
-        assert task.is_complete and task.is_failed
-        assert child.get_result() is raw
-        failure = task.get_exception()
-        assert failure.details.error_type == "TypeError"
-        diagnostic = failure.details.message
-    else:
-        from agent_framework_azurefunctions._orchestration import AgentTask
-        from azure.durable_functions.models.actions.NoOpAction import NoOpAction
-        from azure.durable_functions.models.Task import AtomicTask, TaskState
-
-        af_child = AtomicTask(7, NoOpAction())
-        if precompleted:
-            af_child.set_value(is_error=False, value=raw)
-        af_task = AgentTask(af_child, None, "contents-review")
-        if not precompleted:
-            af_child.set_value(is_error=False, value=raw)
-        assert af_task.state is TaskState.FAILED
-        assert af_child.result is raw
-        assert type(af_task.result) is TypeError
-        diagnostic = str(af_task.result)
+    child: CompletableTask[Any] = CompletableTask()
+    if precompleted:
+        child.complete(raw)
+    task = DurableAgentTask(child, None, "contents-review")
+    if not precompleted:
+        child.complete(raw)
+    assert task.is_complete and task.is_failed
+    assert child.get_result() is raw
+    failure = task.get_exception()
+    assert failure.details.error_type == "TypeError"
+    diagnostic = failure.details.message
     assert diagnostic == CONTAINER_ERROR
     assert PRIVATE not in caplog.text
     assert raw == before
