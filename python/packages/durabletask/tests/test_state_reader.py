@@ -35,6 +35,15 @@ CASES = [
     for name, group in CASE_GROUPS
     for case in group["tests"]
 ]
+CONTENT_DEFINITIONS = {
+    name
+    for name, definition in SCHEMA["$defs"].items()
+    if definition
+    .get("properties", {})
+    .get("extensionData", {})
+    .get("description", "")
+    .startswith("Producer-defined content metadata")
+}
 NOW = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
 COMPLETED = "2026-09-16T11:00:00Z"
 EXPIRES = "2026-09-16T13:00:00Z"
@@ -181,6 +190,10 @@ def _case_root(reference: str, value: Any) -> dict[str, Any]:
             "firstEvictedAt": COMPLETED,
             "lastEvictedAt": COMPLETED,
         }
+    elif fragment.removeprefix("/$defs/") in CONTENT_DEFINITIONS:
+        raw["data"]["conversationHistory"] = [
+            {"$type": "response", "messages": [{"role": "assistant", "contents": [deepcopy(value)]}]}
+        ]
     else:
         pytest.fail(f"Add a valid envelope for shared schema fragment {fragment}")
     return raw
@@ -189,7 +202,8 @@ def _case_root(reference: str, value: Any) -> dict[str, Any]:
 def test_shared_corpus_enumeration_and_exact_versions() -> None:
     assert len(FIXTURES) == 4
     bounded_contract = "nonNegativeInt64" in SCHEMA["$defs"]
-    assert len(CASES) == (126 if bounded_contract else 96)
+    assert len(CASES) == (256 if bounded_contract else 226)
+    assert len(CONTENT_DEFINITIONS) == 13
     assert VERSIONS == ("1.0.0", "1.1.0", "1.2.0", "2.0.0")
     assert {group["schema"]["$ref"].partition("#")[0] for _, group in CASE_GROUPS} == {SCHEMA["$id"]}
     fragments = {
@@ -200,6 +214,7 @@ def test_shared_corpus_enumeration_and_exact_versions() -> None:
     }
     if bounded_contract:
         fragments.update({"/$defs/usage", "/$defs/data/properties/truncation/properties/evictedMessageCount"})
+    fragments.update(f"/$defs/{name}" for name in CONTENT_DEFINITIONS)
     assert {group["schema"]["$ref"].partition("#")[2] for _, group in CASE_GROUPS} == fragments
 
 

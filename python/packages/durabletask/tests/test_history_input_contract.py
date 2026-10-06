@@ -45,6 +45,37 @@ REVISIONS = [
 ]
 
 
+@pytest.mark.parametrize("value", [None, False, 0, 0.0, "", [], {}])
+def test_direct_message_metadata_keeps_every_json_value(value: Any) -> None:
+    message = Message("user", ["input"], additional_properties={"provider_extra": deepcopy(value)})
+
+    serialized = serialize_input_message(message)
+
+    assert _json(serialized["additional_properties"]["provider_extra"]) == _json(value)
+    assert _json(message.additional_properties["provider_extra"]) == _json(value)
+
+
+def test_direct_message_metadata_is_restored_when_core_omits_the_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native = Message.to_dict
+
+    def omit_metadata(self: Message, **kwargs: Any) -> dict[str, Any]:
+        payload = native(self, **kwargs)
+        payload.pop("additional_properties", None)
+        return payload
+
+    monkeypatch.setattr(Message, "to_dict", omit_metadata)
+    marker = object()
+    message = Message("user", ["input"], additional_properties={"provider_extra": marker})
+
+    serialized = serialize_input_message(message)
+
+    assert serialized["additional_properties"]["provider_extra"] is not marker
+    assert type(serialized["additional_properties"]["provider_extra"]) is object
+    assert message.additional_properties["provider_extra"] is marker
+
+
 @pytest.mark.parametrize(("first", "second"), REVISIONS)
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("nested", [False, True])

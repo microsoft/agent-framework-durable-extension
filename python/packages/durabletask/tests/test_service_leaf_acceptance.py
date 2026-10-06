@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections import UserDict, UserList
 from collections.abc import AsyncIterable, Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
+from datetime import datetime, timezone
 from types import MethodType, SimpleNamespace
 from typing import Any, cast
 
@@ -33,12 +34,14 @@ from agent_framework import (
 from agent_framework import chat_middleware as as_chat_middleware
 from agent_framework.observability import ChatTelemetryLayer
 
+from agent_framework_durabletask import migrate_legacy_state, read_agent_state, state_snapshot_digest
 from agent_framework_durabletask._invocation_safety import (
     DurableServiceAcceptance,
     DurableServiceClient,
     DurableToolGuard,
     InvocationProgress,
 )
+from agent_framework_durabletask._shared_agent_state import DurableAgentState, DurableAgentStateMessage
 
 
 class _Record:
@@ -320,6 +323,116 @@ async def test_snapshot_precedes_provider_mutation(stream: bool, compact: bool) 
     assert _serialized(record.accepted) == _serialized(record.received)
     assert record.accepted[0][-1].text == "B"
     assert record.accepted[0][-1].additional_properties["nested"] == {"values": ["original"]}
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("layered", [False, True])
+@pytest.mark.parametrize("source", ["client", "per-call", "strategy"])
+@pytest.mark.parametrize("changed", [False, True])
+async def test_post_compaction_annotations_tokens_and_cold_message_roundtrip(
+    stream: bool, layered: bool, source: str, changed: bool
+) -> None:
+    class Tokenizer:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def count_tokens(self, text: str) -> int:
+            self.calls.append(text)
+            return len(self.calls)
+
+    class Strategy:
+        def __init__(self, tokenizer: Tokenizer) -> None:
+            self.calls = 0
+            self.tokenizer = tokenizer if source == "strategy" else None
+
+        async def __call__(self, messages: list[Message]) -> bool:
+            self.calls += 1
+            return await _compact(messages) if changed else False
+
+    records = [_Record(), _Record()]
+    tokenizers = [Tokenizer(), Tokenizer()]
+    strategies = [Strategy(tokenizer) for tokenizer in tokenizers]
+    clients = [(_Layered(record, middleware=[_Pass()]) if layered else _Leaf(record)) for record in records]
+    observer = DurableServiceClient(clients[1], records[1].accept, records[1].on_completed)
+    target: Any
+    for target, client, tokenizer, strategy in zip([clients[0], observer], clients, tokenizers, strategies):
+        client.compaction_strategy = strategy
+        kwargs: dict[str, Any] = {}
+        if source == "client":
+            client.tokenizer = tokenizer
+        elif source == "per-call":
+            kwargs["tokenizer"] = tokenizer
+        await _finish(target.get_response(_inputs(), stream=stream, **kwargs), stream)
+        assert strategy.calls == 1 and client.compaction_strategy is strategy
+    assert tokenizers[0].calls == tokenizers[1].calls
+    assert _serialized(records[1].accepted) == _serialized(records[1].received) == _serialized(records[0].received)
+    assert observer.observed_request
+    wires = [DurableAgentStateMessage.from_chat_message(message).to_dict() for message in records[1].accepted[0]]
+    cold = [DurableAgentStateMessage.from_dict(deepcopy(wire)).to_chat_message() for wire in wires]
+    assert _serialized([cold]) == _serialized(records[1].accepted)
+    assert all(message.additional_properties["_group"]["token_count"] is not None for message in cold)
+    records[1].accepted[0][-1].additional_properties["nested"]["values"].append("later")
+    assert cold[-1].additional_properties["nested"]["values"] == ["original"]
+
+
+@pytest.mark.parametrize("version", ["1.2.0", "2.0.0"])
+async def test_old_persisted_input_and_canonical_writer_keep_real_core_dispatch(version: str) -> None:
+    raw: dict[str, Any] = {
+        "schemaVersion": version,
+        "data": {
+            "conversationHistory": [
+                {
+                    "$type": "request",
+                    "messages": [
+                        {"role": "user", "messageId": "A", "contents": [{"$type": "text", "text": "A"}]},
+                        {
+                            "role": "user",
+                            "messageId": "B",
+                            "contents": [{"$type": "text", "text": "B"}],
+                            "extensionData": {"nested": {"values": ["original"]}},
+                        },
+                    ],
+                }
+            ]
+        },
+    }
+    if version == "2.0.0":
+        raw["data"].update(terminalResults={}, completionReceipts={})
+    original = deepcopy(raw)
+    reader = read_agent_state(raw)
+    assert reader.message_count == 1
+    if version == "1.2.0":
+        digest = state_snapshot_digest(raw)
+        state = migrate_legacy_state(
+            raw,
+            source_digest=digest,
+            source_session_id="old-session",
+            migration_id="compatibility-fixture",
+            ownership_transfer_id="operator-fixture",
+            delivery_window_seconds=60,
+            completion_evidence={
+                "sourceDigest": digest,
+                "evidenceId": "empty-operator-journal-fixture",
+                "complete": True,
+                "results": [],
+            },
+            now=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+    else:
+        assert reader.to_dict() == original
+        state = DurableAgentState.from_dict(raw)
+    persisted = state.to_dict()
+    cold = DurableAgentState.from_json(state.to_json())
+    assert cold.to_dict() == persisted
+    messages = [stored.to_chat_message() for stored in cold.data.conversation_history[0].messages]
+    assert [(message.role, message.text) for message in messages] == [("user", "A"), ("user", "B")]
+    record = _Record()
+    client = _Leaf(record, mutate=True, compaction_strategy=_compact)
+    await DurableServiceClient(client, record.accept, record.on_completed).get_response(messages)
+    assert _serialized(record.accepted) == _serialized(record.received)
+    assert [message.text for message in record.accepted[0]] == ["summary", "B"]
+    assert record.accepted[0][-1].additional_properties["nested"]["values"] == ["original"]
+    assert cold.to_dict() == persisted and raw == original
 
 
 @pytest.mark.parametrize("stream", [False, True])

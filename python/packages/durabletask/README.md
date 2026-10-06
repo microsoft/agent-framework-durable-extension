@@ -219,7 +219,7 @@ Async streaming remains supported. Activity state deltas compare a detached rece
 pickle bytes. Explicit writes retain their intent, and in-place JSON changes remain type-sensitive.
 
 Requires Python 3.10+, `durabletask>=1.7.1,<2` for scoped JSON decoding and SDK parent metadata,
-`agent-framework-core>=1.13.0,<2` and `pydantic>=2.11,<3` for structured response handling.
+`agent-framework-core>=1.19.0,<2` and `pydantic>=2.11,<3` for structured response handling.
 
 #### History Provider Integration
 

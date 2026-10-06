@@ -66,12 +66,13 @@ def _unchanged_on_rejection(
         assert _snapshot(captured) == before
 
 
-def _invalid_message() -> Message:
-    # A direct object-valued metadata member can be skipped by Core serialization.
-    # A nested dictionary survives that projection and reaches durable JSON admission.
-    message = Message("assistant", ["invalid strategy output"], additional_properties={"payload": {"bad": object()}})
+def _invalid_message(location: str) -> Message:
+    invalid = object()
+    payload = invalid if location == "direct" else {"bad": invalid}
+    message = Message("assistant", ["invalid strategy output"], additional_properties={"payload": payload})
     payload = serialize_input_message(message)
-    assert type(payload["additional_properties"]["payload"]["bad"]) is object
+    stored = payload["additional_properties"]["payload"]
+    assert type(stored if location == "direct" else stored["bad"]) is object
     with pytest.raises(TypeError, match="not JSON serializable"):
         json.dumps(payload, allow_nan=False)
     with pytest.raises(TypeError, match="not JSON serializable"):
@@ -81,11 +82,12 @@ def _invalid_message() -> Message:
 
 @pytest.mark.parametrize("identity", ["anonymous", "duplicate", "unique"])
 @pytest.mark.parametrize("valid_prefix", [False, True], ids=["invalid-first", "valid-summary-first"])
+@pytest.mark.parametrize("location", ["direct", "nested"])
 def test_flush_invalid_working_message_leaves_repairs_insertions_and_binding_unchanged(
-    identity: str, valid_prefix: bool
+    identity: str, valid_prefix: bool, location: str
 ) -> None:
     owner = _owner(identity)
-    buffer = ([_summary()] if valid_prefix else []) + [_invalid_message()]
+    buffer = ([_summary()] if valid_prefix else []) + [_invalid_message(location)]
     working: dict[str, Any] = {
         WORKING_BUFFER_KEY: buffer,
         POSITIONS_KEY: {},

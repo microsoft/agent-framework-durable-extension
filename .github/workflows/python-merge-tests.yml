@@ -37,7 +37,7 @@ jobs:
         run: |
           uv pip install --group dev --group test \
             -e packages/durabletask -e packages/azurefunctions \
-            "agent-framework-core==1.13.0" "pydantic==2.11.0" "opentelemetry-api==1.39.0" \
+            "agent-framework-core==1.19.0" "pydantic==2.11.0" "opentelemetry-api==1.39.0" \
             "durabletask==1.7.1" "durabletask-azuremanaged==1.4.0" "azure-functions-durable==1.3.1" \
             opentelemetry-instrumentation-logging
           uv pip check
@@ -45,7 +45,7 @@ jobs:
       - name: Verify versions and run unit tests without resynchronizing
         working-directory: python
         run: |
-          uv run --no-sync python -c "import importlib.metadata as m; assert m.version('agent-framework-core') == '1.13.0'; assert m.version('pydantic') == '2.11.0'; assert m.version('opentelemetry-api') == '1.39.0'"
+          uv run --no-sync python -c "import importlib.metadata as m; assert m.version('agent-framework-core') == '1.19.0'; assert m.version('pydantic') == '2.11.0'; assert m.version('opentelemetry-api') == '1.39.0'"
           uv run --no-sync python -c "import importlib.metadata as m; assert m.version('durabletask') == '1.7.1'; assert m.version('durabletask-azuremanaged') == '1.4.0'; assert m.version('azure-functions-durable') == '1.3.1'"
           uv run --no-sync pytest -m "not integration" packages/durabletask/tests packages/azurefunctions/tests
 
