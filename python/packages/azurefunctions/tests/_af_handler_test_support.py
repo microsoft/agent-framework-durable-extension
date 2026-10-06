@@ -17,14 +17,42 @@ from datetime import datetime, timezone
 from typing import Any
 
 from agent_framework import Agent, BaseChatClient, ChatResponse, Message
+from azure.durable_functions.internal.payloads import ActivityPayload, get_payload_store
 from durabletask import task
 from durabletask.entities import EntityInstanceId
 from durabletask.internal import helpers
 from durabletask.internal import orchestrator_service_pb2 as pb
+from durabletask.payload import LargePayloadStorageOptions, PayloadStore
 
 from agent_framework_azurefunctions import AgentFunctionApp
 
 _NOW = datetime(2026, 9, 23, tzinfo=timezone.utc)
+
+
+class _MemoryPayloadStore(PayloadStore):
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    @property
+    def options(self) -> LargePayloadStorageOptions:
+        return LargePayloadStorageOptions(threshold_bytes=64)
+
+    def upload(self, data: bytes, *, instance_id: str | None = None) -> str:
+        token = f"memory:payload:{len(self.values)}"
+        self.values[token] = data
+        return token
+
+    async def upload_async(self, data: bytes, *, instance_id: str | None = None) -> str:
+        return self.upload(data, instance_id=instance_id)
+
+    def download(self, token: str) -> bytes:
+        return self.values[token]
+
+    async def download_async(self, token: str) -> bytes:
+        return self.download(token)
+
+    def is_known_token(self, value: str) -> bool:
+        return value.startswith("memory:payload:")
 
 
 class _Client(BaseChatClient):
@@ -99,11 +127,17 @@ class _Host:
     def activity(self, instance_id: str, action: Any) -> Any:
         scheduled = action.scheduleTask
         # The host binds the decoded activity input to the trigger parameter.
-        output = self.functions[scheduled.name].get_user_function()(json.loads(scheduled.input.value))
+        activity_input = (
+            ActivityPayload(scheduled.input.value)
+            if get_payload_store() is not None
+            else json.loads(scheduled.input.value)
+        )
+        output = self.functions[scheduled.name].get_user_function()(activity_input)
+        wire = output.value if isinstance(output, ActivityPayload) else json.dumps(output)
         return self.replay(
             instance_id,
             helpers.new_task_scheduled_event(action.id, scheduled.name, scheduled.input.value),
-            helpers.new_task_completed_event(action.id, json.dumps(output)),
+            helpers.new_task_completed_event(action.id, wire),
         )
 
     def entity(self, instance_id: str, operation: str, wire: str | None, state: str | None = None) -> Any:
