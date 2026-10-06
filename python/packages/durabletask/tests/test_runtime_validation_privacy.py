@@ -103,7 +103,7 @@ def test_registered_durabletask_host_commits_safe_failure_and_suppresses_cold_du
     def activate(raw: str | None) -> tuple[Any, StateShim]:
         converter = JsonDataConverter()
         shim = StateShim(raw, converter, is_serialized=True)
-        context = EntityContext("orchestration", "operation", shim, EntityInstanceId("dafx-privacy", "s1"), converter)
+        context = EntityContext("orchestration", "run", shim, EntityInstanceId("dafx-privacy", "s1"), converter)
         hosted = factory()
         hosted._initialize_entity_context(context)
         return hosted, shim

@@ -57,7 +57,7 @@ class _JsonPayloadConverter(DataConverter):
             return None if data is None or data == "" else load_migration_json(data)
         if target_type is JsonState:
             return None if data is None or data == "" else load_state_json(data)
-        if target_type is JsonPayload or (target_type is None and self._deserialize_untagged_json):
+        if target_type is JsonPayload or self._deserialize_untagged_json:
             return None if data is None or data == "" else json.loads(data)
         return self._inner.deserialize(data, target_type)
 

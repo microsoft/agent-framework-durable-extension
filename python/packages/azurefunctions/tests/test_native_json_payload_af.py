@@ -14,6 +14,7 @@ import asyncio
 import inspect
 import json
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, get_type_hints
 from unittest.mock import AsyncMock
@@ -233,6 +234,76 @@ def test_agent_entity_untagged_operation_input_stays_plain_json(operation: str) 
 
     assert len(result.results) == 1, result
     assert result.results[0].HasField("success" if operation == "delete" else "failure"), result
+    assert _CONSTRUCTIONS == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "set_state",
+        "_set_state_dict",
+        "get_state",
+        "_get_state_dict",
+        "persist_state",
+        "_initialize_entity_context",
+        "signal_entity",
+        "schedule_new_orchestration",
+        "__init__",
+        "__class__",
+        "run_agent",
+    ],
+)
+def test_generated_agent_rejects_unsupported_operations_without_state_changes(operation: str) -> None:
+    client = _Client(None)
+    host = _Host(_app(agents=[_NonStreamingAgent(client=client, name="json-agent")]))
+    state = '{"schemaVersion":"2.0.0","data":{"conversationHistory":[],"terminalResults":{},"completionReceipts":{}}}'
+
+    batch = host.entity("@dafx-json-agent@key", operation, json.dumps(_envelope()), state)
+
+    assert batch.results[0].HasField("failure"), batch
+    assert batch.entityState.value == state
+    assert client.options == []
+    assert _CONSTRUCTIONS == []
+
+
+def test_generated_agent_maintenance_results_and_delete_contract() -> None:
+    client = _Client(None)
+    host = _Host(_app(agents=[_NonStreamingAgent(client=client, name="json-agent")]))
+    state = None
+    for correlation in ("expired", "live"):
+        batch = host.entity(
+            "@dafx-json-agent@key", "run", json.dumps({"message": "go", "correlationId": correlation}), state
+        )
+        _succeeded(batch)
+        state = batch.entityState.value
+    assert isinstance(state, str)
+    raw = json.loads(state)
+    expired_at = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    completed_at = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    for field in ("terminalResults", "completionReceipts"):
+        raw["data"][field]["expired"]["completedAt"] = completed_at
+        raw["data"][field]["expired"]["resultExpiresAt"] = expired_at
+
+    expired = host.entity("@dafx-json-agent@key", "expire_responses", None, json.dumps(raw))
+    assert json.loads(_succeeded(expired)) == 1
+    repeated = host.entity("@dafx-json-agent@key", "expire_responses", None, expired.entityState.value)
+    assert json.loads(_succeeded(repeated)) == 0
+    before_reset = json.loads(repeated.entityState.value)["data"]
+    assert before_reset["conversationHistory"]
+    assert before_reset["completionReceipts"]["expired"]["resultState"] == "unavailable"
+    reset = host.entity("@dafx-json-agent@key", "reset", None, repeated.entityState.value)
+    assert reset.results[0].HasField("success"), reset
+    assert FUNCTIONS_FRAMEWORK_CONVERTER.deserialize(_succeeded(reset), JsonPayload) is None
+    after_reset = json.loads(reset.entityState.value)["data"]
+    assert after_reset["conversationHistory"] == []
+    assert after_reset.get("session") is None
+    assert after_reset["terminalResults"] == before_reset["terminalResults"]
+    assert after_reset["completionReceipts"] == before_reset["completionReceipts"]
+    deleted = host.entity("@dafx-json-agent@key", "delete", None, reset.entityState.value)
+    assert deleted.results[0].HasField("success"), deleted
+    assert not deleted.entityState.value
+    assert FUNCTIONS_FRAMEWORK_CONVERTER.deserialize(_succeeded(deleted), JsonPayload) is None
+    assert len(client.options) == 2
     assert _CONSTRUCTIONS == []
 
 

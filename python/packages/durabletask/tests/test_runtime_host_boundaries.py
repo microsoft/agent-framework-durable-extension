@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 from _execution_test_support import NonStreamingAgent, RecordingChatClient
+from _migration_json_test_support import _EntityHost
 from agent_framework import Agent, AgentExecutor, BaseChatClient, ChatResponse, Message, Workflow, WorkflowBuilder
 from durabletask.entities import EntityContext, EntityInstanceId
 from durabletask.internal.entity_state_shim import StateShim
@@ -34,6 +35,71 @@ def test_entity_factory_is_internal() -> None:
 
     assert "create_agent_entity_class" not in agent_framework_durabletask.__all__
     assert not hasattr(agent_framework_durabletask, "create_agent_entity_class")
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "set_state",
+        "_set_state_dict",
+        "get_state",
+        "_get_state_dict",
+        "persist_state",
+        "_initialize_entity_context",
+        "signal_entity",
+        "schedule_new_orchestration",
+        "__init__",
+        "__class__",
+    ],
+)
+def test_registered_entity_rejects_implementation_operations_without_writes(operation: str) -> None:
+    host = _EntityHost()
+    host.raw = json.dumps(_delivery_state())
+    before = host.raw
+
+    with pytest.raises(ValueError, match="Agent entity operation .* is not supported"):
+        host.call(operation, {} if operation in ("set_state", "_set_state_dict") else None)
+
+    assert host.shim.encode_state() == before
+    host.assert_writes(0)
+    host.assert_idle()
+
+
+def test_registered_entity_rejects_removed_run_agent_alias() -> None:
+    host = _EntityHost()
+    host.raw = json.dumps(_delivery_state())
+    before = host.raw
+
+    with pytest.raises(AttributeError, match="does not have operation 'run_agent'"):
+        host.call("run_agent", {"message": "ignored", "correlationId": "removed"})
+
+    assert host.shim.encode_state() == before
+    host.assert_writes(0)
+    host.assert_idle()
+
+
+def test_registered_entity_maintenance_results_and_delete_contract() -> None:
+    host = _EntityHost()
+    now = datetime.now(timezone.utc)
+    raw = _delivery_state(correlation_id="expired", expires_at=now - timedelta(days=1))
+    live = _delivery_state(correlation_id="live", expires_at=now + timedelta(days=1))
+    for field in ("terminalResults", "completionReceipts"):
+        raw["data"][field].update(live["data"][field])
+    host.raw = json.dumps(raw)
+
+    assert host.call("expire_responses") == 1
+    assert host.call("expire_responses") == 0
+    before_reset = host.snapshot()["data"]
+    assert before_reset["completionReceipts"]["expired"]["resultState"] == "unavailable"
+    assert host.call("reset") is None
+    after_reset = host.snapshot()["data"]
+    assert after_reset["conversationHistory"] == []
+    assert after_reset.get("session") is None
+    assert after_reset["terminalResults"] == before_reset["terminalResults"]
+    assert after_reset["completionReceipts"] == before_reset["completionReceipts"]
+    assert host.call("delete") is None
+    assert host.raw is None
+    host.assert_idle()
 
 
 class _CoreClient(BaseChatClient):
@@ -77,7 +143,7 @@ def _sdk_provider(state_json: str | None, *, entity_name: str = "dafx-runtime", 
     converter = JsonDataConverter()
     shim = StateShim(state_json, converter, is_serialized=True)
     entity_id = EntityInstanceId(entity_name, session_id)
-    context = EntityContext("orchestration", "operation", shim, entity_id, converter)
+    context = EntityContext("orchestration", "run", shim, entity_id, converter)
     entity = create_agent_entity_class(
         Agent(client=RecordingChatClient(), name="bootstrap"),
         None,
@@ -194,7 +260,7 @@ def test_worker_add_agent_registers_real_factory_and_binds_sdk_context() -> None
     instance = registered_class()
     context = EntityContext(
         "orchestration",
-        "operation",
+        "run",
         StateShim(None, JsonDataConverter(), is_serialized=True),
         EntityInstanceId("dafx-runtime-agent", "stateful"),
         JsonDataConverter(),

@@ -46,7 +46,8 @@ azure-functions-durable 2.x runs each orchestrator and entity function on its ow
 worker. That worker's converter rebuilds objects from `__class__`, `__module__` and `__data__`
 envelopes. `AgentFunctionApp` wraps it with the same framework decoder on every durable function
 it registers, including user functions, blueprints and the SDK's built-in functions. The generated
-agent entity also decodes untagged operation input as plain JSON, matching the 1.x host. Other
+agent entity also decodes non-framework operation input as plain JSON, including typed helper
+inputs before unsupported-operation rejection. State and migration targets keep exact counters. Other
 functions change only for `JsonPayload`, `JsonState` and `JsonMigration` targets, so their native
 payload types keep the Functions converter's behavior.
 
@@ -55,6 +56,11 @@ rather than falling back to object reconstruction. The workflow HTTP endpoints r
 orchestration output and custom status as plain JSON instead of through the Functions converter.
 `get_agent()` needs a two-argument `(context, input)` orchestrator, which receives the durabletask
 `OrchestrationContext`.
+
+Both Python hosts restrict generated agent entities to `run`, `reset`, `expire_responses`, `migrate`
+and administrative `delete`. Internal helpers and raw state setters are not operations, and the
+deprecated `run_agent` alias is removed. This does not restrict unrelated user entity classes.
+See the [maintenance and deletion contract](../../python/packages/durabletask/README.md#delivery-and-maintenance).
 
 ## Dependencies and custom converters
 
