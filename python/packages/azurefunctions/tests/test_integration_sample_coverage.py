@@ -136,6 +136,13 @@ def test_integration_setup_uses_current_azurite_without_api_validation_bypass() 
         assert "--skipApiVersionCheck" not in setup, path
 
 
+def test_sample_guidance_keeps_azurite_api_validation_enabled() -> None:
+    sample_root = Path(__file__).resolve().parents[3] / "samples" / "azure_functions"
+    for path in sample_root.rglob("*"):
+        if path.suffix in (".md", ".http", ".py"):
+            assert "--skipApiVersionCheck" not in path.read_text(encoding="utf-8"), path
+
+
 def test_skip_guard_detects_decorators_and_module_markers(tmp_path: Path) -> None:
     """Detect called, bare, and module-level unconditional skip markers."""
     test_file = tmp_path / "test_sample.py"

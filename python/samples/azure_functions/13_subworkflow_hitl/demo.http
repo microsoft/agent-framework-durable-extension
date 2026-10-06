@@ -9,7 +9,7 @@
 ### This sample hosts no AI agents, so it needs only Azurite.
 ###
 ### Prerequisites:
-### 1. Start Azurite: azurite --silent --location . --skipApiVersionCheck
+### 1. Start Azurite: azurite --silent --location .
 ### 2. Run: func start
 ### ============================================================================
 

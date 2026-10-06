@@ -2503,6 +2503,55 @@ class TestAgentFunctionAppSubworkflowHitl:
 
         assert resolved is None
 
+    @pytest.mark.parametrize("depth", [0, 1, 2], ids=["missing-parent", "missing-child", "missing-grandchild"])
+    async def test_resolve_missing_instance_returns_none(self, depth: int) -> None:
+        app = self._app()
+        statuses: dict[str, dict | None] = {}
+        if depth >= 1:
+            statuses["parent"] = {"subworkflows": {"sub": {"0": "child"}}}
+        if depth == 2:
+            statuses["child"] = {"subworkflows": {"sub": {"0": "grandchild"}}}
+        client = self._client(statuses)
+
+        resolved = await app._resolve_hitl_target(client, "parent", "sub~0~" * depth + "approval")
+
+        assert resolved is None
+
+    @pytest.mark.parametrize("depth", [1, 2], ids=["child", "grandchild"])
+    @pytest.mark.parametrize("missing", [False, True], ids=["early-buffered", "purged"])
+    async def test_respond_route_requires_existing_child_but_not_published_wait(
+        self, depth: int, missing: bool
+    ) -> None:
+        app = self._app()
+        statuses: dict[str, dict | None] = {"parent": {"subworkflows": {"sub": {"0": "child"}}}}
+        target = "child"
+        if depth == 2:
+            statuses["child"] = {"subworkflows": {"sub": {"0": "grandchild"}}}
+            target = "grandchild"
+        if not missing:
+            statuses[target] = None
+        client = self._client(statuses)
+        name = app._workflow_route_function_name(app.workflows["orders"], "respond")
+        registered = next(function for function in app.get_functions() if function.get_function_name() == name)
+        client_wrapper: Any = registered.get_user_function()
+        respond = client_wrapper.client_function
+        request_id = "sub~0~" * depth + "approval"
+        request = func.HttpRequest(
+            method="POST",
+            url="https://example.test/api/workflow/orders/respond/parent/" + request_id,
+            body=b'{"approved":true}',
+            route_params={"instanceId": "parent", "requestId": request_id},
+        )
+
+        response = await respond(req=request, client=client)
+
+        assert response.status_code == (404 if missing else 200)
+        if missing:
+            assert json.loads(response.get_body())["error"] == "Pending request not found"
+            client.raise_orchestration_event.assert_not_called()
+        else:
+            client.raise_orchestration_event.assert_awaited_once_with(target, "approval", data={"approved": True})
+
     async def test_multiple_children_of_one_executor_stay_addressable(self) -> None:
         app = self._app()
         client = self._client({

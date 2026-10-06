@@ -1237,7 +1237,7 @@ class AgentFunctionApp(df.DFApp):
         addressed instance has a terminal runtime status.
         """
         status = await client.get_orchestration_state(instance_id)
-        if self._is_terminal_hitl_state(status):
+        if status is None or self._is_terminal_hitl_state(status):
             return None
         hop = split_subworkflow_request_id(request_id)
         if hop is None:
