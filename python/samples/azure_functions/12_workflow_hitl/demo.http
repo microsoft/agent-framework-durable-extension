@@ -7,7 +7,7 @@
 ### The AgentFunctionApp automatically provides all HITL endpoints.
 ###
 ### Prerequisites:
-### 1. Start Azurite: azurite --silent --location . --skipApiVersionCheck
+### 1. Start Azurite: azurite --silent --location .
 ### 2. Configure local.settings.json with Azure OpenAI credentials
 ### 3. Run: func start
 ### ============================================================================
