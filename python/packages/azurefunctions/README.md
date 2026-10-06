@@ -110,7 +110,7 @@ Unrelated native calls retain SDK behavior. Manually wrapping an entity factory 
 the generated-entity boundary, and internal checkpoints still require trusted workers and storage.
 See the [host coverage and SDK constraints](../../../docs/features/python-durable-json-boundaries.md#covered-host-paths).
 
-Requires Python 3.10+, `agent-framework-core>=1.13.0,<2`, `azure-functions>=1.24.0,<2` and
+Requires Python 3.10+, `agent-framework-core>=1.19.0,<2`, `azure-functions>=1.24.0,<2` and
 `azure-functions-durable>=1.3.1,<2`. The shared dependency requires `durabletask>=1.7.1,<2`
 and `pydantic>=2.11,<3`. Functions uses its own SDK's parent metadata.
 

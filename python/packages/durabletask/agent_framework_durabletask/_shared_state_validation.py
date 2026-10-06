@@ -25,8 +25,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
 _VERSIONS = ("1.0.0", "1.1.0", "1.2.0", "2.0.0")
-_LEGACY_ROLES = ("user", "assistant", "system", "tool")
-_V2_ROLES = (*_LEGACY_ROLES, "developer")
+_V2_ROLES = ("user", "assistant", "system", "tool", "developer")
 _ENTRY_TYPES = ("request", "response", "errorResponse", "compaction")
 _OUTCOMES = ("succeeded", "failed")
 _CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -194,7 +193,7 @@ def validate_usage(value: Any) -> None:
         _object(usage["extensionData"], "usage.extensionData")
 
 
-def _content(value: Any, *, v2: bool) -> None:
+def _content(value: Any) -> None:
     content = _object(value, "content")
     kind = content.get("$type")
     if not isinstance(kind, str) or kind not in _CONTENT_FIELDS:
@@ -204,10 +203,8 @@ def _content(value: Any, *, v2: bool) -> None:
     _strings(content, strings, "content")
     if kind == "functionCall" and "arguments" in content:
         arguments = content["arguments"]
-        if not isinstance(arguments, dict) and not (v2 and isinstance(arguments, str)):
-            raise ValueError("Function arguments must be an object, or an original string in schema 2.0.0.")
-    if kind == "uri" and not v2:
-        _required(content, ("mediaType",), "legacy URI content")
+        if not isinstance(arguments, (dict, str)):
+            raise ValueError("Function arguments must be an object or an original string.")
     if kind == "usage":
         validate_usage(content["usage"])
 
@@ -215,7 +212,11 @@ def _content(value: Any, *, v2: bool) -> None:
 def _messages(value: Any, *, v2: bool) -> None:
     for item in _array(value, "messages"):
         message = _object(item, "message")
-        _enum(message.get("role"), _V2_ROLES if v2 else _LEGACY_ROLES, "message.role")
+        if v2:
+            _enum(message.get("role"), _V2_ROLES, "message.role")
+        else:
+            _required(message, ("role",), "message")
+            _strings(message, ("role",), "message")
         _strings(message, ("authorName", "messageId"), "message")
         if "createdAt" in message:
             _timestamp(message["createdAt"], "message.createdAt")
@@ -223,7 +224,7 @@ def _messages(value: Any, *, v2: bool) -> None:
             _object(message["extensionData"], "message.extensionData")
         if "contents" in message:
             for content in _array(message["contents"], "message.contents"):
-                _content(content, v2=v2)
+                _content(content)
 
 
 def _conversation(value: Any, *, v2: bool) -> None:

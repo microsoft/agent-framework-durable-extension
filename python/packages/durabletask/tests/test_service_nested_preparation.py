@@ -183,7 +183,10 @@ async def _compare_pair(
         for name, strategy in strategies.items():
             assert strategy.calls == ([["A", "B"]] if name == expected_strategy else [])
         for name, tokenizer in tokenizers.items():
-            assert len(tokenizer.calls) == (2 if name == expected_tokenizer else 0)
+            # Core 1.19 counts the two inputs before compaction, then the
+            # inserted summary and both inputs in the post-strategy pass.
+            expected_count = (5 if expected_strategy is not None else 2) if name == expected_tokenizer else 0
+            assert len(tokenizer.calls) == expected_count
         strategy_counts.append({name: strategy.calls for name, strategy in strategies.items()})
         tokenizer_counts.append({name: tokenizer.calls for name, tokenizer in tokenizers.items()})
         if expected_tokenizer is not None:

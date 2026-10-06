@@ -24,9 +24,10 @@ from agent_framework import (
 class ToolChatClient(FunctionInvocationLayer, ChatMiddlewareLayer, BaseChatClient):
     """Exercise real core middleware and tool invocation through a delegated wrapper."""
 
-    def __init__(self, *, fail_on_call: int | None = None) -> None:
+    def __init__(self, *, fail_on_call: int | None = None, occurrence_id: str | None = "occurrence-1") -> None:
         super().__init__(middleware=[])
         self.fail_on_call = fail_on_call
+        self.occurrence_id = occurrence_id
         self.received_messages: list[list[Message]] = []
         self.received_options: list[dict[str, Any]] = []
 
@@ -45,7 +46,11 @@ class ToolChatClient(FunctionInvocationLayer, ChatMiddlewareLayer, BaseChatClien
             raise RuntimeError("service parent is not visible")
         calls_tool = call == 1
         contents = (
-            [Content.from_function_call(call_id="call-1", name="lookup", arguments='{"key":"durable"}')]
+            [
+                Content.from_function_call(
+                    call_id="call-1", name="lookup", arguments='{"key":"durable"}', id=self.occurrence_id
+                )
+            ]
             if calls_tool
             else [Content.from_text(f"answer-{call}")]
         )

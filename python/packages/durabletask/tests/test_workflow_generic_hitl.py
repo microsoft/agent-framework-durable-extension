@@ -295,9 +295,11 @@ def test_descriptor_depth_and_cycles_fail_with_bounded_errors() -> None:
 @pytest.mark.parametrize("annotation", [Literal["approve"], list[Literal["approve"]]])
 def test_unsupported_literal_annotation_is_not_silently_widened(annotation: Any) -> None:
     sample = "approve" if annotation == Literal["approve"] else ["approve"]
-    # Core's field-level coercer knows Literal but public HITL admission does not.
-    with pytest.raises(TypeError):
-        is_instance_of(sample, annotation)
+    # Core 1.19 admits Literal; the durable descriptor remains closed and must
+    # still reject it rather than widening the persisted annotation.
+    assert is_instance_of(sample, annotation)
+    rejected = "reject" if annotation == Literal["approve"] else ["reject"]
+    assert not is_instance_of(rejected, annotation)
     with pytest.raises(ValueError, match="Unsupported HITL response annotation"):
         serialize_response_type(annotation)
 

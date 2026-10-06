@@ -2185,6 +2185,7 @@ public sealed class AgentEntityHistoryTests
             agent,
             state,
             options => options.ProviderKey = new("model-service.v1"));
+        string before = SerializeState(state);
 
         DurableAgentHistoryBindingMismatchException exception =
             await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
@@ -2193,6 +2194,7 @@ public sealed class AgentEntityHistoryTests
         Assert.Contains("remote service may already have observed", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(1, client.InvocationCount);
         Assert.False(harness.StateWasPersisted);
+        Assert.Equal(before, SerializeState(state));
     }
 
     [Fact]
@@ -2232,10 +2234,12 @@ public sealed class AgentEntityHistoryTests
 
         RecordingChatClient transitioningClient = new() { ResponseConversationId = "remote-conversation" };
         ChatClientAgent transitioningAgent = new(transitioningClient, name: "agent");
+        DurableAgentState restoredState = DeserializeState(SerializeState(persisted));
         EntityHarness harness = CreateHarness(
             transitioningAgent,
-            DeserializeState(SerializeState(persisted)),
+            restoredState,
             options => options.ProviderKey = new("model-service.v1"));
+        string before = SerializeState(restoredState);
 
         DurableAgentHistoryBindingMismatchException exception =
             await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
@@ -2244,6 +2248,7 @@ public sealed class AgentEntityHistoryTests
         Assert.Contains("remote service may already have observed", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(1, transitioningClient.InvocationCount);
         Assert.False(harness.StateWasPersisted);
+        Assert.Equal(before, SerializeState(restoredState));
     }
 
     [Fact]
@@ -2341,7 +2346,9 @@ public sealed class AgentEntityHistoryTests
     {
         RecordingChatClient client = new() { ResponseConversationId = "remote-conversation" };
         ChatClientAgent agent = new(client, name: "agent");
-        EntityHarness harness = CreateHarness(agent, new DurableAgentState());
+        DurableAgentState initialState = new();
+        EntityHarness harness = CreateHarness(agent, initialState);
+        string before = SerializeState(initialState);
 
         DurableAgentHistoryBindingMismatchException exception =
             await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
@@ -2350,6 +2357,7 @@ public sealed class AgentEntityHistoryTests
         Assert.Contains("remote service may already have observed", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(1, client.InvocationCount);
         Assert.False(harness.StateWasPersisted);
+        Assert.Equal(before, SerializeState(initialState));
     }
 
     [Fact]
@@ -2407,6 +2415,7 @@ public sealed class AgentEntityHistoryTests
             agent,
             legacyState,
             options => options.ProviderKey = new("model-service.v1"));
+        string before = SerializeState(legacyState);
 
         DurableAgentHistoryBindingMismatchException exception =
             await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
@@ -2415,6 +2424,7 @@ public sealed class AgentEntityHistoryTests
         Assert.Contains("remote service may already have observed", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(1, client.InvocationCount);
         Assert.False(harness.StateWasPersisted);
+        Assert.Equal(before, SerializeState(legacyState));
     }
 
     [Fact]

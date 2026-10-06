@@ -61,7 +61,7 @@ app-wide or global SDK decoder replacement.
 
 Durable Task requires `durabletask>=1.7.1,<2` for target-aware decoding, deferred state reads and
 parent-instance metadata, plus `pydantic>=2.11,<3`. Both packages require Python 3.10+ and
-`agent-framework-core>=1.13.0,<2`. Functions requires `azure-functions>=1.24.0,<2` and
+`agent-framework-core>=1.19.0,<2`. Functions requires `azure-functions>=1.24.0,<2` and
 `azure-functions-durable>=1.3.1,<2` and uses its own SDK's parent metadata.
 
 Custom converters can still serve native co-hosted work. For framework traffic, serializers must
@@ -98,6 +98,33 @@ the resulting JSON afterwards is not a substitute for that ordering.
 Compatibility tests pair literal shared-wire expectations and fixed projected fields with
 round-trip/parity checks. Core constructor coverage tests detect new fields to review, but
 are not the sole oracle for the supported wire behavior.
+
+### Core 1.19 preparation and serialization
+
+The service observer snapshots the configured strategy's **post-compaction** dispatch,
+including Core's group, exclusion and token-count annotations. It uses Core's exported
+incremental annotation helpers, preserves a strategy-owned tokenizer, and records inputs
+only after the service response completes. Provider or outer-middleware mutations cannot
+rewrite that detached snapshot. This is local completion evidence, not remote receipt or
+an external exactly-once guarantee. Tokenizer-only preparation and unclassified wrappers
+retain their conservative completion-only behavior.
+
+The observer relies on helpers exported by Core 1.19's compaction module; not
+every helper is re-exported by the top-level package. These source-level adapters
+do not certify all versions allowed by the dependency range.
+
+Core 1.19 recursively omits non-JSON metadata during ordinary serialization. The durable
+message snapshot retains nested metadata containers so strict JSON admission rejects an
+invalid member rather than committing only its serializable siblings. Flush and append
+staging still roll back their local changes on rejection.
+
+Core assigns a function-call occurrence `Content.id` independently of the provider
+`call_id`. Approval delivery preserves both identities; they must not be conflated.
+Host-internal `Content.exception` diagnostics serialize as Core's fixed
+`FunctionInvocationError` marker, while public results remain intact. The existing
+durable HITL descriptor still rejects `Literal` and other unsupported annotations,
+even though newer Core admission supports `Literal`. No persisted descriptor or
+shared-state schema is expanded by these compatibility adapters.
 
 ## Polling failure boundaries
 

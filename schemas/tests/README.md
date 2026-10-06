@@ -1,6 +1,7 @@
 # Language-neutral schema validation cases
 
-`validation-cases.json` and `versioned-envelope-cases.json` record positive and negative contract expectations using
+`validation-cases.json`, `versioned-envelope-cases.json`, and
+`content-metadata-cases.json` record positive and negative contract expectations using
 the JSON Schema Test Suite's group shape: `description`, `schema`, and `tests`;
 each test has `description`, `data`, and `valid`. These are test data, not durable
 state fixtures, product implementation, or runtime test-project integration.
@@ -19,6 +20,12 @@ just testing `$defs` fragments. Historical `1.0.0`, `1.1.0`, and `1.2.0`
 continue accepting free-form roles, string-form function arguments, and URI
 content without media type; v2 narrows roles while retaining the two lossless
 content forms in transcript and terminal payload paths.
+The content metadata cases cover all thirteen direct content definitions
+(eleven shared definitions and the two versioned function-call/URI definitions):
+object, array, string, integer, decimal, boolean, null, and absent metadata.
+Required discriminators and known field types remain strict. Content metadata
+is arbitrary JSON; root, data, entry, message, response, and nested usage
+metadata retain their object-only constraints.
 Historical explicit `unknown` JSON was already valid and stays valid in all
 versions. The unchanged legacy fixture remains additional compatibility evidence.
 Profile cases distinguish opaque shared preservation from validation by a relying

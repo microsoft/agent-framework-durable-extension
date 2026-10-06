@@ -391,8 +391,8 @@ async def test_first_typed_approval_from_entity_is_canonical_and_delivers_throug
     assert len(first.user_input_requests) == 1
     approval = first.user_input_requests[0]
     assert approval.type == "function_approval_request"
-    assert approval.id == "call-1" and approval.approved is None
     assert approval.function_call is not None
+    assert approval.id and approval.id == approval.function_call.id and approval.approved is None
     assert approval.function_call.call_id == "call-1"
     assert approval.function_call.name == "lookup"
     arguments = approval.function_call.arguments

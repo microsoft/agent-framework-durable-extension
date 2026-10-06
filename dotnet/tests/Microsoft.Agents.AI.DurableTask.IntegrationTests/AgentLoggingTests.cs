@@ -46,6 +46,9 @@ public sealed class AgentLoggingTests(ITestOutputHelper output)
     [InlineData("Microsoft.DurableTask.Agents.othertestagent.session")]
     [InlineData("Microsoft.DurableTask.Agents.testagentextra.session")]
     [InlineData("Microsoft.DurableTask.Agents.testagent")]
+    [InlineData("Microsoft.DurableTask.Agents.OtherTestAgent.session")]
+    [InlineData("Microsoft.DurableTask.Agents.TestAgentExtra.session")]
+    [InlineData("Microsoft.DurableTask.Agents.TestAgent")]
     public void AgentLogCaptureExcludesUnrelatedCategories(string category)
     {
         TestLoggerProvider loggerProvider = new(output);
@@ -176,7 +179,7 @@ public sealed class AgentLoggingTests(ITestOutputHelper output)
 
         Assert.NotEmpty(response.Text);
         Assert.NotNull(persistedState);
-        Assert.Equal(initialState.SchemaVersion, persistedState.SchemaVersion);
+        Assert.Equal("1.2.0", persistedState.SchemaVersion);
         Assert.False(host.Services.GetRequiredService<DurableAgentsOptions>().EnablePersistentRequestOutcomes);
     }
 
