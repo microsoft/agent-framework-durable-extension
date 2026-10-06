@@ -92,10 +92,12 @@ does not supply a separate correlation-status endpoint.
 - Save both `session_id` and `correlation_id` from the accepted response. A session-scoped Redis
   marker or cursor cannot identify a committed result for the current request.
 - For non-blocking applications, implement an application-owned status path using the Functions
-  durable client binding. Read `EntityId("dafx-TravelPlanner", session_id)` with `read_entity_state`
-  from the same configured backend and hub. Decode the stored snapshot with `read_agent_state`
-  from `agent_framework_durabletask`, then call `try_get_agent_response(correlation_id)` to check
-  the canonical completion receipt and result for that request.
+  durable client binding. Read `EntityInstanceId("dafx-TravelPlanner", session_id)` with
+  `get_entity` from the same configured backend and hub. Pass the raw `get_state()` string to
+  `read_agent_state` from `agent_framework_durabletask`, then call
+  `try_get_agent_response(correlation_id)` to check the canonical completion receipt and result for
+  that request. Avoid `read_entity_state` and `get_typed_state()`, which decode through the Functions
+  converter and can rebuild objects from stored JSON.
 - Require a committed successful outcome and any needed available result before performing a
   business-success action. Missing state, a read error, or a timeout remains unverified. Handle
   committed failure and completed-but-result-unavailable explicitly. Never reconstruct success

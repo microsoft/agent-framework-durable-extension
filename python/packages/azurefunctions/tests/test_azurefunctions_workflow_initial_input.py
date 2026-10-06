@@ -4,15 +4,14 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from typing import Any, TypeVar
 from unittest.mock import AsyncMock, Mock, patch
 
-import azure.durable_functions as df
 import pytest
 from agent_framework import Executor, Workflow, WorkflowBuilder, WorkflowContext, handler
 from agent_framework_durabletask._workflows.protocol import wrap_workflow_input
+from durabletask.task import OrchestrationContext
 
 from agent_framework_azurefunctions import AgentFunctionApp
 from agent_framework_azurefunctions import _workflow as workflow_module
@@ -84,11 +83,11 @@ async def test_workflow_run_route_neutralizes_reserved_marker_shaped_input() -> 
     request.params = {}
     request.url = "https://example.test/api/workflow/input_boundary/run"
     client = AsyncMock()
-    client.start_new.return_value = "instance-1"
+    client.schedule_new_orchestration.return_value = "instance-1"
 
     await handler(request, client)
 
-    assert client.start_new.await_args.kwargs["client_input"] == wrap_workflow_input(None)
+    assert client.schedule_new_orchestration.await_args.kwargs["input"] == wrap_workflow_input(None)
 
 
 def test_workflow_orchestrator_rejects_legacy_recorded_start_before_actions() -> None:
@@ -96,17 +95,14 @@ def test_workflow_orchestrator_rejects_legacy_recorded_start_before_actions() ->
     executor = _Start()
     workflow = WorkflowBuilder(name="input_boundary", start_executor=executor, output_from=[executor]).build()
     orchestrator = _capture_workflow_orchestrator(workflow)
-    context = Mock(spec=df.DurableOrchestrationContext)
-    context._input = json.dumps({"input": "raw-without-version"})
-    context.get_input.side_effect = AssertionError("Generated workflow starts must not use SDK custom decoding")
+    context = Mock(spec=OrchestrationContext)
     context.is_replaying = True
 
     with (
         patch.object(workflow_module, "_run_workflow_orchestrator_shared") as engine,
         pytest.raises(ValueError, match="unsupported execution protocol"),
     ):
-        next(orchestrator(context))
+        next(orchestrator(context, {"input": "raw-without-version"}))
 
     engine.assert_not_called()
-    context.get_input.assert_not_called()
     assert context.mock_calls == []

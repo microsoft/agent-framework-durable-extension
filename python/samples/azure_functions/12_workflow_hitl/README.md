@@ -107,9 +107,8 @@ When running on Durable Functions, the HITL pattern maps to:
 ## Prerequisites
 
 1. **Azure OpenAI** - Access to Azure OpenAI with a deployed chat model
-2. **Durable Task Scheduler** - Local emulator or Azure deployment
-3. **Azurite** - Local Azure Storage emulator
-4. **Azure CLI** - For authentication (`az login`)
+2. **Azurite** - Local Azure Storage emulator
+3. **Azure CLI** - For authentication (`az login`)
 
 ## Setup
 
@@ -128,13 +127,9 @@ When running on Durable Functions, the HITL pattern maps to:
    }
    ```
 
-3. Start the local emulators:
+3. Start Azurite:
    ```bash
-   # Terminal 1: Start Azurite
-   azurite --silent --location .
-
-   # Terminal 2: Start Durable Task Scheduler (if using local emulator)
-   # Follow Durable Task Scheduler setup instructions
+    azurite --silent --location .
    ```
 
 4. Start the Function App:
