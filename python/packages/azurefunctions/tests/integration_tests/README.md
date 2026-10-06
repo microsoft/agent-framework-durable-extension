@@ -30,13 +30,11 @@ environment. The workflow uses Azure Login with OpenID Connect so
 
 **Azurite (for orchestration tests):**
 ```bash
-docker run -d -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite \
-  azurite -l /data --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --skipApiVersionCheck
+docker run -d -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite:3.37.0
 ```
 
-`--skipApiVersionCheck` is required because the preview extension bundle's durable
-extension uses a newer Azure Storage API version than Azurite currently recognises. The
-image's default arguments have to be repeated because they are replaced, not appended to.
+Azurite 3.37.0 accepts the durable extension's storage API versions without disabling validation.
+Samples use the GA extension bundle with version range `[4.38.1, 5.0.0)`.
 
 **Durable Task Scheduler:**
 ```bash

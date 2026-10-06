@@ -3,6 +3,7 @@
 """Coverage checks for the Azure Functions sample integration tests."""
 
 import ast
+import json
 from pathlib import Path
 
 
@@ -109,6 +110,30 @@ def test_integration_pipelines_run_azure_functions_suite() -> None:
         )
     }
     assert not missing_fragments, f"Azure Functions integration suite is not invoked by: {missing_fragments}"
+
+
+def test_sample_hosts_use_the_compatible_ga_bundle_and_azure_storage() -> None:
+    sample_root = Path(__file__).resolve().parents[3] / "samples" / "azure_functions"
+    hosts = list(sample_root.glob("*/host.json"))
+    assert len(hosts) == 14
+    for path in hosts:
+        config = json.loads(path.read_text(encoding="utf-8"))
+        assert config["extensionBundle"] == {
+            "id": "Microsoft.Azure.Functions.ExtensionBundle",
+            "version": "[4.38.1, 5.0.0)",
+        }, path
+        assert config["extensions"]["durableTask"]["storageProvider"]["type"] == "AzureStorage", path
+
+
+def test_integration_setup_uses_current_azurite_without_api_validation_bypass() -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    for path in (
+        repo_root / ".github" / "actions" / "azure-functions-integration-setup" / "action.yml",
+        repo_root / "eng" / "templates" / "jobs" / "setup-integration-infra.yml",
+    ):
+        setup = path.read_text(encoding="utf-8")
+        assert "mcr.microsoft.com/azure-storage/azurite:3.37.0" in setup, path
+        assert "--skipApiVersionCheck" not in setup, path
 
 
 def test_skip_guard_detects_decorators_and_module_markers(tmp_path: Path) -> None:

@@ -2,7 +2,7 @@
 
 """Live Functions/Azure Storage retention with a deterministic core model, not Foundry.
 
-Requires func v4, Azurite on 10000/10001/10002 (with --skipApiVersionCheck),
+Requires func v4, Azurite 3.37.0+ on 10000/10001/10002,
 DTS on 8080, and the selected venv's test dependencies including psutil,
 jsonschema, and opentelemetry-sdk. The test generates its app/settings under tmp_path
 and supplies local emulator defaults. It never uses the sample-starting fixture.
@@ -254,7 +254,7 @@ def _prepare(app: Path, session: str, hub: str) -> dict[str, str]:
             "version": "2.0",
             # The stable bundle's durable extension advertises its gRPC endpoint in a form the
             # azure-functions-durable 2.x client cannot parse, so use the preview bundle like the samples.
-            "extensionBundle": {"id": "Microsoft.Azure.Functions.ExtensionBundle.Preview", "version": "[4.*, 5.0.0)"},
+            "extensionBundle": {"id": "Microsoft.Azure.Functions.ExtensionBundle", "version": "[4.38.1, 5.0.0)"},
             "extensions": {"durableTask": {"hubName": hub, "storageProvider": {"type": "AzureStorage"}}},
             "logging": {"logLevel": {"default": "Warning"}},
         }),

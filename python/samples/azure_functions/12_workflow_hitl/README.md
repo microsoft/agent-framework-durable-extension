@@ -129,7 +129,7 @@ When running on Durable Functions, the HITL pattern maps to:
 
 3. Start Azurite:
    ```bash
-   azurite --silent --location . --skipApiVersionCheck
+    azurite --silent --location .
    ```
 
 4. Start the Function App:

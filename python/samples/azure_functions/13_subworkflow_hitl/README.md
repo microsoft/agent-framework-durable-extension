@@ -78,7 +78,7 @@ workflow is driven as a child orchestration, not addressed directly.
 
 ## Running
 
-1. Start Azurite: `azurite --silent --location . --skipApiVersionCheck`
+1. Start Azurite: `azurite --silent --location .`
 2. Copy `local.settings.json.sample` to `local.settings.json`.
 3. `func start`
 4. Drive it with [demo.http](./demo.http): start a run, GET the status to read the

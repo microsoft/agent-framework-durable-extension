@@ -1,8 +1,8 @@
 {
   "version": "2.0",
   "extensionBundle": {
-    "id": "Microsoft.Azure.Functions.ExtensionBundle.Preview",
-    "version": "[4.*, 5.0.0)"
+    "id": "Microsoft.Azure.Functions.ExtensionBundle",
+    "version": "[4.38.1, 5.0.0)"
   },
   "extensions": {
     "durableTask": {

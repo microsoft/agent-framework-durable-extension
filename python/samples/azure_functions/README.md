@@ -54,7 +54,7 @@ Install and verify these tools before [Environment Setup](#environment-setup):
 
 - **[Python 3.13 or later](https://www.python.org/downloads/)**, required by azure-functions-durable 2.x
 - **[Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local?tabs=windows%2Cpython%2Cv2&pivots=programming-language-python#install-the-azure-functions-core-tools)** – run samples locally with `func start`
-- **[Azurite](https://learn.microsoft.com/azure/storage/common/storage-install-azurite)** – local storage emulator, required before `func start`
+- **[Azurite 3.37.0 or later](https://learn.microsoft.com/azure/storage/common/storage-install-azurite)** – local storage emulator, required before `func start`. npm installation requires a supported Node.js runtime, such as Node.js 22.
 - **[Docker](https://docs.docker.com/get-docker/)** and the **[Durable Task Scheduler emulator](https://learn.microsoft.com/azure/durable-task/scheduler/develop-with-durable-task-scheduler#durable-task-scheduler-emulator)** are optional for the [DTS backend](#optional-durable-task-scheduler-backend), not required by the shipped Azure Storage configuration.
 - **[uv](https://docs.astral.sh/uv/)** – create virtual environments (recommended, especially on Windows)
 - **[Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli)** – authenticate with `az login` for `AzureCliCredential`
@@ -63,7 +63,7 @@ Install and verify these tools before [Environment Setup](#environment-setup):
 
 ```powershell
 winget install Microsoft.Azure.FunctionsCoreTools
-npm install -g azurite
+npm install -g azurite@3.37.0
 irm https://astral.sh/uv/install.ps1 | iex
 winget install Microsoft.AzureCLI
 ```
@@ -73,7 +73,7 @@ winget install Microsoft.AzureCLI
 ```bash
 brew tap azure/functions
 brew install azure-functions-core-tools@4
-npm install -g azurite
+npm install -g azurite@3.37.0
 curl -LsSf https://astral.sh/uv/install.sh | sh
 # Azure CLI: https://learn.microsoft.com/cli/azure/install-azure-cli
 ```
@@ -82,7 +82,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ```bash
 npm install -g azure-functions-core-tools@4 --unsafe-perm true
-npm install -g azurite
+npm install -g azurite@3.37.0
 curl -LsSf https://astral.sh/uv/install.sh | sh
 # Azure CLI: https://learn.microsoft.com/cli/azure/install-azure-cli
 ```
@@ -99,11 +99,11 @@ az account show
 Start Azurite before `func start` when using the supplied `UseDevelopmentStorage=true` setting:
 
 ```bash
-azurite --skipApiVersionCheck
+azurite
 ```
 
-`--skipApiVersionCheck` is required because the preview extension bundle's durable
-extension uses a newer Azure Storage API version than Azurite currently recognizes.
+Azurite 3.37.0 accepts the storage API versions used by the durable extension, so no
+API-validation bypass is needed. The samples use the GA extension bundle, version 4.38.1 or later.
 
 The samples' host configurations set `storageProvider` to `AzureStorage`, so Durable Functions
 uses **Azure Storage**, with `AzureWebJobsStorage` pointing to Azurite locally. The supplied
@@ -180,17 +180,16 @@ source .venv/bin/activate
 
 This is an explicit choice for a **new deployment**, not the default and not a migration of existing
 state. Before starting that deployment, merge this configuration into its host configuration,
-preserving other settings. Keep the preview extension bundle the samples use. The durable extension
-in the current GA bundle advertises its gRPC endpoint in a form azure-functions-durable 2.x cannot
-parse. Check that the bundle's durable extension supports `azureManaged`, and see the
+preserving other settings. Keep the GA extension bundle version range the samples use.
+The bundle includes the compatible durable extension and its `azureManaged` provider. See the
 [DTS quickstart](https://learn.microsoft.com/azure/durable-task/scheduler/quickstart-durable-task-scheduler?pivots=python)
 for the scheduler settings.
 
 ```json
 {
   "extensionBundle": {
-    "id": "Microsoft.Azure.Functions.ExtensionBundle.Preview",
-    "version": "[4.*, 5.0.0)"
+    "id": "Microsoft.Azure.Functions.ExtensionBundle",
+    "version": "[4.38.1, 5.0.0)"
   },
   "extensions": {
     "durableTask": {

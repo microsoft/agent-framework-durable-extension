@@ -12,7 +12,7 @@ Prerequisites:
 
 Usage:
     # Start Azurite (if not already running)
-    azurite --skipApiVersionCheck &
+    azurite &
 
     # Run tests from python/packages/azurefunctions
     uv run pytest tests/integration_tests/test_07_single_agent_orchestration_hitl.py -v

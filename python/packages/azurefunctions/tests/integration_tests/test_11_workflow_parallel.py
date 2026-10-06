@@ -15,7 +15,7 @@ Prerequisites:
 
 Usage:
     # Start Azurite (if not already running)
-    azurite --skipApiVersionCheck &
+    azurite &
 
     # Run tests from python/packages/azurefunctions
     uv run pytest tests/integration_tests/test_11_workflow_parallel.py -v

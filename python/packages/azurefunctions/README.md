@@ -31,6 +31,19 @@ Migration is a privileged backend entity operation, with no generated HTTP or MC
 Follow the shared [migration contract and request example](../durabletask/README.md#migration),
 including operator quiescence, fencing, evidence and a separate empty destination.
 
+### Entity Operations
+
+Generated entities use the same operation contract as the standalone Python host: `run`, `reset`,
+`expire_responses`, `migrate` and administrative `delete`. Raw state setters and internal helpers
+are rejected. These operations are not arbitrary commands exposed by the generated HTTP/MCP routes.
+
+The deprecated `run_agent` alias is removed. Direct callers must use `run`. Maintenance results
+also change from the 1.x Functions adapter: `reset` returns no value instead of `{"status":"reset"}`,
+and `expire_responses` returns an integer instead of `{"expired":count}`. Failures use native SDK
+operation failures, not the old error-result wrapper. See the shared
+[maintenance and deletion contract](../durabletask/README.md#delivery-and-maintenance), including
+receipt preservation, retry-count semantics and deletion's loss of duplicate-execution protection.
+
 ### HTTP Routes and Responses
 
 With the default `/api` prefix, generated routes are
@@ -106,7 +119,8 @@ Functions exposes status and final output, not the standalone workflow event-str
 Every orchestrator and entity worker the app registers, including your own functions and
 blueprints, decodes framework payloads as plain JSON. That covers agent state and `run`/`migrate`
 inputs, framework agent results, generated workflow starts, child results and HITL values. The
-generated agent entity also decodes untagged operation input as plain JSON, matching the 1.x host.
+generated agent entity also decodes non-framework operation input as plain JSON, including typed
+helper inputs that the dispatcher will reject. State and migration targets keep exact counters.
 Other functions keep the Functions converter's behavior, so an unannotated native input still gets
 its object reconstruction. Registration fails if a function's durable worker can't be located.
 Internal checkpoints still require trusted workers and storage.
@@ -115,6 +129,10 @@ See the [host coverage and SDK constraints](../../../docs/features/python-durabl
 Requires Python 3.13+, `agent-framework-core>=1.19.0,<2`, `azure-functions>=2.3.0,<3` and
 `azure-functions-durable>=2.0.0rc2,<3`, which brings `durabletask>=1.11.0`. The shared dependency
 requires `durabletask>=1.7.1,<2` and `pydantic>=2.11,<3`.
+
+Use the GA `Microsoft.Azure.Functions.ExtensionBundle` with version range `[4.38.1, 5.0.0)`.
+Local Azure Storage development requires Azurite 3.37.0 or later, without an API-validation bypass.
+The Python Durable Functions SDK remains prerelease; the extension bundle does not need to be Preview.
 
 `get_agent()` needs a two-argument `(context, input)` orchestrator. A one-argument orchestrator
 receives the 1.x compatibility context, which cannot call agents. Session keys can't contain `@`,

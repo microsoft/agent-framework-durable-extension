@@ -32,7 +32,7 @@ automatically.
 This sample hosts **no AI agents**, so it needs only Azurite (no model credentials).
 
 Prerequisites:
-- Start Azurite: ``azurite --silent --location . --skipApiVersionCheck``
+- Start Azurite: ``azurite --silent --location .``
 - Run: ``func start``
 """
 
