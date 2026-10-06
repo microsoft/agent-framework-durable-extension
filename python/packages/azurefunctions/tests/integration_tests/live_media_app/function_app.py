@@ -130,6 +130,19 @@ app = AgentFunctionApp(
     response_delivery_window_seconds=CONFIG["delivery_window_seconds"],
 )
 
+if CONFIG.get("payload_container"):
+    from durabletask.extensions.azure_blob_payloads import BlobPayloadStore, BlobPayloadStoreOptions
+
+    app.configure_large_payloads(
+        payload_store=BlobPayloadStore(
+            BlobPayloadStoreOptions(
+                connection_string=CONFIG["payload_connection_string"],
+                container_name=CONFIG["payload_container"],
+                threshold_bytes=1024,
+            )
+        )
+    )
+
 
 def _json(value: Any, status: int = 200) -> func.HttpResponse:
     return func.HttpResponse(json.dumps(value), status_code=status, mimetype="application/json")
