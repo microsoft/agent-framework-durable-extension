@@ -192,9 +192,10 @@ them, and manage storage lifecycle separately.
 > Blob store, this includes raw or JSON-quoted `blob:v1:<container>:<blobName>` values. Wrap
 > literal references in an object, such as `{"reference": "blob:v1:container:blob"}`, and
 > retain that wrapper across durable boundaries. References are not authorization checks.
-> `container_name` selects uploads, not the containers credentials may read. Use least-privilege
-> storage credentials and reject or validate references from untrusted callers before durable
-> API calls. Framework plain-JSON decoding does not remove this transport trust requirement.
+> `container_name` chooses the upload container. It does not restrict which containers the
+> configured credentials can read. Use least-privilege storage credentials and reject or validate
+> references from untrusted callers before durable API calls. Framework plain-JSON decoding does
+> not remove this transport trust requirement.
 
 > [!WARNING]
 > Blob failures that escape storage retries can fail durable invocations, including causing
