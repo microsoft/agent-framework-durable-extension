@@ -28,6 +28,12 @@ dependencies = [
     "azure-functions-durable>=2.0.0rc2,<3",
 ]
 
+[project.optional-dependencies]
+azure-blob-payloads = [
+    "durabletask[azure-blob-payloads]>=1.11.0,<2",
+    "aiohttp>=3.13.4,<4",
+]
+
 [dependency-groups]
 # This package is a standalone uv project (see the note in ../../pyproject.toml),
 # so it cannot inherit the workspace root's groups. Keep the pinned versions here

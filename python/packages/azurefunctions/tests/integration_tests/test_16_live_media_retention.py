@@ -10,6 +10,7 @@ and supplies local emulator defaults. It never uses the sample-starting fixture.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -35,6 +36,7 @@ import pytest
 import requests
 from agent_framework import Content, Message
 from agent_framework_durabletask import AgentSessionId, DurableAgentState, DurableHistoryProvider
+from azure.storage.blob import BlobServiceClient, ContainerClient
 from jsonschema import Draft202012Validator, FormatChecker
 
 import agent_framework_azurefunctions
@@ -54,6 +56,25 @@ AGENT = "live-media-retention"
 MAX_STATE_BYTES = 50_000
 DELIVERY_WINDOW_SECONDS = 3600
 TURNS = 8
+_AZURITE_BLOB_CONNECTION_STRING = (
+    "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;"
+    "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;"
+    "BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+)
+
+
+@pytest.fixture(params=[False, True], ids=["inline", "blob-offloaded"])
+def _payload_container(request: pytest.FixtureRequest) -> Iterator[ContainerClient | None]:
+    if not request.param:
+        yield None
+        return
+    with BlobServiceClient.from_connection_string(_AZURITE_BLOB_CONNECTION_STRING) as service:
+        container = service.get_container_client(f"media-payloads-{uuid.uuid4().hex}")
+        container.create_container()
+        try:
+            yield container
+        finally:
+            container.delete_container()
 
 
 def _equal(actual: Any, expected: Any, label: str) -> None:
@@ -231,7 +252,7 @@ def _host(app: Path, env: dict[str, str], deadline: float, epoch: str, harness: 
                 host.log.close()
 
 
-def _prepare(app: Path, session: str, hub: str) -> dict[str, str]:
+def _prepare(app: Path, session: str, hub: str, payload_container: str | None = None) -> dict[str, str]:
     app.mkdir()
     source_paths = [PYTHON_ROOT / "packages" / name for name in ("azurefunctions", "durabletask")]
     for package, path in zip((agent_framework_azurefunctions, agent_framework_durabletask), source_paths):
@@ -247,6 +268,8 @@ def _prepare(app: Path, session: str, hub: str) -> dict[str, str]:
         "delivery_window_seconds": DELIVERY_WINDOW_SECONDS,
         "azurefunctions_source": str(source_paths[0] / "agent_framework_azurefunctions"),
         "durabletask_source": str(source_paths[1] / "agent_framework_durabletask"),
+        "payload_container": payload_container,
+        "payload_connection_string": _AZURITE_BLOB_CONNECTION_STRING if payload_container else None,
     }
     (app / "live_config.json").write_text(json.dumps(config), encoding="utf-8")
     (app / "host.json").write_text(
@@ -354,7 +377,7 @@ def _metrics(host: _Host, boot: str, removed: int, calls: int) -> None:
 
 @pytest.mark.parametrize("kind", ["inline-png", "inline-file"])
 def test_live_functions_media_pressure_cold_json_and_exact_next_model(
-    kind: str, tmp_path: Path, request: pytest.FixtureRequest
+    kind: str, tmp_path: Path, request: pytest.FixtureRequest, _payload_container: ContainerClient | None
 ) -> None:
     # Resolve the already-loaded local conftest, not an identically named DTS module.
     harness_path = Path(__file__).with_name("conftest.py").resolve()
@@ -366,7 +389,12 @@ def test_live_functions_media_pressure_cold_json_and_exact_next_model(
     deadline = time.monotonic() + 150
     session = f"media-{kind}-{uuid.uuid4().hex[:12]}"
     app = tmp_path / "app"
-    env = _prepare(app, session, f"media{uuid.uuid4().hex[:16]}")
+    env = _prepare(
+        app,
+        session,
+        f"media{uuid.uuid4().hex[:16]}",
+        _payload_container.container_name if _payload_container is not None else None,
+    )
     originals: dict[str, dict[str, Any]] = {}
     previous: list[dict[str, Any]] = []
     raw: dict[str, Any] = {}
@@ -388,6 +416,14 @@ def test_live_functions_media_pressure_cold_json_and_exact_next_model(
         assert removed >= 4, "Must actually evict messages, not merely round-trip media"
         assert sum(message["role"] == "user" for message in previous) >= 2, "Keep older media for cold replay"
         assert len(raw["data"]["completionReceipts"]) == len(raw["data"]["terminalResults"]) == TURNS
+
+    blob_names: set[str] = set()
+    if _payload_container is not None:
+        blob_names = {blob.name for blob in _payload_container.list_blobs()}
+        assert blob_names, "The configured store must actually externalize payloads"
+        assert any(
+            json.loads(gzip.decompress(_payload_container.download_blob(name).readall())) == raw for name in blob_names
+        ), "The persisted agent entity state must be present in Blob Storage"
 
     with _host(app, env, deadline, "cold", harness) as cold:
         initial = cold.get("retention/capture")
@@ -434,3 +470,5 @@ def test_live_functions_media_pressure_cold_json_and_exact_next_model(
                 datetime.fromisoformat(terminal["resultExpiresAt"]) - datetime.fromisoformat(terminal["completedAt"])
             ).total_seconds() == DELIVERY_WINDOW_SECONDS
         (tmp_path / "cold-final-state.json").write_text(json.dumps(final), encoding="utf-8")
+    if _payload_container is not None:
+        assert blob_names <= {blob.name for blob in _payload_container.list_blobs()}
