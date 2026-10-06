@@ -189,34 +189,17 @@ def _cold_lookup(wire: dict[str, Any]) -> AgentResponse[Any]:
     return response
 
 
-def _deliver(raw: dict[str, Any], consumer: str, precompleted: bool) -> AgentResponse[Any]:
-    if consumer == "durabletask":
-        child: CompletableTask[Any] = CompletableTask()
-        if precompleted:
-            child.complete(raw)
-        task = DurableAgentTask(child, None, CORRELATION)
-        if not precompleted:
-            assert not task.is_complete
-            child.complete(raw)
-        assert task.is_complete and not task.is_failed
-        assert child.get_result() is raw
-        return task.get_result()
-
-    from agent_framework_azurefunctions._orchestration import AgentTask
-    from azure.durable_functions.models.actions.NoOpAction import NoOpAction
-    from azure.durable_functions.models.Task import AtomicTask, TaskState
-
-    af_child = AtomicTask(17, NoOpAction())
+def _deliver(raw: dict[str, Any], precompleted: bool) -> AgentResponse[Any]:
+    child: CompletableTask[Any] = CompletableTask()
     if precompleted:
-        af_child.set_value(is_error=False, value=raw)
-    af_task = AgentTask(af_child, None, CORRELATION)
+        child.complete(raw)
+    task = DurableAgentTask(child, None, CORRELATION)
     if not precompleted:
-        assert af_task.state is TaskState.RUNNING
-        af_child.set_value(is_error=False, value=raw)
-    assert af_task.state is TaskState.SUCCEEDED
-    assert af_child.result is raw
-    assert isinstance(af_task.result, AgentResponse)
-    return af_task.result
+        assert not task.is_complete
+        child.complete(raw)
+    assert task.is_complete and not task.is_failed
+    assert child.get_result() is raw
+    return task.get_result()
 
 
 def _assert_presence(raw: dict[str, Any], present: bool) -> None:
@@ -234,10 +217,9 @@ def _assert_presence(raw: dict[str, Any], present: bool) -> None:
 
 @pytest.mark.parametrize("present", [False, True], ids=["absent", "explicit-null"])
 @pytest.mark.parametrize("cold", [False, True], ids=["codec", "cold-state-lookup"])
-@pytest.mark.parametrize("consumer", ["durabletask", "azurefunctions"])
 @pytest.mark.parametrize("precompleted", [False, True], ids=["delayed", "precompleted"])
 def test_shared_content_presence_survives_actual_json_task_returns(
-    present: bool, cold: bool, consumer: str, precompleted: bool
+    present: bool, cold: bool, precompleted: bool
 ) -> None:
     wire = _wire(present)
     before = _json(wire)
@@ -247,7 +229,7 @@ def test_shared_content_presence_survives_actual_json_task_returns(
         raw = json.loads(_json(serialize_agent_response(response)))
         _assert_presence(raw, present)
         raw_before = _json(raw)
-        response = _deliver(raw, consumer, precompleted)
+        response = _deliver(raw, precompleted)
         _assert_presence(json.loads(_json(serialize_agent_response(response))), present)
         assert _json(raw) == raw_before
     assert _json(wire) == before

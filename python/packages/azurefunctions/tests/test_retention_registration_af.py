@@ -7,7 +7,6 @@ from inspect import signature
 from typing import Any, get_args
 from unittest.mock import Mock, patch
 
-import azure.durable_functions as df
 import pytest
 from agent_framework import Agent, AgentExecutor, Executor, InMemoryHistoryProvider, WorkflowExecutor
 from agent_framework_durabletask import (
@@ -19,11 +18,12 @@ from agent_framework_durabletask import (
     LOW_WATERMARK,
     RetentionMode,
 )
+from agent_framework_durabletask._entities import DurableTaskEntityStateProvider
 
 from agent_framework_azurefunctions import AgentFunctionApp
-from agent_framework_azurefunctions._entities import AzureFunctionEntityStateProvider, create_agent_entity
 
-EntityHandler = Callable[[df.DurableEntityContext], None]
+# azure-functions-durable 2.x registers the shared class-based entity.
+EntityHandler = type[Any]
 
 
 def _agent(name: str = "assistant", *, ambiguous_history: bool = False) -> Agent:
@@ -75,15 +75,12 @@ def registered_entities() -> Iterator[dict[str, EntityHandler]]:
 
 
 def _consumer_settings(handler: EntityHandler) -> dict[str, Any]:
-    context = Mock()
-    context.operation_name = "reset"
-    with patch("agent_framework_azurefunctions._entities.AgentEntity") as consumer:
-        handler(context)
+    with patch("agent_framework_durabletask._entities.AgentEntity") as consumer:
+        handler().reset()
     consumer.assert_called_once()
     consumer.return_value.reset.assert_called_once_with()
-    context.set_result.assert_called_once_with({"status": "reset"})
     kwargs = consumer.call_args.kwargs
-    assert isinstance(kwargs["state_provider"], AzureFunctionEntityStateProvider)
+    assert isinstance(kwargs["state_provider"], DurableTaskEntityStateProvider)
     return dict(kwargs)
 
 
@@ -301,7 +298,7 @@ _INVALID_SETTINGS: list[dict[str, Any]] = [
 
 
 @pytest.mark.parametrize("settings", _INVALID_SETTINGS)
-@pytest.mark.parametrize("surface", ["host", "workflow_default", "agent", "workflow", "factory"])
+@pytest.mark.parametrize("surface", ["host", "workflow_default", "agent", "workflow"])
 def test_invalid_settings_fail_before_registration(
     registered_entities: dict[str, EntityHandler], surface: str, settings: dict[str, Any]
 ) -> None:
@@ -312,17 +309,15 @@ def test_invalid_settings_fail_before_registration(
         patch.object(AgentFunctionApp, "_setup_workflow_orchestration") as orchestration,
         patch.object(AgentFunctionApp, "_register_workflow_routes") as routes,
     ):
-        if surface in ("host", "workflow_default", "factory"):
+        if surface in ("host", "workflow_default"):
             with pytest.raises(ValueError):
                 if surface == "host":
                     _app(agents=[_agent()], **settings)
-                elif surface == "workflow_default":
+                else:
                     _app(
                         workflow=_workflow("flow", _agent()),
                         **{f"workflow_{key}": value for key, value in settings.items()},
                     )
-                else:
-                    create_agent_entity(_agent(), **settings)
         else:
             app = _app()
             with pytest.raises(ValueError):
@@ -387,7 +382,7 @@ def test_registration_and_factory_validation_do_not_replace_history(
 ) -> None:
     agent = _agent()
     original_providers = agent.context_providers
-    with patch("agent_framework_azurefunctions._entities.AgentEntity") as consumer:
+    with patch("agent_framework_durabletask._entities.AgentEntity") as consumer:
         _app(agents=[agent], retention="follow_compaction")
     consumer.assert_not_called()
     assert "dafx-assistant" in registered_entities
@@ -395,9 +390,16 @@ def test_registration_and_factory_validation_do_not_replace_history(
     assert isinstance(agent.context_providers[0], InMemoryHistoryProvider)
 
 
-def test_functions_backend_limit_error_is_raised_before_invocation() -> None:
+@pytest.mark.parametrize("surface", ["host", "agent"])
+def test_functions_backend_limit_error_is_raised_before_invocation(
+    registered_entities: dict[str, EntityHandler], surface: str
+) -> None:
     with pytest.raises(ValueError, match="max_state_bytes.*backend_limit"):
-        create_agent_entity(_agent(), max_state_bytes="backend_limit")
+        if surface == "host":
+            _app(agents=[_agent()], max_state_bytes="backend_limit")
+        else:
+            _app().add_agent(_agent(), max_state_bytes="backend_limit")
+    assert registered_entities == {}
 
 
 @pytest.mark.parametrize("invalid_name", [None, "", "invalid name"])

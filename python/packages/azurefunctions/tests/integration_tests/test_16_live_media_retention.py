@@ -2,7 +2,7 @@
 
 """Live Functions/Azure Storage retention with a deterministic core model, not Foundry.
 
-Requires func v4, Azurite on 10000/10001/10002 (with --skipApiVersionCheck),
+Requires func v4, Azurite 3.37.0+ on 10000/10001/10002,
 DTS on 8080, and the selected venv's test dependencies including psutil,
 jsonschema, and opentelemetry-sdk. The test generates its app/settings under tmp_path
 and supplies local emulator defaults. It never uses the sample-starting fixture.
@@ -252,8 +252,8 @@ def _prepare(app: Path, session: str, hub: str) -> dict[str, str]:
     (app / "host.json").write_text(
         json.dumps({
             "version": "2.0",
-            "extensionBundle": {"id": "Microsoft.Azure.Functions.ExtensionBundle", "version": "[4.*, 5.0.0)"},
-            "extensions": {"durableTask": {"hubName": hub}},
+            "extensionBundle": {"id": "Microsoft.Azure.Functions.ExtensionBundle", "version": "[4.38.1, 5.0.0)"},
+            "extensions": {"durableTask": {"hubName": hub, "storageProvider": {"type": "AzureStorage"}}},
             "logging": {"logLevel": {"default": "Warning"}},
         }),
         encoding="utf-8",
@@ -289,8 +289,9 @@ def _capture(host: _Host, boot: str, calls: int, current_id: str, session: str, 
     _equal(
         capture["context"],
         {
-            "provider": "AzureFunctionEntityStateProvider",
-            "type": "_JsonEntityContext",
+            # create_agent_entity_class names the configured class after its entity.
+            "provider": AgentSessionId.to_entity_name(AGENT),
+            "type": "EntityContext",
             "entity_name": AgentSessionId.to_entity_name(AGENT),
             "entity_key": session,
             "operation": "run",

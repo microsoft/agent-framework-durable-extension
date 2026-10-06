@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Functions storage retries and response delivery through SDK tasks and HTTP handlers."""
+"""Functions storage retries and response delivery through HTTP handlers."""
 
 import json
 from copy import deepcopy
@@ -12,7 +12,6 @@ from _reader_test_support import (
     CORRELATION_ID,
     ERROR_MESSAGE,
     SESSION_ID,
-    Answer,
     HttpHandler,
     McpHandler,
     _assert_one_delivery,
@@ -31,12 +30,6 @@ from _reader_test_support import (
 from _reader_test_support import (
     sleep as sleep,
 )
-from agent_framework import AgentResponse, Content
-from azure.durable_functions.models.actions.NoOpAction import NoOpAction
-from azure.durable_functions.models.Task import AtomicTask, TaskState
-from pydantic import ValidationError
-
-from agent_framework_azurefunctions._orchestration import AgentTask
 
 SPARSE_ERRORS = [
     pytest.param({}, id="missing-both"),
@@ -55,80 +48,6 @@ SPARSE_ERRORS = [
 ]
 
 
-def _legacy_inline(kind: str) -> dict[str, Any]:
-    if kind == "approval-no-result":
-        approval = Content.from_function_approval_request("approval-01", Content.from_function_call("call-01", "tool"))
-        contents = [approval.to_dict()]
-    else:
-        contents = [{"type": "error", "error_code": "LegacyFailure", "message": "Legacy diagnostic"}]
-        if kind != "bare-error":
-            text = '{"answer":42}' if kind == "error-valid-json" else "not JSON"
-            contents.append({"type": "text", "text": text})
-    return {
-        "type": "agent_response",
-        "messages": [{"role": "assistant", "contents": contents}],
-        "additional_properties": {"provider": {"keep": [False, 0]}},
-    }
-
-
-def _complete_inline(raw: dict[str, Any], precompleted: bool) -> AgentTask:
-    child = AtomicTask(7, NoOpAction())
-    if precompleted:
-        child.set_value(is_error=False, value=raw)
-    task = AgentTask(child, Answer, CORRELATION_ID)
-    assert task.children == [child]
-    if not precompleted:
-        assert task.state is TaskState.RUNNING
-        child.set_value(is_error=False, value=raw)
-    assert child.state is TaskState.SUCCEEDED and child.result is raw
-    assert task.is_completed
-    return task
-
-
-@pytest.mark.parametrize("precompleted", [False, True], ids=["delayed", "precompleted"])
-@pytest.mark.parametrize("kind", ["bare-error", "error-invalid-json", "error-valid-json", "approval-no-result"])
-def test_real_af_task_retains_legacy_typed_success_and_failure(kind: str, precompleted: bool) -> None:
-    raw = _legacy_inline(kind)
-    before = deepcopy(raw)
-
-    task = _complete_inline(raw, precompleted)
-
-    if kind == "error-valid-json":
-        assert task.state is TaskState.SUCCEEDED
-        assert isinstance(task.result, AgentResponse)
-        assert task.result.value == Answer(answer=42)
-        assert task.result.messages[0].contents[0].error_code == "LegacyFailure"
-        assert "durable_status" not in task.result.additional_properties
-    else:
-        assert task.state is TaskState.FAILED
-        if kind == "error-invalid-json":
-            assert isinstance(task.result, ValidationError)
-            assert task.result.errors()[0]["type"] == "json_invalid"
-        else:
-            assert type(task.result) is ValueError
-            assert "could not be parsed into required format Answer" in str(task.result)
-    assert raw == before
-
-
-@pytest.mark.parametrize("precompleted", [False, True], ids=["delayed", "precompleted"])
-@pytest.mark.parametrize("status", ["error", "already_completed", "accepted"])
-def test_explicit_durable_status_still_skips_af_task_typed_validation(status: str, precompleted: bool) -> None:
-    raw = {
-        "type": "agent_response",
-        "messages": [{"role": "assistant", "contents": [{"type": "text", "text": "not JSON"}]}],
-        "value": {"answer": "not-an-integer"},
-        "additional_properties": {"durable_status": status, "correlation_id": CORRELATION_ID},
-    }
-    before = deepcopy(raw)
-
-    task = _complete_inline(raw, precompleted)
-
-    assert task.state is TaskState.SUCCEEDED and isinstance(task.result, AgentResponse)
-    assert type(task.result.value) is dict and task.result.value == raw["value"]
-    assert task.result.additional_properties == raw["additional_properties"]
-    assert raw == before
-
-
 @pytest.mark.parametrize("encoded", [False, True], ids=["object-state", "json-state"])
 async def test_first_transient_storage_error_retries_then_returns_legacy_http_200(
     encoded: bool, handlers: tuple[HttpHandler, McpHandler], sleep: AsyncMock
@@ -137,12 +56,12 @@ async def test_first_transient_storage_error_retries_then_returns_legacy_http_20
     stored = json.dumps(raw) if encoded else raw
     before = deepcopy(stored)
     client = _client(stored)
-    recovered = client.read_entity_state.return_value
-    client.read_entity_state.side_effect = [OSError("Transient storage read failure"), recovered]
+    recovered = client.get_entity.return_value
+    client.get_entity.side_effect = [OSError("Transient storage read failure"), recovered]
     events = Mock()
     events.attach_mock(client.signal_entity, "signal")
     events.attach_mock(sleep, "sleep")
-    events.attach_mock(client.read_entity_state, "read")
+    events.attach_mock(client.get_entity, "read")
 
     response = await handlers[0](_request(), client)
 
@@ -157,10 +76,10 @@ async def test_first_transient_storage_error_retries_then_returns_legacy_http_20
     }
     client.signal_entity.assert_awaited_once()
     entity_id = client.signal_entity.call_args.args[0]
-    assert client.read_entity_state.await_args_list == [call(entity_id), call(entity_id)]
+    assert client.get_entity.await_args_list == [call(entity_id), call(entity_id)]
     assert sleep.await_args_list == [call(0.01), call(0.01)]
     assert [event[0] for event in events.mock_calls] == ["signal", "sleep", "read", "sleep", "read"]
-    assert recovered.entity_state == before
+    assert recovered.get_state() == before
     assert stored == before
 
 
@@ -177,8 +96,8 @@ async def test_deterministic_shared_read_error_is_terminal_without_retrying_a_la
         raw["data"]["terminalResults"][CORRELATION_ID]["response"]["extensionData"]["durable_status"] = "error"
     before = deepcopy(raw)
     client = _client(raw)
-    good_state = _client(_shared_state()).read_entity_state.return_value
-    client.read_entity_state.side_effect = [client.read_entity_state.return_value, good_state]
+    good_state = _client(_shared_state()).get_entity.return_value
+    client.get_entity.side_effect = [client.get_entity.return_value, good_state]
 
     response = await handlers[0](_request(), client)
 
@@ -219,4 +138,4 @@ async def test_http_500_fills_only_missing_or_blank_failed_content_diagnostics(
     _assert_one_delivery(client, sleep, before)
     assert raw == before
     errors[0]["message"] = "Consumer edit"
-    assert client.read_entity_state.return_value.entity_state == before
+    assert client.get_entity.return_value.get_state() == before

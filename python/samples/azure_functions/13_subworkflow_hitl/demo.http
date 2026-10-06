@@ -6,12 +6,11 @@
 ### surfaces with a qualified id (review_sub~0~{requestId}); you respond against the
 ### top-level instance and the host routes it to the owning child orchestration.
 ###
-### This sample hosts no AI agents, so it needs only Azurite + the DTS emulator.
+### This sample hosts no AI agents, so it needs only Azurite.
 ###
 ### Prerequisites:
 ### 1. Start Azurite: azurite --silent --location .
-### 2. Start the Durable Task Scheduler emulator (localhost:8080)
-### 3. Run: func start
+### 2. Run: func start
 ### ============================================================================
 
 

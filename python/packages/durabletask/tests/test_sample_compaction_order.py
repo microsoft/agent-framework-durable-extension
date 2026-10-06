@@ -47,9 +47,14 @@ def _sample(kind: str, monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, Moc
     return module, models
 
 
-@pytest.mark.parametrize("kind", ["standalone", "functions"])
 @pytest.mark.parametrize("history_first", [False, True], ids=["actual-sample", "old-order-control"])
 async def test_sample_fourth_model_call_observes_four_prior_groups_after_cold_reloads(
+    history_first: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _assert_fourth_call_observes_four_prior_groups("standalone", history_first, monkeypatch)
+
+
+async def _assert_fourth_call_observes_four_prior_groups(
     kind: str, history_first: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module, models = _sample(kind, monkeypatch)

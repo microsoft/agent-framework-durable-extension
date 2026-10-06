@@ -9,18 +9,18 @@ with Azure Durable Entities, enabling stateful and durable AI agent execution.
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import json
 import logging
 import re
 import unicodedata
 import uuid
 from collections.abc import Callable, Mapping
-from copy import copy
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from typing import Any, TypeVar, cast
 
-import aiohttp
 import azure.durable_functions as df
 import azure.functions as func
 from agent_framework import SupportsAgentRun, Workflow
@@ -47,8 +47,10 @@ from agent_framework_durabletask import (
     AgentResponseCallbackProtocol,
     AgentSessionId,
     ApiResponseFields,
+    DurableAgentTask,
     DurableAIAgent,
     LegacyDurableAgentState,
+    OrchestrationAgentExecutor,
     RegistrationIdentity,
     RetentionMode,
     RunRequest,
@@ -70,6 +72,11 @@ from agent_framework_durabletask import (
     validate_workflow_start_input,
     wrap_workflow_input,
 )
+from agent_framework_durabletask._entities import (
+    _validation_diagnostic,  # pyright: ignore[reportPrivateUsage]
+    create_agent_entity_class,
+)
+from agent_framework_durabletask._json_payload import JsonPayload, install_json_payload_converter
 from agent_framework_durabletask._workflows.hitl_checkpoint import (
     execute_hitl_checkpoint,
     workflow_hitl_checkpoint_name,
@@ -87,17 +94,17 @@ from agent_framework_durabletask._workflows.naming import (
 from agent_framework_durabletask._workflows.protocol import validate_workflow_start_provenance
 from agent_framework_durabletask._workflows.registration import collect_hosted_workflows
 from agent_framework_durabletask._workflows.serialization import strip_pickle_markers, strip_subworkflow_markers
-from azure.durable_functions.models.utils.http_utils import post_async_request as _sdk_post_async_request
-from azure.functions.decorators.function_app import Function
+from azure.durable_functions.worker import DurableFunctionsWorker
+from azure.functions.decorators.function_app import DecoratorApi, Function, FunctionBuilder
+from durabletask import task
+from durabletask.client import OrchestrationState, OrchestrationStatus
+from durabletask.entities import EntityInstanceId
+from durabletask.task import OrchestrationContext
 
-from ._entities import create_agent_entity
-from ._entity_json import create_json_entity
 from ._errors import IncomingRequestError
 from ._feature_usage import FeatureIndex
-from ._orchestration import AgentOrchestrationContextType, AgentTask, AzureFunctionsAgentExecutor
 from ._routes import build_workflow_respond_url, build_workflow_status_url, split_request_url
 from ._workflow import run_workflow_orchestrator
-from ._workflow_af_context import get_workflow_start_input
 
 _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS = 10
 _MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS = 200
@@ -112,72 +119,144 @@ _WORKFLOW_WAIT_TIMEOUT_SECONDS_QUERY_PARAMETER = "timeoutSeconds"
 
 logger = logging.getLogger("agent_framework.azurefunctions")
 
-EntityHandler = Callable[[df.DurableEntityContext], None]
 HandlerT = TypeVar("HandlerT", bound=Callable[..., Any])
 AgentStateReadView = SharedAgentStateReader | LegacyDurableAgentState
 
+# The workflow HTTP endpoints have always emitted PascalCase runtime status names
+# ("Completed", "ContinuedAsNew"). durabletask's OrchestrationStatus renders as
+# SCREAMING_CASE, so map it back here rather than silently changing the wire format
+# for existing callers.
+_RUNTIME_STATUS_WIRE_NAMES: Mapping[OrchestrationStatus, str] = {
+    OrchestrationStatus.RUNNING: "Running",
+    OrchestrationStatus.COMPLETED: "Completed",
+    OrchestrationStatus.FAILED: "Failed",
+    OrchestrationStatus.TERMINATED: "Terminated",
+    OrchestrationStatus.CONTINUED_AS_NEW: "ContinuedAsNew",
+    OrchestrationStatus.PENDING: "Pending",
+    OrchestrationStatus.SUSPENDED: "Suspended",
+}
 
-class _WorkflowCompletionClient(Protocol):
-    async def wait_for_completion_or_create_check_status_response(
-        self,
-        request: func.HttpRequest,
-        instance_id: str,
-        timeout_in_milliseconds: int = 10_000,
-        retry_interval_in_milliseconds: int = 1_000,
-    ) -> func.HttpResponse: ...
+_TERMINAL_RUNTIME_STATUSES = frozenset({
+    OrchestrationStatus.COMPLETED,
+    OrchestrationStatus.FAILED,
+    OrchestrationStatus.TERMINATED,
+})
 
 
-async def _raise_workflow_response(
-    client: df.DurableOrchestrationClient, instance_id: str, event_name: str, response_data: Any
-) -> None:
-    """Preserve the HTTP reply's JSON type across the native SDK transport.
+def runtime_status_name(status: OrchestrationStatus | None) -> str | None:
+    """Render a runtime status using the name the HTTP endpoints have always emitted.
 
-    SDK raise_event (verified in 1.6.0 and 1.7.0) pre-encodes data, then POSTs
-    it with aiohttp's json= argument, encoding it again. Keep URL construction
-    and status handling, but replace that sender on a per-call shallow copy.
-    Capture the sanitized value, not the SDK's serialized argument, so strings
-    that look like JSON remain strings. Explicit null must be a JSON body too:
-    aiohttp's json=None would instead omit the JSON payload/content type.
-
-    Only adapt the native method/transport pair. Custom implementations keep
-    their own transport contract. Neither the original client nor SDK globals
-    are modified, and no receiver heuristic or new event envelope is needed.
-    This relies on the SDK's private sender signature, covered by the HTTP
-    roundtrip tests when upgrading the SDK.
+    ``durabletask``'s :class:`OrchestrationStatus` renders as SCREAMING_CASE, so apps that
+    expose their own orchestration status endpoints should use this to stay consistent with
+    the endpoints :class:`AgentFunctionApp` registers.
     """
-    event_client: Any = client
-    if (
-        getattr(client.raise_event, "__func__", None) is df.DurableOrchestrationClient.raise_event
-        and getattr(client, "_post_async_request", None) is _sdk_post_async_request
-    ):
-        body = json.dumps(response_data).encode("utf-8")
+    if status is None:
+        return None
+    return _RUNTIME_STATUS_WIRE_NAMES.get(status, status.name)
 
-        async def post_json(
-            url: str,
-            data: Any = None,
-            trace_parent: str | None = None,
-            trace_state: str | None = None,
-            function_invocation_id: str | None = None,
-        ) -> list[Any]:
-            # Ignore the SDK's intermediate data. The captured body already
-            # represents the application's value, including an actual string.
-            headers = {"Content-Type": "application/json"}
-            if trace_parent:
-                headers["traceparent"] = trace_parent
-            if trace_state:
-                headers["tracestate"] = trace_state
-            if function_invocation_id:
-                headers["X-Azure-Functions-InvocationId"] = function_invocation_id
-            timeout = aiohttp.ClientTimeout(total=240, sock_connect=10, sock_read=None)
-            async with (
-                aiohttp.ClientSession(timeout=timeout) as session,
-                session.post(url, data=body, headers=headers) as response,
-            ):
-                return [response.status, await response.json(content_type=None)]
 
-        event_client = copy(client)
-        event_client._post_async_request = post_json
-    await event_client.raise_event(instance_id=instance_id, event_name=event_name, event_data=response_data)
+def _read_json_field(serialized: str | None) -> Any:
+    """Decode a serialized orchestration status field as plain JSON.
+
+    ``OrchestrationState.get_output()`` and ``get_custom_status()`` decode through the
+    Functions data converter, which constructs objects from ``__class__``/``__module__``
+    markers. Workflow outputs and custom status are framework JSON, so read the raw
+    serialized value instead and keep any marker-shaped data as plain data. A value that
+    is not JSON, such as a plain termination reason, is returned as the original string.
+    """
+    if serialized is None or serialized == "":
+        return None
+    try:
+        return json.loads(serialized)
+    except json.JSONDecodeError:
+        return serialized
+
+
+def _workflow_error(status: OrchestrationState, decoded_output: Any) -> Any:
+    """Return the error to report for a failed workflow.
+
+    durabletask records an orchestration failure in ``failure_details`` and leaves the
+    output empty, so report the failure message. The stack trace is not exposed.
+    """
+    if status.failure_details is not None:
+        return status.failure_details.message
+    return decoded_output
+
+
+def _utc_isoformat(value: datetime | None) -> str | None:
+    """Format a durabletask timestamp, which is naive UTC, with an explicit UTC offset."""
+    if value is None:
+        return None
+    return (value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)).isoformat()
+
+
+def _agent_entity_id(session_id: AgentSessionId) -> EntityInstanceId:
+    """Address the entity behind an agent session.
+
+    Raises:
+        IncomingRequestError: If durabletask cannot represent the session key, for example
+            because it contains ``@``, which the 1.x client accepted.
+    """
+    try:
+        EntityInstanceId.validate_key(session_id.key)
+    except ValueError as exc:
+        raise IncomingRequestError(f"Invalid session ID: {exc}") from exc
+    return EntityInstanceId(entity=session_id.entity_name, key=session_id.key)
+
+
+def _without_validation_input(operation: Callable[..., Any]) -> Callable[..., Any]:
+    """Replace a validation failure from an entity operation with its input-free diagnostic.
+
+    durabletask logs a failed operation and returns its message, stack trace and inner
+    errors to the caller, and Pydantic messages can quote request or state values.
+    """
+
+    @functools.wraps(operation)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        diagnostic: str | None = None
+        try:
+            return operation(*args, **kwargs)
+        except Exception as exc:
+            diagnostic = _validation_diagnostic(exc)
+            if diagnostic is None:
+                raise
+        # Raised outside the handler so the validation error isn't chained in as context.
+        raise ValueError(diagnostic)
+
+    return wrapper
+
+
+def _install_framework_json_decoding(
+    builder: FunctionBuilder, *, deserialize_untagged_json: bool = False
+) -> FunctionBuilder:
+    """Install plain JSON decoding on the durable worker behind a generated function.
+
+    azure-functions-durable 2.x creates one ``DurableFunctionsWorker`` per orchestrator
+    and entity function and does not expose its data converter. Framework payloads are
+    tagged ``JsonPayload``, ``JsonState`` or ``JsonMigration`` and must never reach the
+    Functions converter's ``__class__``/``__module__`` object hook, so the worker is
+    located in the generated invocation handler and wrapped with the framework converter.
+    Generated agent entities also opt into plain JSON for untagged operation input. Other
+    functions keep the Functions converter's behavior. An unrecognized layout fails
+    registration rather than silently falling back to the object-constructing decoder.
+    """
+    function = builder._function  # pyright: ignore[reportPrivateUsage]
+    handler = inspect.unwrap(function._func)  # pyright: ignore[reportPrivateUsage]
+    worker = inspect.getclosurevars(handler).nonlocals.get("worker")
+    if not isinstance(worker, DurableFunctionsWorker):
+        raise RuntimeError(
+            f"Unsupported azure-functions-durable function layout: the durable worker for "
+            f"'{function.get_function_name()}' could not be located, so plain JSON decoding "
+            "cannot be installed."
+        )
+    install_json_payload_converter(worker, deserialize_untagged_json=deserialize_untagged_json)
+    return builder
+
+
+def _is_durable_worker_function(builder: FunctionBuilder) -> bool:
+    """Return whether a function builder hosts a durable orchestrator or entity."""
+    trigger = builder._function.get_trigger()  # pyright: ignore[reportPrivateUsage]
+    return trigger is not None and trigger.get_binding_name() in {"orchestrationTrigger", "entityTrigger"}
 
 
 def _json_default(obj: Any) -> Any:
@@ -225,41 +304,10 @@ class AgentMetadata:
     mcp_tool_enabled: bool
 
 
-if TYPE_CHECKING:
-
-    class DFAppBase:
-        def __init__(self, http_auth_level: func.AuthLevel = func.AuthLevel.FUNCTION) -> None: ...
-
-        def get_functions(self) -> list[Function]: ...
-
-        def function_name(self, name: str) -> Callable[[HandlerT], HandlerT]: ...
-
-        def route(self, route: str, methods: list[str]) -> Callable[[HandlerT], HandlerT]: ...
-
-        def durable_client_input(self, client_name: str) -> Callable[[HandlerT], HandlerT]: ...
-
-        def entity_trigger(self, context_name: str, entity_name: str) -> Callable[[EntityHandler], EntityHandler]: ...
-
-        def _configure_entity_callable(self, wrap: Callable[..., Any]) -> Callable[[EntityHandler], Any]: ...
-
-        def orchestration_trigger(self, context_name: str) -> Callable[[HandlerT], HandlerT]: ...
-
-        def activity_trigger(self, input_name: str) -> Callable[[HandlerT], HandlerT]: ...
-
-        def mcp_tool_trigger(
-            self,
-            arg_name: str,
-            tool_name: str,
-            description: str,
-            tool_properties: str,
-            data_type: func.DataType,
-        ) -> Callable[[HandlerT], HandlerT]: ...
-
-else:
-    DFAppBase = df.DFApp  # type: ignore[assignment]
-
-
-class AgentFunctionApp(DFAppBase):
+# azure-functions-durable 2.x ships PEP 561 type information, so ``df.DFApp`` can be
+# subclassed directly. 1.x shipped no types, which is why this used to need a
+# hand-written TYPE_CHECKING stub.
+class AgentFunctionApp(df.DFApp):
     """Main application class for creating durable agent function apps using Durable Entities.
 
     This class uses Durable Entities pattern for agent execution, providing:
@@ -300,7 +348,7 @@ class AgentFunctionApp(DFAppBase):
 
 
         @app.orchestration_trigger(context_name="context")
-        def my_orchestration(context):
+        def my_orchestration(context, input_data):
             writer = app.get_agent(context, "WeatherAgent")
             session = writer.create_session()
             forecast_task = writer.run("What's the forecast?", session=session)
@@ -523,6 +571,53 @@ class AgentFunctionApp(DFAppBase):
         """Do not index an app whose backend registration failed."""
         self._ensure_registration_usable()
         return super().get_functions()
+
+    def _configure_orchestrator_callable(
+        self,
+        wrap: Callable[[Callable[..., Any]], FunctionBuilder],
+        context_name: str,
+        input_type: type | None = None,
+    ) -> Callable[[task.Orchestrator[Any, Any]], FunctionBuilder]:
+        """Decode framework payloads as plain JSON in every orchestrator on this app.
+
+        This covers user orchestrators too, because ``get_agent`` results are framework
+        payloads wherever they are awaited. Only ``JsonPayload`` targets change, so user
+        payload types keep the Functions converter's behavior.
+        """
+        configure = super()._configure_orchestrator_callable(wrap, context_name, input_type=input_type)
+
+        def decorator(orchestrator_func: task.Orchestrator[Any, Any]) -> FunctionBuilder:
+            return _install_framework_json_decoding(configure(orchestrator_func))
+
+        return decorator
+
+    def _configure_entity_callable(
+        self,
+        wrap: Callable[[Callable[..., Any]], FunctionBuilder],
+        context_name: str,
+        entity_name: str | None = None,
+    ) -> Callable[[task.Entity[Any, Any]], FunctionBuilder]:
+        """Decode framework entity input and state as plain JSON in every entity on this app."""
+        configure = super()._configure_entity_callable(wrap, context_name, entity_name)
+
+        def decorator(entity_func: task.Entity[Any, Any]) -> FunctionBuilder:
+            return _install_framework_json_decoding(
+                configure(entity_func),
+                deserialize_untagged_json=bool(getattr(entity_func, "_dafx_plain_json_input", False)),
+            )
+
+        return decorator
+
+    def register_functions(self, function_container: DecoratorApi) -> None:
+        """Register a blueprint's functions with the same plain JSON decoding as this app."""
+        for builder in function_container._function_builders:
+            if _is_durable_worker_function(builder):
+                _install_framework_json_decoding(builder)
+        super().register_functions(function_container)
+
+    # ``register_blueprint`` is an alias in the base classes, so re-alias it to keep
+    # blueprint registration on the same path.
+    register_blueprint = register_functions
 
     def _preflight_agent(
         self,
@@ -836,10 +931,14 @@ class AgentFunctionApp(DFAppBase):
 
         @self.function_name(orchestrator_name)
         @self.orchestration_trigger(context_name="context")
-        def workflow_orchestrator(context: df.DurableOrchestrationContext) -> Any:
-            """Generic orchestrator for running the configured workflow."""
-            input_data = get_workflow_start_input(context)
+        def workflow_orchestrator(context: OrchestrationContext, input_data: JsonPayload) -> Any:
+            """Generic orchestrator for running the configured workflow.
 
+            This is a durabletask-native two-argument orchestrator, so ``context`` is a
+            real :class:`durabletask.task.OrchestrationContext` and the client input is
+            delivered as the second argument. The ``JsonPayload`` annotation keeps that
+            input plain JSON.
+            """
             # Reject legacy recorded starts before entering the changed engine.
             initial_message = unwrap_workflow_input(input_data)
             validate_workflow_start_provenance(
@@ -872,7 +971,7 @@ class AgentFunctionApp(DFAppBase):
         @self.route(route=f"workflow/{workflow_name}/run", methods=["POST"])
         @self.durable_client_input(client_name="client")
         async def start_workflow_orchestration(
-            req: func.HttpRequest, client: df.DurableOrchestrationClient
+            req: func.HttpRequest, client: df.DurableFunctionsClient
         ) -> func.HttpResponse:
             """HTTP endpoint to start the workflow."""
             try:
@@ -910,64 +1009,63 @@ class AgentFunctionApp(DFAppBase):
             except ValueError as exc:
                 return self._build_error_response(str(exc), status_code=400)
 
-            instance_id = await client.start_new(
+            instance_id = await client.schedule_new_orchestration(
                 orchestrator_name,
+                input=workflow_input,
                 instance_id=requested_instance_id,
-                client_input=workflow_input,
             )
 
             if wait_for_response:
-                timeout_in_milliseconds = wait_timeout_seconds * 1000
-                # The SDK leaves the request parameter untyped, so use the local protocol
-                # to give pyright a complete signature for this runtime method.
-                completion_client = cast(_WorkflowCompletionClient, client)
-                completion_response = await completion_client.wait_for_completion_or_create_check_status_response(
-                    req,
-                    instance_id,
-                    timeout_in_milliseconds=timeout_in_milliseconds,
-                    retry_interval_in_milliseconds=1000,
-                )
-                if completion_response.status_code != 202:
-                    status = await client.get_status(instance_id)
-                    return self._build_workflow_terminal_response(status, instance_id)
+                try:
+                    completed = await client.wait_for_orchestration_completion(
+                        instance_id, timeout=wait_timeout_seconds
+                    )
+                except TimeoutError:
+                    completed = None
+                if completed is not None and completed.runtime_status in _TERMINAL_RUNTIME_STATUSES:
+                    return self._build_workflow_terminal_response(completed, instance_id)
 
             return self._build_workflow_accepted_response(req, workflow_name, instance_id)
 
         @self.function_name(self._workflow_route_function_name(workflow, "status"))
         @self.route(route=f"workflow/{workflow_name}/status/{{instanceId}}", methods=["GET"])
         @self.durable_client_input(client_name="client")
-        async def get_workflow_status(
-            req: func.HttpRequest, client: df.DurableOrchestrationClient
-        ) -> func.HttpResponse:
+        async def get_workflow_status(req: func.HttpRequest, client: df.DurableFunctionsClient) -> func.HttpResponse:
             """HTTP endpoint to get workflow status."""
             instance_id = req.route_params.get("instanceId")
             if not instance_id:
                 return self._build_error_response("Instance ID is required", status_code=400)
 
-            status = await client.get_status(instance_id)
+            status = await client.get_orchestration_state(instance_id)
 
             # Scope the endpoint to this workflow's orchestrator. The durable client
             # resolves instance IDs across every orchestration in the task hub, so an ID
             # belonging to a different orchestration (or a different workflow) must be
             # treated as "not found" rather than leaking its status / HITL details.
-            if not self._is_owned_orchestration(status, workflow_name):
+            if status is None or not self._is_owned_orchestration(status, workflow_name):
                 return self._build_error_response("Instance not found", status_code=404)
 
             # The workflow's yielded outputs are checkpoint-encoded by the shared
             # activity (typed objects become pickle/type-marker dicts). Reconstruct
             # the originals so the HTTP response carries clean domain JSON, matching
             # what DurableWorkflowClient.await_workflow_output returns in-process.
-            # status.output is the workflow's own (trusted) orchestration result.
-            decoded_output = deserialize_workflow_output(status.output) if status.output is not None else None
+            # The output is the workflow's own (trusted) orchestration result.
+            raw_output = _read_json_field(status.serialized_output)
+            decoded_output = deserialize_workflow_output(raw_output) if raw_output is not None else None
+            custom_status = _read_json_field(status.serialized_custom_status)
 
             response = {
                 "instanceId": status.instance_id,
-                "runtimeStatus": status.runtime_status.name if status.runtime_status else None,
-                "customStatus": status.custom_status,
+                "runtimeStatus": runtime_status_name(status.runtime_status),
+                "customStatus": custom_status,
                 "output": decoded_output,
-                "error": decoded_output if status.runtime_status == df.OrchestrationRuntimeStatus.Failed else None,
-                "createdTime": status.created_time.isoformat() if status.created_time else None,
-                "lastUpdatedTime": status.last_updated_time.isoformat() if status.last_updated_time else None,
+                "error": (
+                    _workflow_error(status, decoded_output)
+                    if status.runtime_status == OrchestrationStatus.FAILED
+                    else None
+                ),
+                "createdTime": _utc_isoformat(status.created_at),
+                "lastUpdatedTime": _utc_isoformat(status.last_updated_at),
             }
 
             # Add pending HITL requests info if available. Requests originating in a
@@ -975,7 +1073,6 @@ class AgentFunctionApp(DFAppBase):
             # ({executorId}~{ordinal}~{requestId}, nested deeper for deeper levels); the
             # respondUrl always targets this top-level instance, so the caller has a
             # single addressing surface.
-            custom_status = status.custom_status
             if isinstance(custom_status, dict) and not self._is_terminal_hitl_state(status):
                 gathered = await self._gather_pending_hitl_requests(client, cast("dict[str, Any]", custom_status))
                 if gathered:
@@ -1004,7 +1101,7 @@ class AgentFunctionApp(DFAppBase):
         @self.function_name(self._workflow_route_function_name(workflow, "respond"))
         @self.route(route=f"workflow/{workflow_name}/respond/{{instanceId}}/{{requestId}}", methods=["POST"])
         @self.durable_client_input(client_name="client")
-        async def send_hitl_response(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
+        async def send_hitl_response(req: func.HttpRequest, client: df.DurableFunctionsClient) -> func.HttpResponse:
             """HTTP endpoint to send a response to a pending HITL request.
 
             The requestId in the URL corresponds to the request_id from the RequestInfoEvent.
@@ -1019,7 +1116,7 @@ class AgentFunctionApp(DFAppBase):
             # Scope the endpoint to this workflow's orchestrator before raising an
             # external event, so a leaked instance ID cannot be used to inject events into
             # a different orchestration (or a different workflow) in the task hub.
-            status = await client.get_status(instance_id)
+            status = await client.get_orchestration_state(instance_id)
             if not self._is_owned_orchestration(status, workflow_name):
                 return self._build_error_response("Instance not found", status_code=404)
             if self._is_terminal_hitl_state(status):
@@ -1046,13 +1143,10 @@ class AgentFunctionApp(DFAppBase):
             target_instance_id, bare_request_id = resolved
 
             # Send the response as an external event. The (bare) request_id is used as the
-            # event name for correlation on the owning orchestration instance.
-            await _raise_workflow_response(
-                client,
-                instance_id=target_instance_id,
-                event_name=bare_request_id,
-                response_data=response_data,
-            )
+            # event name for correlation on the owning orchestration instance. The client
+            # encodes the value once as JSON, and the workflow decodes it as plain JSON, so
+            # strings that look like JSON stay strings.
+            await client.raise_orchestration_event(target_instance_id, bare_request_id, data=response_data)
 
             return func.HttpResponse(
                 json.dumps({
@@ -1073,16 +1167,11 @@ class AgentFunctionApp(DFAppBase):
     def _is_terminal_hitl_state(status: Any) -> bool:
         """Do not infer completion from missing status or a test-double attribute."""
         runtime_status = getattr(status, "runtime_status", None)
-        return isinstance(runtime_status, df.OrchestrationRuntimeStatus) and runtime_status in {
-            df.OrchestrationRuntimeStatus.Completed,
-            df.OrchestrationRuntimeStatus.Failed,
-            df.OrchestrationRuntimeStatus.Canceled,
-            df.OrchestrationRuntimeStatus.Terminated,
-        }
+        return isinstance(runtime_status, OrchestrationStatus) and runtime_status in _TERMINAL_RUNTIME_STATUSES
 
     async def _gather_pending_hitl_requests(
         self,
-        client: df.DurableOrchestrationClient,
+        client: df.DurableFunctionsClient,
         custom_status: dict[str, Any],
         *,
         prefix: str = "",
@@ -1116,10 +1205,10 @@ class AgentFunctionApp(DFAppBase):
             sep = SUBWORKFLOW_REQUEST_SEPARATOR
             for executor_id, child_ids in cast("dict[str, Any]", subworkflows).items():
                 for ordinal, child_instance_id in iter_subworkflow_instances(child_ids):
-                    child_status = await client.get_status(child_instance_id)
-                    if self._is_terminal_hitl_state(child_status):
+                    child_status = await client.get_orchestration_state(child_instance_id)
+                    if child_status is None or self._is_terminal_hitl_state(child_status):
                         continue
-                    child_custom = child_status.custom_status if child_status else None
+                    child_custom = _read_json_field(child_status.serialized_custom_status)
                     if isinstance(child_custom, dict):
                         gathered.extend(
                             await self._gather_pending_hitl_requests(
@@ -1133,7 +1222,7 @@ class AgentFunctionApp(DFAppBase):
 
     async def _resolve_hitl_target(
         self,
-        client: df.DurableOrchestrationClient,
+        client: df.DurableFunctionsClient,
         instance_id: str,
         request_id: str,
     ) -> tuple[str, str] | None:
@@ -1147,14 +1236,14 @@ class AgentFunctionApp(DFAppBase):
         recursively. Returns ``None`` when a referenced child is not active or an
         addressed instance has a terminal runtime status.
         """
-        status = await client.get_status(instance_id)
-        if self._is_terminal_hitl_state(status):
+        status = await client.get_orchestration_state(instance_id)
+        if status is None or self._is_terminal_hitl_state(status):
             return None
         hop = split_subworkflow_request_id(request_id)
         if hop is None:
             return instance_id, request_id
 
-        custom_status = status.custom_status if status else None
+        custom_status = _read_json_field(status.serialized_custom_status) if status else None
         if not isinstance(custom_status, dict):
             return None
         executor_id, ordinal, remainder = hop
@@ -1344,14 +1433,17 @@ class AgentFunctionApp(DFAppBase):
 
     def get_agent(
         self,
-        context: AgentOrchestrationContextType,
+        context: OrchestrationContext,
         agent_name: str,
         workflow_name: str | None = None,
-    ) -> DurableAIAgent[AgentTask]:
+    ) -> DurableAIAgent[DurableAgentTask]:
         """Return a DurableAIAgent proxy for a registered agent.
 
         Args:
-            context: Durable Functions orchestration context invoking the agent.
+            context: Durable Functions orchestration context invoking the agent. Since
+                azure-functions-durable 2.x this is a durabletask
+                :class:`~durabletask.task.OrchestrationContext`, which a two-argument
+                ``(context, input)`` orchestrator receives.
             agent_name: Name of the agent registered on this app. For an agent that
                 belongs to a hosted workflow, pass ``workflow_name`` to resolve it
                 under its workflow-scoped identity; for an agent registered standalone
@@ -1360,11 +1452,19 @@ class AgentFunctionApp(DFAppBase):
                 resolved under the scoped id ``{workflow_name}-{agent_name}``.
 
         Returns:
-            DurableAIAgent[AgentTask] wrapper bound to the orchestration context.
+            DurableAIAgent[DurableAgentTask] wrapper bound to the orchestration context.
 
         Raises:
+            TypeError: If ``context`` is the 1.x compatibility context that a
+                one-argument orchestrator receives.
             ValueError: If the requested agent has not been registered.
         """
+        if isinstance(context, df.DurableOrchestrationContext):
+            raise TypeError(
+                "get_agent requires the durabletask OrchestrationContext that a two-argument "
+                "(context, input) orchestrator receives. A one-argument orchestrator gets the "
+                "azure-functions-durable 1.x compatibility context, which cannot call agents."
+            )
         normalized_name = (
             workflow_scoped_executor_id(workflow_name, str(agent_name)) if workflow_name else str(agent_name)
         )
@@ -1372,7 +1472,7 @@ class AgentFunctionApp(DFAppBase):
         if normalized_name not in self._agent_metadata:
             raise ValueError(f"Agent '{normalized_name}' is not registered with this app.")
 
-        executor = AzureFunctionsAgentExecutor(context)
+        executor = OrchestrationAgentExecutor(context)
         return DurableAIAgent(executor, normalized_name)
 
     def _setup_agent_functions(
@@ -1445,7 +1545,7 @@ class AgentFunctionApp(DFAppBase):
         @function_name_decorator
         @route_decorator
         @durable_client_decorator
-        async def http_start(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
+        async def http_start(req: func.HttpRequest, client: df.DurableFunctionsClient) -> func.HttpResponse:
             """HTTP trigger that calls a durable entity to execute the agent and returns the result.
 
             Expected request body (RunRequest format):
@@ -1487,10 +1587,7 @@ class AgentFunctionApp(DFAppBase):
                     f"and correlation ID: {correlation_id}"
                 )
 
-                entity_instance_id = df.EntityId(
-                    name=agent_session_id.entity_name,
-                    key=agent_session_id.key,
-                )
+                entity_instance_id = _agent_entity_id(agent_session_id)
                 run_request = self._build_request_data(
                     req_body,
                     message,
@@ -1559,19 +1656,6 @@ class AgentFunctionApp(DFAppBase):
 
         _ = http_start
 
-    def _configure_entity_callable(self, wrap: Callable[..., Any]) -> Callable[[EntityHandler], Any]:
-        """Select plain JSON only for entity functions generated by this app."""
-        native_decorator = super()._configure_entity_callable(wrap)
-
-        def decorator(entity_func: EntityHandler) -> Any:
-            if getattr(entity_func, "_dafx_json_entity", False) is not True:
-                return native_decorator(entity_func)
-            handle = create_json_entity(entity_func)
-            handle.__name__ = entity_func.__name__
-            return wrap(handle)
-
-        return decorator
-
     def _setup_agent_entity(
         self,
         agent: SupportsAgentRun,
@@ -1598,32 +1682,24 @@ class AgentFunctionApp(DFAppBase):
         """
         # Use the prefixed entity name for both registration and function naming
         entity_name_with_prefix = AgentSessionId.to_entity_name(agent_name)
-        entity_handler = create_agent_entity(
+
+        # azure-functions-durable 2.x accepts a class-based ``DurableEntity`` here, so
+        # the Functions host registers the same entity implementation the standalone
+        # DurableTask worker uses instead of a bespoke function-style entity.
+        entity_class = create_agent_entity_class(
             agent,
             callback,
-            deployment_mode=self._deployment_mode,
+            entity_id=agent_name,
             retention=retention,
             max_state_bytes=max_state_bytes,
             high_watermark=high_watermark,
             low_watermark=low_watermark,
             response_delivery_window_seconds=response_delivery_window_seconds,
         )
-
-        def entity_function(context: df.DurableEntityContext) -> None:
-            """Durable entity that manages agent execution and conversation state.
-
-            Operations:
-            - run: Execute the agent with a message
-            - run_agent: (Deprecated) Execute the agent with a message
-            - reset: Clear conversation history
-            """
-            entity_handler(context)
-
-        # Set function name for Azure Functions (used in function.json generation)
-        # Use the prefixed entity name as the function name too.
-        entity_function.__name__ = entity_name_with_prefix
-        cast(Any, entity_function)._dafx_json_entity = True
-        self.entity_trigger(context_name="context", entity_name=entity_name_with_prefix)(entity_function)
+        for operation in ("run", "reset", "expire_responses", "migrate"):
+            setattr(entity_class, operation, _without_validation_input(getattr(entity_class, operation)))
+        cast(Any, entity_class)._dafx_plain_json_input = True
+        self.entity_trigger(context_name="context", entity_name=entity_name_with_prefix)(entity_class)
 
     def _setup_mcp_tool_trigger(self, agent_name: str, agent_description: str | None) -> None:
         """Register an MCP tool trigger for an agent using Azure Functions native MCP support.
@@ -1656,7 +1732,7 @@ class AgentFunctionApp(DFAppBase):
         ])
 
         function_name_decorator = self.function_name(mcp_function_name)
-        mcp_tool_decorator = self.mcp_tool_trigger(
+        mcp_tool_decorator = self.mcp_tool_trigger(  # pyright: ignore[reportUnknownMemberType]  # SDK leaves **kwargs untyped
             arg_name="context",
             tool_name=agent_name,
             description=agent_description or f"Interact with {agent_name} agent",
@@ -1668,7 +1744,7 @@ class AgentFunctionApp(DFAppBase):
         @function_name_decorator
         @mcp_tool_decorator
         @durable_client_decorator
-        async def mcp_tool_handler(context: str, client: df.DurableOrchestrationClient) -> str:
+        async def mcp_tool_handler(context: str, client: df.DurableFunctionsClient) -> str:
             """Handle MCP tool invocation for the agent.
 
             Args:
@@ -1685,7 +1761,7 @@ class AgentFunctionApp(DFAppBase):
         logger.debug("[AgentFunctionApp] Registered MCP tool trigger for agent: %s", agent_name)
 
     async def _handle_mcp_tool_invocation(
-        self, agent_name: str, context: str, client: df.DurableOrchestrationClient
+        self, agent_name: str, context: str, client: df.DurableFunctionsClient
     ) -> str:
         """Handle an MCP tool invocation.
 
@@ -1747,10 +1823,7 @@ class AgentFunctionApp(DFAppBase):
             session_id = AgentSessionId.with_random_key(agent_name)
 
         # Build entity instance ID
-        entity_instance_id = df.EntityId(
-            name=session_id.entity_name,
-            key=session_id.key,
-        )
+        entity_instance_id = _agent_entity_id(session_id)
 
         # Create run request
         correlation_id = self._generate_unique_id()
@@ -1834,26 +1907,29 @@ class AgentFunctionApp(DFAppBase):
 
     async def _read_cached_state(
         self,
-        client: df.DurableOrchestrationClient,
-        entity_instance_id: df.EntityId,
+        client: df.DurableFunctionsClient,
+        entity_instance_id: EntityInstanceId,
     ) -> AgentStateReadView | None:
         try:
-            state_response = await client.read_entity_state(entity_instance_id)
+            entity = await client.get_entity(entity_instance_id)
         except Exception:
             # Preserve bounded retry for transient storage/transport failures.
             # Decoding below remains outside this catch, so malformed stored
             # state is reported immediately rather than treated as not ready.
             logger.warning("[HTTP Trigger] Entity state transport read failed", exc_info=True)
             return None
-        if not state_response or not state_response.entity_exists:
+        if entity is None:
             return None
 
-        return read_agent_state(state_response.entity_state)
+        # get_state() returns the raw serialized JSON rather than a mapping. Reading it
+        # here keeps agent state out of the Functions converter's object hook. An
+        # existing entity without readable state is malformed, not "not ready".
+        return read_agent_state(entity.get_state())
 
     async def _get_response_from_entity(
         self,
-        client: df.DurableOrchestrationClient,
-        entity_instance_id: df.EntityId,
+        client: df.DurableFunctionsClient,
+        entity_instance_id: EntityInstanceId,
         correlation_id: str,
         message: str,
         session_id: str,
@@ -1893,8 +1969,8 @@ class AgentFunctionApp(DFAppBase):
 
     async def _poll_entity_for_response(
         self,
-        client: df.DurableOrchestrationClient,
-        entity_instance_id: df.EntityId,
+        client: df.DurableFunctionsClient,
+        entity_instance_id: EntityInstanceId,
         correlation_id: str,
         message: str,
         session_id: str,
@@ -2087,9 +2163,11 @@ class AgentFunctionApp(DFAppBase):
             mimetype=MIMETYPE_APPLICATION_JSON,
         )
 
-    def _build_workflow_terminal_response(self, status: Any, instance_id: str) -> func.HttpResponse:
+    def _build_workflow_terminal_response(
+        self, status: OrchestrationState | None, instance_id: str
+    ) -> func.HttpResponse:
         """Build a compact response for a completed or failed workflow."""
-        if status is None or status.runtime_status is None:
+        if status is None:
             return self._build_error_response(
                 f"Workflow orchestration '{instance_id}' returned no status.",
                 status_code=500,
@@ -2097,22 +2175,24 @@ class AgentFunctionApp(DFAppBase):
 
         runtime_status = status.runtime_status
         if runtime_status not in {
-            df.OrchestrationRuntimeStatus.Completed,
-            df.OrchestrationRuntimeStatus.Failed,
+            OrchestrationStatus.COMPLETED,
+            OrchestrationStatus.FAILED,
         }:
             return self._build_error_response(
-                f"Workflow orchestration '{instance_id}' ended with unexpected status '{runtime_status.name}'.",
+                f"Workflow orchestration '{instance_id}' ended with unexpected status "
+                f"'{runtime_status_name(runtime_status)}'.",
                 status_code=500,
             )
 
-        decoded_output = deserialize_workflow_output(status.output) if status.output is not None else None
+        raw_output = _read_json_field(status.serialized_output)
+        decoded_output = deserialize_workflow_output(raw_output) if raw_output is not None else None
         response: dict[str, Any] = {
             "instanceId": status.instance_id or instance_id,
-            "runtimeStatus": runtime_status.name,
-            "output": decoded_output if runtime_status == df.OrchestrationRuntimeStatus.Completed else None,
+            "runtimeStatus": runtime_status_name(runtime_status),
+            "output": decoded_output if runtime_status == OrchestrationStatus.COMPLETED else None,
         }
-        if runtime_status == df.OrchestrationRuntimeStatus.Failed:
-            response["error"] = decoded_output
+        if runtime_status == OrchestrationStatus.FAILED:
+            response["error"] = _workflow_error(status, decoded_output)
 
         return func.HttpResponse(
             json.dumps(response, default=_json_default),

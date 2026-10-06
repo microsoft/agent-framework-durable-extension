@@ -5,7 +5,7 @@
 import json
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
-from types import SimpleNamespace
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
@@ -17,6 +17,8 @@ from agent_framework_durabletask import (
     MIMETYPE_TEXT_PLAIN,
     WAIT_FOR_RESPONSE_HEADER,
 )
+from durabletask.entities import EntityInstanceId, EntityMetadata
+from durabletask.serialization import DEFAULT_DATA_CONVERTER
 from pydantic import BaseModel
 
 from agent_framework_azurefunctions import AgentFunctionApp
@@ -104,10 +106,23 @@ def _history_entry(*, error: bool = False) -> dict[str, Any]:
     }
 
 
+def _entity(raw: Any) -> EntityMetadata:
+    """A real EntityMetadata, whose get_state returns the stored value without decoding it."""
+    return EntityMetadata(
+        id=EntityInstanceId(entity=f"dafx-{AGENT_NAME}", key=SESSION_ID),
+        last_modified=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        backlog_queue_size=0,
+        locked_by="",
+        includes_state=True,
+        state=deepcopy(raw),
+        data_converter=DEFAULT_DATA_CONVERTER,
+    )
+
+
 def _client(raw: Any, *, exists: bool = True) -> Mock:
-    client = Mock(spec=df.DurableOrchestrationClient)
+    client = Mock(spec=df.DurableFunctionsClient)
     client.signal_entity = AsyncMock()
-    client.read_entity_state = AsyncMock(return_value=SimpleNamespace(entity_exists=exists, entity_state=deepcopy(raw)))
+    client.get_entity = AsyncMock(return_value=_entity(raw) if exists else None)
     return client
 
 
@@ -181,9 +196,9 @@ def handlers(app: AgentFunctionApp, monkeypatch: pytest.MonkeyPatch) -> tuple[Ht
 def _assert_one_delivery(client: Mock, sleep: AsyncMock, original: Any) -> None:
     client.signal_entity.assert_awaited_once()
     entity_id, operation, request = client.signal_entity.call_args.args
-    assert entity_id.name == f"dafx-{AGENT_NAME}" and entity_id.key == SESSION_ID
+    assert entity_id.entity == f"dafx-{AGENT_NAME}" and entity_id.key == SESSION_ID
     assert operation == "run" and request["correlationId"] == CORRELATION_ID
     assert request["message"] == "question"
-    client.read_entity_state.assert_awaited_once_with(entity_id)
-    assert client.read_entity_state.return_value.entity_state == original
+    client.get_entity.assert_awaited_once_with(entity_id)
+    assert client.get_entity.return_value.get_state() == original
     sleep.assert_awaited_once_with(0.01)

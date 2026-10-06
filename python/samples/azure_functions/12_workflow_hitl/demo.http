@@ -8,9 +8,8 @@
 ###
 ### Prerequisites:
 ### 1. Start Azurite: azurite --silent --location .
-### 2. Start Durable Task Scheduler emulator
-### 3. Configure local.settings.json with Azure OpenAI credentials
-### 4. Run: func start
+### 2. Configure local.settings.json with Azure OpenAI credentials
+### 3. Run: func start
 ### ============================================================================
 
 

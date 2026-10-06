@@ -126,9 +126,12 @@ _INVALID_CHILD_CASES = [
 
 
 class _DTStarts:
-    def __init__(self, workflow: Workflow) -> None:
-        self.worker: Any = TaskHubGrpcWorker(host_address="localhost:1")
-        DurableAIAgentWorker(self.worker, deployment_mode="isolated_v2").configure_workflow(workflow)
+    def __init__(self, workflow: Workflow, *, worker: Any = None) -> None:
+        # Another host may inject a worker holding its own registration of `workflow`.
+        self.worker: Any = worker
+        if worker is None:
+            self.worker = TaskHubGrpcWorker(host_address="localhost:1")
+            DurableAIAgentWorker(self.worker, deployment_mode="isolated_v2").configure_workflow(workflow)
         self.histories: dict[str, list[Any]] = {}
         self.names: dict[str, str] = {}
 

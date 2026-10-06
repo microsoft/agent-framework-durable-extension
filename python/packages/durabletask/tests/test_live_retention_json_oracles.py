@@ -31,11 +31,9 @@ def _load(path: Path, name: str, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return module
 
 
-@pytest.fixture(params=["durabletask", "azurefunctions"])
-def live_equal(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Callable[[Any, Any, str], None]:
+def _live_equal(package: str, monkeypatch: pytest.MonkeyPatch) -> Callable[[Any, Any, str], None]:
     # Guard accidental launch if either integration module later acquires import-time work.
     monkeypatch.setattr("subprocess.Popen", Mock(side_effect=AssertionError("Unit JSON checks cannot start a host")))
-    package = request.param
     if package == "durabletask":
         # The real module imports sibling constants. Give it this exact sibling,
         # then restore sys.modules at teardown, with no permanent sys.path edits.
@@ -53,6 +51,12 @@ def live_equal(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) 
         monkeypatch,
     )
     return module._equal
+
+
+@pytest.fixture
+def live_equal(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any, Any, str], None]:
+    # The Functions package re-collects these checks with its own oracle.
+    return _live_equal("durabletask", monkeypatch)
 
 
 @pytest.mark.parametrize(
