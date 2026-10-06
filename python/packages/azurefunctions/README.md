@@ -164,10 +164,12 @@ app.configure_large_payloads(
 )
 ```
 
-Supply a full Blob connection string in `PAYLOAD_STORAGE_CONNECTION_STRING`, including
-the Blob endpoint when using Azurite. `UseDevelopmentStorage=true` is not a full connection
-string for the Python Blob SDK. Configuration does not automatically discover or reuse
-`AzureWebJobsStorage`. Use the store's credential options for identity-based deployments.
+Set `PAYLOAD_STORAGE_CONNECTION_STRING` to a Blob connection string. With
+`azure-storage-blob` 12.28 or later (including the locked 12.30.0), local Azurite at its
+default endpoints also accepts `UseDevelopmentStorage=true;`. Use a full connection
+string with an explicit Blob endpoint for older SDKs or custom Azurite endpoints.
+Configuration does not automatically discover or reuse `AzureWebJobsStorage`.
+Use the store's credential options for identity-based deployments.
 
 Payloads above the threshold are stored as blobs and replaced with references. This includes
 agent entity state, inputs and results, workflow inputs and outputs, custom status, external
