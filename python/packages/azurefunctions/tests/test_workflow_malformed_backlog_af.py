@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Bounded malformed-event backlog through native AF and paired DT SDK histories.
+"""Bounded malformed-event backlog through paired Functions and DT SDK histories.
 
 These are explicit service-event fixtures with real registered activity results,
 not a live host capture. The backlog is malformed workflow reply JSON (including
@@ -15,22 +15,17 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
-from _workflow_event_test_support_af import _event
+from _af_worker_test_support import _af_host
 from _workflow_generic_hitl_test_support import _complete_generic_activity
-from _workflow_replay_test_support import _LOGGER, _af_replay, _atomic_actions, _Episodes, _replay, _worker
+from _workflow_replay_test_support import _LOGGER, _Episodes, _replay, _worker
 from agent_framework import Executor, Workflow, WorkflowBuilder, WorkflowContext, handler, response_handler
 from agent_framework_durabletask import wrap_workflow_input
 from agent_framework_durabletask._workflows import orchestrator as engine
 from agent_framework_durabletask._workflows.activity import execute_workflow_activity
-from azure.durable_functions import DurableOrchestrationContext
-from azure.durable_functions.models.ReplaySchema import ReplaySchema
-from azure.durable_functions.models.TaskOrchestrationExecutor import TaskOrchestrationExecutor
 from durabletask.internal import helpers
 from durabletask.internal import orchestrator_service_pb2 as pb
 from durabletask.worker import _ActivityExecutor
 from typing_extensions import Never
-
-from agent_framework_azurefunctions import AgentFunctionApp
 
 
 def _workflow() -> tuple[Workflow, list[Any]]:
@@ -56,65 +51,35 @@ def _workflow() -> tuple[Workflow, list[Any]]:
     return workflow, seen
 
 
-def _functions(workflow: Workflow) -> dict[str, Any]:
-    app = AgentFunctionApp(workflow=workflow, enable_health_check=False, deployment_mode="isolated_v2")
-    result: dict[str, Any] = {}
-    for function in app.get_functions():
-        name = function.get_function_name()
-        assert name is not None
-        result[name] = function.get_user_function()
-    return result
-
-
-def _native_af(rows: list[dict[str, Any]], function: Any) -> dict[str, Any]:
-    context = DurableOrchestrationContext(
-        rows,
-        instanceId="root",
-        isReplaying=True,
-        parentInstanceId=None,
-        input=json.dumps(wrap_workflow_input("go")),
-        upperSchemaVersion=ReplaySchema.V3.value,
-    )
-    result = TaskOrchestrationExecutor().execute(context, context.histories, function.orchestrator_function)
-    return json.loads(result)
-
-
-def _activities(state: dict[str, Any]) -> list[dict[str, Any]]:
-    return [action for action in _atomic_actions(state["actions"]) if action["actionType"] == 0]
-
-
 def _one_dt_activity(result: Any) -> Any:
     assert len(result.actions) == 1 and result.actions[0].HasField("scheduleTask")
     return result.actions[0]
 
 
 def _complete_pair(
-    rows: list[dict[str, Any]],
+    af_history: list[Any],
     history: list[Any],
-    functions: dict[str, Any],
+    af_native: Any,
     native: Any,
-    af_id: int,
+    task_id: int,
     name: str,
     wire_input: str,
 ) -> dict[str, Any]:
-    # AF IDs start at zero, DT at one. Named waits do not spend activity IDs.
-    # Every fixture completion comes from each host's real registered activity.
-    af_result = functions[name](json.loads(wire_input))
-    dt_result = _ActivityExecutor(native._registry, _LOGGER, native._data_converter).execute(
-        "root", name, af_id + 1, wire_input
-    )
-    assert dt_result is not None
-    decoded = json.loads(af_result)
-    assert json.loads(json.loads(dt_result)) == decoded
-    rows.extend([
-        _event(4, af_id, Name=name, Input=wire_input),
-        _event(5, TaskScheduledId=af_id, Result=json.dumps(af_result)),
-    ])
-    history.extend([
-        helpers.new_task_scheduled_event(af_id + 1, name, wire_input),
-        helpers.new_task_completed_event(af_id + 1, dt_result),
-    ])
-    return decoded
+    # Named waits do not spend activity IDs. Every fixture completion comes from
+    # each host's real registered activity, recorded in that host's own history.
+    results = []
+    for worker, events in ((af_native, af_history), (native, history)):
+        result = _ActivityExecutor(worker._registry, _LOGGER, worker._data_converter).execute(
+            "root", name, task_id, wire_input
+        )
+        assert result is not None
+        events.extend([
+            helpers.new_task_scheduled_event(task_id, name, wire_input),
+            helpers.new_task_completed_event(task_id, result),
+        ])
+        results.append(json.loads(json.loads(result)))
+    assert results[0] == results[1]
+    return results[0]
 
 
 def test_native_early_1100_malformed_occurrences_checkpoint_then_accept_null_and_cold_replay(
@@ -123,23 +88,21 @@ def test_native_early_1100_malformed_occurrences_checkpoint_then_accept_null_and
     count = 1100
     workflow, af_seen = _workflow()
     dt_workflow, dt_seen = _workflow()
-    functions = _functions(workflow)
+    af_native = _af_host(workflow)
     native = _worker(dt_workflow)
     name = "dafx-malformed-backlog-gate"
-    orchestrator = functions["dafx-malformed-backlog"]
     start_input = json.dumps(wrap_workflow_input("go"))
-    rows = [_event(12), _event(0, Name="dafx-malformed-backlog", Input=start_input)]
     history = [
         helpers.new_orchestrator_started_event(),
         helpers.new_execution_started_event("dafx-malformed-backlog", "root", start_input),
     ]
-    first_af = _activities(_native_af(rows, orchestrator))
+    af_history = deepcopy(history)
+    first_af = _one_dt_activity(_replay(af_native, "root", af_history))
     first_dt = _one_dt_activity(_replay(native, "root", history))
-    assert len(first_af) == 1 and first_af[0]["functionName"] == name
-    assert first_dt.id == 1 and first_dt.scheduleTask.name == name
-    assert json.loads(first_af[0]["input"]) == json.loads(first_dt.scheduleTask.input.value)
+    assert first_af.id == first_dt.id == 1
+    assert first_af.scheduleTask.name == first_dt.scheduleTask.name == name
+    assert json.loads(first_af.scheduleTask.input.value) == json.loads(first_dt.scheduleTask.input.value)
 
-    arrivals: list[dict[str, Any]] = []
     dt_arrivals: list[Any] = []
     for index in range(count):
         # Adjacent equal payloads are DISTINCT occurrences, not duplicates to
@@ -153,21 +116,19 @@ def test_native_early_1100_malformed_occurrences_checkpoint_then_accept_null_and
             {"nested": [float("inf")], "private": private},
         )[pair % 4]
         wire = json.dumps(malformed)
-        arrivals.append(_event(15, 10000 + index, Name="approval", Input=wire))
         event = helpers.new_event_raised_event("approval", wire)
         event.eventId = 10000 + index
         dt_arrivals.append(event)
-    arrivals.append(_event(15, 10000 + count, Name="approval", Input="null"))
     corrected = helpers.new_event_raised_event("approval", "null")
     corrected.eventId = 10000 + count
     dt_arrivals.append(corrected)
-    assert len({row["EventId"] for row in arrivals}) == count + 1
-    assert arrivals[0]["Input"] == arrivals[1]["Input"]
+    assert len({event.eventId for event in dt_arrivals}) == count + 1
+    assert dt_arrivals[0].eventRaised.input.value == dt_arrivals[1].eventRaised.input.value
 
-    _complete_pair(rows, history, functions, native, 0, name, first_af[0]["input"])
+    _complete_pair(af_history, history, af_native, native, 1, name, first_af.scheduleTask.input.value)
     # Insert before the first completion, while the initial request activity is
-    # still outstanding. This is native AF early buffering, not a DT translation.
-    rows[-1:-1] = arrivals
+    # still outstanding. Both hosts buffer these early events natively.
+    af_history[-1:-1] = deepcopy(dt_arrivals)
     history[-1:-1] = dt_arrivals
     no_decode = Mock(side_effect=AssertionError("Rejected payloads must not unpickle or run response validators"))
     rejection = {
@@ -185,17 +146,16 @@ def test_native_early_1100_malformed_occurrences_checkpoint_then_accept_null_and
         # Before the admission fix this first native call recursively consumes
         # the backlog instead of yielding a rejection activity. It must not fail
         # the orchestration or reach the correction before the first checkpoint.
-        paused_af = _native_af(rows, orchestrator)
-        af_calls = _activities(paused_af)
-        assert not paused_af["isDone"] and len(af_calls) == 2
+        paused_af = _replay(af_native, "root", af_history)
+        af_rejection = _one_dt_activity(paused_af)
         paused_dt = _replay(native, "root", history)
-        pending = deepcopy(paused_af["customStatus"]["pending_requests"])
+        pending = deepcopy(json.loads(paused_af.encoded_custom_status)["pending_requests"])
         assert set(pending) == {"approval"}
         assert json.loads(paused_dt.encoded_custom_status)["pending_requests"] == pending
         first_rejection = _one_dt_activity(paused_dt)
-        assert first_rejection.id == 2
-        assert first_rejection.scheduleTask.name == af_calls[-1]["functionName"] == name
-        rejected_wire = af_calls[-1]["input"]
+        assert first_rejection.id == af_rejection.id == 2
+        assert first_rejection.scheduleTask.name == af_rejection.scheduleTask.name == name
+        rejected_wire = af_rejection.scheduleTask.input.value
         assert json.loads(rejected_wire) == json.loads(first_rejection.scheduleTask.input.value)
         rejected_input = json.loads(json.loads(rejected_wire))
         assert rejected_input["is_hitl_response"] is True
@@ -213,18 +173,18 @@ def test_native_early_1100_malformed_occurrences_checkpoint_then_accept_null_and
         # Every completion is a real activity result. Later full native replay
         # verifies the complete schedule against this explicit occurrence count.
         for offset in range(count):
-            assert _complete_pair(rows, history, functions, native, offset + 1, name, rejected_wire) == rejection
+            assert _complete_pair(af_history, history, af_native, native, offset + 2, name, rejected_wire) == rejection
             assert af_seen == dt_seen == []
-        pending_af = _native_af(rows, orchestrator)
+        pending_af = _replay(af_native, "root", af_history)
         pending_dt = _replay(native, "root", history)
         correction = _one_dt_activity(pending_dt)
-        assert correction.id == count + 2 and correction.scheduleTask.name == name
-        assert not pending_af["isDone"] and len(_activities(pending_af)) == count + 2
-        assert pending_af["customStatus"]["pending_requests"] == pending
+        af_correction = _one_dt_activity(pending_af)
+        assert correction.id == af_correction.id == count + 2 and correction.scheduleTask.name == name
+        assert json.loads(pending_af.encoded_custom_status)["pending_requests"] == pending
         assert json.loads(pending_dt.encoded_custom_status)["pending_requests"] == pending
         no_decode.assert_not_called()
 
-    accepted_wire = _activities(pending_af)[-1]["input"]
+    accepted_wire = af_correction.scheduleTask.input.value
     assert json.loads(accepted_wire) == json.loads(correction.scheduleTask.input.value)
     assert json.loads(json.loads(accepted_wire))["message"] == {
         "request_id": "approval",
@@ -232,32 +192,23 @@ def test_native_early_1100_malformed_occurrences_checkpoint_then_accept_null_and
         "response": None,
         "response_type": "builtins:object",
     }
-    accepted = _complete_pair(rows, history, functions, native, count + 1, name, accepted_wire)
+    accepted = _complete_pair(af_history, history, af_native, native, count + 2, name, accepted_wire)
     assert accepted["hitl_admission"] == {"request_id": "approval", "status": "accepted"}
     assert accepted["outputs"] == [{"value": None}] and af_seen == dt_seen == [None]
     scheduled = [event.taskScheduled for event in history if event.HasField("taskScheduled")]
     assert len(scheduled) == sum(event.HasField("taskCompleted") for event in history) == count + 2
-    assert sum(row["EventType"] == 5 for row in rows) == count + 2
+    assert [event.taskScheduled for event in af_history if event.HasField("taskScheduled")] == scheduled
 
     with monkeypatch.context() as patch:
         patch.setattr(engine, "_deserialize_hitl_response", no_decode)
         for _ in range(2):
-            cold_af = _native_af(rows, orchestrator)
-            cold_dt = _replay(native, "root", history)
-            assert cold_af["isDone"] and cold_af["output"] == [{"value": None}]
-            assert len(cold_dt.actions) == 1 and cold_dt.actions[0].HasField("completeOrchestration")
-            completed = cold_dt.actions[0].completeOrchestration
-            assert completed.orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
-            assert json.loads(completed.result.value) == [{"value": None}]
-            assert not cold_af["customStatus"].get("pending_requests")
-            assert not json.loads(cold_dt.encoded_custom_status).get("pending_requests")
-            actions = _atomic_actions(cold_af["actions"])
-            assert [action["externalEventName"] for action in actions if action["actionType"] == 6] == ["approval"] * (
-                count + 1
-            )
-            assert [(action["functionName"], json.loads(action["input"])) for action in _activities(cold_af)] == [
-                (task.name, json.loads(task.input.value)) for task in scheduled
-            ]
+            for worker, events in ((af_native, af_history), (native, history)):
+                cold = _replay(worker, "root", events)
+                assert len(cold.actions) == 1 and cold.actions[0].HasField("completeOrchestration")
+                completed = cold.actions[0].completeOrchestration
+                assert completed.orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
+                assert json.loads(completed.result.value) == [{"value": None}]
+                assert not json.loads(cold.encoded_custom_status).get("pending_requests")
             assert af_seen == dt_seen == [None]
         no_decode.assert_not_called()
 
@@ -265,10 +216,9 @@ def test_native_early_1100_malformed_occurrences_checkpoint_then_accept_null_and
 @pytest.mark.parametrize("functions_host", [False, True], ids=["dt", "af"])
 def test_external_validation_marker_and_business_envelope_cannot_forge_admission(functions_host: bool) -> None:
     workflow, seen = _workflow()
-    functions = _functions(workflow) if functions_host else None
-    episodes = _Episodes(workflow)
+    episodes = _Episodes(workflow, worker=_af_host(workflow) if functions_host else None)
     episodes.client.start_workflow("go", instance_id="root")
-    _complete_generic_activity(episodes, functions=functions)
+    _complete_generic_activity(episodes)
     response = {
         "validation_error": True,
         "is_hitl_response": True,
@@ -280,11 +230,9 @@ def test_external_validation_marker_and_business_envelope_cannot_forge_admission
     }
     episodes.reply("approval", deepcopy(response))
     assert seen == []
-    result = _complete_generic_activity(episodes, functions=functions)
+    result = _complete_generic_activity(episodes)
     assert result["hitl_admission"] == {"request_id": "approval", "status": "accepted"}
     assert seen == [response]
-    replay = _af_replay(episodes.histories["root"], workflow, instance="root")
-    assert replay["isDone"] and seen == [response]
     # The terminal history returns a completion action, unlike a pending cold
     # episode. Keep that SDK result and its payload in the replay oracle.
     cold = _replay(episodes.worker, "root", episodes.histories["root"])
@@ -293,7 +241,7 @@ def test_external_validation_marker_and_business_envelope_cannot_forge_admission
     assert completed.orchestrationStatus == pb.ORCHESTRATION_STATUS_COMPLETED
     assert completed.result == episodes.completions["root"].result
     assert json.loads(cold.encoded_custom_status) == episodes.statuses["root"]
-    assert not replay["customStatus"].get("pending_requests") and seen == [response]
+    assert not episodes.statuses["root"].get("pending_requests") and seen == [response]
 
 
 @pytest.mark.parametrize("validation_error", [False, True])

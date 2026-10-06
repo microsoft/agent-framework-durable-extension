@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal, get_origin
@@ -119,7 +120,7 @@ class _CountedDataclass:
         self.count += len(_VALIDATOR_CALLS)
 
 
-def _complete_generic_activity(episodes: Any, *, functions: dict[str, Any] | None = None) -> dict[str, Any]:
+def _complete_generic_activity(episodes: Any) -> dict[str, Any]:
     from _workflow_replay_test_support import _LOGGER
     from durabletask.internal import helpers
     from durabletask.worker import _ActivityExecutor
@@ -127,14 +128,9 @@ def _complete_generic_activity(episodes: Any, *, functions: dict[str, Any] | Non
     assert len(episodes.actions["root"]) == 1
     task_id, action = episodes.actions["root"].popitem()
     task = action.scheduleTask
-    if functions is None:
-        executor = _ActivityExecutor(episodes.worker._registry, _LOGGER, episodes.worker._data_converter)
-        result = executor.execute("root", task.name, task_id, task.input.value)
-    else:
-        # Use the exact scheduled name and real Functions activity registration.
-        # DT history stores converter-wrapped strings. Functions takes the inner
-        # activity JSON string and returns the same shared-body result string.
-        result = json.dumps(functions[task.name](json.loads(task.input.value)))
+    # Use the exact scheduled name and the episode worker's real registration.
+    executor = _ActivityExecutor(episodes.worker._registry, _LOGGER, episodes.worker._data_converter)
+    result = executor.execute("root", task.name, task_id, task.input.value)
     assert result is not None
     decoded: dict[str, Any] = json.loads(json.loads(result))
     episodes.episode("root", helpers.new_task_completed_event(task_id, result))
@@ -157,8 +153,10 @@ _CONCRETE_REPLAY_CASES = [
 ]
 
 
-def _concrete_replay_trial(requested: type, answer: Any, correction: Any, *, functions_host: bool = False) -> None:
-    from _workflow_replay_test_support import _af_replay, _Episodes, _replay
+def _concrete_replay_trial(
+    requested: type, answer: Any, correction: Any, *, host: Callable[[Workflow], Any] | None = None
+) -> None:
+    from _workflow_replay_test_support import _Episodes, _replay
 
     # The public Core workflow is independent of durable's descriptor and
     # admission helpers. In particular bool->float differs in Core 1.13/1.16.
@@ -166,19 +164,9 @@ def _concrete_replay_trial(requested: type, answer: Any, correction: Any, *, fun
     corrected, correction_oracle = asyncio.run(_core_trial(requested, correction))
     assert corrected
     workflow, seen = _generic_workflow(requested)
-    functions: dict[str, Any] | None = None
-    if functions_host:
-        from agent_framework_azurefunctions import AgentFunctionApp
-
-        app = AgentFunctionApp(workflow=workflow, enable_health_check=False, deployment_mode="isolated_v2")
-        functions = {}
-        for item in app.get_functions():
-            name = item.get_function_name()
-            assert name is not None
-            functions[name] = item.get_user_function()
-    episodes = _Episodes(workflow)
+    episodes = _Episodes(workflow, worker=None if host is None else host(workflow))
     episodes.client.start_workflow("go", instance_id="root")
-    _complete_generic_activity(episodes, functions=functions)
+    _complete_generic_activity(episodes)
     pending = deepcopy(episodes.statuses["root"]["pending_requests"])
     assert set(pending) == {"approval"}
 
@@ -186,9 +174,6 @@ def _concrete_replay_trial(requested: type, answer: Any, correction: Any, *, fun
         cold = _replay(episodes.worker, "root", episodes.histories["root"])
         assert list(cold.actions) == []
         assert json.loads(cold.encoded_custom_status)["pending_requests"] == pending
-        if functions_host:
-            af_cold = _af_replay(episodes.histories["root"], workflow, instance="root")
-            assert not af_cold["isDone"] and af_cold["customStatus"]["pending_requests"] == pending
         assert not seen
 
     for _ in range(1 if accepted else 2):
@@ -196,7 +181,7 @@ def _concrete_replay_trial(requested: type, answer: Any, correction: Any, *, fun
         assert not seen and len(episodes.actions["root"]) == 1
         assert episodes.statuses["root"]["pending_requests"] == pending
         cold_pending()  # A scheduled activity is not an acknowledged admission.
-        result = _complete_generic_activity(episodes, functions=functions)
+        result = _complete_generic_activity(episodes)
         assert seen == oracle
         if accepted:
             assert result["hitl_admission"] == {"request_id": "approval", "status": "accepted"}
@@ -216,7 +201,7 @@ def _concrete_replay_trial(requested: type, answer: Any, correction: Any, *, fun
     if not accepted:
         episodes.reply("approval", deepcopy(correction))
         cold_pending()
-        result = _complete_generic_activity(episodes, functions=functions)
+        result = _complete_generic_activity(episodes)
         assert result["hitl_admission"] == {"request_id": "approval", "status": "accepted"}
     expected = oracle if accepted else correction_oracle
     assert seen == expected and type(seen[0]) is type(expected[0])
@@ -230,30 +215,17 @@ def _concrete_replay_trial(requested: type, answer: Any, correction: Any, *, fun
         assert deserialize_workflow_output(json.loads(cold.actions[0].completeOrchestration.result.value)) == [
             {"value": expected[0]}
         ]
-        if functions_host:
-            af_cold = _af_replay(episodes.histories["root"], workflow, instance="root")
-            assert af_cold["isDone"] and af_cold["output"] == [{"value": expected[0]}]
         assert seen == expected and len(seen) == 1
 
 
-def _validator_replay_trial(annotation: Any, *, functions_host: bool = False) -> None:
-    from _workflow_replay_test_support import _af_replay, _Episodes, _replay
+def _validator_replay_trial(annotation: Any, *, host: Callable[[Workflow], Any] | None = None) -> None:
+    from _workflow_replay_test_support import _Episodes, _replay
 
     _VALIDATOR_CALLS.clear()
     workflow, seen = _generic_workflow(annotation)
-    functions: dict[str, Any] | None = None
-    if functions_host:
-        from agent_framework_azurefunctions import AgentFunctionApp
-
-        app = AgentFunctionApp(workflow=workflow, enable_health_check=False, deployment_mode="isolated_v2")
-        functions = {}
-        for item in app.get_functions():
-            name = item.get_function_name()
-            assert name is not None
-            functions[name] = item.get_user_function()
-    episodes = _Episodes(workflow)
+    episodes = _Episodes(workflow, worker=None if host is None else host(workflow))
     episodes.client.start_workflow("go", instance_id="root")
-    _complete_generic_activity(episodes, functions=functions)
+    _complete_generic_activity(episodes)
     # A concrete model/dataclass is supported on both Core versions. A union's
     # fallback permits the generic control to finish even on older Core versions.
     wire: Any = [{"count": 7}] if get_origin(annotation) is not None else {"count": 7}
@@ -262,14 +234,11 @@ def _validator_replay_trial(annotation: Any, *, functions_host: bool = False) ->
     for _ in range(2):
         replayed = _replay(episodes.worker, "root", episodes.histories["root"])
         assert list(replayed.actions) == [] and not _VALIDATOR_CALLS
-        if functions_host:
-            assert not _af_replay(episodes.histories["root"], workflow, instance="root")["isDone"]
-            assert not _VALIDATOR_CALLS
-    result = _complete_generic_activity(episodes, functions=functions)
+    result = _complete_generic_activity(episodes)
     if result["hitl_admission"]["status"] == "invalidreply":
         assert annotation == (list[_CountedDecision] | str) and not _VALIDATOR_CALLS
         episodes.reply("approval", "fallback")
-        result = _complete_generic_activity(episodes, functions=functions)
+        result = _complete_generic_activity(episodes)
         assert seen == ["fallback"]
     else:
         assert _VALIDATOR_CALLS == [7]
@@ -280,52 +249,37 @@ def _validator_replay_trial(annotation: Any, *, functions_host: bool = False) ->
     for _ in range(3):
         replayed = _replay(episodes.worker, "root", episodes.histories["root"])
         assert len(replayed.actions) == 1 and replayed.actions[0].HasField("completeOrchestration")
-        if functions_host:
-            assert _af_replay(episodes.histories["root"], workflow, instance="root")["isDone"]
         assert checkpoint == _VALIDATOR_CALLS and len(seen) == 1
 
 
-def _invalid_generic_replay_trial(*, functions_host: bool = False) -> None:
-    from _workflow_replay_test_support import _af_replay, _Episodes, _replay
+def _invalid_generic_replay_trial(*, host: Callable[[Workflow], Any] | None = None) -> None:
+    from _workflow_replay_test_support import _Episodes, _replay
 
     workflow, seen = _generic_workflow(list[int])
-    functions: dict[str, Any] | None = None
-    if functions_host:
-        from agent_framework_azurefunctions import AgentFunctionApp
-
-        app = AgentFunctionApp(workflow=workflow, enable_health_check=False, deployment_mode="isolated_v2")
-        functions = {}
-        for item in app.get_functions():
-            name = item.get_function_name()
-            assert name is not None
-            functions[name] = item.get_user_function()
-    episodes = _Episodes(workflow)
+    episodes = _Episodes(workflow, worker=None if host is None else host(workflow))
     episodes.client.start_workflow("go", instance_id="root")
-    _complete_generic_activity(episodes, functions=functions)
+    _complete_generic_activity(episodes)
     episodes.reply("approval", ["bad"])
-    rejected = _complete_generic_activity(episodes, functions=functions)
+    rejected = _complete_generic_activity(episodes)
     assert rejected["hitl_admission"]["status"] == "invalidreply" and not seen
     assert episodes.pending() == {"approval"}
     for _ in range(2):
         cold = _replay(episodes.worker, "root", episodes.histories["root"])
         assert list(cold.actions) == []
         assert set(json.loads(cold.encoded_custom_status)["pending_requests"]) == {"approval"}
-        if functions_host:
-            af_cold = _af_replay(episodes.histories["root"], workflow, instance="root")
-            assert not af_cold["isDone"]
-            assert set(af_cold["customStatus"]["pending_requests"]) == {"approval"}
     episodes.reply("approval", [7])
-    accepted = _complete_generic_activity(episodes, functions=functions)
+    accepted = _complete_generic_activity(episodes)
     assert accepted["hitl_admission"]["status"] == "accepted"
     assert seen == [[7]] and "root" in episodes.completions
-    if functions_host:
-        done = _af_replay(episodes.histories["root"], workflow, instance="root")
-        assert done["isDone"] and done["output"] == [{"value": [7]}]
-        assert seen == [[7]]
+    done = _replay(episodes.worker, "root", episodes.histories["root"])
+    assert len(done.actions) == 1 and done.actions[0].HasField("completeOrchestration")
+    output = json.loads(done.actions[0].completeOrchestration.result.value)
+    assert deserialize_workflow_output(output) == [{"value": [7]}]
+    assert seen == [[7]]
 
 
-def _handler_failure_trial(*, functions_host: bool, output_failure: bool) -> None:
-    from _workflow_replay_test_support import _LOGGER, _af_replay, _Episodes
+def _handler_failure_trial(*, host: Callable[[Workflow], Any] | None = None, output_failure: bool) -> None:
+    from _workflow_replay_test_support import _LOGGER, _Episodes
     from durabletask.internal import helpers
     from durabletask.internal import orchestrator_service_pb2 as pb
     from durabletask.worker import _ActivityExecutor
@@ -347,28 +301,15 @@ def _handler_failure_trial(*, functions_host: bool, output_failure: bool) -> Non
 
     gate = Broken(id="gate")
     workflow = WorkflowBuilder(name="failure-hitl", start_executor=gate, output_from=[gate]).build()
-    functions: dict[str, Any] | None = None
-    if functions_host:
-        from agent_framework_azurefunctions import AgentFunctionApp
-
-        app = AgentFunctionApp(workflow=workflow, enable_health_check=False, deployment_mode="isolated_v2")
-        functions = {}
-        for item in app.get_functions():
-            name = item.get_function_name()
-            assert name is not None
-            functions[name] = item.get_user_function()
-    episodes = _Episodes(workflow)
+    episodes = _Episodes(workflow, worker=None if host is None else host(workflow))
     episodes.client.start_workflow("go", instance_id="root")
-    _complete_generic_activity(episodes, functions=functions)
+    _complete_generic_activity(episodes)
     episodes.reply("approval", 7)
     task_id, action = episodes.actions["root"].popitem()
     task = action.scheduleTask
     with pytest.raises(ValueError) as failure:
-        if functions is None:
-            executor = _ActivityExecutor(episodes.worker._registry, _LOGGER, episodes.worker._data_converter)
-            executor.execute("root", task.name, task_id, task.input.value)
-        else:
-            functions[task.name](json.loads(task.input.value))
+        executor = _ActivityExecutor(episodes.worker._registry, _LOGGER, episodes.worker._data_converter)
+        executor.execute("root", task.name, task_id, task.input.value)
     assert seen == [7]
     if output_failure:
         assert "string keys" in str(failure.value)
@@ -376,15 +317,4 @@ def _handler_failure_trial(*, functions_host: bool, output_failure: bool) -> Non
         assert str(failure.value) == "Application handler failed"
     episodes.episode("root", helpers.new_task_failed_event(task_id, failure.value))
     assert episodes.completions["root"].orchestrationStatus == pb.ORCHESTRATION_STATUS_FAILED
-    if functions_host:
-        # The real Functions SDK exposes failed orchestration state on its
-        # exception, rather than returning an invalidreply control record.
-        with pytest.raises(Exception) as terminal:
-            _af_replay(episodes.histories["root"], workflow, instance="root")
-        terminal_state = json.loads(str(terminal.value).split("$OutOfProcData$:", 1)[1])
-        # Functions' isDone denotes successful invocation, not failure. The
-        # populated error and raised out-of-proc exception are its failure contract.
-        assert terminal_state["error"]
-        expected_error = "string keys" if output_failure else "Application handler failed"
-        assert expected_error in terminal_state["error"]
     assert seen == [7]

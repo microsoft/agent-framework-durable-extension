@@ -3,6 +3,7 @@
 """Coverage checks for the Azure Functions sample integration tests."""
 
 import ast
+import json
 from pathlib import Path
 
 
@@ -97,14 +98,42 @@ def test_integration_pipelines_run_azure_functions_suite() -> None:
         repo_root / ".github" / "workflows" / "python-integration-tests.yml",
         repo_root / "eng" / "templates" / "jobs" / "python-integration-tests.yml",
     ]
-    expected_command = "pytest packages/azurefunctions/tests/integration_tests"
+    # This package is a standalone uv project with its own environment, so the suite
+    # runs from the package directory and the pytest target is relative to it.
+    required_fragments = ("python/packages/azurefunctions", "pytest tests/integration_tests")
 
-    missing_invocations = [
-        str(path.relative_to(repo_root))
+    missing_fragments = {
+        str(path.relative_to(repo_root)): missing
         for path in pipeline_paths
-        if expected_command not in path.read_text(encoding="utf-8")
-    ]
-    assert not missing_invocations, f"Azure Functions integration suite is not invoked by: {missing_invocations}"
+        if (
+            missing := [fragment for fragment in required_fragments if fragment not in path.read_text(encoding="utf-8")]
+        )
+    }
+    assert not missing_fragments, f"Azure Functions integration suite is not invoked by: {missing_fragments}"
+
+
+def test_sample_hosts_use_the_compatible_ga_bundle_and_azure_storage() -> None:
+    sample_root = Path(__file__).resolve().parents[3] / "samples" / "azure_functions"
+    hosts = list(sample_root.glob("*/host.json"))
+    assert len(hosts) == 14
+    for path in hosts:
+        config = json.loads(path.read_text(encoding="utf-8"))
+        assert config["extensionBundle"] == {
+            "id": "Microsoft.Azure.Functions.ExtensionBundle",
+            "version": "[4.38.1, 5.0.0)",
+        }, path
+        assert config["extensions"]["durableTask"]["storageProvider"]["type"] == "AzureStorage", path
+
+
+def test_integration_setup_uses_current_azurite_without_api_validation_bypass() -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    for path in (
+        repo_root / ".github" / "actions" / "azure-functions-integration-setup" / "action.yml",
+        repo_root / "eng" / "templates" / "jobs" / "setup-integration-infra.yml",
+    ):
+        setup = path.read_text(encoding="utf-8")
+        assert "mcr.microsoft.com/azure-storage/azurite:3.37.0" in setup, path
+        assert "--skipApiVersionCheck" not in setup, path
 
 
 def test_skip_guard_detects_decorators_and_module_markers(tmp_path: Path) -> None:

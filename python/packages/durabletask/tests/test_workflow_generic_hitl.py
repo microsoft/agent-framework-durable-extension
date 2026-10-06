@@ -665,7 +665,7 @@ def test_rejected_responses_do_not_spend_handler_convergence_budget() -> None:
 
 @pytest.mark.parametrize("output_failure", [False, True])
 def test_handler_and_output_errors_become_sdk_terminal_failures(output_failure: bool) -> None:
-    _handler_failure_trial(functions_host=False, output_failure=output_failure)
+    _handler_failure_trial(output_failure=output_failure)
 
 
 def test_invalid_reply_preserves_sibling_wait_and_ready_sibling_delivery() -> None:

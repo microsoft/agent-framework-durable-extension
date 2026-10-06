@@ -25,8 +25,8 @@ See the [README.md](../README.md) file in the parent directory for complete setu
 
 - Prerequisites installation
 - Azure OpenAI configuration
-- Durable Task Scheduler setup
 - Storage emulator configuration
+- The optional Durable Task Scheduler backend
 
 ## Configuration
 

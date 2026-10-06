@@ -70,11 +70,17 @@ environments = [
 ]
 
 [tool.uv.workspace]
-members = ["packages/durabletask", "packages/azurefunctions"]
+# agent-framework-azurefunctions is deliberately NOT a member. It depends on
+# azure-functions-durable 2.x, which requires Python >=3.13, and uv resolves a
+# workspace to a single lock over the intersection of its members'
+# requires-python. Keeping it here would drag this workspace (and therefore
+# agent-framework-durabletask, which supports >=3.10 and needs no part of Azure
+# Functions) up to 3.13. It is a standalone uv project under
+# packages/azurefunctions with its own lockfile.
+members = ["packages/durabletask"]
 
 [tool.uv.sources]
 agent-framework-durabletask = { workspace = true }
-agent-framework-azurefunctions = { workspace = true }
 
 [tool.ruff]
 line-length = 120
@@ -141,9 +147,7 @@ notice-rgx = "^# Copyright \\(c\\) Microsoft\\. All rights reserved\\."
 min-file-size = 1
 
 [tool.pytest.ini_options]
-testpaths = ["packages/durabletask/tests", "packages/azurefunctions/tests"]
-# Functions tests reuse Durable Task test helpers. Declare the path rather than
-# relying on Durable Task tests being collected first.
+testpaths = ["packages/durabletask/tests"]
 pythonpath = ["packages/durabletask/tests"]
 norecursedirs = ["**/lab/**"]
 addopts = "-ra -q -r fEX"
@@ -208,9 +212,14 @@ exclude_dirs = ["tests", "samples"]
 [tool.poe]
 executor.type = "uv"
 
+# agent-framework-azurefunctions is a standalone uv project (see the note above), so the
+# tasks below run its steps in that project's own environment.
 [tool.poe.tasks.install]
-help = "Install the Durable Task workspace package and dependency groups."
-cmd = "uv sync --all-packages --group dev --group test"
+help = "Install the Durable Task workspace and the standalone Azure Functions project."
+sequence = [
+    { cmd = "uv sync --all-packages --group dev --group test" },
+    { cmd = "uv sync --directory packages/azurefunctions --group dev --group test" },
+]
 
 [tool.poe.tasks.lint]
 help = "Run Ruff checks for the packages and samples."
@@ -222,15 +231,18 @@ cmd = "ruff format packages/durabletask packages/azurefunctions samples"
 
 [tool.poe.tasks.pyright]
 help = "Run Pyright for the package sources."
-shell = "pyright -p packages/durabletask/pyproject.toml && pyright -p packages/azurefunctions/pyproject.toml"
+shell = "pyright -p packages/durabletask/pyproject.toml && uv run --directory packages/azurefunctions pyright -p pyproject.toml"
 
 [tool.poe.tasks.mypy]
 help = "Run MyPy for the package tests."
-shell = "mypy --config-file pyproject.toml packages/durabletask/tests && mypy --config-file pyproject.toml packages/azurefunctions/tests"
+shell = "mypy --config-file pyproject.toml packages/durabletask/tests && uv run --directory packages/azurefunctions mypy --config-file ../../pyproject.toml tests"
 
 [tool.poe.tasks.test]
 help = "Run the unit tests."
-cmd = "pytest -m \"not integration\" packages/durabletask/tests packages/azurefunctions/tests"
+sequence = [
+    { cmd = "pytest -m \"not integration\" packages/durabletask/tests" },
+    { cmd = "uv run --directory packages/azurefunctions pytest -m \"not integration\" tests" },
+]
 
 [tool.poe.tasks.build]
 help = "Build the package distributions."

@@ -25,7 +25,7 @@ runs:
             docker rm -f azurite
           fi
           echo "Starting Azurite (Azure Storage emulator)"
-          docker run -d --name azurite -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite
+          docker run -d --name azurite -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite:3.37.0
           echo "Waiting for Azurite (Azure Storage emulator) to be ready"
           # An unauthenticated storage request returns HTTP 400 once Azurite is ready.
           timeout 30 bash -c 'until curl --silent --show-error --output /dev/null http://localhost:10000/devstoreaccount1; do sleep 1; done'

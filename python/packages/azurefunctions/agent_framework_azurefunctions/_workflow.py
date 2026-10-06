@@ -6,8 +6,13 @@ This module provides the Azure Functions entry point for workflow orchestration.
 The actual orchestration logic lives in the shared module
 ``agent_framework_durabletask._workflows.orchestrator`` and is host-agnostic.
 This module re-exports the public API and provides the AF-specific
-``run_workflow_orchestrator`` wrapper that creates an
-:class:`AzureFunctionsWorkflowContext` before delegating.
+``run_workflow_orchestrator`` wrapper.
+
+Since ``azure-functions-durable`` 2.x, a durabletask-native (two-argument)
+orchestrator receives a real :class:`durabletask.task.OrchestrationContext`, so
+the Azure Functions host reuses the shared
+:class:`~agent_framework_durabletask.DurableTaskWorkflowContext` adapter instead
+of maintaining its own.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from collections.abc import Generator
 from typing import Any
 
 from agent_framework import Workflow
+from agent_framework_durabletask import DurableTaskWorkflowContext
 from agent_framework_durabletask._workflows.orchestrator import (
     SOURCE_HITL_RESPONSE,
     SOURCE_ORCHESTRATOR,
@@ -33,9 +39,7 @@ from agent_framework_durabletask._workflows.orchestrator import (
 from agent_framework_durabletask._workflows.orchestrator import (
     run_workflow_orchestrator as _run_workflow_orchestrator_shared,
 )
-from azure.durable_functions import DurableOrchestrationContext
-
-from ._workflow_af_context import AzureFunctionsWorkflowContext
+from durabletask.task import OrchestrationContext
 
 logger = logging.getLogger(__name__)
 
@@ -57,18 +61,20 @@ __all__ = [
 
 
 def run_workflow_orchestrator(
-    context: DurableOrchestrationContext,
+    context: OrchestrationContext,
     workflow: Workflow,
     initial_message: Any,
     shared_state: dict[str, Any] | None = None,
 ) -> Generator[Any, Any, list[Any] | dict[str, Any]]:
     """Azure Functions wrapper around the shared workflow orchestrator.
 
-    Creates an :class:`AzureFunctionsWorkflowContext` and delegates to the
-    host-agnostic :func:`run_workflow_orchestrator` in the durabletask package.
+    Wraps the durabletask orchestration context in the shared
+    :class:`~agent_framework_durabletask.DurableTaskWorkflowContext` and delegates
+    to the host-agnostic :func:`run_workflow_orchestrator` in the durabletask
+    package.
 
     Args:
-        context: The Azure Functions ``DurableOrchestrationContext``.
+        context: The durabletask ``OrchestrationContext`` supplied by the Functions host.
         workflow: The MAF Workflow instance to execute.
         initial_message: Initial message to send to the start executor.
         shared_state: Optional dict for cross-executor state sharing.
@@ -79,5 +85,10 @@ def run_workflow_orchestrator(
         "events": [...]}`` so the parent can bubble nested progress (see the shared
         ``run_workflow_orchestrator`` in the durabletask package).
     """
-    af_ctx = AzureFunctionsWorkflowContext(context)
+    # Azure Functions caps the Durable Functions custom status at 16 KB in the
+    # WebJobs extension, and it exposes no workflow event-streaming endpoint.
+    # Publishing the accumulating event log would overflow that cap and fail the
+    # orchestrator, so events are omitted here; state, pending HITL requests, and
+    # the final output remain available via the workflow status endpoint.
+    af_ctx = DurableTaskWorkflowContext(context, supports_event_streaming=False)
     return _run_workflow_orchestrator_shared(af_ctx, workflow, initial_message, shared_state)

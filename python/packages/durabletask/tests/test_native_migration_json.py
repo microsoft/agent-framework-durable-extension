@@ -27,7 +27,7 @@ from _migration_json_test_support import migration_clock as migration_clock
 @pytest.mark.parametrize("case", ["plain", "dt-false", "dt-true"])
 @pytest.mark.parametrize("location", ["source", "completion"])
 def test_native_migration_preserves_json_and_digest(case: str, location: str, migration_clock: Any) -> None:
-    _assert_ingress_and_retry(_EntityHost("dt"), case, location, migration_clock)
+    _assert_ingress_and_retry(_EntityHost(), case, location, migration_clock)
 
 
 @pytest.mark.parametrize("location", ["source", "source-position", "source-usage", "completion", "completion-content"])
@@ -35,18 +35,18 @@ def test_native_migration_preserves_json_and_digest(case: str, location: str, mi
 def test_native_migration_exact_counters(
     location: str, token: str, expected: int | float | None, migration_clock: Any
 ) -> None:
-    _assert_counter_ingress(_EntityHost("dt"), location, token, expected)
+    _assert_counter_ingress(_EntityHost(), location, token, expected)
 
 
 @pytest.mark.parametrize("location", ["source", "completion"])
 @pytest.mark.parametrize("token", ["1.00000000000000001", "1e-9999999999999999999"])
 def test_native_migration_opaque_numbers(location: str, token: str, migration_clock: Any) -> None:
-    _assert_opaque_counter_ingress(_EntityHost("dt"), location, token)
+    _assert_opaque_counter_ingress(_EntityHost(), location, token)
 
 
 @pytest.mark.parametrize("location", ["source", "completion"])
 def test_native_migration_public_digest_and_float_retry(location: str, migration_clock: Any) -> None:
-    _assert_float_digest_compatibility(_EntityHost("dt"), location)
+    _assert_float_digest_compatibility(_EntityHost(), location)
 
 
 def test_migration_shaped_business_input_keeps_normal_decoding() -> None:
@@ -55,18 +55,18 @@ def test_migration_shaped_business_input_keeps_normal_decoding() -> None:
     from agent_framework_durabletask._json_payload import JsonPayload
 
     wire = '{"source":{"schemaVersion":"1.1.0","data":{"truncation":{"evictedMessageCount":1.00000000000000001}}}}'
-    host = _EntityHost("dt")
+    host = _EntityHost()
     assert host.worker._data_converter.deserialize(wire, JsonPayload) == json.loads(wire)
 
 
 @pytest.mark.parametrize("case", ["plain", "dt-false", "dt-true"])
 def test_native_cold_migration_reset_preserves_results(case: str, migration_clock: Any) -> None:
-    _assert_cold_reset(_EntityHost("dt"), case, migration_clock)
+    _assert_cold_reset(_EntityHost(), case, migration_clock)
 
 
 @pytest.mark.parametrize("change", ["erase-marker", "false-to-zero", "change-value"])
 def test_native_migration_retry_compares_original_json(change: str, migration_clock: Any) -> None:
-    host = _EntityHost("dt")
+    host = _EntityHost()
     request = _request(_payload("dt-false"), "completion")
     before = _json(request)
     assert _json(host.call("migrate", request)) == _json(_MIGRATED)

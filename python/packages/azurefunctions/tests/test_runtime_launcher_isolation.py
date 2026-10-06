@@ -12,9 +12,9 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
-from agent_framework_azurefunctions import AgentFunctionApp
-
 from agent_framework_durabletask import DurableAIAgentWorker
+
+from agent_framework_azurefunctions import AgentFunctionApp
 
 
 def _load(monkeypatch: pytest.MonkeyPatch, package: str) -> Any:

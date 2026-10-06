@@ -13,7 +13,7 @@ Prerequisites:
 - Set FOUNDRY_PROJECT_ENDPOINT and FOUNDRY_MODEL
 - Sign in with Azure CLI (`az login`) for `AzureCliCredential`
 - Redis running (docker run -d --name redis -p 6379:6379 redis:latest)
-- DTS and Azurite running (see parent README)
+- Azurite running (see parent README)
 """
 
 import logging

@@ -7,7 +7,6 @@ from copy import deepcopy
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
-import azure.durable_functions as df
 import pytest
 from _reader_test_support import (
     AGENT_NAME,
@@ -42,8 +41,9 @@ from agent_framework_durabletask import (
     SharedAgentStateReader,
     load_agent_response,
 )
-from azure.durable_functions.models.actions.NoOpAction import NoOpAction
-from azure.durable_functions.models.Task import AtomicTask, TaskState
+from agent_framework_durabletask._json_payload import JsonPayload
+from durabletask.entities import EntityInstanceId
+from durabletask.task import CompletableTask, OrchestrationContext
 from pydantic import BaseModel, RootModel
 
 from agent_framework_azurefunctions import AgentFunctionApp
@@ -93,7 +93,7 @@ async def test_http_shared_success_delivers_snapshot_and_falsey_values(
     assert delivered.additional_properties == {"provider": {"labels": ["response"]}}
     _assert_one_delivery(client, sleep, raw)
     snapshot["additional_properties"]["provider"]["labels"].append("consumer edit")
-    assert client.read_entity_state.return_value.entity_state == raw
+    assert client.get_entity.return_value.get_state() == raw
 
 
 @pytest.mark.parametrize("value", [None, False, 0, "", [], {}])
@@ -255,7 +255,7 @@ async def test_existing_malformed_state_is_not_normalized_or_polled_until_timeou
 ) -> None:
     direct_client = _client(raw)
     with pytest.raises(ValueError):
-        await app._read_cached_state(direct_client, df.EntityId(f"dafx-{AGENT_NAME}", SESSION_ID))
+        await app._read_cached_state(direct_client, EntityInstanceId(f"dafx-{AGENT_NAME}", SESSION_ID))
     client = _client(raw)
 
     response = await handlers[0](_request(), client)
@@ -271,14 +271,14 @@ async def test_transport_read_failure_retains_bounded_retries(
     handlers: tuple[HttpHandler, McpHandler], sleep: AsyncMock
 ) -> None:
     client = _client({})
-    client.read_entity_state.side_effect = OSError("Storage read failed")
+    client.get_entity.side_effect = OSError("Storage read failed")
 
     response = await handlers[0](_request(), client)
 
     assert response.status_code == 500
     payload = json.loads(response.get_body())
     assert payload["status"] == "timeout"
-    assert client.read_entity_state.await_count == 3
+    assert client.get_entity.await_count == 3
     assert sleep.await_count == 3
 
 
@@ -296,9 +296,10 @@ async def test_only_absent_completion_keeps_polling(
     response = await handlers[0](_request(), client)
 
     assert response.status_code == 500 and json.loads(response.get_body())["status"] == "timeout"
-    assert client.read_entity_state.await_count == 3 and sleep.await_count == 3
+    assert client.get_entity.await_count == 3 and sleep.await_count == 3
     client.signal_entity.assert_awaited_once()
-    assert client.read_entity_state.return_value.entity_state == raw
+    stored = client.get_entity.return_value
+    assert (stored is None) if kind == "missing" else (stored.get_state() == raw)
 
 
 @pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
@@ -332,7 +333,7 @@ async def test_read_cached_state_uses_shared_view_with_canonical_writer_and_expl
     raw = _shared_state()
     client = _client(json.dumps(raw) if encoded else raw)
 
-    state = await app._read_cached_state(client, df.EntityId(f"dafx-{AGENT_NAME}", SESSION_ID))
+    state = await app._read_cached_state(client, EntityInstanceId(f"dafx-{AGENT_NAME}", SESSION_ID))
 
     assert isinstance(state, SharedAgentStateReader) and not isinstance(state, DurableAgentState)
     assert state.to_dict() == raw
@@ -358,7 +359,7 @@ async def test_read_cached_legacy_state_uses_compatibility_reader_without_migrat
     stored = json.dumps(raw) if encoded else raw
     client = _client(stored)
 
-    state = await app._read_cached_state(client, df.EntityId(f"dafx-{AGENT_NAME}", SESSION_ID))
+    state = await app._read_cached_state(client, EntityInstanceId(f"dafx-{AGENT_NAME}", SESSION_ID))
 
     assert isinstance(state, LegacyDurableAgentState)
     assert not isinstance(state, (DurableAgentState, SharedAgentStateReader))
@@ -368,7 +369,7 @@ async def test_read_cached_legacy_state_uses_compatibility_reader_without_migrat
     assert state.to_dict()["schemaVersion"] == version
     assert "terminalResults" not in state.to_dict()["data"]
     assert "completionReceipts" not in state.to_dict()["data"]
-    assert client.read_entity_state.return_value.entity_state == stored
+    assert client.get_entity.return_value.get_state() == stored
     client.signal_entity.assert_not_awaited()
 
 
@@ -392,7 +393,7 @@ async def test_fire_and_forget_http_remains_202_without_state_read(
             "correlation_id": CORRELATION_ID,
         }
     client.signal_entity.assert_awaited_once()
-    client.read_entity_state.assert_not_awaited()
+    client.get_entity.assert_not_awaited()
     sleep.assert_not_awaited()
 
 
@@ -445,10 +446,10 @@ async def test_http_snapshot_reaches_public_proxy_typed_task_without_reparsing_t
     assert http_response.status_code == 200
     payload = json.loads(http_response.get_body())["agent_response"]
     before = deepcopy(payload)
-    child = AtomicTask(7, NoOpAction())
+    child: CompletableTask[Any] = CompletableTask()
     if precompleted:
-        child.set_value(is_error=False, value=payload)
-    context = Mock(spec=df.DurableOrchestrationContext)
+        child.complete(payload)
+    context = Mock(spec=OrchestrationContext)
     context.instance_id = "shared-orchestration"
     context.new_uuid.side_effect = [SESSION_ID, CORRELATION_ID]
     context.call_entity.return_value = child
@@ -458,17 +459,20 @@ async def test_http_snapshot_reaches_public_proxy_typed_task_without_reparsing_t
 
     context.call_entity.assert_called_once()
     entity_id, operation, request = context.call_entity.call_args.args
-    assert entity_id.name == f"dafx-{AGENT_NAME}" and entity_id.key == SESSION_ID
+    assert context.call_entity.call_args.kwargs == {"return_type": JsonPayload}
+    assert entity_id.entity == f"dafx-{AGENT_NAME}" and entity_id.key == SESSION_ID
     assert operation == "run" and request["correlationId"] == CORRELATION_ID
     assert request["orchestrationId"] == "shared-orchestration"
     context.signal_entity.assert_not_called()
     if not precompleted:
-        assert task.state is TaskState.RUNNING
-        child.set_value(is_error=False, value=payload)
-    assert task.state is TaskState.SUCCEEDED and isinstance(task.result, AgentResponse)
-    assert isinstance(task.result.value, response_format)
-    assert task.result.value.model_dump(mode="json") == value
-    assert child.result is payload and payload == before
+        assert not task.is_complete
+        child.complete(payload)
+    assert task.is_complete and not task.is_failed
+    result = task.get_result()
+    assert isinstance(result, AgentResponse)
+    assert isinstance(result.value, response_format)
+    assert result.value.model_dump(mode="json") == value
+    assert child.get_result() is payload and payload == before
     _assert_one_delivery(client, sleep, raw)
 
 
@@ -480,9 +484,7 @@ async def test_http_shared_value_policy_survives_loading_and_typed_task_delivery
     handlers: tuple[HttpHandler, McpHandler],
     sleep: AsyncMock,
 ) -> None:
-    from agent_framework_durabletask import ensure_response_format, serialize_agent_response
-
-    from agent_framework_azurefunctions._orchestration import AgentTask
+    from agent_framework_durabletask import DurableAgentTask, ensure_response_format, serialize_agent_response
 
     stored = _wire_response('{"answer":42}')
     values = {
@@ -510,19 +512,19 @@ async def test_http_shared_value_policy_survives_loading_and_typed_task_delivery
         else:
             with pytest.raises(ValueError, match="no structured value|cannot preserve"):
                 ensure_response_format(response_format, CORRELATION_ID, direct)
-        child = AtomicTask(7, NoOpAction())
+        child: CompletableTask[Any] = CompletableTask()
         if precompleted:
-            child.set_value(is_error=False, value=deepcopy(snapshot))
-        task = AgentTask(child, response_format, CORRELATION_ID)
+            child.complete(deepcopy(snapshot))
+        task = DurableAgentTask(child, response_format, CORRELATION_ID)
         if not precompleted:
-            child.set_value(is_error=False, value=deepcopy(snapshot))
-        assert task.state is (TaskState.SUCCEEDED if valid else TaskState.FAILED)
+            child.complete(deepcopy(snapshot))
+        assert task.is_complete and task.is_failed is not valid
         # A second consumer serialization must not remove the policy either.
         snapshot = json.loads(json.dumps(serialize_agent_response(load_agent_response(snapshot))))
         assert ("value" in snapshot) is (shape != "absent")
         if shape != "absent":
             assert snapshot["value"] == values[shape]
-    assert client.read_entity_state.return_value.entity_state == raw
+    assert client.get_entity.return_value.get_state() == raw
     assert json.loads(http.get_body())["agent_response"] == original_snapshot
     _assert_one_delivery(client, sleep, raw)
 

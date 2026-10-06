@@ -17,8 +17,8 @@ Prerequisites:
 - Azurite running for durable orchestrations
 - Durable Task Scheduler emulator running on localhost:8080
 
-Usage:
-    uv run pytest packages/azurefunctions/tests/integration_tests/test_13_workflow_subworkflow_hitl.py -v
+Usage (from python/packages/azurefunctions):
+    uv run pytest tests/integration_tests/test_13_workflow_subworkflow_hitl.py -v
 """
 
 import time

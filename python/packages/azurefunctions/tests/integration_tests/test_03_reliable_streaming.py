@@ -7,12 +7,12 @@ Tests the reliable streaming sample using Redis Streams for persistent message d
 The function app is automatically started by the test fixture.
 
 Prerequisites:
-- Azure OpenAI credentials configured (see packages/azurefunctions/tests/integration_tests/.env.example)
+- Azure OpenAI credentials configured (see tests/integration_tests/.env.example)
 - Azurite or Azure Storage account configured
 - Redis running (docker run -d --name redis -p 6379:6379 redis:latest)
 
-Usage:
-    uv run pytest packages/azurefunctions/tests/integration_tests/test_03_reliable_streaming.py -v
+Usage (from python/packages/azurefunctions):
+    uv run pytest tests/integration_tests/test_03_reliable_streaming.py -v
 """
 
 import time

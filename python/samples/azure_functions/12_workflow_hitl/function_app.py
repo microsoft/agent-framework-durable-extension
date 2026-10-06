@@ -21,7 +21,7 @@ Key architectural points:
 
 Prerequisites:
 - Configure `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`
-- Durable Task Scheduler connection string
+- Azurite running (see parent README)
 - Authentication via Azure CLI (az login)
 """
 

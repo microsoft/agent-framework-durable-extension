@@ -13,7 +13,7 @@ workflow state.
 Prerequisites:
 - Configure `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`
 - Sign in with Azure CLI (`az login`) for `AzureCliCredential`
-- Ensure Azurite and the Durable Task Scheduler emulator are running
+- Ensure Azurite is running
 """
 
 import logging
