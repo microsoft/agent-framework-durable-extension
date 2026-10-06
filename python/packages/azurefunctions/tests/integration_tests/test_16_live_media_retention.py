@@ -252,8 +252,6 @@ def _prepare(app: Path, session: str, hub: str) -> dict[str, str]:
     (app / "host.json").write_text(
         json.dumps({
             "version": "2.0",
-            # The stable bundle's durable extension advertises its gRPC endpoint in a form the
-            # azure-functions-durable 2.x client cannot parse, so use the preview bundle like the samples.
             "extensionBundle": {"id": "Microsoft.Azure.Functions.ExtensionBundle", "version": "[4.38.1, 5.0.0)"},
             "extensions": {"durableTask": {"hubName": hub, "storageProvider": {"type": "AzureStorage"}}},
             "logging": {"logLevel": {"default": "Warning"}},
