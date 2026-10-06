@@ -142,46 +142,27 @@ def test_serialization_cannot_change_shared_value_or_presence(mutation: str) -> 
     assert raw == before
 
 
-UNTYPED_CONSUMERS = [("direct", False), ("dt", False), ("dt", True), ("af", False), ("af", True)]
+UNTYPED_CONSUMERS = [("direct", False), ("dt", False), ("dt", True)]
 
 
 def _untyped_delivery(raw: dict[str, Any], consumer: str, precompleted: bool) -> AgentResponse[Any]:
     """Use real SDK completion, with no requested format to hide an embedded parser."""
     if consumer == "direct":
         return load_agent_response(raw)
-    if consumer == "dt":
-        child: CompletableTask[Any] = CompletableTask()
-        if precompleted:
-            child.complete(raw)
-        task = DurableAgentTask(child, None, "value-policy")
-        if not precompleted:
-            assert not task.is_complete
-            child.complete(raw)
-        assert task.is_complete and child.get_result() is raw
-        if task.is_failed:
-            failure = task.get_exception()
-            assert failure.details.error_type == "ValueError"
-            raise ValueError(failure.details.message) from failure
-        return task.get_result()
-
-    from agent_framework_azurefunctions._orchestration import AgentTask
-    from azure.durable_functions.models.actions.NoOpAction import NoOpAction
-    from azure.durable_functions.models.Task import AtomicTask, TaskState
-
-    assert consumer == "af"
-    af_child = AtomicTask(7, NoOpAction())
+    assert consumer == "dt"
+    child: CompletableTask[Any] = CompletableTask()
     if precompleted:
-        af_child.set_value(is_error=False, value=raw)
-    af_task = AgentTask(af_child, None, "value-policy")
+        child.complete(raw)
+    task = DurableAgentTask(child, None, "value-policy")
     if not precompleted:
-        assert af_task.state is TaskState.RUNNING
-        af_child.set_value(is_error=False, value=raw)
-    assert af_child.state is TaskState.SUCCEEDED and af_child.result is raw
-    if af_task.state is TaskState.FAILED:
-        assert type(af_task.result) is ValueError
-        raise af_task.result
-    assert af_task.state is TaskState.SUCCEEDED and type(af_task.result) is AgentResponse
-    return af_task.result
+        assert not task.is_complete
+        child.complete(raw)
+    assert task.is_complete and child.get_result() is raw
+    if task.is_failed:
+        failure = task.get_exception()
+        assert failure.details.error_type == "ValueError"
+        raise ValueError(failure.details.message) from failure
+    return task.get_result()
 
 
 @pytest.mark.parametrize(("consumer", "precompleted"), UNTYPED_CONSUMERS)

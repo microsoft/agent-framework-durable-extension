@@ -384,21 +384,21 @@ persist cleanup. `reset` clears local transcript and session state while preserv
 receipts and live results. External-primary reset is rejected without a provider-owned clear
 operation.
 
-Generated standalone agent entities support only `run`, `reset`, `expire_responses`, `migrate`
-and administrative `delete`. Raw state setters and implementation helpers are not operations.
-Direct callers must use `run`, not `run_agent`. The Functions 1.x host is unchanged here.
+Generated agent entities on both Python hosts support only `run`, `reset`, `expire_responses`,
+`migrate` and `delete`. Raw state setters and implementation helpers are not entity operations.
+The deprecated `run_agent` operation has been removed; direct callers must use `run`.
 
 `reset` returns no value. `expire_responses` returns the integer number of expired delivery
 payloads removed by that execution, or zero for a successful no-op. Failures use the SDK operation
 failure channel. A completed call acknowledges execution; a signal acknowledges only enqueueing.
 The expiry count is not an idempotent receipt: an execution can remove payloads and lose its reply,
-then a retry can return zero.
+then a retry can return zero. Both hosts use these native results rather than host-specific wrappers.
 
 `delete` is a privileged administrative operation that removes the entire entity, including
-conversation state, live results, completion receipts and ingestion evidence. It is not reset
-or expiry. Reusing that key no longer benefits from previous duplicate-run protection, and queued
-operations can recreate the entity. Operators must quiesce and fence callers when deletion must
-be final.
+conversation state, live results, completion receipts and ingestion evidence. It is not a reset
+or expiry operation. Reusing that entity key no longer benefits from its previous duplicate-run
+protection, and queued operations can recreate it. Operators must quiesce and fence callers when
+deletion must be final. Generated HTTP and MCP routes do not expose these maintenance operations.
 
 At or after a delivery deadline, lookup reports completion with its retained outcome, even before
 physical cleanup. It never returns the expired payload, reports pending work, reruns the request or

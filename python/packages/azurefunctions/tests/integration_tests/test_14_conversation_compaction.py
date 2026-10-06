@@ -15,8 +15,8 @@ Prerequisites:
 - FOUNDRY_PROJECT_ENDPOINT and FOUNDRY_MODEL configured, with Azure CLI authentication
 - Azure Functions Core Tools, Durable Task Scheduler, and Azurite or Azure Storage configured
 
-Usage:
-    uv run pytest packages/azurefunctions/tests/integration_tests/test_14_conversation_compaction.py -v
+Usage (from python/packages/azurefunctions):
+    uv run pytest tests/integration_tests/test_14_conversation_compaction.py -v
 """
 
 import json

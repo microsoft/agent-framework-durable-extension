@@ -46,21 +46,26 @@ This sample showcases three different parallel execution patterns:
 ## How Parallel Execution Works
 
 ### Activities (Executors)
-When multiple executors are pending in the same iteration (e.g., after a fan-out edge), they are batched and executed using `task_all()`:
+When multiple executors are pending in the same iteration (e.g., after a fan-out edge), they are batched and executed using `when_all()`:
 
 ```python
-# In _workflow.py - activities execute in parallel
-activity_tasks = [context.call_activity("ExecuteExecutor", input) for ...]
-results = yield context.task_all(activity_tasks)  # All run concurrently!
+from durabletask.task import when_all
+
+activity_tasks = [
+   context.call_activity("ExecuteExecutor", input=executor_input)
+   for executor_input in executor_inputs
+]
+results = yield when_all(activity_tasks)
 ```
 
 ### Agents (Entities)
 Different agents can also run in parallel when they're pending in the same iteration:
 
 ```python
-# Different agents run in parallel
-agent_tasks = [agent_a.run(...), agent_b.run(...)]
-responses = yield context.task_all(agent_tasks)  # Both agents run concurrently!
+from durabletask.task import when_all
+
+agent_tasks = [agent_a.run(message), agent_b.run(message)]
+responses = yield when_all(agent_tasks)
 ```
 
 **Note:** Multiple messages to the *same* agent are processed sequentially to maintain conversation coherence.
@@ -84,8 +89,7 @@ responses = yield context.task_all(agent_tasks)  # Both agents run concurrently!
 ## Prerequisites
 
 1. **Azure AI Foundry** - Project endpoint and model configured
-2. **DTS Emulator** - For durable task scheduling (recommended)
-3. **Azurite** - For Azure Functions internal storage
+2. **Azurite** - For Azure Functions and Durable Functions storage
 
 ## Setup
 
@@ -133,17 +137,12 @@ The sample can run locally without Azure Functions infrastructure using DevUI:
    pip install -r requirements.txt
    ```
 
-4. Start DTS Emulator:
-   ```bash
-   docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 mcr.microsoft.com/dts/dts-emulator:latest
-   ```
-
-5. Start Azurite (or use VS Code extension):
+4. Start Azurite (or use VS Code extension):
    ```bash
    azurite --silent
    ```
 
-6. Run the function app (ensure `durable=True` in `function_app.py`):
+5. Run the function app (ensure `durable=True` in `function_app.py`):
    ```bash
    func start
    ```
@@ -169,7 +168,9 @@ curl http://localhost:7071/api/workflow/parallel_review/status/{instanceId}
 
 ## Observing Parallel Execution
 
-Open the DTS Dashboard at `http://localhost:8082` to observe:
+If you run the sample on the
+[optional Durable Task Scheduler backend](../README.md#optional-durable-task-scheduler-backend),
+open the DTS dashboard at `http://localhost:8082` to observe:
 
 1. **Activity Execution Timeline** - You'll see `word_count_processor` and `format_analyzer_processor` starting at approximately the same time
 2. **Agent Execution Timeline** - `SentimentAnalysisAgent` and `KeywordExtractionAgent` also start concurrently

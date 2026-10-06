@@ -15,7 +15,6 @@ import pytest
 from _execution_test_support import NonStreamingAgent, RecordingChatClient
 from _migration_json_test_support import _EntityHost
 from agent_framework import Agent, AgentExecutor, BaseChatClient, ChatResponse, Message, Workflow, WorkflowBuilder
-from agent_framework_azurefunctions import AgentFunctionApp
 from durabletask.entities import EntityContext, EntityInstanceId
 from durabletask.internal.entity_state_shim import StateShim
 from durabletask.serialization import JsonDataConverter
@@ -47,6 +46,80 @@ def test_workflow_context_keeps_event_streaming_enabled_by_default() -> None:
 def test_workflow_context_can_select_host_event_streaming(enabled: bool) -> None:
     context = DurableTaskWorkflowContext(Mock(), supports_event_streaming=enabled)
     assert context.supports_event_streaming is enabled
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "set_state",
+        "_set_state_dict",
+        "get_state",
+        "_get_state_dict",
+        "persist_state",
+        "_initialize_entity_context",
+        "signal_entity",
+        "schedule_new_orchestration",
+        "__init__",
+        "__class__",
+    ],
+)
+def test_registered_entity_rejects_implementation_operations_without_writes(operation: str) -> None:
+    host = _EntityHost()
+    host.raw = json.dumps(_delivery_state())
+    before = host.raw
+
+    with pytest.raises(ValueError, match="Agent entity operation .* is not supported"):
+        host.call(operation, {} if operation in ("set_state", "_set_state_dict") else None)
+
+    assert host.shim.encode_state() == before
+    host.assert_writes(0)
+    host.assert_idle()
+
+
+def test_registered_entity_rejects_removed_run_agent_alias() -> None:
+    host = _EntityHost()
+    host.raw = json.dumps(_delivery_state())
+    before = host.raw
+
+    with pytest.raises(AttributeError, match="does not have operation 'run_agent'"):
+        host.call("run_agent", {"message": "ignored", "correlationId": "removed"})
+
+    assert host.shim.encode_state() == before
+    host.assert_writes(0)
+    host.assert_idle()
+
+
+def test_registered_entity_maintenance_results_and_delete_contract() -> None:
+    host = _EntityHost()
+    now = datetime.now(timezone.utc)
+    raw = _delivery_state(correlation_id="expired", expires_at=now - timedelta(days=1))
+    live = _delivery_state(correlation_id="live", expires_at=now + timedelta(days=1))
+    for field in ("terminalResults", "completionReceipts"):
+        raw["data"][field].update(live["data"][field])
+    raw["data"]["conversationHistory"] = [
+        {
+            "$type": "request",
+            "correlationId": "historical",
+            "createdAt": now.isoformat(),
+            "messages": [{"role": "user", "contents": [{"$type": "text", "text": "old turn"}]}],
+        }
+    ]
+    host.raw = json.dumps(raw)
+
+    assert host.call("expire_responses") == 1
+    assert host.call("expire_responses") == 0
+    before_reset = host.snapshot()["data"]
+    assert before_reset["conversationHistory"] == raw["data"]["conversationHistory"]
+    assert before_reset["completionReceipts"]["expired"]["resultState"] == "unavailable"
+    assert host.call("reset") is None
+    after_reset = host.snapshot()["data"]
+    assert after_reset["conversationHistory"] == []
+    assert after_reset.get("session") is None
+    assert after_reset["terminalResults"] == before_reset["terminalResults"]
+    assert after_reset["completionReceipts"] == before_reset["completionReceipts"]
+    assert host.call("delete") is None
+    assert host.raw is None
+    host.assert_idle()
 
 
 class _CoreClient(BaseChatClient):
@@ -130,80 +203,6 @@ def _agent(name: str, *, client: BaseChatClient | None = None) -> Agent:
 def _workflow(name: str, executor_id: str, *, agent_name: str | None = None) -> Workflow:
     executor = AgentExecutor(agent=_agent(agent_name or executor_id), id=executor_id)
     return WorkflowBuilder(name=name, start_executor=executor, output_from=[executor]).build()
-
-
-@pytest.mark.parametrize(
-    "operation",
-    [
-        "set_state",
-        "_set_state_dict",
-        "get_state",
-        "_get_state_dict",
-        "persist_state",
-        "_initialize_entity_context",
-        "signal_entity",
-        "schedule_new_orchestration",
-        "__init__",
-        "__class__",
-    ],
-)
-def test_registered_entity_rejects_implementation_operations_without_writes(operation: str) -> None:
-    host = _EntityHost("dt")
-    host.raw = json.dumps(_delivery_state())
-    before = host.raw
-
-    with pytest.raises(ValueError, match="Agent entity operation .* is not supported"):
-        host.call(operation, {} if operation in ("set_state", "_set_state_dict") else None)
-
-    assert host.shim.encode_state() == before
-    host.assert_writes(0)
-    host.assert_idle()
-
-
-def test_registered_entity_rejects_unsupported_run_agent_alias() -> None:
-    host = _EntityHost("dt")
-    host.raw = json.dumps(_delivery_state())
-    before = host.raw
-
-    with pytest.raises(AttributeError, match="does not have operation 'run_agent'"):
-        host.call("run_agent", {"message": "ignored", "correlationId": "unsupported"})
-
-    assert host.shim.encode_state() == before
-    host.assert_writes(0)
-    host.assert_idle()
-
-
-def test_registered_entity_maintenance_results_and_delete_contract() -> None:
-    host = _EntityHost("dt")
-    now = datetime.now(timezone.utc)
-    raw = _delivery_state(correlation_id="expired", expires_at=now - timedelta(days=1))
-    live = _delivery_state(correlation_id="live", expires_at=now + timedelta(days=1))
-    for field in ("terminalResults", "completionReceipts"):
-        raw["data"][field].update(live["data"][field])
-    raw["data"]["conversationHistory"] = [
-        {
-            "$type": "request",
-            "correlationId": "historical",
-            "createdAt": now.isoformat(),
-            "messages": [{"role": "user", "contents": [{"$type": "text", "text": "old turn"}]}],
-        }
-    ]
-    host.raw = json.dumps(raw)
-
-    assert host.call("expire_responses") == 1
-    assert host.call("expire_responses") == 0
-    before_reset = host.snapshot()["data"]
-    assert before_reset["conversationHistory"] == raw["data"]["conversationHistory"]
-    assert before_reset["completionReceipts"]["expired"]["resultState"] == "unavailable"
-    assert host.call("reset") is None
-    after_reset = host.snapshot()["data"]
-    assert after_reset["conversationHistory"] == []
-    assert after_reset.get("session") is None
-    assert after_reset["terminalResults"] == before_reset["terminalResults"]
-    assert after_reset["completionReceipts"] == before_reset["completionReceipts"]
-    assert host.call("delete") is None
-    assert host.raw is None
-    host.assert_idle()
 
 
 async def test_sdk_state_cold_reload_preserves_session_continuity_and_canonical_history() -> None:
@@ -358,51 +357,3 @@ def test_worker_rejects_shared_workflow_delivery_window_mismatch_before_partial_
 
     assert len(native.add_orchestrator.call_args_list) == 1
     assert len(native.add_entity.call_args_list) == 1
-
-
-def test_app_constructor_requires_explicit_isolated_v2_when_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DURABLE_AGENTS_DEPLOYMENT_MODE", raising=False)
-    with pytest.raises(ValueError, match="Schema 2 requires an isolated task hub/deployment"):
-        AgentFunctionApp(enable_health_check=False)
-
-
-@pytest.mark.parametrize("value", ["legacy", "isolated", "", "ISOLATED_V2"])
-def test_app_constructor_rejects_invalid_deployment_mode_values(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
-    monkeypatch.delenv("DURABLE_AGENTS_DEPLOYMENT_MODE", raising=False)
-    with pytest.raises(ValueError, match="no other deployment mode is accepted"):
-        AgentFunctionApp(enable_health_check=False, deployment_mode=value)
-
-
-def test_app_constructor_accepts_explicit_isolated_v2_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DURABLE_AGENTS_DEPLOYMENT_MODE", raising=False)
-    app = AgentFunctionApp(enable_health_check=False, deployment_mode="isolated_v2")
-    assert app._deployment_mode == "isolated_v2"
-
-
-@pytest.mark.parametrize("value", ["legacy", "isolated", "", "ISOLATED_V2"])
-def test_app_constructor_rejects_invalid_deployment_environment(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
-    monkeypatch.setenv("DURABLE_AGENTS_DEPLOYMENT_MODE", value)
-    with pytest.raises(ValueError, match="no other deployment mode is accepted"):
-        AgentFunctionApp(enable_health_check=False)
-
-
-@pytest.mark.parametrize(
-    ("value", "valid"),
-    [
-        pytest.param(True, False, id="bool-true"),
-        pytest.param(False, False, id="bool-false"),
-        pytest.param(17, True, id="int"),
-        pytest.param("17", False, id="string"),
-    ],
-)
-def test_app_constructor_delivery_window_matrix_matches_configuration(value: Any, valid: bool) -> None:
-    if valid:
-        app = AgentFunctionApp(
-            enable_health_check=False, deployment_mode="isolated_v2", response_delivery_window_seconds=value
-        )
-        assert app._response_delivery_window_seconds == value
-    else:
-        with pytest.raises(ValueError, match="positive integer"):
-            AgentFunctionApp(
-                enable_health_check=False, deployment_mode="isolated_v2", response_delivery_window_seconds=value
-            )  # type: ignore[arg-type]

@@ -4,6 +4,7 @@
 
 import json
 import logging
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, call
@@ -12,6 +13,9 @@ import azure.durable_functions as df
 import azure.functions as func
 import pytest
 from agent_framework_durabletask import read_agent_state
+from azure.durable_functions.http.builtin import BUILTIN_HTTP_ACTIVITY_NAME, BUILTIN_HTTP_POLL_ORCHESTRATOR_NAME
+from durabletask.entities import EntityInstanceId, EntityMetadata
+from durabletask.serialization import DEFAULT_DATA_CONVERTER
 
 from agent_framework_azurefunctions import AgentFunctionApp
 from agent_framework_azurefunctions import _app as af_app
@@ -60,7 +64,8 @@ def registered(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(af_app.asyncio, "sleep", sleeper)
     app.add_agent(agent, enable_http_endpoint=True, enable_mcp_tool_trigger=True)
     functions = {item.get_function_name(): item for item in cast(Any, app).get_functions()}
-    assert set(functions) == {f"dafx-{AGENT}", f"http-{AGENT}", f"mcptool-{AGENT}"}
+    builtins = {BUILTIN_HTTP_ACTIVITY_NAME, BUILTIN_HTTP_POLL_ORCHESTRATOR_NAME}
+    assert set(functions) - builtins == {f"dafx-{AGENT}", f"http-{AGENT}", f"mcptool-{AGENT}"}
     assert functions[f"http-{AGENT}"].get_trigger().get_dict_repr()["route"] == f"agents/{AGENT}/run"
     assert functions[f"mcptool-{AGENT}"].get_trigger().get_binding_name() == "mcpToolTrigger"
     # Only bypass SDK rich-client construction to inject storage, not registration.
@@ -70,14 +75,23 @@ def registered(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     return SimpleNamespace(http=http, mcp=mcp, sleep=sleeper, agent=agent)
 
 
+def _entity(state: Any) -> EntityMetadata:
+    return EntityMetadata(
+        id=EntityInstanceId(entity=f"dafx-{AGENT}", key=SESSION),
+        last_modified=datetime(2026, 9, 23, tzinfo=timezone.utc),
+        backlog_queue_size=0,
+        locked_by="",
+        includes_state=True,
+        state=state,
+        data_converter=DEFAULT_DATA_CONVERTER,
+    )
+
+
 def _storage(*states: Any) -> Mock:
-    client = Mock(spec=df.DurableOrchestrationClient)
+    client = Mock(spec=df.DurableFunctionsClient)
     client.signal_entity = AsyncMock()
-    client.read_entity_state = AsyncMock(
-        side_effect=[
-            state if isinstance(state, Exception) else SimpleNamespace(entity_exists=True, entity_state=state)
-            for state in states
-        ]
+    client.get_entity = AsyncMock(
+        side_effect=[state if isinstance(state, Exception) else _entity(state) for state in states]
     )
     return client
 
@@ -104,9 +118,9 @@ async def _invoke(registered: SimpleNamespace, client: Mock, surface: str) -> tu
 def _assert_polls(registered: SimpleNamespace, client: Mock, count: int) -> None:
     client.signal_entity.assert_awaited_once()
     entity, operation, request = client.signal_entity.call_args.args
-    assert entity.name == f"dafx-{AGENT}" and entity.key == SESSION
+    assert entity.entity == f"dafx-{AGENT}" and entity.key == SESSION
     assert operation == "run" and request["correlationId"] == CORRELATION and request["message"] == "question"
-    assert client.read_entity_state.await_args_list == [call(entity)] * count
+    assert client.get_entity.await_args_list == [call(entity)] * count
     assert registered.sleep.await_args_list == [call(0.01)] * count
     registered.agent.run.assert_not_called()
 
