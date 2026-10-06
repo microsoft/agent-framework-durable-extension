@@ -1458,7 +1458,7 @@ def create_agent_entity_class(
 ) -> type[DurableTaskEntityStateProvider]:
     """Build a ``DurableEntity`` subclass bound to a specific agent instance.
 
-    Both hosts register the same entity implementation: the standalone DurableTask
+    Both hosts can register the same entity implementation: the standalone DurableTask
     worker passes the class to ``TaskHubGrpcWorker.add_entity``, and the Azure
     Functions host passes it to ``DFApp.entity_trigger`` (azure-functions-durable 2.x
     accepts a class-based ``DurableEntity`` as well as a function).

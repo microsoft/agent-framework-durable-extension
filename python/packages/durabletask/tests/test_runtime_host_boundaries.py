@@ -23,6 +23,7 @@ from agent_framework_durabletask import (
     AgentEntity,
     DurableAgentState,
     DurableAIAgentWorker,
+    DurableTaskWorkflowContext,
     load_agent_response,
 )
 from agent_framework_durabletask._entities import create_agent_entity_class
@@ -35,6 +36,16 @@ def test_entity_factory_is_internal() -> None:
 
     assert "create_agent_entity_class" not in agent_framework_durabletask.__all__
     assert not hasattr(agent_framework_durabletask, "create_agent_entity_class")
+
+
+def test_workflow_context_keeps_event_streaming_enabled_by_default() -> None:
+    assert DurableTaskWorkflowContext(Mock()).supports_event_streaming is True
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_workflow_context_can_select_host_event_streaming(enabled: bool) -> None:
+    context = DurableTaskWorkflowContext(Mock(), supports_event_streaming=enabled)
+    assert context.supports_event_streaming is enabled
 
 
 class _CoreClient(BaseChatClient):
