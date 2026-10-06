@@ -180,11 +180,20 @@ def test_registered_entity_maintenance_results_and_delete_contract() -> None:
     live = _delivery_state(correlation_id="live", expires_at=now + timedelta(days=1))
     for field in ("terminalResults", "completionReceipts"):
         raw["data"][field].update(live["data"][field])
+    raw["data"]["conversationHistory"] = [
+        {
+            "$type": "request",
+            "correlationId": "historical",
+            "createdAt": now.isoformat(),
+            "messages": [{"role": "user", "contents": [{"$type": "text", "text": "old turn"}]}],
+        }
+    ]
     host.raw = json.dumps(raw)
 
     assert host.call("expire_responses") == 1
     assert host.call("expire_responses") == 0
     before_reset = host.snapshot()["data"]
+    assert before_reset["conversationHistory"] == raw["data"]["conversationHistory"]
     assert before_reset["completionReceipts"]["expired"]["resultState"] == "unavailable"
     assert host.call("reset") is None
     after_reset = host.snapshot()["data"]
