@@ -29,12 +29,12 @@ from _af_handler_test_support import (
     _completed,
     _entity_function,
     _Host,
+    _MemoryPayloadStore,
     _NonStreamingAgent,
-    _result,
     _succeeded,
     _worker,
 )
-from _af_worker_test_support import FUNCTIONS_FRAMEWORK_CONVERTER, _event_wire_value, _orchestration_state
+from _af_worker_test_support import FUNCTIONS_FRAMEWORK_CONVERTER, _event_wire_value
 from agent_framework import (
     Executor,
     WorkflowBuilder,
@@ -48,12 +48,13 @@ from agent_framework_durabletask._json_payload import JsonMigration, JsonPayload
 from agent_framework_durabletask._workflows.dt_context import DurableTaskWorkflowContext
 from azure.durable_functions.decorators.metadata import OrchestrationTrigger
 from azure.durable_functions.http.builtin import BUILTIN_HTTP_POLL_ORCHESTRATOR_NAME
+from azure.durable_functions.internal import payloads as sdk_payloads
 from azure.durable_functions.internal.compat.orchestration_context import wrap_orchestrator
 from azure.durable_functions.internal.serialization import DEFAULT_FUNCTIONS_DATA_CONVERTER
 from azure.functions.decorators.function_app import FunctionBuilder
-from durabletask.client import OrchestrationStatus
 from durabletask.internal import helpers, type_discovery
 from durabletask.internal import orchestrator_service_pb2 as pb
+from durabletask.payload import deexternalize_payloads, externalize_payloads
 from typing_extensions import Never
 
 from agent_framework_azurefunctions._app import _install_framework_json_decoding
@@ -91,6 +92,54 @@ def _reset_probe() -> None:
 
 def _assert_json(actual: Any, expected: Any) -> None:
     assert json.dumps(actual, sort_keys=True, allow_nan=False) == json.dumps(expected, sort_keys=True, allow_nan=False)
+
+
+@pytest.fixture(params=[False, True], ids=["inline", "offloaded"])
+def _payload_storage(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> _MemoryPayloadStore | None:
+    monkeypatch.setattr(sdk_payloads, "_payload_store", None)
+    if not request.param:
+        return None
+    store = _MemoryPayloadStore()
+    _app().configure_large_payloads(payload_store=store)
+    return store
+
+
+def _stored_wire(value: str) -> str:
+    store = sdk_payloads.get_transport_payload_store()
+    request = pb.ActivityRequest(input=helpers.get_string_value(value))
+    if store is not None:
+        externalize_payloads(request, store)
+    return request.input.value
+
+
+def _raw_wire(value: str) -> str:
+    store = sdk_payloads.get_transport_payload_store()
+    request = pb.ActivityRequest(input=helpers.get_string_value(value))
+    if store is not None:
+        deexternalize_payloads(request, store)
+    return request.input.value
+
+
+def _load_wire(value: str) -> Any:
+    return json.loads(_raw_wire(value)) if value else None
+
+
+def test_large_payload_configuration_keeps_workers_and_is_process_wide(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sdk_payloads, "_payload_store", None)
+    app = _app(agents=[_NonStreamingAgent(client=_Client(None), name="json-agent")])
+    functions = {function.get_function_name(): function for function in app.get_functions()}
+    agent = _entity_function(functions, "dafx-json-agent")
+    worker = _worker(agent)
+    converter = worker._data_converter
+    store = _MemoryPayloadStore()
+
+    app.configure_large_payloads(payload_store=store)
+    app.configure_large_payloads(payload_store=store)
+
+    assert sdk_payloads.get_payload_store() is store
+    assert worker._data_converter is converter
+    with pytest.raises(ValueError, match="different payload store"):
+        app.configure_large_payloads(payload_store=_MemoryPayloadStore())
 
 
 class _Echo(Executor):
@@ -308,7 +357,9 @@ def test_generated_agent_maintenance_results_and_delete_contract() -> None:
 
 
 @pytest.mark.parametrize("nested", [False, True], ids=["root", "child"])
-def test_generated_workflow_start_and_child_result_keep_envelopes_as_data(nested: bool) -> None:
+def test_generated_workflow_start_and_child_result_keep_envelopes_as_data(
+    nested: bool, _payload_storage: _MemoryPayloadStore | None
+) -> None:
     value = _payload()
     echo = _Echo()
     leaf = WorkflowBuilder(name="json-leaf", start_executor=echo, output_from=[echo]).build()
@@ -319,7 +370,8 @@ def test_generated_workflow_start_and_child_result_keep_envelopes_as_data(nested
     host = _Host(_app(workflow=workflow))
     # The Functions client serializes the start input with the Functions converter.
     wire = DEFAULT_FUNCTIONS_DATA_CONVERTER.serialize(wrap_workflow_input(value))
-    first = host.start(f"dafx-{workflow.name}", "root", wire)
+    assert isinstance(wire, str)
+    first = host.start(f"dafx-{workflow.name}", "root", _stored_wire(wire))
 
     if nested:
         action = _action(first, "createSubOrchestration")
@@ -333,21 +385,28 @@ def test_generated_workflow_start_and_child_result_keep_envelopes_as_data(nested
         assert waiting.actions == []
         started = host.start(scheduled.name, scheduled.instanceId, scheduled.input.value, parent="root")
         produced = _completed(host.activity(scheduled.instanceId, _action(started, "scheduleTask")))
-        assert json.loads(produced.result.value)["outputs"] == [value]
+        assert _load_wire(produced.result.value)["outputs"] == [value]
         final = host.replay("root", helpers.new_sub_orchestration_completed_event(action.id, produced.result.value))
     else:
         scheduled = _action(first, "scheduleTask")
-        assert json.loads(json.loads(scheduled.scheduleTask.input.value))["message"] == value
+        assert json.loads(_load_wire(scheduled.scheduleTask.input.value))["message"] == value
         final = host.activity("root", scheduled)
 
-    assert json.loads(_completed(final).result.value) == [value]
-    assert json.loads(_completed(host.replay("root")).result.value) == [value]
+    completion = _completed(final)
+    if _payload_storage is not None:
+        token = json.loads(completion.result.value)
+        assert isinstance(token, str) and _payload_storage.is_known_token(token), "Workflow output was not offloaded"
+    assert _load_wire(completion.result.value) == [value]
+    assert _load_wire(_completed(host.replay("root")).result.value) == [value]
     assert echo.seen == [value] and _CONSTRUCTIONS == []
 
 
 @pytest.mark.parametrize("protocol", ["current", "legacy"])
-def test_get_agent_input_result_and_entity_state_keep_envelopes_as_data(protocol: str) -> None:
+def test_get_agent_input_result_and_entity_state_keep_envelopes_as_data(
+    protocol: str, _payload_storage: _MemoryPayloadStore | None
+) -> None:
     value = _payload()
+    value["large"] = "x" * 300_000
     client = _Client(value)
     app = _app(agents=[_NonStreamingAgent(client=client, name="json-agent")], enable_http_endpoints=False)
 
@@ -362,10 +421,10 @@ def test_get_agent_input_result_and_entity_state_keep_envelopes_as_data(protocol
     batch = host.entity(called.targetInstanceId.value, called.operation, called.input.value)
     produced = _succeeded(batch)
     _assert_json(client.options[0]["metadata"], value)
-    _assert_json(json.loads(produced)["messages"][0]["additional_properties"]["opaque"], value)
+    _assert_json(_load_wire(produced)["messages"][0]["additional_properties"]["opaque"], value)
     # A later batch hydrates the stored response and replays it without the model.
     retried = host.entity(called.targetInstanceId.value, called.operation, called.input.value, batch.entityState.value)
-    assert json.loads(_succeeded(retried)) == json.loads(produced)
+    assert _load_wire(_succeeded(retried)) == _load_wire(produced)
 
     if protocol == "current":
         scheduled = pb.HistoryEvent(eventId=action.id, entityOperationCalled=called)
@@ -377,24 +436,44 @@ def test_get_agent_input_result_and_entity_state_keep_envelopes_as_data(protocol
         )
     else:
         entity_id = called.targetInstanceId.value
-        scheduled = helpers.new_event_sent_event(action.id, entity_id, json.dumps({"id": called.requestId}))
+        scheduled = helpers.new_event_sent_event(
+            action.id,
+            entity_id,
+            json.dumps({
+                "id": called.requestId,
+                "op": called.operation,
+                "parent": "root",
+                "input": called.input.value,
+                "signal": False,
+            }),
+        )
+        scheduled.eventSent.name = "op"
         done = helpers.new_event_raised_event(called.requestId, json.dumps({"result": produced}))
-    _assert_json(json.loads(_completed(host.replay("root", scheduled, done)).result.value), value)
-    _assert_json(json.loads(_completed(host.replay("root")).result.value), value)
+    _assert_json(_load_wire(_completed(host.replay("root", scheduled, done)).result.value), value)
+    _assert_json(_load_wire(_completed(host.replay("root")).result.value), value)
     assert len(client.options) == 1 and _CONSTRUCTIONS == []
+    if _payload_storage is not None:
+        assert _payload_storage.is_known_token(json.loads(batch.entityState.value))
 
 
 @pytest.mark.parametrize("value", _EVENT_VALUES, ids=_EVENT_IDS)
-def test_event_wire_helper_matches_the_real_client(value: Any) -> None:
+def test_event_wire_helper_matches_the_real_client(value: Any, _payload_storage: _MemoryPayloadStore | None) -> None:
     """Replays built with _event_wire_value receive what the real client sends."""
     wire = _client_event_wire(value)
 
-    assert _event_wire_value(value) == FUNCTIONS_FRAMEWORK_CONVERTER.deserialize(wire, JsonPayload)
+    assert _event_wire_value(value) == FUNCTIONS_FRAMEWORK_CONVERTER.deserialize(
+        _raw_wire(wire) if wire is not None else None, JsonPayload
+    )
+    if _payload_storage is not None and isinstance(value, dict):
+        assert isinstance(wire, str)
+        assert _payload_storage.is_known_token(json.loads(wire))
 
 
 @pytest.mark.parametrize("value", _EVENT_VALUES, ids=_EVENT_IDS)
 @pytest.mark.parametrize("early", [False, True], ids=["waiting", "buffered"])
-def test_framework_event_keeps_envelopes_as_data(early: bool, value: Any) -> None:
+def test_framework_event_keeps_envelopes_as_data(
+    early: bool, value: Any, _payload_storage: _MemoryPayloadStore | None
+) -> None:
     app = _app()
 
     @app.orchestration_trigger(context_name="context")
@@ -410,8 +489,8 @@ def test_framework_event_keeps_envelopes_as_data(early: bool, value: Any) -> Non
     # The event carries exactly what the real Functions client sends for the value.
     event = helpers.new_event_raised_event("business", _client_event_wire(value))
     events = [scheduled, event, done] if early else [scheduled, done, event]
-    assert _result(_completed(host.replay("root", *events))) == value
-    assert _result(_completed(host.replay("root"))) == value
+    assert _load_wire(_completed(host.replay("root", *events)).result.value) == value
+    assert _load_wire(_completed(host.replay("root")).result.value) == value
     assert _CONSTRUCTIONS == []
 
 
@@ -436,20 +515,30 @@ def test_native_cohost_keeps_functions_object_decoding() -> None:
     assert _CONSTRUCTIONS == [{"value": 7}] * 6
 
 
-async def test_workflow_status_keeps_output_and_custom_status_envelopes_as_data() -> None:
+async def test_workflow_status_keeps_output_and_custom_status_envelopes_as_data(
+    _payload_storage: _MemoryPayloadStore | None,
+) -> None:
     echo = _Echo()
     app = _app(workflow=WorkflowBuilder(name="json", start_executor=echo, output_from=[echo]).build())
     functions = {function.get_function_name(): function for function in app.get_functions()}
     registered: Any = functions["dafx-json-status"].get_user_function()
     status = registered.client_function
-    client = AsyncMock()
-    client.get_orchestration_state.return_value = _orchestration_state(
-        "root",
-        "dafx-json",
-        runtime_status=OrchestrationStatus.COMPLETED,
-        custom_status=_payload(),
-        output=[_payload()],
+    client = df.DurableFunctionsClient(json.dumps({"taskHubName": "hub", "rpcBaseUrl": "localhost:1"}))
+    stub = SimpleNamespace(
+        GetInstance=AsyncMock(
+            return_value=pb.GetInstanceResponse(
+                exists=True,
+                orchestrationState=pb.OrchestrationState(
+                    instanceId="root",
+                    name="dafx-json",
+                    orchestrationStatus=pb.ORCHESTRATION_STATUS_COMPLETED,
+                    customStatus=helpers.get_string_value(_stored_wire(json.dumps(_payload()))),
+                    output=helpers.get_string_value(_stored_wire(json.dumps([_payload()]))),
+                ),
+            )
+        )
     )
+    client._get_stub = lambda: stub  # type: ignore[method-assign]
     request = func.HttpRequest(
         method="GET",
         url="https://example.test/api/workflow/json/status/root",
@@ -457,13 +546,18 @@ async def test_workflow_status_keeps_output_and_custom_status_envelopes_as_data(
         route_params={"instanceId": "root"},
     )
 
-    response = await status(req=request, client=client)
+    try:
+        response = await status(req=request, client=client)
+    finally:
+        await client.close()
 
     assert response.status_code == 200
     body = json.loads(response.get_body())
     _assert_json(body["output"], [_payload()])
     _assert_json(body["customStatus"], _payload())
     assert _CONSTRUCTIONS == []
+    if _payload_storage is not None:
+        assert _payload_storage.values
 
 
 @pytest.mark.parametrize(
@@ -477,7 +571,7 @@ async def test_workflow_status_keeps_output_and_custom_status_envelopes_as_data(
     ],
 )
 def test_entity_state_counter_tokens_decode_exactly(
-    token: str, expected: int | None, monkeypatch: pytest.MonkeyPatch
+    token: str, expected: int | None, monkeypatch: pytest.MonkeyPatch, _payload_storage: _MemoryPayloadStore | None
 ) -> None:
     observed: list[Any] = []
 
@@ -492,7 +586,7 @@ def test_entity_state_counter_tokens_decode_exactly(
     )
     host = _Host(_app(agents=[_NonStreamingAgent(client=_Client(None), name="json-agent")]))
 
-    batch = host.entity("@dafx-json-agent@key", "expire_responses", None, state)
+    batch = host.entity("@dafx-json-agent@key", "expire_responses", None, _stored_wire(state))
 
     if expected is None:
         assert batch.results[0].HasField("failure"), batch

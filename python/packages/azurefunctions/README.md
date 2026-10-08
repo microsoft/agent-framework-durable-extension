@@ -134,6 +134,82 @@ Use the GA `Microsoft.Azure.Functions.ExtensionBundle` with version range `[4.38
 Local Azure Storage development requires Azurite 3.37.0 or later, without an API-validation bypass.
 The Python Durable Functions SDK remains prerelease; the extension bundle does not need to be Preview.
 
+### Optional Blob Payload Offloading
+
+SDK-managed offloading is available in `azure-functions-durable` 2.0.0rc2. It is disabled
+unless you configure a payload store. Install the optional dependencies with:
+
+```bash
+pip install "agent-framework-azurefunctions[azure-blob-payloads]" --pre
+```
+
+This is a forwarding extra: the Blob dependency list is owned by
+[`agent-framework-durabletask[azure-blob-payloads]`](../durabletask/README.md#optional-blob-payload-offloading).
+Both installation options provide the same storage dependencies; host configuration differs.
+Release both packages together with a Functions dependency floor that includes the shared
+extra. The already-published MAF-DT beta does not provide it.
+
+Configure the inherited SDK method once at app startup, before any invocations. It may
+be called after registering agents, workflows and blueprints:
+
+```python
+import os
+
+from agent_framework_azurefunctions import AgentFunctionApp
+from durabletask.extensions.azure_blob_payloads import BlobPayloadStore, BlobPayloadStoreOptions
+
+app = AgentFunctionApp(deployment_mode="isolated_v2")
+app.configure_large_payloads(
+	payload_store=BlobPayloadStore(
+		BlobPayloadStoreOptions(
+			connection_string=os.environ["PAYLOAD_STORAGE_CONNECTION_STRING"],
+			container_name="durable-payloads",
+			threshold_bytes=256 * 1024,
+		)
+	)
+)
+```
+
+Set `PAYLOAD_STORAGE_CONNECTION_STRING` to a Blob connection string. With
+`azure-storage-blob` 12.28 or later (including the locked 12.30.0), local Azurite at its
+default endpoints also accepts `UseDevelopmentStorage=true;`. Use a full connection
+string with an explicit Blob endpoint for older SDKs or custom Azurite endpoints.
+Configuration does not automatically discover or reuse `AzureWebJobsStorage`.
+Use the store's credential options for identity-based deployments.
+
+Payloads above the threshold are stored as blobs and replaced with references. This includes
+agent entity state, inputs and results, workflow inputs and outputs, custom status, external
+events, sub-orchestrations and continue-as-new. The default stored-payload limit is 10 MiB;
+`max_stored_payload_bytes` can change it. Configured SDK clients hydrate these references,
+but unconfigured clients and host management HTTP endpoints may expose reference strings.
+
+There is one store per Python worker process, shared by all durable functions and clients,
+including imported blueprints. Registering the same store object again is allowed; a different
+object raises `ValueError`. Keep the store open for the process lifetime, and configure all
+scaled-out workers and subsequent deployments with access to the same backing storage.
+This is separate from the Azure Storage backend's automatic large-message handling.
+
+Offloading does not reduce decoded state or model context, and does not change retention,
+pressure budgets or the isolated-hub migration requirements. Keep explicit state budgets
+where needed. Reset, response expiry, entity deletion and orchestration purge are not SDK
+payload-blob cleanup. Retain blobs while any state or history needed for replay references
+them, and manage storage lifecycle separately.
+
+> [!WARNING]
+> Store-recognized whole strings are reserved references, even below the threshold. For the
+> Blob store, this includes raw or JSON-quoted `blob:v1:<container>:<blobName>` values. Wrap
+> literal references in an object, such as `{"reference": "blob:v1:container:blob"}`, and
+> retain that wrapper across durable boundaries. References are not authorization checks.
+> `container_name` chooses the upload container. It does not restrict which containers the
+> configured credentials can read. Use least-privilege storage credentials and reject or validate
+> references from untrusted callers before durable API calls. Framework plain-JSON decoding does
+> not remove this transport trust requirement.
+
+> [!WARNING]
+> Blob failures that escape storage retries can fail durable invocations, including causing
+> terminal orchestration failure. Activity retry policies do not cover all transport I/O,
+> and the SDK does not guarantee host abandonment and redelivery after storage failure.
+
 `get_agent()` needs a two-argument `(context, input)` orchestrator. A one-argument orchestrator
 receives the 1.x compatibility context, which cannot call agents. Session keys can't contain `@`,
 because durabletask rejects it in entity keys.
