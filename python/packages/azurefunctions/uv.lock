@@ -42,8 +42,7 @@ dependencies = [
 
 [package.optional-dependencies]
 azure-blob-payloads = [
-    { name = "aiohttp" },
-    { name = "durabletask", extra = ["azure-blob-payloads"] },
+    { name = "agent-framework-durabletask", extra = ["azure-blob-payloads"] },
 ]
 
 [package.dev-dependencies]
@@ -81,10 +80,9 @@ test = [
 requires-dist = [
     { name = "agent-framework-core", specifier = ">=1.19.0,<2" },
     { name = "agent-framework-durabletask", editable = "../durabletask" },
-    { name = "aiohttp", marker = "extra == 'azure-blob-payloads'", specifier = ">=3.13.4,<4" },
+    { name = "agent-framework-durabletask", extras = ["azure-blob-payloads"], marker = "extra == 'azure-blob-payloads'", editable = "../durabletask" },
     { name = "azure-functions", specifier = ">=2.3.0,<3" },
     { name = "azure-functions-durable", specifier = ">=2.0.0rc2,<3" },
-    { name = "durabletask", extras = ["azure-blob-payloads"], marker = "extra == 'azure-blob-payloads'", specifier = ">=1.11.0,<2" },
 ]
 provides-extras = ["azure-blob-payloads"]
 
@@ -149,15 +147,24 @@ dependencies = [
     { name = "python-dateutil" },
 ]
 
+[package.optional-dependencies]
+azure-blob-payloads = [
+    { name = "aiohttp" },
+    { name = "durabletask", extra = ["azure-blob-payloads"] },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "agent-framework-core", specifier = ">=1.19.0,<2" },
+    { name = "aiohttp", marker = "extra == 'azure-blob-payloads'", specifier = ">=3.13.4,<4" },
     { name = "durabletask", specifier = ">=1.7.1,<2" },
+    { name = "durabletask", extras = ["azure-blob-payloads"], marker = "extra == 'azure-blob-payloads'", specifier = ">=1.7.1,<2" },
     { name = "durabletask-azuremanaged", specifier = ">=1.4.0,<2" },
     { name = "opentelemetry-api", specifier = ">=1.39.0,<2" },
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "python-dateutil", specifier = ">=2.8.0,<3" },
 ]
+provides-extras = ["azure-blob-payloads"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "types-python-dateutil", specifier = "==2.9.0.20260518" }]

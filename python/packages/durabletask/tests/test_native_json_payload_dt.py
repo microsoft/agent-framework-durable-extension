@@ -28,17 +28,93 @@ from durabletask.entities import EntityContext, EntityInstanceId
 from durabletask.internal import helpers, type_discovery
 from durabletask.internal import orchestrator_service_pb2 as pb
 from durabletask.internal.entity_state_shim import StateShim
+from durabletask.payload import LargePayloadStorageOptions, PayloadStore, deexternalize_payloads, externalize_payloads
 from durabletask.serialization import JsonDataConverter
 from durabletask.worker import TaskHubGrpcWorker, _ActivityExecutor, _EntityExecutor, _OrchestrationExecutor
 from typing_extensions import Never
 
-from agent_framework_durabletask import DurableAIAgentWorker, DurableWorkflowClient, RunRequest
+from agent_framework_durabletask import DurableAIAgentClient, DurableAIAgentWorker, DurableWorkflowClient, RunRequest
 from agent_framework_durabletask._entities import DurableTaskEntityStateProvider
 from agent_framework_durabletask._executors import OrchestrationAgentExecutor
 from agent_framework_durabletask._workflows.dt_context import DurableTaskWorkflowContext
 
 _LOG = logging.getLogger(__name__)
 _NOW = datetime(2026, 9, 23, tzinfo=timezone.utc)
+
+
+class _MemoryPayloadStore(PayloadStore):
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    @property
+    def options(self) -> LargePayloadStorageOptions:
+        return LargePayloadStorageOptions(threshold_bytes=64)
+
+    def upload(self, data: bytes, *, instance_id: str | None = None) -> str:
+        token = f"memory:payload:{len(self.values)}"
+        self.values[token] = data
+        return token
+
+    async def upload_async(self, data: bytes, *, instance_id: str | None = None) -> str:
+        return self.upload(data, instance_id=instance_id)
+
+    def download(self, token: str) -> bytes:
+        return self.values[token]
+
+    async def download_async(self, token: str) -> bytes:
+        return self.download(token)
+
+    def is_known_token(self, value: str) -> bool:
+        return value.startswith("memory:payload:")
+
+
+@pytest.mark.parametrize("offloaded", [False, True], ids=["inline", "offloaded"])
+@pytest.mark.parametrize("marker", [False, True])
+def test_native_worker_offloads_agent_state_and_preserves_duplicate_results(offloaded: bool, marker: bool) -> None:
+    store = _MemoryPayloadStore() if offloaded else None
+    worker: Any = TaskHubGrpcWorker(channel=Mock(), payload_store=store)
+    native: Any = TaskHubGrpcClient(channel=Mock(), payload_store=store)
+    wrapped_client = DurableAIAgentClient(native)
+    host = DurableAIAgentWorker(worker, deployment_mode="isolated_v2")
+    assert wrapped_client._client is native and native._payload_store is store
+    assert worker._payload_store is store
+    value = {**_payload(marker), "large": "x" * 300_000}
+    model = _Client(value)
+    host.add_agent(_NonStreamingAgent(client=model, name="json-agent"))
+    entity_id = "@dafx-json-agent@key"
+    wire = json.dumps({"message": "go", "correlationId": "request", "options": {"metadata": value}})
+    original = pb.EntityBatchRequest(
+        instanceId=entity_id,
+        operations=[pb.OperationRequest(operation="run", requestId="request", input=helpers.get_string_value(wire))],
+    )
+    if store is not None:
+        externalize_payloads(original, store)
+        assert store.is_known_token(original.operations[0].input.value)
+    stored_request = original.SerializeToString()
+    stub = Mock()
+    worker._execute_entity_batch(original, stub, None)
+    result = stub.CompleteEntityTask.call_args.args[0]
+    assert result.results[0].HasField("success"), result
+    if store is not None:
+        assert store.is_known_token(result.entityState.value)
+        assert store.is_known_token(result.results[0].success.result.value)
+    decoded = pb.EntityBatchResult()
+    decoded.CopyFrom(result)
+    if store is not None:
+        deexternalize_payloads(decoded, store)
+    _assert_json(
+        json.loads(decoded.results[0].success.result.value)["messages"][0]["additional_properties"]["opaque"], value
+    )
+    _assert_json(model.options[0]["metadata"], value)
+    repeated = pb.EntityBatchRequest()
+    repeated.ParseFromString(stored_request)
+    repeated.entityState.CopyFrom(result.entityState)
+    worker._execute_entity_batch(repeated, stub, None)
+    retry = stub.CompleteEntityTask.call_args.args[0]
+    if store is not None:
+        deexternalize_payloads(retry, store)
+    assert json.loads(retry.results[0].success.result.value) == json.loads(decoded.results[0].success.result.value)
+    assert len(model.options) == 1
 
 
 def _assert_json(actual: Any, expected: Any) -> None:
