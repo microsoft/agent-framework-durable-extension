@@ -141,6 +141,12 @@ dependencies = [
     { name = "python-dateutil" },
 ]
 
+[package.optional-dependencies]
+azure-blob-payloads = [
+    { name = "aiohttp" },
+    { name = "durabletask", extra = ["azure-blob-payloads"] },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "types-python-dateutil" },
@@ -149,12 +155,15 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agent-framework-core", specifier = ">=1.19.0,<2" },
+    { name = "aiohttp", marker = "extra == 'azure-blob-payloads'", specifier = ">=3.13.4,<4" },
     { name = "durabletask", specifier = ">=1.7.1,<2" },
+    { name = "durabletask", extras = ["azure-blob-payloads"], marker = "extra == 'azure-blob-payloads'", specifier = ">=1.7.1,<2" },
     { name = "durabletask-azuremanaged", specifier = ">=1.4.0,<2" },
     { name = "opentelemetry-api", specifier = ">=1.39.0,<2" },
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "python-dateutil", specifier = ">=2.8.0,<3" },
 ]
+provides-extras = ["azure-blob-payloads"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "types-python-dateutil", specifier = "==2.9.0.20260518" }]
@@ -491,6 +500,11 @@ wheels = [
     { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/azure-core/1.41/azure_core-1.41.0-py3-none-any.whl", hash = "sha256:522b4011e8180b1a3dcd2024396a4e7fe9ac37fb8597db47163d230b5efe892d", size = 220920, upload-time = "2026-07-23T18:44:42Z" },
 ]
 
+[package.optional-dependencies]
+aio = [
+    { name = "aiohttp" },
+]
+
 [[package]]
 name = "azure-core-tracing-opentelemetry"
 version = "1.0.0b13"
@@ -574,6 +588,11 @@ dependencies = [
 sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/azure-storage-blob/12.30/azure_storage_blob-12.30.0.tar.gz", hash = "sha256:2cd74d4d5731e5eb6b8d5c5056ee115a5e88f8fdf22517b739836fda685018be", size = 618229, upload-time = "2026-08-07T09:30:38Z" }
 wheels = [
     { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/azure-storage-blob/12.30/azure_storage_blob-12.30.0-py3-none-any.whl", hash = "sha256:d415ac50b67a8da6b3ae7e9f1014b1b55cd7aafa0b8d4ca9b380568dc7360423", size = 435610, upload-time = "2026-07-24T03:03:52Z" },
+]
+
+[package.optional-dependencies]
+aio = [
+    { name = "azure-core", extra = ["aio"] },
 ]
 
 [[package]]
@@ -1108,6 +1127,11 @@ dependencies = [
 sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/durabletask/1.7.2/durabletask-1.7.2.tar.gz", hash = "sha256:b22c234d859c8ac3ad621d324132ffb7ba546c011ae3df8e22c2bd7ca7b108d2", size = 169101, upload-time = "2026-07-09T21:39:22Z" }
 wheels = [
     { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/durabletask/1.7.2/durabletask-1.7.2-py3-none-any.whl", hash = "sha256:e4397649d9b63f75d5ddcfe65197aad646b2187ad7eff79cdbdaa67cb7f1782a", size = 195984, upload-time = "2026-07-24T13:42:30Z" },
+]
+
+[package.optional-dependencies]
+azure-blob-payloads = [
+    { name = "azure-storage-blob", extra = ["aio"] },
 ]
 
 [[package]]

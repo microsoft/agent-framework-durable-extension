@@ -30,6 +30,12 @@ dependencies = [
     "python-dateutil>=2.8.0,<3",
 ]
 
+[project.optional-dependencies]
+azure-blob-payloads = [
+    "durabletask[azure-blob-payloads]>=1.7.1,<2",
+    "aiohttp>=3.13.4,<4",
+]
+
 [dependency-groups]
 dev = [
     "types-python-dateutil==2.9.0.20260518",
