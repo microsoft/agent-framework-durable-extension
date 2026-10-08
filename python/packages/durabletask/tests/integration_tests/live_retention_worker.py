@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from collections.abc import AsyncIterable, Awaitable, Generator, Mapping, Sequence
 from pathlib import Path
@@ -126,6 +127,7 @@ def main() -> None:
     parser.add_argument("--artifacts", required=True, type=Path)
     parser.add_argument("--block-message-id", default="")
     parser.add_argument("--budget-policy", choices=("small", "default", "disabled"), default="small")
+    parser.add_argument("--payload-container", default="")
     args = parser.parse_args()
     expected_package = Path(__file__).resolve().parents[2] / "agent_framework_durabletask"
     if Path(agent_framework_durabletask.__file__).resolve().parent != expected_package:
@@ -135,8 +137,23 @@ def main() -> None:
     meters = MeterProvider(metric_readers=[reader], shutdown_on_exit=False)
     set_meter_provider(meters)
     model = RecordingModel(args.artifacts, args.block_message_id)
+    payload_store = None
+    if args.payload_container:
+        from durabletask.extensions.azure_blob_payloads import BlobPayloadStore, BlobPayloadStoreOptions
+
+        payload_store = BlobPayloadStore(
+            BlobPayloadStoreOptions(
+                connection_string=os.environ["PAYLOAD_STORAGE_CONNECTION_STRING"],
+                container_name=args.payload_container,
+                threshold_bytes=1024,
+            )
+        )
     worker = DurableTaskSchedulerWorker(
-        host_address=args.endpoint, taskhub=args.taskhub, token_credential=None, secure_channel=False
+        host_address=args.endpoint,
+        taskhub=args.taskhub,
+        token_credential=None,
+        secure_channel=False,
+        payload_store=payload_store,
     )
     # Inherit the parent test's explicit acknowledgement for its newly generated hub.
     # Do not grant isolated mode to arbitrary direct launches of this worker.

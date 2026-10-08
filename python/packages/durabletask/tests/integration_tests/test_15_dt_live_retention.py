@@ -3,12 +3,15 @@
 """Live DTS persistence tests, not live LLM or graceful cancellation tests.
 
 Requires the installed worktree package, pytest, pytest-timeout, redis and
-python-dotenv (for the existing conftest), and opentelemetry-sdk. The only required service is DTS at
-ENDPOINT (default http://localhost:8080). No model credentials or sample marker.
+python-dotenv (for the existing conftest), and opentelemetry-sdk. DTS is required at
+ENDPOINT (default http://localhost:8080). Blob variants also require the azure-blob-payloads
+extra and Azurite 3.37.0+ at its default local endpoints. Inline variants require no Blob
+service. No model credentials or sample marker.
 """
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -51,6 +54,22 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 WORKER_SCRIPT = Path(__file__).with_name("live_retention_worker.py")
 
 
+@pytest.fixture
+def blob_payload_container(request: pytest.FixtureRequest) -> Iterator[Any]:
+    if not getattr(request, "param", False):
+        yield None
+        return
+    from azure.storage.blob import BlobServiceClient
+
+    with BlobServiceClient.from_connection_string("UseDevelopmentStorage=true;") as service:
+        container = service.get_container_client(f"dt-payloads-{uuid.uuid4().hex}")
+        container.create_container()
+        try:
+            yield container
+        finally:
+            container.delete_container()
+
+
 class _CallDetails(
     namedtuple("CallDetails", "method timeout metadata credentials wait_for_ready compression"), grpc.ClientCallDetails
 ):
@@ -80,18 +99,32 @@ def live_taskhub(unique_taskhub: str) -> str:
 
 
 @pytest.fixture
-def live_client(dts_available: bool, dts_endpoint: str, live_taskhub: str) -> Iterator[DurableTaskSchedulerClient]:
+def live_client(
+    dts_available: bool, dts_endpoint: str, live_taskhub: str, blob_payload_container: Any
+) -> Iterator[DurableTaskSchedulerClient]:
     assert dts_available
     loaded_package = Path(agent_framework_durabletask.__file__).resolve().parent
     assert loaded_package == PACKAGE_ROOT / "agent_framework_durabletask", (
         "Run with this exact worktree package installed, not an editable install from another checkout"
     )
+    payload_store = None
+    if blob_payload_container is not None:
+        from durabletask.extensions.azure_blob_payloads import BlobPayloadStore, BlobPayloadStoreOptions
+
+        payload_store = BlobPayloadStore(
+            BlobPayloadStoreOptions(
+                connection_string="UseDevelopmentStorage=true;",
+                container_name=blob_payload_container.container_name,
+                threshold_bytes=1024,
+            )
+        )
     client = DurableTaskSchedulerClient(
         host_address=dts_endpoint,
         taskhub=live_taskhub,
         token_credential=None,
         secure_channel=False,
         interceptors=[_RpcDeadline()],
+        payload_store=payload_store,
     )
     with client:
         yield client
@@ -99,7 +132,14 @@ def live_client(dts_available: bool, dts_endpoint: str, live_taskhub: str) -> It
 
 class _WorkerProcess:
     def __init__(
-        self, endpoint: str, taskhub: str, artifacts: Path, block_message_id: str, *, budget_policy: str = "small"
+        self,
+        endpoint: str,
+        taskhub: str,
+        artifacts: Path,
+        block_message_id: str,
+        *,
+        budget_policy: str = "small",
+        payload_container: str = "",
     ) -> None:
         artifacts.mkdir()
         self.artifacts = artifacts
@@ -113,6 +153,7 @@ class _WorkerProcess:
             "DURABLE_AGENTS_DEPLOYMENT_MODE": "isolated_v2",
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONPATH": str(PACKAGE_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+            "PAYLOAD_STORAGE_CONNECTION_STRING": "UseDevelopmentStorage=true;",
         }
         try:
             self.process = subprocess.Popen(
@@ -131,6 +172,8 @@ class _WorkerProcess:
                     block_message_id,
                     "--budget-policy",
                     budget_policy,
+                    "--payload-container",
+                    payload_container,
                 ],
                 cwd=artifacts,
                 env=env,
@@ -237,9 +280,17 @@ class _WorkerProcess:
 
 @contextmanager
 def _worker(
-    endpoint: str, hub: str, artifacts: Path, block: str = "", *, budget_policy: str = "small"
+    endpoint: str,
+    hub: str,
+    artifacts: Path,
+    block: str = "",
+    *,
+    budget_policy: str = "small",
+    payload_container: str = "",
 ) -> Iterator[_WorkerProcess]:
-    worker = _WorkerProcess(endpoint, hub, artifacts, block, budget_policy=budget_policy)
+    worker = _WorkerProcess(
+        endpoint, hub, artifacts, block, budget_policy=budget_policy, payload_container=payload_container
+    )
     try:
         worker.event("started")
         yield worker
@@ -389,16 +440,29 @@ def _answer(message_id: str) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("kind", ["inline-png", "inline-file"])
+@pytest.mark.parametrize(
+    "blob_payload_container",
+    [False, True],
+    indirect=True,
+    ids=["inline", "blob-offloaded"],
+)
 def test_live_media_pressure_cold_read_and_exact_model_input(
-    kind: str, live_client: DurableTaskSchedulerClient, dts_endpoint: str, live_taskhub: str, tmp_path: Path
+    kind: str,
+    live_client: DurableTaskSchedulerClient,
+    dts_endpoint: str,
+    live_taskhub: str,
+    tmp_path: Path,
+    blob_payload_container: Any,
 ) -> None:
+    offloaded = blob_payload_container is not None
+    payload_container = blob_payload_container.container_name if offloaded else ""
     entity = EntityInstanceId(entity=f"dafx-{AGENT_NAME}", key=uuid.uuid4().hex)
     originals: dict[str, dict[str, Any]] = {}
     previous: list[dict[str, Any]] = []
     raw: dict[str, Any] = {}
     previous_removed = 0
     previous_measured = 0
-    with _worker(dts_endpoint, live_taskhub, tmp_path / "warm") as warm:
+    with _worker(dts_endpoint, live_taskhub, tmp_path / "warm", payload_container=payload_container) as warm:
         for index in range(8):
             correlation = f"turn-{index}"
             inputs = _input(kind, correlation)
@@ -428,7 +492,16 @@ def test_live_media_pressure_cold_read_and_exact_model_input(
         assert sum(message["role"] == "user" for message in previous) >= 2, "Retain older media for cold model replay"
         assert len(raw["data"]["completionReceipts"]) == len(raw["data"]["terminalResults"]) == 8
 
-    with _worker(dts_endpoint, live_taskhub, tmp_path / "cold") as cold:
+    blob_names: set[str] = set()
+    if offloaded:
+        blob_names = {blob.name for blob in blob_payload_container.list_blobs()}
+        assert blob_names, "The worker must actually offload payloads"
+        assert any(
+            json.loads(gzip.decompress(blob_payload_container.download_blob(name).readall())) == raw
+            for name in blob_names
+        ), "Persisted entity state must exist in Blob Storage"
+
+    with _worker(dts_endpoint, live_taskhub, tmp_path / "cold", payload_container=payload_container) as cold:
         snapshot = _snapshot(live_client, entity)
         (cold.artifacts / "cold-read.json").write_text(json.dumps(snapshot), encoding="utf-8")
         _equal(snapshot["state"], raw, "cold backend read")
@@ -471,6 +544,8 @@ def test_live_media_pressure_cold_read_and_exact_model_input(
                 datetime.fromisoformat(mailbox["resultExpiresAt"]) - datetime.fromisoformat(mailbox["completedAt"])
             ).total_seconds() == DELIVERY_WINDOW_SECONDS
         assert set(final["data"]["terminalResults"]) == {*raw["data"]["terminalResults"], "cold"}
+    if offloaded:
+        assert blob_names <= {blob.name for blob in blob_payload_container.list_blobs()}
 
 
 @pytest.mark.parametrize("kind", ["ascii", "unicode", "escaped", "tool-result"])

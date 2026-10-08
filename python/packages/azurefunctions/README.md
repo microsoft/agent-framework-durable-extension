@@ -143,6 +143,12 @@ unless you configure a payload store. Install the optional dependencies with:
 pip install "agent-framework-azurefunctions[azure-blob-payloads]" --pre
 ```
 
+This is a forwarding extra: the Blob dependency list is owned by
+[`agent-framework-durabletask[azure-blob-payloads]`](../durabletask/README.md#optional-blob-payload-offloading).
+Both installation options provide the same storage dependencies; host configuration differs.
+Release both packages together with a Functions dependency floor that includes the shared
+extra. The already-published MAF-DT beta does not provide it.
+
 Configure the inherited SDK method once at app startup, before any invocations. It may
 be called after registering agents, workflows and blueprints:
 

@@ -32,7 +32,7 @@ jobs:
           # azure-functions-durable 2.x requires Python 3.13. Core Tools 4.13.0 is the
           # first release carrying a host new enough to run it.
           uv python install 3.13
-          uv sync --python 3.13 --all-packages --group dev --group test
+          uv sync --python 3.13 --all-packages --group dev --group test --extra azure-blob-payloads
           # agent-framework-azurefunctions is a standalone uv project with its own
           # lockfile, so it is synced separately from the workspace above.
           uv sync --python 3.13 --group dev --group test --extra azure-blob-payloads --directory packages/azurefunctions

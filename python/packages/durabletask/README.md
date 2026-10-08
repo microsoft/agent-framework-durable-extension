@@ -8,6 +8,68 @@ Please install this package via pip:
 pip install agent-framework-durabletask --pre
 ```
 
+## Optional Blob Payload Offloading
+
+This extra is part of the current unreleased stack. The matching package release must
+include it before using the installation command against PyPI.
+Install the optional storage dependencies through the shared extra:
+
+```bash
+pip install "agent-framework-durabletask[azure-blob-payloads]" --pre
+```
+
+The Functions package's `azure-blob-payloads` extra forwards to this extra. The dependency
+list has one owner; installation alone does not enable offloading. The shared extra preserves
+the existing `durabletask>=1.7.1` floor. Functions independently requires `durabletask>=1.11.0`.
+Keep SDK versions locked across clients and workers. When upgrading to SDK 1.11 or later, drain
+affected older nested-race orchestrations or use a fresh isolated hub. Existing migration and
+fresh-instance requirements still apply.
+
+Configure a compatible `payload_store` on each SDK worker and client before wrapping them:
+
+```python
+import os
+
+from durabletask.client import TaskHubGrpcClient
+from durabletask.extensions.azure_blob_payloads import BlobPayloadStore, BlobPayloadStoreOptions
+from durabletask.worker import TaskHubGrpcWorker
+
+from agent_framework_durabletask import DurableAIAgentClient, DurableAIAgentWorker
+
+store = BlobPayloadStore(
+  BlobPayloadStoreOptions(
+    connection_string=os.environ["PAYLOAD_STORAGE_CONNECTION_STRING"],
+    container_name="durable-payloads",
+    threshold_bytes=256 * 1024,
+  )
+)
+worker = TaskHubGrpcWorker(host_address=os.environ["DURABLE_TASK_ENDPOINT"], payload_store=store)
+client = TaskHubGrpcClient(host_address=os.environ["DURABLE_TASK_ENDPOINT"], payload_store=store)
+agent_worker = DurableAIAgentWorker(worker, deployment_mode="isolated_v2")
+agent_client = DurableAIAgentClient(client)
+```
+
+`DurableTaskSchedulerWorker` and `DurableTaskSchedulerClient` accept the same `payload_store`
+argument alongside their DTS endpoint, task hub and credential settings. The MAF wrappers retain
+it. Separate processes can use different store objects but must agree on the backing storage and
+reference format. Keep each store open while its worker or client uses it. Blob offloading does
+not require Functions. Functions configures its root app instead of constructing these objects;
+see the [Functions setup](../azurefunctions/README.md#optional-blob-payload-offloading).
+
+Supported serialized payloads above the threshold, including entity state and operation results,
+are stored in blobs and hydrated by configured SDK clients/workers. The default stored-payload
+limit is 10 MiB and is configurable. Offloading does not reduce decoded state or model context,
+and does not change MAF state budgets or retention. Reset, response expiry, entity deletion and
+orchestration purge do not clean up SDK payload blobs. Retain blobs while referenced state/history
+may be read or replayed, including across deployments, and manage lifecycle separately.
+
+Store-recognized whole strings are reserved transport references rather than ordinary data.
+Wrap literal references in an object and retain that wrapper across durable boundaries.
+References do not authorize reads; the upload container does not constrain which containers
+credentials can read. Use least-privilege credentials and validate or reject references from
+untrusted callers before durable API calls. Blob transport failures and missing references can
+prevent execution or reads; storage retries are not a guarantee of durable recovery.
+
 ## Durable Task Integration
 
 The durable task integration lets you host Microsoft Agent Framework agents using the [Durable Task](https://github.com/microsoft/durabletask-python) framework so they can persist state, replay conversation history, and recover from failures automatically.
