@@ -30,8 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 azure-blob-payloads = [
-    "durabletask[azure-blob-payloads]>=1.11.0,<2",
-    "aiohttp>=3.13.4,<4",
+    "agent-framework-durabletask[azure-blob-payloads]>=1.0.0b260922,<2",
 ]
 
 [dependency-groups]
