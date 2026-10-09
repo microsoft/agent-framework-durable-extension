@@ -157,6 +157,7 @@ public sealed class AgentLoggingTests(ITestOutputHelper output)
         Mock<TaskEntityContext> context = new(MockBehavior.Strict);
         context.SetupGet(value => value.Id).Returns(entityId);
         DurableAgentState initialState = new();
+        string expectedSchemaVersion = initialState.SchemaVersion;
         DurableAgentState? persistedState = null;
         Mock<TaskEntityState> state = new(MockBehavior.Strict);
         state.SetupGet(value => value.HasState).Returns(true);
@@ -176,7 +177,7 @@ public sealed class AgentLoggingTests(ITestOutputHelper output)
 
         Assert.NotEmpty(response.Text);
         Assert.NotNull(persistedState);
-        Assert.Equal(initialState.SchemaVersion, persistedState.SchemaVersion);
+        Assert.Equal(expectedSchemaVersion, persistedState.SchemaVersion);
         Assert.False(host.Services.GetRequiredService<DurableAgentsOptions>().EnablePersistentRequestOutcomes);
     }
 
