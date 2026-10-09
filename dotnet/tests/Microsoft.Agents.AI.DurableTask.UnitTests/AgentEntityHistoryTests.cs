@@ -2743,32 +2743,37 @@ public sealed class AgentEntityHistoryTests
         Assert.Equal(originalState, SerializeState(initialState));
     }
 
-    [Fact]
-    public async Task DraftSampleProfileEvictsTranscriptButPreservesCompletionAndIdempotencyAsync()
+    [Collection("Durable retention telemetry")]
+    public sealed class DraftSampleProfileTelemetryTests
     {
-        const string FirstCorrelationId = "sample-first";
-        const string NewestCorrelationId = "sample-newest";
-        const string Marker = "FIRST-MARKER-ABC123";
-        const string ToolCallId = "sample-connected-tool-call";
-        ConcurrentQueue<string> measuredInstruments = new();
-        using MeterListener listener = new();
-        listener.InstrumentPublished = static (instrument, meterListener) =>
+        [Fact]
+        public async Task DraftSampleProfileEvictsTranscriptButPreservesCompletionAndIdempotencyAsync()
         {
-            if (instrument.Meter.Name == DurableAgentTelemetry.MeterName)
+            const string FirstCorrelationId = "sample-first";
+            const string NewestCorrelationId = "sample-newest";
+            const string Marker = "FIRST-MARKER-ABC123";
+            const string ToolCallId = "sample-connected-tool-call";
+            ConcurrentQueue<long> operationMeasurements = new();
+            using MeterListener listener = new();
+            listener.InstrumentPublished = static (instrument, meterListener) =>
             {
-                meterListener.EnableMeasurementEvents(instrument);
-            }
-        };
-        listener.SetMeasurementEventCallback<long>(
-            (instrument, _, _, _) => measuredInstruments.Enqueue(instrument.Name));
-        listener.Start();
+                if (instrument.Meter.Name == DurableAgentTelemetry.MeterName &&
+                    instrument.Name == DurableAgentTelemetry.OperationsInstrumentName)
+                {
+                    meterListener.EnableMeasurementEvents(instrument);
+                }
+            };
+            listener.SetMeasurementEventCallback<long>(
+                (_, measurement, _, _) => operationMeasurements.Enqueue(measurement));
+            listener.Start();
+            Assert.Empty(operationMeasurements);
 
-        RecordingChatClient client = new();
-        ChatClientAgent agent = new(client, name: "agent");
-        DurableAgentState state = new();
-        RunRequest firstRequest = new(
-            [
-                new ChatMessage(
+            RecordingChatClient client = new();
+            ChatClientAgent agent = new(client, name: "agent");
+            DurableAgentState state = new();
+            RunRequest firstRequest = new(
+                [
+                    new ChatMessage(
                     ChatRole.User,
                     HistoryRetentionDemo.CreateFirstNote(
                         "sample",
@@ -2781,85 +2786,84 @@ public sealed class AgentEntityHistoryTests
                     ChatRole.Tool,
                     [new FunctionResultContent(ToolCallId, "stored")]),
             ])
-        {
-            CorrelationId = FirstCorrelationId,
-        };
+            {
+                CorrelationId = FirstCorrelationId,
+            };
 
-        state = await RunEntityAsync(
-            agent,
-            state,
-            firstRequest,
-            configureOptions: ConfigureDraftSampleRetention);
-        for (int turn = 2; turn <= HistoryRetentionDemo.ScenarioTurns; turn++)
-        {
-            string marker = turn == HistoryRetentionDemo.ScenarioTurns
-                ? "NEWEST-PRESSURE"
-                : $"MIDDLE-{turn}";
             state = await RunEntityAsync(
                 agent,
+                state,
+                firstRequest,
+                configureOptions: ConfigureDraftSampleRetention);
+            Assert.Equal(1, Assert.Single(operationMeasurements));
+            for (int turn = 2; turn <= HistoryRetentionDemo.ScenarioTurns; turn++)
+            {
+                string marker = turn == HistoryRetentionDemo.ScenarioTurns
+                    ? "NEWEST-PRESSURE"
+                    : $"MIDDLE-{turn}";
+                state = await RunEntityAsync(
+                    agent,
+                    DeserializeState(SerializeState(state)),
+                    new RunRequest(
+                        HistoryRetentionDemo.CreateLaterNote(
+                            "sample",
+                            turn,
+                            $"{marker} {new string((char)('a' + turn - 1), HistoryRetentionDemo.NotesPerTurn)}"))
+                    {
+                        CorrelationId = turn == HistoryRetentionDemo.ScenarioTurns
+                            ? NewestCorrelationId
+                            : $"sample-middle-{turn}",
+                    },
+                    configureOptions: ConfigureDraftSampleRetention);
+                Assert.Equal(turn, operationMeasurements.Count);
+            }
+
+            Assert.NotNull(state.Data.Truncation);
+            Assert.DoesNotContain(
+                state.Data.ConversationHistory,
+                entry => entry.CorrelationId == FirstCorrelationId);
+            Assert.Contains(
+                state.Data.ConversationHistory,
+                entry => entry.CorrelationId == NewestCorrelationId);
+            Assert.DoesNotContain(
+                state.Data.ConversationHistory
+                    .SelectMany(entry => entry.Messages)
+                    .SelectMany(message => message.Contents),
+                content =>
+                    content is DurableAgentStateFunctionCallContent { CallId: ToolCallId } ||
+                    content is DurableAgentStateFunctionResultContent { CallId: ToolCallId });
+            Assert.Contains(FirstCorrelationId, state.Data.TerminalResults!.Keys);
+            Assert.Contains(FirstCorrelationId, state.Data.CompletionReceipts!.Keys);
+            Assert.All(operationMeasurements, measurement => Assert.Equal(1, measurement));
+
+            DurableAgentState reloaded = DeserializeState(SerializeState(state));
+            RecordingChatClient duplicateClient = new();
+            AgentResponse duplicate = await CreateHarness(
+                new ChatClientAgent(duplicateClient, name: "agent"),
+                reloaded,
+                configureOptions: ConfigureDraftSampleRetention).RunAsync(
+                    new RunRequest("different request") { CorrelationId = FirstCorrelationId });
+            Assert.Equal("response", duplicate.Text);
+            Assert.Equal(0, duplicateClient.InvocationCount);
+
+            RecordingChatClient diagnosticClient = new();
+            _ = await RunEntityAsync(
+                new ChatClientAgent(diagnosticClient, name: "agent"),
                 DeserializeState(SerializeState(state)),
-                new RunRequest(
-                    HistoryRetentionDemo.CreateLaterNote(
-                        "sample",
-                        turn,
-                        $"{marker} {new string((char)('a' + turn - 1), HistoryRetentionDemo.NotesPerTurn)}"))
+                new RunRequest(HistoryRetentionDemo.DiagnosticQuestion)
                 {
-                    CorrelationId = turn == HistoryRetentionDemo.ScenarioTurns
-                        ? NewestCorrelationId
-                        : $"sample-middle-{turn}",
+                    CorrelationId = "sample-diagnostic",
                 },
                 configureOptions: ConfigureDraftSampleRetention);
-        }
+            Assert.DoesNotContain(
+                diagnosticClient.LastMessages,
+                message => message.Text?.Contains(Marker, StringComparison.Ordinal) is true);
 
-        Assert.NotNull(state.Data.Truncation);
-        Assert.DoesNotContain(
-            state.Data.ConversationHistory,
-            entry => entry.CorrelationId == FirstCorrelationId);
-        Assert.Contains(
-            state.Data.ConversationHistory,
-            entry => entry.CorrelationId == NewestCorrelationId);
-        Assert.DoesNotContain(
-            state.Data.ConversationHistory
-                .SelectMany(entry => entry.Messages)
-                .SelectMany(message => message.Contents),
-            content =>
-                content is DurableAgentStateFunctionCallContent { CallId: ToolCallId } ||
-                content is DurableAgentStateFunctionResultContent { CallId: ToolCallId });
-        Assert.Contains(FirstCorrelationId, state.Data.TerminalResults!.Keys);
-        Assert.Contains(FirstCorrelationId, state.Data.CompletionReceipts!.Keys);
-        Assert.Contains(
-            measuredInstruments,
-            instrumentName => instrumentName.EndsWith(
-                ".operations",
-                StringComparison.Ordinal));
-
-        DurableAgentState reloaded = DeserializeState(SerializeState(state));
-        RecordingChatClient duplicateClient = new();
-        AgentResponse duplicate = await CreateHarness(
-            new ChatClientAgent(duplicateClient, name: "agent"),
-            reloaded,
-            configureOptions: ConfigureDraftSampleRetention).RunAsync(
-                new RunRequest("different request") { CorrelationId = FirstCorrelationId });
-        Assert.Equal("response", duplicate.Text);
-        Assert.Equal(0, duplicateClient.InvocationCount);
-
-        RecordingChatClient diagnosticClient = new();
-        _ = await RunEntityAsync(
-            new ChatClientAgent(diagnosticClient, name: "agent"),
-            DeserializeState(SerializeState(state)),
-            new RunRequest(HistoryRetentionDemo.DiagnosticQuestion)
+            static void ConfigureDraftSampleRetention(DurableAgentsOptions options)
             {
-                CorrelationId = "sample-diagnostic",
-            },
-            configureOptions: ConfigureDraftSampleRetention);
-        Assert.DoesNotContain(
-            diagnosticClient.LastMessages,
-            message => message.Text?.Contains(Marker, StringComparison.Ordinal) is true);
-
-        static void ConfigureDraftSampleRetention(DurableAgentsOptions options)
-        {
-            options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
-            options.MaxStateBytes = HistoryRetentionDemo.MaxStateBytes;
+                options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+                options.MaxStateBytes = HistoryRetentionDemo.MaxStateBytes;
+            }
         }
     }
 
