@@ -84,7 +84,7 @@ app = AgentFunctionApp(
 )
 
 """
-Expected behavior when posting several turns with the same `session_id`:
+Expected behavior when posting several turns with the same `sessionId`:
 
 - each turn uses the recent history groups kept by compaction,
 - the number of history groups sent to the model stops growing once the sliding window fills,

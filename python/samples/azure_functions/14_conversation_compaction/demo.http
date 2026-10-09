@@ -14,7 +14,7 @@ Content-Type: application/json
 
 {
   "message": "Name a color.",
-  "session_id": "{{sessionId}}"
+  "sessionId": "{{sessionId}}"
 }
 
 ### Turn 2 - filler
@@ -23,7 +23,7 @@ Content-Type: application/json
 
 {
   "message": "Name a country.",
-  "session_id": "{{sessionId}}"
+  "sessionId": "{{sessionId}}"
 }
 
 ### Turn 3 - filler
@@ -32,7 +32,7 @@ Content-Type: application/json
 
 {
   "message": "Name a fruit.",
-  "session_id": "{{sessionId}}"
+  "sessionId": "{{sessionId}}"
 }
 
 ### Turn 4 - filler
@@ -41,7 +41,7 @@ Content-Type: application/json
 
 {
   "message": "Name a musical instrument.",
-  "session_id": "{{sessionId}}"
+  "sessionId": "{{sessionId}}"
 }
 
 ### Turn 5 - state the fact to recall later
@@ -50,7 +50,7 @@ Content-Type: application/json
 
 {
   "message": "My project codename is BLUEHERON.",
-  "session_id": "{{sessionId}}"
+  "sessionId": "{{sessionId}}"
 }
 
 ### Turn 6 - the fact is inside the retained window, so it is answered
@@ -59,5 +59,5 @@ Content-Type: application/json
 
 {
   "message": "What is my project codename? Reply with just the codename.",
-  "session_id": "{{sessionId}}"
+  "sessionId": "{{sessionId}}"
 }
