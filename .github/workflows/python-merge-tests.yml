@@ -5,11 +5,13 @@ on:
     paths:
       - "python/**"
       - ".github/workflows/python-merge-tests.yml"
+      - ".github/actions/python-package-validation/**"
   push:
     branches: [main]
     paths:
       - "python/**"
       - ".github/workflows/python-merge-tests.yml"
+      - ".github/actions/python-package-validation/**"
   workflow_dispatch:
 
 jobs:
@@ -22,34 +24,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Setup Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - name: Validate package
+        uses: ./.github/actions/python-package-validation
         with:
+          package: durabletask
           python-version: "3.10"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
-
-      - name: Sync locked baseline
-        working-directory: python
-        run: uv sync --frozen --all-packages --group dev --group test
-
-      - name: Resolve exact supported minimums together
-        working-directory: python
-        run: |
-          uv pip install --group dev --group test \
-            -e packages/durabletask \
-            "agent-framework-core==1.19.0" "pydantic==2.11.0" "opentelemetry-api==1.39.0" \
-            "durabletask==1.7.1" "durabletask-azuremanaged==1.4.0" \
-            opentelemetry-instrumentation-logging
-          uv pip check
-
-      - name: Verify versions and run unit tests without resynchronizing
-        working-directory: python
-        run: |
-          uv run --no-sync python -c "import importlib.metadata as m; assert m.version('agent-framework-core') == '1.19.0'; assert m.version('pydantic') == '2.11.0'; assert m.version('opentelemetry-api') == '1.39.0'"
-          uv run --no-sync python -c "import importlib.metadata as m; assert m.version('durabletask') == '1.7.1'; assert m.version('durabletask-azuremanaged') == '1.4.0'"
-          uv run --no-sync pytest -m "not integration" packages/durabletask/tests
+          minimum-dependencies: "true"
 
   durabletask:
     name: durabletask (Python ${{ matrix.python-version }})
@@ -66,38 +46,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Setup Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - name: Validate package
+        uses: ./.github/actions/python-package-validation
         with:
+          package: durabletask
           python-version: ${{ matrix.python-version }}
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
-
-      - name: Sync workspace
-        run: uv sync --all-packages --group dev --group test
-
-      - name: Ruff
-        run: uv run ruff check packages/durabletask
-
-      - name: Pyright (source)
-        run: uv run pyright -p packages/durabletask/pyproject.toml
-
-      - name: MyPy (tests)
-        run: uv run mypy --config-file pyproject.toml packages/durabletask/tests
-
-      - name: Unit tests
-        run: uv run pytest -m "not integration" packages/durabletask/tests --cov=agent_framework_durabletask --cov-report=term-missing:skip-covered
-
-      - name: Build package
-        run: uv build packages/durabletask --out-dir dist
-
-      - name: Upload package
-        if: matrix.python-version == '3.13'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: python-package-durabletask
-          path: python/dist/*
 
   azurefunctions:
     # agent-framework-azurefunctions depends on azure-functions-durable 2.x, which
@@ -115,37 +68,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Setup Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - name: Validate package
+        uses: ./.github/actions/python-package-validation
         with:
+          package: azurefunctions
           python-version: "3.13"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
-
-      - name: Sync project
-        run: uv sync --group dev --group test
-
-      - name: Ruff
-        run: uv run ruff check agent_framework_azurefunctions tests
-
-      - name: Pyright (source)
-        run: uv run pyright -p pyproject.toml
-
-      - name: MyPy (tests)
-        run: uv run mypy --config-file ../../pyproject.toml tests
-
-      - name: Unit tests
-        run: uv run pytest -m "not integration" tests --cov=agent_framework_azurefunctions --cov-report=term-missing:skip-covered
-
-      - name: Build package
-        run: uv build . --out-dir dist
-
-      - name: Upload package
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: python-package-azurefunctions
-          path: python/packages/azurefunctions/dist/*
 
   azurefunctions-minimum-dependencies:
     # azure-functions-durable 2.0.0rc2 requires durabletask 1.11.0, so this package's
@@ -160,33 +87,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Setup Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - name: Validate package
+        uses: ./.github/actions/python-package-validation
         with:
+          package: azurefunctions
           python-version: "3.13"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
-
-      - name: Sync locked baseline
-        run: uv sync --frozen --group dev --group test
-
-      - name: Resolve exact supported minimums together
-        # The locked azure-monitor-opentelemetry installs opentelemetry-instrumentation-logging,
-        # and the older one these pins select doesn't. Listing it makes uv downgrade that copy
-        # too instead of leaving it behind, as in the 3.10 job above.
-        run: |
-          uv pip install --group dev --group test \
-            -e . -e ../durabletask \
-            "agent-framework-core==1.19.0" "pydantic==2.11.0" "opentelemetry-api==1.39.0" \
-            "durabletask==1.11.0" "durabletask-azuremanaged==1.4.0" \
-            "azure-functions==2.3.0" "azure-functions-durable==2.0.0rc2" \
-            opentelemetry-instrumentation-logging
-          uv pip check
-
-      - name: Verify versions and run unit tests without resynchronizing
-        run: |
-          uv run --no-sync python -c "import importlib.metadata as m; assert m.version('agent-framework-core') == '1.19.0'; assert m.version('pydantic') == '2.11.0'; assert m.version('opentelemetry-api') == '1.39.0'"
-          uv run --no-sync python -c "import importlib.metadata as m; assert m.version('durabletask') == '1.11.0'; assert m.version('durabletask-azuremanaged') == '1.4.0'"
-          uv run --no-sync python -c "import importlib.metadata as m; assert m.version('azure-functions') == '2.3.0'; assert m.version('azure-functions-durable') == '2.0.0rc2'"
-          uv run --no-sync pytest -m "not integration" tests
+          minimum-dependencies: "true"
