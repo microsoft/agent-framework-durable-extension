@@ -7,6 +7,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Microsoft.Agents.AI.DurableTask\Microsoft.Agents.AI.DurableTask.csproj" />
+    <ProjectReference Include="..\..\samples\DurableAgents\ConsoleApps\10_AutoHistoryRetention\10_AutoHistoryRetention.csproj" />
     <PackageReference Include="Microsoft.Agents.AI.Foundry" />
     <PackageReference Include="Microsoft.Agents.AI.Workflows" />
     <PackageReference Include="Microsoft.Extensions.Hosting" />
