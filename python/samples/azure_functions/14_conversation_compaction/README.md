@@ -111,11 +111,11 @@ contains a ready-made sequence, and the equivalent with `curl` is:
 ```bash
 curl -X POST http://localhost:7071/api/agents/Historian/run \
      -H "Content-Type: application/json" \
-     -d '{"message": "My project codename is BLUEHERON.", "session_id": "compaction-demo-001"}'
+     -d '{"message": "My project codename is BLUEHERON.", "sessionId": "compaction-demo-001"}'
 
 curl -X POST http://localhost:7071/api/agents/Historian/run \
      -H "Content-Type: application/json" \
-     -d '{"message": "What is my project codename? Reply with just the codename.", "session_id": "compaction-demo-001"}'
+     -d '{"message": "What is my project codename? Reply with just the codename.", "sessionId": "compaction-demo-001"}'
 ```
 
 ## What to look for
