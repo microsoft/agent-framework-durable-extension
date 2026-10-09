@@ -2863,6 +2863,13 @@ public sealed class AgentEntityHistoryTests
             {
                 options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
                 options.MaxStateBytes = HistoryRetentionDemo.MaxStateBytes;
+                options.HistoryRetentionHighWatermark = HistoryRetentionDemo.HighWatermark;
+                options.HistoryRetentionLowWatermark = HistoryRetentionDemo.LowWatermark;
+
+                DurableAgentRetentionSettings settings = options.GetRetentionSettings();
+                Assert.Equal(HistoryRetentionDemo.MaxStateBytes, settings.MaxStateBytes);
+                Assert.Equal(HistoryRetentionDemo.HighWatermark, settings.HighWatermark);
+                Assert.Equal(HistoryRetentionDemo.LowWatermark, settings.LowWatermark);
             }
         }
     }
