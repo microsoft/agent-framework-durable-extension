@@ -46,6 +46,9 @@ public sealed class AgentLoggingTests(ITestOutputHelper output)
     [InlineData("Microsoft.DurableTask.Agents.othertestagent.session")]
     [InlineData("Microsoft.DurableTask.Agents.testagentextra.session")]
     [InlineData("Microsoft.DurableTask.Agents.testagent")]
+    [InlineData("Microsoft.DurableTask.Agents.OtherTestAgent.session")]
+    [InlineData("Microsoft.DurableTask.Agents.TestAgentExtra.session")]
+    [InlineData("Microsoft.DurableTask.Agents.TestAgent")]
     public void AgentLogCaptureExcludesUnrelatedCategories(string category)
     {
         TestLoggerProvider loggerProvider = new(output);
