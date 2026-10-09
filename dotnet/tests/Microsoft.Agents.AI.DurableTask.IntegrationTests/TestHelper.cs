@@ -179,8 +179,8 @@ internal sealed class TestHelper : IDisposable
         return this._loggerProvider.GetAllLogs();
     }
 
-    internal IReadOnlyCollection<LogEntry> GetAgentLogs(string agentName)
+    internal IReadOnlyCollection<LogEntry> GetAgentLogs(AgentSessionId sessionId)
     {
-        return this._loggerProvider.GetAgentLogs(agentName);
+        return this._loggerProvider.GetAgentLogs(sessionId);
     }
 }

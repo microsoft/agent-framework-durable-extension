@@ -150,9 +150,12 @@ async def test_first_transient_storage_error_retries_then_returns_legacy_http_20
     assert json.loads(response.get_body()) == {
         "response": "Legacy transcript answer",
         "message": "question",
+        "sessionId": SESSION_ID,
         "session_id": SESSION_ID,
         "status": "success",
+        "correlationId": CORRELATION_ID,
         "correlation_id": CORRELATION_ID,
+        "messageCount": 1,
         "message_count": 1,
     }
     client.signal_entity.assert_awaited_once()
