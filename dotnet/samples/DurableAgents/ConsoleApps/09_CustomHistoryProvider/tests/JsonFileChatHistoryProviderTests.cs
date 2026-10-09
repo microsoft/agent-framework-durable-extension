@@ -131,6 +131,46 @@ public sealed class JsonFileChatHistoryProviderTests
     }
 
     [Fact]
+    public async Task RestoredSessionFailsWhenExternalHistoryIsNullAsync()
+    {
+        string directory = CreateStoreDirectory();
+        try
+        {
+            using JsonFileChatHistoryProvider firstProvider = new(directory);
+            ChatClientAgent firstAgent = CreateAgent(firstProvider);
+            AgentSession session = await firstAgent.CreateSessionAsync();
+            string historyPath = Path.Combine(directory, firstProvider.GetHistoryId(session));
+            await File.WriteAllTextAsync(historyPath, "null");
+            JsonElement serializedSession = await firstAgent.SerializeSessionAsync(session);
+
+            using JsonFileChatHistoryProvider secondProvider = new(directory);
+            ChatClientAgent secondAgent = CreateAgent(secondProvider);
+            AgentSession restoredSession = await secondAgent.DeserializeSessionAsync(serializedSession);
+
+            await Assert.ThrowsAsync<JsonException>(
+                () => secondProvider.ReadMessagesAsync(restoredSession));
+            await Assert.ThrowsAsync<JsonException>(async () =>
+                _ = await secondProvider.InvokingAsync(
+                    new ChatHistoryProvider.InvokingContext(
+                        secondAgent,
+                        restoredSession,
+                        [new ChatMessage(ChatRole.User, "next request")])));
+            await Assert.ThrowsAsync<JsonException>(
+                () => secondProvider.InvokedAsync(
+                    new ChatHistoryProvider.InvokedContext(
+                        secondAgent,
+                        restoredSession,
+                        [new ChatMessage(ChatRole.User, "next request")],
+                        [new ChatMessage(ChatRole.Assistant, "next response")])).AsTask());
+            Assert.Equal("null", await File.ReadAllTextAsync(historyPath));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task StoreDoesNotDuplicateTheProvidedHistoryPrefixAsync()
     {
         string directory = CreateStoreDirectory();
