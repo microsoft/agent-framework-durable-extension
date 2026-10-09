@@ -11,7 +11,39 @@ This sample demonstrates how to use the Durable Extension for Agent Framework to
 
 ## Prerequisites
 
-Complete the common environment preparation steps described in `../README.md`, including installing Azure Functions Core Tools, starting Azurite, configuring Azure AI Foundry settings, and installing this sample's requirements.
+This folder can be installed independently, including after gallery extraction.
+Use Python 3.13 and Azure Functions Core Tools v4, and sign in using `az login`
+with an identity authorized for an **existing** Azure AI Foundry project/model.
+Start your own Azurite instance for the host's storage connection.
+
+From this folder, create and activate an isolated virtual environment and run:
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+On Linux/macOS use `python3.13 -m venv .venv` and `source .venv/bin/activate`.
+Requirements use published packages matching this release and the repository's
+lock, not editable paths to sibling packages missing from gallery downloads.
+The integration requires `azure-functions<2`; it cannot currently be combined
+with connectors requiring `azure-functions>=2.2`. Do not adopt a different SDK
+major or the unreleased migration stack just to satisfy dependency resolution.
+
+If `local.settings.json` does not exist, copy `local.settings.json.template` to
+it. Otherwise, preserve your existing settings and add only missing entries.
+Set `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL` to real existing resources;
+the template placeholders are not runnable values. Keep credentials and local
+settings out of source control.
+
+The existing host.json uses the Azure Storage backend. The template's DTS
+connection string alone does not select DTS. This packaging change does not
+migrate backend/history protocols; DTS configuration and service execution
+still require a separately validated owner decision.
+
+Start the host with `func start`. Package imports and function discovery do not
+prove model access or completed durable agent execution.
 
 ## Running the Sample
 
