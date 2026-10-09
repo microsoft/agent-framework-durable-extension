@@ -46,12 +46,17 @@ With the default `/api` prefix, generated routes are
 `enable_health_check` controls `/api/health` (both default true). `enable_mcp_tool_trigger` opts
 agents into native MCP tools (default false).
 
-Agent requests accept a JSON `message` with optional `session_id`, `role`, `response_format` and
-`enable_tool_calls`, or a plain-text body. `session_id` also works in the query string. The deprecated
-`thread_id` alias remains accepted, but conflicting nonblank IDs are rejected. Reuse the returned
-`session_id` for later turns. JSON requests or `Accept: application/json` select JSON responses.
-Agent `wait_for_response` defaults to true. A valid `x-ms-wait-for-response` header takes precedence
-over query and body settings. With JSON responses, false returns `202` with `session_id` and `correlation_id`.
+Agent requests accept a JSON `message` with optional `sessionId`, `role`, `response_format` and
+`enable_tool_calls`, or a plain-text body. `sessionId` also works in the query string. Reuse the returned
+`sessionId` for later turns. JSON requests or `Accept: application/json` select JSON responses.
+Agent `waitForResponse` defaults to true. A valid `x-ms-wait-for-response` header takes precedence
+over query and body settings. With JSON responses, false returns `202` with `sessionId` and `correlationId`.
+
+Legacy `session_id`, `wait_for_response` and deprecated `thread_id` request aliases remain temporarily
+accepted; conflicting nonblank session identifiers are rejected. JSON responses temporarily include
+`session_id` and `correlation_id` alongside the canonical fields for existing callers.
+See the [agent HTTP camelCase migration guide](../../../docs/features/durable-agents/http-api-camelcase-migration.md).
+SDK options such as `response_format` and `enable_tool_calls` keep their existing names.
 
 Workflow start query parameters are `runId`, `waitForResponse` (default false) and `timeoutSeconds` (default 10,
 range 1-200 when waiting). A valid wait header overrides the query. The generic Functions `runId`
@@ -61,7 +66,8 @@ control characters. It does not apply the standalone DTS ASCII-only rule or rewr
 Agent polling returns `200` for an available successful result, `410 Gone` for an expired or
 unavailable v2 result with its retained `outcome`, and `500` for available failed v2 results or state
 decode errors. Transient storage reads retry within `max_poll_retries` and `poll_interval_seconds`.
-Polling does not persist cleanup. JSON `agent_response` snapshots retain the `_durable_value_policy`
+Polling does not persist cleanup. JSON `agentResponse` snapshots (also temporarily emitted as
+`agent_response`) retain the `_durable_value_policy`
 marker under the shared value rules. Text responses expose unavailable outcomes in
 `x-ms-durable-outcome`. See [delivery and maintenance](../durabletask/README.md#delivery-and-maintenance).
 

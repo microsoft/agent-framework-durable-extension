@@ -72,15 +72,23 @@ async def test_http_shared_success_delivers_snapshot_and_falsey_values(
     assert set(payload) == {
         "response",
         "message",
+        "sessionId",
         "session_id",
         "status",
+        "correlationId",
         "correlation_id",
+        "messageCount",
         "message_count",
+        "agentResponse",
         "agent_response",
     }
     assert payload["response"] == "Readable answer" and payload["status"] == "success"
     assert payload["message"] == "question" and payload["session_id"] == SESSION_ID
     assert payload["correlation_id"] == CORRELATION_ID and payload["message_count"] == 0
+    assert payload["sessionId"] == payload["session_id"]
+    assert payload["correlationId"] == payload["correlation_id"]
+    assert payload["messageCount"] == payload["message_count"]
+    assert payload["agentResponse"] == payload["agent_response"]
     snapshot = payload["agent_response"]
     assert "value" in snapshot and snapshot["value"] == value
     assert type(snapshot["value"]) is type(value)
@@ -138,6 +146,11 @@ async def test_http_unavailable_preserves_receipt_outcome_and_stops_polling(
         payload = json.loads(response.get_body())
         assert payload["status"] == "completed_unavailable" and payload["response"] is None
         assert payload["error_code"] == "response_expired" and payload["error"] == EXPIRED_MESSAGE
+        assert payload["errorCode"] == payload["error_code"]
+        assert payload["sessionId"] == payload["session_id"]
+        assert payload["correlationId"] == payload["correlation_id"]
+        assert payload["messageCount"] == payload["message_count"]
+        assert payload["agentResponse"] == payload["agent_response"]
         assert payload["outcome"] == outcome and payload["message_count"] == 1
         assert payload["agent_response"]["additional_properties"] == {
             "durable_status": "already_completed",
@@ -174,6 +187,8 @@ async def test_live_failed_receipt_overrides_provider_delivery_hints(
         payload = json.loads(response.get_body())
         assert payload["status"] == "error" and payload["response"] is None
         assert payload["error"] == ERROR_MESSAGE and payload["error_code"] == "schema_error"
+        assert payload["errorCode"] == payload["error_code"]
+        assert payload["agentResponse"] == payload["agent_response"]
         assert "outcome" not in payload
         assert payload["agent_response"]["value"] == {"answer": "invalid"}
         assert payload["agent_response"]["additional_properties"]["durable_status"] == "error"
@@ -303,7 +318,7 @@ async def test_only_absent_completion_keeps_polling(
 
 @pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
 @pytest.mark.parametrize("error", [False, True])
-async def test_legacy_delivery_keeps_exact_base_builder_shape(
+async def test_legacy_delivery_keeps_base_values_with_http_aliases(
     version: str, error: bool, handlers: tuple[HttpHandler, McpHandler], sleep: AsyncMock
 ) -> None:
     raw = {"schemaVersion": version, "data": {"conversationHistory": [_history_entry(error=error)]}}
@@ -317,9 +332,12 @@ async def test_legacy_delivery_keeps_exact_base_builder_shape(
     assert json.loads(response.get_body()) == {
         "response": original.text,
         "message": "question",
+        "sessionId": SESSION_ID,
         "session_id": SESSION_ID,
         "status": "success",
+        "correlationId": CORRELATION_ID,
         "correlation_id": CORRELATION_ID,
+        "messageCount": 1,
         "message_count": 1,
     }
     _assert_one_delivery(client, sleep, raw)
@@ -387,8 +405,10 @@ async def test_fire_and_forget_http_remains_202_without_state_read(
         assert json.loads(response.get_body()) == {
             "response": "Agent request accepted",
             "message": "question",
+            "sessionId": SESSION_ID,
             "session_id": SESSION_ID,
             "status": "accepted",
+            "correlationId": CORRELATION_ID,
             "correlation_id": CORRELATION_ID,
         }
     client.signal_entity.assert_awaited_once()

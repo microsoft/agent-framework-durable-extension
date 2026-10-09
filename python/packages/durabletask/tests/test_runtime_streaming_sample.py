@@ -46,9 +46,11 @@ def test_reliable_streaming_http_demo_uses_accepted_session_id():
     demo = (SAMPLES / "azure_functions" / "03_reliable_streaming" / "demo.http").read_text(encoding="utf-8")
     start_request = demo.split("# @name trip\n", 1)[1].split("\n###", 1)[0].splitlines()
 
-    assert "@sessionId = {{trip.response.body.$.session_id}}" in demo.splitlines()
+    assert [line for line in demo.splitlines() if line.startswith("@sessionId = ")] == [
+        "@sessionId = {{trip.response.body.$.sessionId}}"
+    ]
     # A plain-text POST needs both settings for a non-blocking JSON response.
-    assert start_request[0] == "POST {{baseUrl}}/api/agents/{{agentName}}/run?wait_for_response=false"
+    assert start_request[0] == "POST {{baseUrl}}/api/agents/{{agentName}}/run?waitForResponse=false"
     assert "Content-Type: text/plain" in start_request
     assert "Accept: application/json" in start_request
     assert [line for line in demo.splitlines() if line.startswith("GET {{baseUrl}}/api/agent/stream/")] == [

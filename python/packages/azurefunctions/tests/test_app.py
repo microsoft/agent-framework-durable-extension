@@ -331,7 +331,7 @@ class TestAgentFunctionAppSetup:
 
 
 class TestWaitForResponseAndCorrelationId:
-    """Tests for wait_for_response flag and correlation ID handling."""
+    """Tests for waitForResponse compatibility and correlation ID handling."""
 
     def _create_app(self) -> AgentFunctionApp:
         mock_agent = Mock()
@@ -356,55 +356,57 @@ class TestWaitForResponseAndCorrelationId:
 
         assert app._should_wait_for_response(request, {}) is True
 
-    def test_wait_for_response_body_snake_case(self) -> None:
-        """Test that payload controls wait_for_response."""
+    def test_wait_for_response_body_accepts_camel_case_and_legacy_names(self) -> None:
+        """Test that payload controls waitForResponse during the compatibility window."""
         app = self._create_app()
         request = self._make_request()
 
+        assert app._should_wait_for_response(request, {"waitForResponse": "true"}) is True
+        assert app._should_wait_for_response(request, {"waitForResponse": "false"}) is False
         assert app._should_wait_for_response(request, {WAIT_FOR_RESPONSE_FIELD: "true"}) is True
         assert app._should_wait_for_response(request, {WAIT_FOR_RESPONSE_FIELD: "false"}) is False
         assert app._should_wait_for_response(request, {WAIT_FOR_RESPONSE_FIELD: "0"}) is False
 
-    def test_wait_for_response_query_parameter(self) -> None:
-        """Test that the agent snake_case query parameter controls wait_for_response."""
+    def test_wait_for_response_query_accepts_camel_case_and_legacy_names(self) -> None:
+        """Test that the agent query parameter controls waitForResponse."""
         app = self._create_app()
-        request = self._make_request(params={WAIT_FOR_RESPONSE_FIELD: "true"})
 
-        assert app._should_wait_for_response(request, {}) is True
+        assert app._should_wait_for_response(self._make_request(params={"waitForResponse": "true"}), {}) is True
+        assert app._should_wait_for_response(self._make_request(params={WAIT_FOR_RESPONSE_FIELD: "true"}), {}) is True
 
     def test_wait_for_response_query_precedence(self) -> None:
         """Test that query parameter overrides body value."""
         app = self._create_app()
-        request = self._make_request(params={WAIT_FOR_RESPONSE_FIELD: "false"})
+        request = self._make_request(params={"waitForResponse": "false"})
 
-        assert app._should_wait_for_response(request, {WAIT_FOR_RESPONSE_FIELD: "true"}) is False
+        assert app._should_wait_for_response(request, {"waitForResponse": "true"}) is False
 
-    def test_wait_for_response_query_parameter_is_surface_specific(self) -> None:
-        """Test that each surface only honors the query parameter matching its casing convention."""
+    def test_wait_for_response_rejects_conflicting_alias_values(self) -> None:
+        """Test that ambiguous compatibility aliases are rejected."""
         app = self._create_app()
-        snake_case = self._make_request(params={WAIT_FOR_RESPONSE_FIELD: "true"})
-        camel_case = self._make_request(params={"waitForResponse": "true"})
 
-        # Agent endpoints default to the snake_case name.
-        assert app._should_wait_for_response(snake_case, {}, default_value=False) is True
-        assert app._should_wait_for_response(camel_case, {}, default_value=False) is False
+        request = self._make_request(params={"waitForResponse": "true", WAIT_FOR_RESPONSE_FIELD: "false"})
+        with pytest.raises(IncomingRequestError, match="waitForResponse"):
+            app._should_wait_for_response(request, {})
 
-        # Workflow endpoints opt in to the camelCase name.
-        assert (
-            app._should_wait_for_response(camel_case, {}, query_parameter="waitForResponse", default_value=False)
-            is True
-        )
-        assert (
-            app._should_wait_for_response(snake_case, {}, query_parameter="waitForResponse", default_value=False)
-            is False
-        )
+        request = self._make_request()
+        with pytest.raises(IncomingRequestError, match="waitForResponse"):
+            app._should_wait_for_response(request, {"waitForResponse": "true", WAIT_FOR_RESPONSE_FIELD: "false"})
+
+        request = self._make_request(params={"waitForResponse": "false"})
+        with pytest.raises(IncomingRequestError, match="waitForResponse"):
+            app._should_wait_for_response(request, {"waitForResponse": "true", WAIT_FOR_RESPONSE_FIELD: "false"})
+
+        request = self._make_request(headers={WAIT_FOR_RESPONSE_HEADER: "true"})
+        with pytest.raises(IncomingRequestError, match="waitForResponse"):
+            app._should_wait_for_response(request, {"waitForResponse": "true", WAIT_FOR_RESPONSE_FIELD: "false"})
 
     def test_invalid_wait_for_response_header_falls_back_to_query(self) -> None:
         """Test that an invalid header does not suppress a valid query option."""
         app = self._create_app()
         request = self._make_request(
             headers={WAIT_FOR_RESPONSE_HEADER: "invalid"},
-            params={WAIT_FOR_RESPONSE_FIELD: "true"},
+            params={"waitForResponse": "true"},
         )
 
         assert app._should_wait_for_response(request, {}) is True
@@ -923,6 +925,16 @@ class TestIncomingRequestParsing:
         app = self._create_app()
 
         request = Mock()
+        request.params = {"sessionId": "query-session"}
+        req_body: dict[str, Any] = {}
+
+        assert app._resolve_session_id(request, req_body) == "query-session"
+
+    def test_extract_legacy_session_id_from_query_params(self) -> None:
+        """The deprecated session_id name is still accepted on incoming requests."""
+        app = self._create_app()
+
+        request = Mock()
         request.params = {"session_id": "query-session"}
         req_body: dict[str, Any] = {}
 
@@ -943,22 +955,22 @@ class TestIncomingRequestParsing:
         app = self._create_app()
 
         request = Mock()
-        request.params = {"session_id": "same-key", "thread_id": "same-key"}
+        request.params = {"sessionId": "same-key", "session_id": "same-key", "thread_id": "same-key"}
 
         assert app._resolve_session_id(request, {}) == "same-key"
-        assert app._resolve_session_id(request, {"session_id": "same-key"}) == "same-key"
+        assert app._resolve_session_id(request, {"sessionId": "same-key"}) == "same-key"
 
     def test_conflicting_session_identifiers_are_rejected(self) -> None:
         """Any two non-blank values that disagree are rejected, matching the .NET behavior."""
         app = self._create_app()
 
         request = Mock()
-        request.params = {"session_id": "query-session", "thread_id": "query-thread"}
+        request.params = {"sessionId": "query-session", "thread_id": "query-thread"}
         with pytest.raises(IncomingRequestError, match="Conflicting session identifiers"):
             app._resolve_session_id(request, {})
 
         # Conflicts across the body and query string are rejected too.
-        request.params = {"session_id": "query-session"}
+        request.params = {"sessionId": "query-session"}
         with pytest.raises(IncomingRequestError, match="Conflicting session identifiers"):
             app._resolve_session_id(request, {"thread_id": "body-thread"})
 
@@ -969,7 +981,7 @@ class TestIncomingRequestParsing:
         request = Mock()
         request.params = {"thread_id": "query-thread"}
 
-        assert app._resolve_session_id(request, {"session_id": "   "}) == "query-thread"
+        assert app._resolve_session_id(request, {"sessionId": "   "}) == "query-thread"
 
 
 class TestHttpRunRoute:
@@ -1035,6 +1047,30 @@ class TestHttpRunRoute:
         assert "session_id" not in run_request
         assert "thread_id" not in run_request
 
+    def test_http_run_success_includes_camel_case_message_count(self) -> None:
+        """A synchronous JSON response emits both message count spellings."""
+        state = Mock()
+        state.message_count = 2
+        app = AgentFunctionApp(enable_http_endpoints=False, enable_health_check=False)
+        result = app._build_success_result(
+            response_message="Hello",
+            message="Hello",
+            session_id="session-1",
+            correlation_id="correlation-1",
+            state=state,
+        )
+
+        response = app._create_http_response(
+            payload=result,
+            status_code=200,
+            request_response_format="json",
+            session_id="session-1",
+        )
+        assert response.status_code == 200
+        payload = json.loads(response.get_body())
+        assert payload["messageCount"] == 2
+        assert payload["message_count"] == payload["messageCount"]
+
     async def test_http_run_accept_header_returns_json(self) -> None:
         """Test that Accept header requesting JSON results in JSON response."""
         mock_agent = Mock()
@@ -1059,12 +1095,15 @@ class TestHttpRunRoute:
         body = response.get_body().decode("utf-8")
         assert '"status": "accepted"' in body
 
-        # Responses carry only the canonical session_id name.
+        # Responses carry camelCase plus temporary legacy fields during the migration window.
         payload = json.loads(body)
-        assert payload["session_id"]
+        assert payload["sessionId"]
+        assert payload["session_id"] == payload["sessionId"]
+        assert payload["correlation_id"] == payload["correlationId"]
         assert "thread_id" not in payload
+        assert response.headers.get("Deprecation") is None
 
-    async def test_http_run_round_trips_explicit_session_id(self) -> None:
+    async def test_http_run_round_trips_explicit_session_id(self, caplog: pytest.LogCaptureFixture) -> None:
         """An explicit caller-supplied key flows through the entity, payload, and header unchanged."""
         mock_agent = Mock()
         mock_agent.name = "HttpAgentEcho"
@@ -1081,10 +1120,16 @@ class TestHttpRunRoute:
 
         client = AsyncMock()
 
-        response = await handler(request, client)
+        with caplog.at_level("WARNING", logger="agent_framework.azurefunctions"):
+            response = await handler(request, client)
 
         assert response.status_code == 202
+        assert response.headers["Deprecation"] == "@1789430400"
+        assert "http-api-camelcase-migration.md" in response.headers["Link"]
+        assert "Deprecated agent HTTP field names" in response.headers["Warning"]
+        assert "Deprecated agent HTTP field names were used" in caplog.text
         payload = json.loads(response.get_body().decode("utf-8"))
+        assert payload["sessionId"] == "caller-key-1"
         assert payload["session_id"] == "caller-key-1"
         assert "thread_id" not in payload
 
@@ -1101,7 +1146,7 @@ class TestHttpRunRoute:
 
         request = Mock()
         request.headers = {WAIT_FOR_RESPONSE_HEADER: "false", "Accept": MIMETYPE_APPLICATION_JSON}
-        request.params = {"session_id": "one", "thread_id": "two"}
+        request.params = {"sessionId": "one", "thread_id": "two"}
         request.route_params = {}
         request.get_json.side_effect = ValueError("Invalid JSON")
         request.get_body.return_value = b"Plain text via HTTP"
@@ -1111,8 +1156,60 @@ class TestHttpRunRoute:
         response = await handler(request, client)
 
         assert response.status_code == 400
+        assert response.headers["Deprecation"] == "@1789430400"
         assert "Conflicting session identifiers" in response.get_body().decode("utf-8")
         client.signal_entity.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "params,body_fields,expected_status",
+        [
+            (
+                {"sessionId": "same", "session_id": "same", "waitForResponse": "false", "wait_for_response": "false"},
+                {"sessionId": "same", "session_id": "same"},
+                202,
+            ),
+            (
+                {},
+                {"sessionId": "same", "session_id": "same", "waitForResponse": False, "wait_for_response": False},
+                202,
+            ),
+            ({"sessionId": "same", "waitForResponse": "false"}, {"session_id": "same"}, 202),
+            ({"sessionId": "one", "session_id": "two"}, {}, 400),
+            ({"sessionId": "one"}, {"session_id": "two"}, 400),
+            ({"waitForResponse": "true", "wait_for_response": "false"}, {}, 400),
+            ({}, {"waitForResponse": True, "wait_for_response": False}, 400),
+        ],
+    )
+    async def test_http_run_alias_pairs_dispatch_only_when_consistent(
+        self, params: dict[str, str], body_fields: dict[str, Any], expected_status: int
+    ) -> None:
+        """The registered HTTP route validates aliases before durable dispatch."""
+        agent = Mock()
+        agent.name = "AliasAgent"
+        handler = self._get_run_handler(agent)
+        request = func.HttpRequest(
+            method="POST",
+            url="https://example.test/api/agents/AliasAgent/run",
+            headers={"Content-Type": MIMETYPE_APPLICATION_JSON, "Accept": MIMETYPE_APPLICATION_JSON},
+            params=params,
+            body=json.dumps({"message": "hello", **body_fields}).encode(),
+        )
+        client = AsyncMock()
+
+        response = await handler(request, client)
+
+        assert response.status_code == expected_status
+        assert response.headers["Deprecation"] == "@1789430400"
+        if expected_status == 202:
+            payload = json.loads(response.get_body())
+            assert payload["sessionId"] == payload["session_id"] == "same"
+            assert payload["correlationId"] == payload["correlation_id"]
+            client.signal_entity.assert_awaited_once()
+            assert client.signal_entity.call_args.args[0].key == "same"
+            client.read_entity_state.assert_not_awaited()
+        else:
+            client.signal_entity.assert_not_awaited()
+            client.read_entity_state.assert_not_awaited()
 
     async def test_http_run_rejects_empty_message(self) -> None:
         """Test that the HTTP handler rejects empty messages with a 400 response."""
@@ -1931,6 +2028,7 @@ class TestAgentFunctionAppErrorPaths:
         mock_req = Mock()
         mock_req.params = {}
 
+        assert app._resolve_session_id(mock_req, {"sessionId": "body-session-123"}) == "body-session-123"
         assert app._resolve_session_id(mock_req, {"session_id": "body-session-123"}) == "body-session-123"
         # The deprecated field name is still accepted.
         assert app._resolve_session_id(mock_req, {"thread_id": "body-thread-123"}) == "body-thread-123"

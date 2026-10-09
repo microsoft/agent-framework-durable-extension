@@ -23,10 +23,12 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
     private const string AgentName = "TestAgent";
     private const string SessionKey = "session-1";
 
-    [Fact]
-    public async Task Http_FireAndForget_ReturnsAcceptedWithoutPollingAsync()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Http_FireAndForget_ReturnsAcceptedWithoutPollingAsync(bool legacyNames)
     {
-        using EndpointFixture fixture = new(waitForResponse: false);
+        using EndpointFixture fixture = new(waitForResponse: false, legacyNames: legacyNames);
 
         HttpResponseData response = await BuiltInFunctions.RunAgentHttpAsync(
             fixture.Request, fixture.Client.Object, fixture.Context);
@@ -35,6 +37,10 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
         using JsonDocument body = ReadBody(response);
         Assert.Equal("accepted", body.RootElement.GetProperty("status").GetString());
         Assert.Equal(202, body.RootElement.GetProperty("status_code").GetInt32());
+        Assert.Equal(202, body.RootElement.GetProperty("statusCode").GetInt32());
+        Assert.Equal(SessionKey, body.RootElement.GetProperty("sessionId").GetString());
+        Assert.Equal(SessionKey, body.RootElement.GetProperty("session_id").GetString());
+        Assert.Equal(legacyNames, response.Headers.TryGetValues("Deprecation", out _));
         Assert.False(body.RootElement.TryGetProperty("response", out _));
         fixture.Entities.Verify(
             c => c.GetEntityAsync<DurableAgentState>(
@@ -59,6 +65,9 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
             using JsonDocument body = ReadBody(response);
             Assert.Equal("success", body.RootElement.GetProperty("status").GetString());
             Assert.Equal(200, body.RootElement.GetProperty("status_code").GetInt32());
+            Assert.Equal(200, body.RootElement.GetProperty("statusCode").GetInt32());
+            Assert.Equal(SessionKey, body.RootElement.GetProperty("sessionId").GetString());
+            Assert.Equal(SessionKey, body.RootElement.GetProperty("session_id").GetString());
             Assert.Equal("original result", body.RootElement.GetProperty("response")
                 .GetProperty("messages")[0].GetProperty("contents")[0].GetProperty("text").GetString());
         }
@@ -87,6 +96,8 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
             Assert.Equal("success", body.RootElement.GetProperty("status").GetString());
             Assert.Equal(200, body.RootElement.GetProperty("status_code").GetInt32());
             Assert.Equal(SessionKey, body.RootElement.GetProperty("session_id").GetString());
+            Assert.False(body.RootElement.TryGetProperty("sessionId", out _));
+            Assert.False(body.RootElement.TryGetProperty("statusCode", out _));
             Assert.Equal("original result", body.RootElement.GetProperty("response")
                 .GetProperty("messages")[0].GetProperty("contents")[0].GetProperty("text").GetString());
         }
@@ -128,14 +139,17 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
     }
 
     [Theory]
-    [InlineData("succeeded", "application/json")]
-    [InlineData("failed", "application/json")]
-    [InlineData("succeeded", "text/plain")]
-    [InlineData("failed", "text/plain")]
-    public async Task Http_Unavailable_RetainsCompletionOutcomeAsync(string outcome, string accept)
+    [InlineData("succeeded", "application/json", true)]
+    [InlineData("failed", "application/json", true)]
+    [InlineData("succeeded", "text/plain", true)]
+    [InlineData("failed", "text/plain", true)]
+    [InlineData("succeeded", "application/json", false)]
+    [InlineData("failed", "text/plain", false)]
+    public async Task Http_Unavailable_RetainsCompletionOutcomeAsync(string outcome, string accept, bool legacyNames)
     {
         using EndpointFixture fixture = new(
-            accept: accept, stateFactory: correlation => CreateMailboxState(correlation, outcome, available: false));
+            accept: accept, stateFactory: correlation => CreateMailboxState(correlation, outcome, available: false),
+            legacyNames: legacyNames);
 
         HttpResponseData response = await BuiltInFunctions.RunAgentHttpAsync(
             fixture.Request, fixture.Client.Object, fixture.Context);
@@ -143,13 +157,18 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
         Assert.Equal(HttpStatusCode.Gone, response.StatusCode);
         Assert.Equal(outcome, Assert.Single(response.Headers.GetValues("x-ms-durable-outcome")));
         Assert.Equal(outcome, Assert.Single(response.Headers.GetValues("x-ms-agent-completion-outcome")));
+        Assert.Equal(legacyNames, response.Headers.TryGetValues("Deprecation", out _));
         if (accept == "application/json")
         {
             using JsonDocument body = ReadBody(response);
             Assert.Equal("completedResultUnavailable", body.RootElement.GetProperty("status").GetString());
             Assert.Equal(410, body.RootElement.GetProperty("status_code").GetInt32());
+            Assert.Equal(410, body.RootElement.GetProperty("statusCode").GetInt32());
+            Assert.Equal(SessionKey, body.RootElement.GetProperty("sessionId").GetString());
+            Assert.Equal(SessionKey, body.RootElement.GetProperty("session_id").GetString());
             Assert.Equal(outcome, body.RootElement.GetProperty("outcome").GetString());
             Assert.Equal(outcome, body.RootElement.GetProperty("completion_outcome").GetString());
+            Assert.Equal(outcome, body.RootElement.GetProperty("completionOutcome").GetString());
             Assert.False(body.RootElement.TryGetProperty("response", out _));
         }
     }
@@ -165,9 +184,15 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
 
         Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
         Assert.Equal("failed", Assert.Single(response.Headers.GetValues("x-ms-durable-outcome")));
+        Assert.Equal("@1789430400", Assert.Single(response.Headers.GetValues("Deprecation")));
         using JsonDocument body = ReadBody(response);
         Assert.Equal("failed", body.RootElement.GetProperty("status").GetString());
         Assert.Equal(500, body.RootElement.GetProperty("status_code").GetInt32());
+        Assert.Equal(500, body.RootElement.GetProperty("statusCode").GetInt32());
+        Assert.Equal(SessionKey, body.RootElement.GetProperty("sessionId").GetString());
+        Assert.Equal(SessionKey, body.RootElement.GetProperty("session_id").GetString());
+        Assert.False(body.RootElement.TryGetProperty("completionOutcome", out _));
+        Assert.False(body.RootElement.TryGetProperty("completion_outcome", out _));
         Assert.Equal("failed", body.RootElement.GetProperty("outcome").GetString());
         JsonElement error = body.RootElement.GetProperty("error");
         Assert.Equal("committedFailure", error.GetProperty("code").GetString());
@@ -376,6 +401,7 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
             bool waitForResponse = true,
             string accept = "application/json",
             Func<string, DurableAgentState>? stateFactory = null,
+            bool legacyNames = true,
             CancellationToken cancellationToken = default)
         {
             ServiceCollection services = new();
@@ -404,12 +430,14 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
             Mock<HttpRequestData> request = new(this.Context);
             request.SetupGet(r => r.Headers).Returns(headers);
             request.SetupGet(r => r.Body).Returns(this._requestBody);
+            string sessionParameter = legacyNames ? "session_id" : "sessionId";
+            string waitParameter = legacyNames ? "wait_for_response" : "waitForResponse";
             request.SetupGet(r => r.Url).Returns(new Uri(
-                $"https://localhost/api/agents/{AgentName}/run?session_id={SessionKey}&wait_for_response={waitForResponse}"));
+                $"https://localhost/api/agents/{AgentName}/run?{sessionParameter}={SessionKey}&{waitParameter}={waitForResponse}"));
             request.SetupGet(r => r.Query).Returns(new NameValueCollection
             {
-                ["session_id"] = SessionKey,
-                ["wait_for_response"] = waitForResponse.ToString(),
+                [sessionParameter] = SessionKey,
+                [waitParameter] = waitForResponse.ToString(),
             });
             request.Setup(r => r.CreateResponse()).Returns(response.Object);
             this.Request = request.Object;

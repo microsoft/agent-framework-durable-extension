@@ -2,7 +2,7 @@
 ### Use with the VS Code REST Client extension or any HTTP client
 ###
 ### Workflow:
-### 1. POST /api/agents/{agentName}/run?wait_for_response=false -> Start durable agent (returns session_id)
+### 1. POST /api/agents/{agentName}/run?waitForResponse=false -> Start durable agent (returns sessionId)
 ### 2. GET  /api/agent/stream/{id}       -> Read chunks from Redis (SSE or plain text)
 ### 3. Add ?cursor={id} to resume from a specific point
 ###
@@ -22,8 +22,10 @@ GET {{baseUrl}}/api/health
 ### Start Agent Run
 # Starts the durable agent without waiting and returns HTTP 202 JSON.
 # The RedisStreamCallback persists streaming chunks to Redis.
+# The run endpoint waits for completion and echoes the body format by default, so opt out of the
+# wait and ask for JSON to get the 202 payload carrying the sessionId used below.
 # @name trip
-POST {{baseUrl}}/api/agents/{{agentName}}/run?wait_for_response=false
+POST {{baseUrl}}/api/agents/{{agentName}}/run?waitForResponse=false
 Content-Type: text/plain
 Accept: application/json
 
@@ -33,8 +35,8 @@ Plan a 3-day trip to Tokyo
 
 ### Stream from Redis (SSE format)
 # Reads persisted chunks from Redis using cursor-based pagination.
-# Use the returned session_id as the stream route's conversation_id and Redis key suffix.
-@sessionId = {{trip.response.body.$.session_id}}
+# Use the returned sessionId as the stream route's conversation_id and Redis key suffix.
+@sessionId = {{trip.response.body.$.sessionId}}
 GET {{baseUrl}}/api/agent/stream/{{sessionId}}
 Accept: text/event-stream
 

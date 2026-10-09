@@ -82,16 +82,45 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
         Assert.Equal(expected, result);
     }
 
-    [Theory]
-    [InlineData("waitForResponse", "wait_for_response")] // workflow endpoints use camelCase
-    [InlineData("wait_for_response", "waitForResponse")] // agent endpoints use snake_case
-    public void ShouldWaitForResponse_OnlyHonorsTheParameterForItsSurface(string parameterName, string otherName)
+    [Fact]
+    public void ShouldWaitForResponse_OnlyHonorsTheWorkflowParameter()
     {
-        HttpRequestData matching = CreateRequest(waitForResponse: "true", waitForResponseParameterName: parameterName);
-        HttpRequestData mismatched = CreateRequest(waitForResponse: "true", waitForResponseParameterName: otherName);
+        HttpRequestData matching = CreateRequest(waitForResponse: "true", waitForResponseParameterName: "waitForResponse");
+        HttpRequestData mismatched = CreateRequest(waitForResponse: "true", waitForResponseParameterName: "wait_for_response");
 
-        Assert.True(BuiltInFunctions.ShouldWaitForResponse(matching, parameterName, defaultValue: false));
-        Assert.False(BuiltInFunctions.ShouldWaitForResponse(mismatched, parameterName, defaultValue: false));
+        Assert.True(BuiltInFunctions.ShouldWaitForResponse(matching, "waitForResponse", defaultValue: false));
+        Assert.False(BuiltInFunctions.ShouldWaitForResponse(mismatched, "waitForResponse", defaultValue: false));
+    }
+
+    [Theory]
+    [InlineData(null, null, null, true, true)]
+    [InlineData(null, "false", null, true, false)]
+    [InlineData(null, null, "false", true, false)]
+    [InlineData(null, "false", "false", true, false)]
+    [InlineData(null, "true", "false", false, true)]
+    [InlineData("true", "true", "false", false, true)]
+    [InlineData("false", "true", "true", true, false)]
+    [InlineData("invalid", null, "false", true, false)]
+    public void TryGetAgentWaitForResponse_AcceptsCamelCaseAndLegacyQueryNames(
+        string? headerValue,
+        string? waitForResponse,
+        string? legacyWaitForResponse,
+        bool expectedSuccess,
+        bool expectedWait)
+    {
+        HttpRequestData request = CreateRequest(
+            headerValue: headerValue,
+            waitForResponse: waitForResponse,
+            legacyWaitForResponse: legacyWaitForResponse);
+
+        bool success = BuiltInFunctions.TryGetAgentWaitForResponse(
+            request,
+            out bool actualWait,
+            out string? error);
+
+        Assert.Equal(expectedSuccess, success);
+        Assert.Equal(expectedWait, actualWait);
+        Assert.Equal(expectedSuccess, error is null);
     }
 
     [Theory]
@@ -378,6 +407,7 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
     private static HttpRequestData CreateRequest(
         string? headerValue = null,
         string? waitForResponse = null,
+        string? legacyWaitForResponse = null,
         string? timeoutSeconds = null,
         string waitForResponseParameterName = "waitForResponse")
     {
@@ -391,6 +421,11 @@ public sealed class BuiltInFunctionsWorkflowRoutingTests
         if (waitForResponse is not null)
         {
             query.Add(waitForResponseParameterName, waitForResponse);
+        }
+
+        if (legacyWaitForResponse is not null)
+        {
+            query.Add("wait_for_response", legacyWaitForResponse);
         }
 
         if (timeoutSeconds is not null)
