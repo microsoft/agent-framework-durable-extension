@@ -69,6 +69,15 @@ state reads and parent-instance metadata, plus `pydantic>=2.11,<3`. Both package
 `agent-framework-core>=1.19.0,<2`. Functions requires Python 3.13+, `azure-functions>=2.3.0,<3`
 and `azure-functions-durable>=2.0.0rc2,<3`, which brings `durabletask>=1.11.0`.
 
+Installing both packages together on Python 3.13+ selects one Durable Task SDK version from
+the intersection, `durabletask>=1.11.0,<2`. Their lower bounds do not conflict. The standalone
+package keeps its lower Python and SDK requirements for applications that do not use Functions.
+
+CI shares the package-validation steps but keeps separate environments for the exact minimums.
+A combined Functions environment cannot check standalone Python 3.10 and SDK 1.7.1 compatibility.
+The Python 3.10 job checks supported compatibility, not a separate build requirement. Uploaded
+package artifacts come from the Python 3.13 jobs.
+
 Custom converters can still serve native co-hosted work. For framework traffic, serializers must
 preserve the expected JSON wire shape. Non-JSON encodings and custom rewrites of that shape are
 unsupported. Plain decoding does not fall back to custom-object reconstruction on malformed JSON.

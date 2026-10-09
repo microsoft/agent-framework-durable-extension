@@ -1,0 +1,122 @@
+name: Python package validation
+description: Validate a durable hosting package with current or exact minimum dependencies.
+
+inputs:
+  package:
+    description: Hosting package to validate (durabletask or azurefunctions).
+    required: true
+  python-version:
+    description: Python version for this validation job.
+    required: true
+  minimum-dependencies:
+    description: Resolve exact supported minimums instead of the normal dependency selection.
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Validate package selection
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        MINIMUM: ${{ inputs.minimum-dependencies }}
+      run: |
+        case "$PACKAGE" in durabletask|azurefunctions) ;; *) exit 1 ;; esac
+        case "$MINIMUM" in true|false) ;; *) exit 1 ;; esac
+
+    - name: Setup Python
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+
+    - name: Sync dependencies
+      shell: bash
+      working-directory: ${{ inputs.package == 'durabletask' && 'python' || 'python/packages/azurefunctions' }}
+      env:
+        PACKAGE: ${{ inputs.package }}
+        MINIMUM: ${{ inputs.minimum-dependencies }}
+      run: |
+        arguments=(--group dev --group test)
+        if [[ "$PACKAGE" == durabletask ]]; then arguments+=(--all-packages); fi
+        if [[ "$MINIMUM" == true ]]; then arguments+=(--frozen); fi
+        uv sync "${arguments[@]}"
+
+    - name: Resolve exact supported minimums together
+      if: inputs.minimum-dependencies == 'true'
+      shell: bash
+      working-directory: ${{ inputs.package == 'durabletask' && 'python' || 'python/packages/azurefunctions' }}
+      env:
+        PACKAGE: ${{ inputs.package }}
+      run: |
+        requirements=("agent-framework-core==1.19.0" "pydantic==2.11.0" "opentelemetry-api==1.39.0" "durabletask-azuremanaged==1.4.0" opentelemetry-instrumentation-logging)
+        if [[ "$PACKAGE" == durabletask ]]; then
+          uv pip install --group dev --group test -e packages/durabletask "durabletask==1.7.1" "${requirements[@]}"
+        else
+          uv pip install --group dev --group test -e . -e ../durabletask "durabletask==1.11.0" "azure-functions==2.3.0" "azure-functions-durable==2.0.0rc2" "${requirements[@]}"
+        fi
+        uv pip check
+
+    - name: Verify minimum versions
+      if: inputs.minimum-dependencies == 'true'
+      shell: bash
+      working-directory: ${{ inputs.package == 'durabletask' && 'python' || 'python/packages/azurefunctions' }}
+      env:
+        PACKAGE: ${{ inputs.package }}
+      run: |
+        uv run --no-sync python - <<'PY'
+        import os
+        from importlib import metadata
+        expected = {"agent-framework-core": "1.19.0", "pydantic": "2.11.0", "opentelemetry-api": "1.39.0", "durabletask-azuremanaged": "1.4.0"}
+        if os.environ["PACKAGE"] == "durabletask":
+            expected["durabletask"] = "1.7.1"
+        else:
+            expected.update({"durabletask": "1.11.0", "azure-functions": "2.3.0", "azure-functions-durable": "2.0.0rc2"})
+        for package, version in expected.items():
+            assert metadata.version(package) == version, package
+        PY
+
+    - name: Ruff
+      if: inputs.minimum-dependencies != 'true'
+      shell: bash
+      working-directory: ${{ inputs.package == 'durabletask' && 'python' || 'python/packages/azurefunctions' }}
+      run: uv run --no-sync ruff check ${{ inputs.package == 'durabletask' && 'packages/durabletask' || 'agent_framework_azurefunctions tests' }}
+
+    - name: Pyright (source)
+      if: inputs.minimum-dependencies != 'true'
+      shell: bash
+      working-directory: ${{ inputs.package == 'durabletask' && 'python' || 'python/packages/azurefunctions' }}
+      run: uv run --no-sync pyright -p ${{ inputs.package == 'durabletask' && 'packages/durabletask/pyproject.toml' || 'pyproject.toml' }}
+
+    - name: MyPy (tests)
+      if: inputs.minimum-dependencies != 'true'
+      shell: bash
+      working-directory: ${{ inputs.package == 'durabletask' && 'python' || 'python/packages/azurefunctions' }}
+      run: uv run --no-sync mypy --config-file ${{ inputs.package == 'durabletask' && 'pyproject.toml' || '../../pyproject.toml' }} ${{ inputs.package == 'durabletask' && 'packages/durabletask/tests' || 'tests' }}
+
+    - name: Unit tests
+      shell: bash
+      working-directory: ${{ inputs.package == 'durabletask' && 'python' || 'python/packages/azurefunctions' }}
+      env:
+        MINIMUM: ${{ inputs.minimum-dependencies }}
+        COVERAGE_PACKAGE: agent_framework_${{ inputs.package }}
+        TEST_PATH: ${{ inputs.package == 'durabletask' && 'packages/durabletask/tests' || 'tests' }}
+      run: |
+        arguments=(-m "not integration" "$TEST_PATH")
+        if [[ "$MINIMUM" != true ]]; then arguments+=("--cov=$COVERAGE_PACKAGE" --cov-report=term-missing:skip-covered); fi
+        uv run --no-sync pytest "${arguments[@]}"
+
+    - name: Build package
+      if: inputs.minimum-dependencies != 'true'
+      shell: bash
+      working-directory: ${{ inputs.package == 'durabletask' && 'python' || 'python/packages/azurefunctions' }}
+      run: uv build ${{ inputs.package == 'durabletask' && 'packages/durabletask' || '.' }} --out-dir dist
+
+    - name: Upload package
+      if: inputs.minimum-dependencies != 'true' && inputs.python-version == '3.13'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: python-package-${{ inputs.package }}
+        path: ${{ inputs.package == 'durabletask' && 'python/dist/*' || 'python/packages/azurefunctions/dist/*' }}
