@@ -3024,7 +3024,7 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
-    public async Task ProviderLoadFailureDoesNotInvokeModelOrCommitWorkingStateAsync()
+    public async Task ProviderLoadFailureCommitsOnlyFailedCompletionWithoutInvokingModelAsync()
     {
         InvalidOperationException expected = new("provider load failed");
         RecordingHistoryProvider provider = new() { LoadException = expected };
@@ -3037,20 +3037,23 @@ public sealed class AgentEntityHistoryTests
             initialState,
             options => options.ProviderKey = new("external-history.v1"));
 
-        InvalidOperationException actual = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" }));
+        AgentResponse response = await harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" });
 
-        Assert.Same(expected, actual);
+        Assert.Equal(ObservedChatHistoryProvider.FailureCode, DurableAgentJsonUtilities.GetCommittedFailure(response)?.Code);
         Assert.Equal(1, provider.LoadCount);
         Assert.Equal(0, provider.StoreCount);
         Assert.Equal(0, client.InvocationCount);
-        Assert.False(harness.StateWasPersisted);
+        DurableAgentState persisted = Assert.IsType<DurableAgentState>(harness.PersistedState);
+        Assert.Equal(initialState.Data.Session?.GetRawText(), persisted.Data.Session?.GetRawText());
+        Assert.Equal(initialState.Data.HistoryBinding.GetRawText(), persisted.Data.HistoryBinding.GetRawText());
+        Assert.Equal(DurableAgentStateCompletionReceipt.FailedOutcome, persisted.Data.CompletionReceipts!["new"].Outcome);
         Assert.Equal(originalState, SerializeState(initialState));
-        Assert.Contains(harness.Logs, entry => ReferenceEquals(expected, entry.Exception));
+        Assert.DoesNotContain(harness.Logs, entry => ReferenceEquals(expected, entry.Exception));
+        Assert.Contains(harness.Logs, entry => entry.Exception?.Message == ObservedChatHistoryProvider.FailureMessage);
     }
 
     [Fact]
-    public async Task ProviderStoreFailureDoesNotCommitWorkingStateAsync()
+    public async Task ProviderStoreFailureCommitsOnlyFailedCompletionWithPriorContinuationAsync()
     {
         InvalidOperationException expected = new("provider store failed");
         RecordingHistoryProvider provider = new() { StoreException = expected };
@@ -3063,16 +3066,19 @@ public sealed class AgentEntityHistoryTests
             initialState,
             options => options.ProviderKey = new("external-history.v1"));
 
-        InvalidOperationException actual = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" }));
+        AgentResponse response = await harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" });
 
-        Assert.Same(expected, actual);
+        Assert.Equal(ObservedChatHistoryProvider.FailureCode, DurableAgentJsonUtilities.GetCommittedFailure(response)?.Code);
         Assert.Equal(1, provider.LoadCount);
         Assert.Equal(1, provider.StoreCount);
         Assert.Equal(1, client.InvocationCount);
-        Assert.False(harness.StateWasPersisted);
+        DurableAgentState persisted = Assert.IsType<DurableAgentState>(harness.PersistedState);
+        Assert.Equal(initialState.Data.Session?.GetRawText(), persisted.Data.Session?.GetRawText());
+        Assert.Equal(initialState.Data.HistoryBinding.GetRawText(), persisted.Data.HistoryBinding.GetRawText());
+        Assert.Equal(DurableAgentStateCompletionReceipt.FailedOutcome, persisted.Data.CompletionReceipts!["new"].Outcome);
         Assert.Equal(originalState, SerializeState(initialState));
-        Assert.Contains(harness.Logs, entry => ReferenceEquals(expected, entry.Exception));
+        Assert.DoesNotContain(harness.Logs, entry => ReferenceEquals(expected, entry.Exception));
+        Assert.Contains(harness.Logs, entry => entry.Exception?.Message == ObservedChatHistoryProvider.FailureMessage);
     }
 
     [Fact]
