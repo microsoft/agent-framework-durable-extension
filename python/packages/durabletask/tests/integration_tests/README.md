@@ -121,4 +121,4 @@ For automated testing in CI/CD pipelines:
 
 1. Use Docker Compose to start the DTS emulator and Azurite for Blob offloading tests
 2. Set environment variables via CI/CD secrets
-3. Run tests with appropriate markers: `uv run --no-sync pytest -m integration_test`
+3. Run tests with appropriate markers: `uv run --no-sync pytest -m integration`
