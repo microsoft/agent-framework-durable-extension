@@ -3,8 +3,135 @@
 """Coverage checks for the Azure Functions sample integration tests."""
 
 import ast
+import importlib.util
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
+from unittest.mock import Mock
+
+import pytest
+
+
+@pytest.fixture
+def integration_conftest(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    path = Path(__file__).parent / "integration_tests" / "conftest.py"
+    spec = importlib.util.spec_from_file_location("azure_functions_integration_conftest", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "_load_env_file_if_present", lambda: None)
+    return module
+
+
+@pytest.mark.parametrize(
+    ("func_available", "azurite_available", "expected_skip", "expected_reason"),
+    [
+        (True, True, False, "Integration tests enabled."),
+        (False, True, True, "Azure Functions Core Tools"),
+        (True, False, True, "Azurite not running"),
+    ],
+)
+def test_integration_prerequisites_do_not_require_dts(
+    integration_conftest: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    func_available: bool,
+    azurite_available: bool,
+    expected_skip: bool,
+    expected_reason: str,
+) -> None:
+    checked_ports: list[int] = []
+
+    def port_available(port: int, host: str = "localhost") -> bool:
+        assert host == "localhost"
+        checked_ports.append(port)
+        return port == 10000 and azurite_available
+
+    monkeypatch.setattr(integration_conftest, "_check_func_cli_available", lambda: func_available)
+    monkeypatch.setattr(integration_conftest, "_check_port_listening", port_available)
+
+    skipped, reason = integration_conftest._should_skip_azure_functions_integration_tests()
+
+    assert skipped is expected_skip
+    assert expected_reason in reason
+    assert checked_ports == ([10000] if func_available else [])
+
+
+@pytest.mark.parametrize(
+    ("func_available", "azurite_available", "sample_name", "foundry_available", "expected_reason"),
+    [
+        (True, True, "13_subworkflow_hitl", False, None),
+        (True, True, "01_single_agent", True, None),
+        (True, True, "01_single_agent", False, "Missing required environment variables"),
+        (False, True, "13_subworkflow_hitl", False, "Azure Functions Core Tools"),
+        (True, False, "13_subworkflow_hitl", False, "Azurite not running"),
+    ],
+)
+def test_integration_collection_preserves_required_service_skips(
+    integration_conftest: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    func_available: bool,
+    azurite_available: bool,
+    sample_name: str,
+    foundry_available: bool,
+    expected_reason: str | None,
+) -> None:
+    monkeypatch.setattr(integration_conftest, "_check_func_cli_available", lambda: func_available)
+    monkeypatch.setattr(
+        integration_conftest,
+        "_check_port_listening",
+        lambda port, host="localhost": port == 10000 and azurite_available,
+    )
+    for name in ("FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"):
+        if foundry_available:
+            monkeypatch.setenv(name, "configured")
+        else:
+            monkeypatch.delenv(name, raising=False)
+    item = Mock()
+    item.fspath = Path(__file__).parent / "integration_tests" / "test_sample.py"
+    item.get_closest_marker.return_value = Mock(args=(sample_name,))
+
+    integration_conftest.pytest_collection_modifyitems(Mock(), [item])
+
+    if expected_reason is None:
+        item.add_marker.assert_not_called()
+    else:
+        item.add_marker.assert_called_once()
+        marker = item.add_marker.call_args.args[0]
+        assert marker.name == "skip"
+        assert expected_reason in marker.kwargs["reason"]
+
+
+@pytest.mark.parametrize(
+    ("sample_name", "foundry_available", "expected_reason"),
+    [
+        ("13_subworkflow_hitl", False, None),
+        ("01_single_agent", True, None),
+        ("01_single_agent", False, "FOUNDRY_PROJECT_ENDPOINT"),
+    ],
+)
+def test_integration_environment_does_not_require_scheduler_configuration(
+    integration_conftest: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    sample_name: str,
+    foundry_available: bool,
+    expected_reason: str | None,
+) -> None:
+    monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
+    monkeypatch.setenv("FUNCTIONS_WORKER_RUNTIME", "python")
+    monkeypatch.delenv("DURABLE_TASK_SCHEDULER_CONNECTION_STRING", raising=False)
+    for name in ("FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"):
+        if foundry_available:
+            monkeypatch.setenv(name, "configured")
+        else:
+            monkeypatch.delenv(name, raising=False)
+
+    if expected_reason is None:
+        integration_conftest._load_and_validate_env(Path(sample_name))
+    else:
+        with pytest.raises(pytest.fail.Exception, match=expected_reason):
+            integration_conftest._load_and_validate_env(Path(sample_name))
 
 
 def _sample_markers(test_file: Path) -> set[str]:

@@ -13,11 +13,11 @@ cp .env.example .env
 ```
 
 Required variables:
-- `FOUNDRY_PROJECT_ENDPOINT`
-- `FOUNDRY_MODEL`
 - `AzureWebJobsStorage`
-- `DURABLE_TASK_SCHEDULER_CONNECTION_STRING`
 - `FUNCTIONS_WORKER_RUNTIME`
+
+Agent samples also require `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL`.
+The `13_subworkflow_hitl` sample hosts no agents and needs no model configuration.
 
 Run `az login` before the tests. The hosted samples use `AzureCliCredential`.
 
@@ -28,6 +28,9 @@ environment. The workflow uses Azure Login with OpenID Connect so
 
 ### 2. Start required services
 
+Install Azure Functions Core Tools 4 and start Azurite. These samples use the Azure Storage
+backend and do not require the Durable Task Scheduler emulator or its connection string.
+
 **Azurite (for orchestration tests):**
 ```bash
 docker run -d -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite:3.37.0
@@ -35,11 +38,6 @@ docker run -d -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azu
 
 Azurite 3.37.0 accepts the durable extension's storage API versions without disabling validation.
 Samples use the GA extension bundle with version range `[4.38.1, 5.0.0)`.
-
-**Durable Task Scheduler:**
-```bash
-docker run -d -p 8080:8080 -p 8082:8082 -e DTS_USE_DYNAMIC_TASK_HUBS=true mcr.microsoft.com/dts/dts-emulator:latest
-```
 
 ## Running Tests
 
