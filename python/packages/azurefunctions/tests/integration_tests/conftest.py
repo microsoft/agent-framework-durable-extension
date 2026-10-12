@@ -30,7 +30,6 @@ _DEFAULT_HOST = "localhost"
 
 # Emulator ports (match CI workflow configuration)
 _AZURITE_BLOB_PORT = 10000
-_DTS_EMULATOR_PORT = 8080
 _NO_LLM_SAMPLES = {"13_subworkflow_hitl"}
 
 
@@ -82,11 +81,6 @@ def _check_azurite_available() -> bool:
     return _check_port_listening(_AZURITE_BLOB_PORT)
 
 
-def _check_dts_emulator_available() -> bool:
-    """Check if Durable Task Scheduler emulator is available on the expected port."""
-    return _check_port_listening(_DTS_EMULATOR_PORT)
-
-
 def _should_skip_azure_functions_integration_tests() -> tuple[bool, str]:
     """Determine whether Azure Functions integration tests should be skipped."""
     _load_env_file_if_present()
@@ -103,13 +97,6 @@ def _should_skip_azure_functions_integration_tests() -> tuple[bool, str]:
         return (
             True,
             f"Azurite not running on port {_AZURITE_BLOB_PORT}. Start with: docker run -d -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite:3.37.0",  # noqa: E501
-        )
-
-    # Check for Durable Task Scheduler emulator
-    if not _check_dts_emulator_available():
-        return (
-            True,
-            f"Durable Task Scheduler emulator not running on port {_DTS_EMULATOR_PORT}. Start with: docker run -d -p 8080:8080 -p 8082:8082 mcr.microsoft.com/dts/dts-emulator:latest",  # noqa: E501
         )
 
     return False, "Integration tests enabled."
@@ -316,7 +303,6 @@ def _load_and_validate_env(sample_path: Path) -> None:
     # Required environment variables for Azure Functions samples
     required_env_vars = [
         "AzureWebJobsStorage",
-        "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
         "FUNCTIONS_WORKER_RUNTIME",
     ]
     # Samples that host no AI agents need no model credentials.
