@@ -183,6 +183,10 @@ string with an explicit Blob endpoint for older SDKs or custom Azurite endpoints
 Configuration does not automatically discover or reuse `AzureWebJobsStorage`.
 Use the store's credential options for identity-based deployments.
 
+The configured credentials need permission to create the upload container and to read
+and write payload blobs. The SDK attempts container creation on the first upload, even
+if the container already exists. Pre-provisioning it does not bypass this request.
+
 Payloads above the threshold are stored as blobs and replaced with references. This includes
 agent entity state, inputs and results, workflow inputs and outputs, custom status, external
 events, sub-orchestrations and continue-as-new. The default stored-payload limit is 10 MiB;
