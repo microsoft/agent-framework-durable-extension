@@ -45,25 +45,27 @@ The tests automatically start and stop the Azure Functions app for each sample.
 
 Run them from `python/packages/azurefunctions`. That package is a standalone uv project,
 because azure-functions-durable 2.x requires Python 3.13, so it has its own environment.
-Install its test dependencies first:
+Install its test dependencies, including the Blob extra used by the retention tests:
 
 ```bash
-uv sync --group dev --group test
+uv sync --group dev --group test --extra azure-blob-payloads
 ```
+
+The commands below reuse this prepared environment without syncing it again.
 
 ### Run all sample tests
 ```bash
-uv run pytest tests/integration_tests -v
+uv run --no-sync pytest tests/integration_tests -v
 ```
 
 ### Run specific sample
 ```bash
-uv run pytest tests/integration_tests/test_01_single_agent.py -v
+uv run --no-sync pytest tests/integration_tests/test_01_single_agent.py -v
 ```
 
 ### Run with verbose output
 ```bash
-uv run pytest tests/integration_tests -sv
+uv run --no-sync pytest tests/integration_tests -sv
 ```
 
 ## How It Works

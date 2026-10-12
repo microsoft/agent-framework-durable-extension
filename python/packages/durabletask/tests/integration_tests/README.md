@@ -31,6 +31,13 @@ docker run -d --name dts-emulator -p 8080:8080 -p 8082:8082 mcr.microsoft.com/dt
 - Port 8080: gRPC endpoint (used by tests)
 - Port 8082: Web dashboard (optional, for monitoring)
 
+**Azurite (for Blob offloading tests):**
+```bash
+docker run -d --name azurite -p 10000:10000 mcr.microsoft.com/azure-storage/azurite:3.37.0
+```
+Blob offloading variants of the retention tests require Azurite 3.37.0 or later at the
+default local Blob endpoint. Inline variants do not require Azurite.
+
 **Redis (for streaming tests):**
 ```bash
 docker run -d --name redis -p 6379:6379 redis:latest
@@ -41,19 +48,28 @@ docker run -d --name redis -p 6379:6379 redis:latest
 
 The tests automatically start and stop worker processes for each sample.
 
+Run them from the `python` workspace directory. Install the test dependencies,
+including the Blob extra used by the retention tests:
+
+```bash
+uv sync --all-packages --group dev --group test --extra azure-blob-payloads
+```
+
+The commands below reuse this prepared environment without syncing it again.
+
 ### Run all sample tests
 ```bash
-uv run pytest packages/durabletask/tests/integration_tests -v
+uv run --no-sync pytest packages/durabletask/tests/integration_tests -v
 ```
 
 ### Run specific sample
 ```bash
-uv run pytest packages/durabletask/tests/integration_tests/test_01_single_agent.py -v
+uv run --no-sync pytest packages/durabletask/tests/integration_tests/test_01_single_agent.py -v
 ```
 
 ### Run with verbose output
 ```bash
-uv run pytest packages/durabletask/tests/integration_tests -sv
+uv run --no-sync pytest packages/durabletask/tests/integration_tests -sv
 ```
 
 ## How It Works
@@ -103,6 +119,6 @@ If you see authentication or deployment errors:
 
 For automated testing in CI/CD pipelines:
 
-1. Use Docker Compose to start DTS emulator
+1. Use Docker Compose to start the DTS emulator and Azurite for Blob offloading tests
 2. Set environment variables via CI/CD secrets
-3. Run tests with appropriate markers: `pytest -m integration_test`
+3. Run tests with appropriate markers: `uv run --no-sync pytest -m integration_test`
