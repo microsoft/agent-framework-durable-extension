@@ -56,6 +56,10 @@ reference format. Keep each store open while its worker or client uses it. Blob 
 not require Functions. Functions configures its root app instead of constructing these objects;
 see the [Functions setup](../azurefunctions/README.md#optional-blob-payload-offloading).
 
+The configured credentials need permission to create the upload container and to read
+and write payload blobs. The SDK attempts container creation on the first upload, even
+if the container already exists. Pre-provisioning it does not bypass this request.
+
 Supported serialized payloads above the threshold, including entity state and operation results,
 are stored in blobs and hydrated by configured SDK clients/workers. The default stored-payload
 limit is 10 MiB and is configurable. Offloading does not reduce decoded state or model context,
