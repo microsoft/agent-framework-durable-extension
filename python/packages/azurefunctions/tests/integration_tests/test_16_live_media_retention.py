@@ -2,9 +2,9 @@
 
 """Live Functions/Azure Storage retention with a deterministic core model, not Foundry.
 
-Requires func v4, Azurite 3.37.0+ on 10000/10001/10002,
-DTS on 8080, and the selected venv's test dependencies including psutil,
-jsonschema, and opentelemetry-sdk. The test generates its app/settings under tmp_path
+Requires func v4, Azurite 3.37.0+ on 10000/10001/10002, and the selected venv's
+test dependencies including psutil, jsonschema, and opentelemetry-sdk.
+The test generates its app/settings under tmp_path
 and supplies local emulator defaults. It never uses the sample-starting fixture.
 """
 
