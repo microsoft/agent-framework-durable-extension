@@ -270,6 +270,50 @@ def test_sample_guidance_keeps_azurite_api_validation_enabled() -> None:
             assert "--skipApiVersionCheck" not in path.read_text(encoding="utf-8"), path
 
 
+def _obsolete_dts_prerequisite_lines(test_file: Path) -> list[str]:
+    tree = ast.parse(test_file.read_text(encoding="utf-8"), filename=str(test_file))
+    docstring = ast.get_docstring(tree) or ""
+    obsolete_phrases = (
+        "Durable Task Scheduler emulator running",
+        "Core Tools, Durable Task Scheduler",
+        "DTS on 8080",
+    )
+    return [line for line in docstring.splitlines() if any(phrase in line for phrase in obsolete_phrases)]
+
+
+def test_azure_storage_integration_guidance_has_no_obsolete_dts_prerequisites() -> None:
+    integration_root = Path(__file__).parent / "integration_tests"
+    stale_guidance = {
+        path.name: lines
+        for path in integration_root.glob("test_*.py")
+        if (lines := _obsolete_dts_prerequisite_lines(path))
+    }
+    assert not stale_guidance, f"Azure Storage integration tests do not require DTS: {stale_guidance}"
+
+
+@pytest.mark.parametrize(
+    "prerequisite",
+    [
+        "- Durable Task Scheduler emulator running on localhost:8080",
+        "- Azure Functions Core Tools, Durable Task Scheduler, and Azurite configured",
+        "DTS on 8080, and the selected venv's test dependencies",
+    ],
+)
+def test_dts_prerequisite_guard_detects_stale_module_guidance(tmp_path: Path, prerequisite: str) -> None:
+    test_file = tmp_path / "test_sample.py"
+    test_file.write_text(f'"""Prerequisites:\n{prerequisite}\n"""\n', encoding="utf-8")
+    assert _obsolete_dts_prerequisite_lines(test_file) == [prerequisite]
+
+
+def test_dts_prerequisite_guard_ignores_runtime_configuration(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_sample.py"
+    test_file.write_text(
+        '"""Requires Core Tools and Azurite."""\nconnection_key = "DURABLE_TASK_SCHEDULER_CONNECTION_STRING"\n',
+        encoding="utf-8",
+    )
+    assert _obsolete_dts_prerequisite_lines(test_file) == []
+
+
 def test_skip_guard_detects_decorators_and_module_markers(tmp_path: Path) -> None:
     """Detect called, bare, and module-level unconditional skip markers."""
     test_file = tmp_path / "test_sample.py"
