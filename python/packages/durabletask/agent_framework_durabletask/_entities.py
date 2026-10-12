@@ -1504,7 +1504,13 @@ def create_agent_entity_class(
             )
 
         def _initialize_entity_context(self, context: EntityContext) -> None:
-            if context.operation not in ("run", "reset", "expire_responses", "migrate", "delete"):
+            if context.operation not in (
+                self.run.__name__,
+                self.reset.__name__,
+                self.expire_responses.__name__,
+                self.migrate.__name__,
+                self.delete.__name__,
+            ):
                 raise ValueError(f"Agent entity operation '{context.operation}' is not supported.")
             super()._initialize_entity_context(context)
 
