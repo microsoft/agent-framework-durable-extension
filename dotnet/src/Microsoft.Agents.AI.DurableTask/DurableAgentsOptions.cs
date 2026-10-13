@@ -53,10 +53,12 @@ public sealed class DurableAgentsOptions
     internal bool EnablePersistentRequestOutcomes { get; set; }
 
     /// <summary>
-    /// Gets or sets whether a certified provider adapter may commit explicitly attested terminal failures.
+    /// Gets or sets whether a certified provider adapter may commit explicitly attested terminal failures
+    /// beyond the observed external chat-history callbacks.
     /// </summary>
     /// <remarks>
     /// This internal capability is disabled by default. It is not enabled merely by mailbox activation.
+    /// Schema 2 already finalizes unrecovered external chat-history callback failures without an attestor.
     /// </remarks>
     internal bool EnableProviderFailureFinalization { get; set; }
 
