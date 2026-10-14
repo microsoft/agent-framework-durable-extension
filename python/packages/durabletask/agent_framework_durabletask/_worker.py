@@ -10,7 +10,7 @@ as durable orchestrations with automatically generated activity functions.
 from __future__ import annotations
 
 import logging
-from typing import Any, cast
+from typing import Any
 
 from agent_framework import SupportsAgentRun, Workflow
 from agent_framework._telemetry import mark_feature_used
@@ -18,7 +18,6 @@ from durabletask.azuremanaged.worker import DurableTaskSchedulerWorker
 from durabletask.task import ActivityContext, OrchestrationContext
 from durabletask.worker import TaskHubGrpcWorker
 
-from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentResponseCallbackProtocol
 from ._configuration import (
     INHERIT,
@@ -31,10 +30,9 @@ from ._configuration import (
     validate_runtime_deployment,
 )
 from ._constants import DELIVERY_WINDOW_SECONDS
-from ._entities import AgentEntity, DurableTaskEntityStateProvider
+from ._entities import create_agent_entity_class
 from ._feature_usage import FeatureIndex
-from ._json_payload import JsonMigration, JsonPayload, install_json_payload_converter
-from ._response_utils import serialize_agent_response
+from ._json_payload import JsonPayload, install_json_payload_converter
 from ._retention import (
     DEFAULT_RETENTION,
     DTS_MAX_STATE_BYTES,
@@ -235,8 +233,8 @@ class DurableAIAgentWorker:
             "[DurableAIAgentWorker] Registering agent: %s as entity: dafx-%s", registration_name, registration_name
         )
 
-        # Create a configured entity class using the factory
-        entity_class = self.__create_agent_entity(
+        # Create a configured entity class using the shared factory
+        entity_class = create_agent_entity_class(
             agent,
             effective_callback,
             entity_id=registration_name,
@@ -566,96 +564,3 @@ class DurableAIAgentWorker:
 
         self._worker.add_orchestrator(workflow_orchestrator)
         logger.debug("[DurableAIAgentWorker] Registered workflow orchestrator: %s", orchestrator_name)
-
-    def __create_agent_entity(
-        self,
-        agent: SupportsAgentRun,
-        callback: AgentResponseCallbackProtocol | None = None,
-        *,
-        entity_id: str | None = None,
-        retention: RetentionMode = DEFAULT_RETENTION,
-        max_state_bytes: int | None = None,
-        high_watermark: float = HIGH_WATERMARK,
-        low_watermark: float = LOW_WATERMARK,
-        response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
-    ) -> type[DurableTaskEntityStateProvider]:
-        """Factory function to create a DurableEntity class configured with an agent.
-
-        This factory creates a new class that combines the entity state provider
-        with the agent execution logic. Each agent gets its own entity class.
-
-        Args:
-            agent: The agent instance to wrap
-            callback: Optional callback for agent responses
-            entity_id: Optional identity to register the entity under instead of
-                ``agent.name`` (used by workflow hosting to key entities by
-                executor id).
-            retention: Eager pruning policy, independent of pressure eviction.
-            max_state_bytes: Resolved pressure budget, or None to disable pressure eviction.
-            high_watermark: Budget fraction at which pressure eviction starts.
-            low_watermark: Target budget fraction after pressure eviction.
-            response_delivery_window_seconds: Response delivery window in seconds.
-
-        Returns:
-            A new DurableEntity subclass configured for this agent
-        """
-        agent_name = entity_id or agent.name or type(agent).__name__
-        entity_name = f"dafx-{agent_name}"
-
-        class ConfiguredAgentEntity(DurableTaskEntityStateProvider):
-            """Durable entity configured with a specific agent instance."""
-
-            def __init__(self) -> None:
-                super().__init__()
-                # Create the AgentEntity with this state provider
-                self._agent_entity = AgentEntity(
-                    agent=agent,
-                    callback=callback,
-                    state_provider=self,
-                    retention=retention,
-                    max_state_bytes=max_state_bytes,
-                    high_watermark=high_watermark,
-                    low_watermark=low_watermark,
-                    response_delivery_window_seconds=response_delivery_window_seconds,
-                )
-                logger.debug(
-                    "[ConfiguredAgentEntity] Initialized entity for agent: %s (entity name: %s)",
-                    agent_name,
-                    entity_name,
-                )
-
-            def run(self, request: JsonPayload) -> Any:
-                """Handle run requests from clients or orchestrations.
-
-                Args:
-                    request: RunRequest as dict or string
-
-                Returns:
-                    AgentResponse as dict
-                """
-                logger.debug("[ConfiguredAgentEntity.run] Executing agent: %s", agent_name)
-                # Run on the shared persistent loop so async resources created by
-                # shared agent clients/credentials stay bound to a live loop across
-                # successive entity invocations (avoids cross-loop hangs).
-                response = run_agent_coroutine(self._agent_entity.run(cast(Any, request)))
-                return serialize_agent_response(response)
-
-            def reset(self) -> None:
-                """Delegate reset to the configured AgentEntity."""
-                logger.debug("[ConfiguredAgentEntity.reset] Resetting agent: %s", agent_name)
-                self._agent_entity.reset()
-
-            def expire_responses(self) -> int:
-                """Remove expired payloads when signaled by application-owned maintenance."""
-                return self._agent_entity.expire_responses()
-
-            def migrate(self, request: JsonMigration) -> dict[str, str]:
-                """Import an authorized legacy export into a separate empty destination."""
-                return self._agent_entity.migrate(cast(Any, request))
-
-        # Set the entity name to match the prefixed agent name
-        # This is used by durabletask to register the entity
-        ConfiguredAgentEntity.__name__ = entity_name
-        ConfiguredAgentEntity.__qualname__ = entity_name
-
-        return ConfiguredAgentEntity

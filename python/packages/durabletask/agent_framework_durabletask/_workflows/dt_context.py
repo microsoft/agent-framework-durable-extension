@@ -30,9 +30,26 @@ logger = logging.getLogger(__name__)
 class DurableTaskWorkflowContext:
     """Adapter that maps ``OrchestrationContext`` to :class:`WorkflowOrchestrationContext`."""
 
-    def __init__(self, context: OrchestrationContext) -> None:
+    def __init__(
+        self,
+        context: OrchestrationContext,
+        *,
+        supports_event_streaming: bool = True,
+    ) -> None:
+        """Wrap a durabletask orchestration context.
+
+        Args:
+            context: The durabletask orchestration context to adapt.
+            supports_event_streaming: Whether the host can publish the accumulating
+                workflow event log. Defaults to ``True`` for the standalone
+                DurableTask host. Azure Functions passes ``False`` because the
+                Durable Functions custom status is capped at 16 KB by the WebJobs
+                extension, and publishing the event log would overflow that cap and
+                fail the orchestrator.
+        """
         self._context = context
         self._executor = OrchestrationAgentExecutor(context)
+        self._supports_event_streaming = supports_event_streaming
 
     # -- Properties -----------------------------------------------------------
 
@@ -46,10 +63,11 @@ class DurableTaskWorkflowContext:
 
     @property
     def supports_event_streaming(self) -> bool:
-        # The standalone DurableTask host exposes the event timeline to clients via
-        # DurableWorkflowClient.stream_workflow, and its DTS backend imposes no 16 KB
-        # custom-status cap, so the full accumulated event stream is published.
-        return True
+        # Host-dependent; see the constructor docstring. The standalone DurableTask
+        # host exposes the event timeline to clients via
+        # DurableWorkflowClient.stream_workflow, and its DTS backend imposes no
+        # 16 KB custom-status cap, so the full event stream is published there.
+        return self._supports_event_streaming
 
     @property
     def current_utc_datetime(self) -> datetime:

@@ -2,10 +2,9 @@
 
 """Provider strategies for Durable Agent execution.
 
-These classes are internal execution strategies used by the DurableAIAgent shim.
-They are intentionally separate from the public client/orchestration APIs to keep
-only `get_agent` exposed to consumers. Executors implement the execution contract
-and are injected into the shim.
+Executors implement the execution contract used by the DurableAIAgent shim.
+DurableAgentExecutor, DurableAgentTask and OrchestrationAgentExecutor are exported
+for custom orchestration integration. Other concrete strategies remain internal.
 """
 
 from __future__ import annotations
