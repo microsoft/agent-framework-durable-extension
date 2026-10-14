@@ -384,6 +384,22 @@ persist cleanup. `reset` clears local transcript and session state while preserv
 receipts and live results. External-primary reset is rejected without a provider-owned clear
 operation.
 
+Generated standalone agent entities support only `run`, `reset`, `expire_responses`, `migrate`
+and administrative `delete`. Raw state setters and implementation helpers are not operations.
+Direct callers must use `run`, not `run_agent`. The Functions 1.x host is unchanged here.
+
+`reset` returns no value. `expire_responses` returns the integer number of expired delivery
+payloads removed by that execution, or zero for a successful no-op. Failures use the SDK operation
+failure channel. A completed call acknowledges execution; a signal acknowledges only enqueueing.
+The expiry count is not an idempotent receipt: an execution can remove payloads and lose its reply,
+then a retry can return zero.
+
+`delete` is a privileged administrative operation that removes the entire entity, including
+conversation state, live results, completion receipts and ingestion evidence. It is not reset
+or expiry. Reusing that key no longer benefits from previous duplicate-run protection, and queued
+operations can recreate the entity. Operators must quiesce and fence callers when deletion must
+be final.
+
 At or after a delivery deadline, lookup reports completion with its retained outcome, even before
 physical cleanup. It never returns the expired payload, reports pending work, reruns the request or
 reconstructs an original from compacted or external history. Shared v2 has no `unknown` outcome.

@@ -107,7 +107,7 @@ def _sdk_registered_entity(
     shim = StateShim(state_json, converter, is_serialized=True)
     context = EntityContext(
         "orchestration",
-        "operation",
+        "run",
         shim,
         EntityInstanceId(ENTITY_NAME, session_id),
         converter,
