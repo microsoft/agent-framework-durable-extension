@@ -84,7 +84,7 @@ def _consume(
     if task.is_failed:
         failure = task.get_exception()
         assert isinstance(failure, TaskFailedError)
-        assert failure.details.error_type in ("ValueError", "ValidationError")
+        assert failure.details.is_caused_by(ValueError)
         # SDK tasks expose a TaskFailedError, while the direct consumer retains
         # the original ValueError. Compare the real diagnostic below.
         raise ValueError(failure.details.message) from failure

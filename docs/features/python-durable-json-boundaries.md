@@ -64,19 +64,32 @@ See the [maintenance and deletion contract](../../python/packages/durabletask/RE
 
 ## Dependencies and custom converters
 
-Durable Task requires Python 3.10+ and `durabletask>=1.7.1,<2` for target-aware decoding, deferred
-state reads and parent-instance metadata, plus `pydantic>=2.11,<3`. Both packages require
+Durable Task requires Python 3.10+ and `durabletask>=1.11.0,<2` for target-aware decoding,
+parent-instance metadata and corrected task-composition behavior, plus `pydantic>=2.11,<3`. Both packages require
 `agent-framework-core>=1.19.0,<2`. Functions requires Python 3.13+, `azure-functions>=2.3.0,<3`
 and `azure-functions-durable>=2.0.0rc2,<3`, which brings `durabletask>=1.11.0`.
 
-Installing both packages together on Python 3.13+ selects one Durable Task SDK version from
-the intersection, `durabletask>=1.11.0,<2`. Their lower bounds do not conflict. The standalone
-package keeps its lower Python and SDK requirements for applications that do not use Functions.
+Both packages require the same Durable Task SDK baseline, `durabletask>=1.11.0,<2`. Installing
+both on Python 3.13+ selects one compatible SDK version. Standalone applications retain
+Python 3.10+ support without taking the Functions dependency.
 
 CI shares the package-validation steps but keeps separate environments for the exact minimums.
-A combined Functions environment cannot check standalone Python 3.10 and SDK 1.7.1 compatibility.
+A combined Functions environment cannot check standalone Python 3.10 compatibility.
 The Python 3.10 job checks supported compatibility, not a separate build requirement. Uploaded
 package artifacts come from the Python 3.13 jobs.
+
+SDK 1.11 fixes nested `when_any`/`when_all` completion and moves asynchronous Blob
+compression off the event loop. The nested-race correction can change replay decisions in
+affected older histories and produce `NonDeterminismError`. Finish affected instances on
+the previous SDK, or keep their hub and workers pinned there and use a separate hub for
+new instances. Already-stuck instances may require deliberate recovery rather than draining.
+Pin or lock SDK versions across clients and workers; matching lower bounds do not enforce
+identical resolved versions. See the
+[upstream replay warning](https://github.com/microsoft/durabletask-python/releases/tag/v1.11.0).
+
+SDK failures now use qualified names such as `builtins.ValueError`. Older histories can
+still contain bare names. Use `FailureDetails.is_caused_by()` for semantic error checks
+rather than comparing those wire strings.
 
 Custom converters can still serve native co-hosted work. For framework traffic, serializers must
 preserve the expected JSON wire shape. Non-JSON encodings and custom rewrites of that shape are

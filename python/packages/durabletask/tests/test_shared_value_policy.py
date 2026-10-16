@@ -160,7 +160,7 @@ def _untyped_delivery(raw: dict[str, Any], consumer: str, precompleted: bool) ->
     assert task.is_complete and child.get_result() is raw
     if task.is_failed:
         failure = task.get_exception()
-        assert failure.details.error_type == "ValueError"
+        assert failure.details.is_caused_by(ValueError)
         raise ValueError(failure.details.message) from failure
     return task.get_result()
 

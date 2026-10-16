@@ -788,7 +788,7 @@ def test_real_task_propagates_the_child_failure_without_response_conversion(
     failure = task.get_exception()
     # The SDK wraps failures. Identity is preserved at the forwarding boundary,
     # not by promising that the parent's wrapper is the child's exception.
-    assert failure.details.error_type == "TaskFailedError"
+    assert failure.details.is_caused_by(TaskFailedError)
     assert failure.details.message == "entity call failed"
     with pytest.raises(TaskFailedError) as raised:
         task.get_result()
@@ -814,7 +814,7 @@ def test_real_task_does_not_reinterpret_shared_content_as_inline_core_content(co
 
     assert task.is_failed
     failure = task.get_exception()
-    assert failure.details.error_type == "ValueError"
+    assert failure.details.is_caused_by(ValueError)
     assert "Content mapping requires 'type'" in failure.details.message
     with pytest.raises(TaskFailedError) as raised:
         task.get_result()

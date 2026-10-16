@@ -53,7 +53,7 @@ runs:
       run: |
         requirements=("agent-framework-core==1.19.0" "pydantic==2.11.0" "opentelemetry-api==1.39.0" "durabletask-azuremanaged==1.4.0" opentelemetry-instrumentation-logging)
         if [[ "$PACKAGE" == durabletask ]]; then
-          uv pip install --group dev --group test -e packages/durabletask "durabletask==1.7.1" "${requirements[@]}"
+          uv pip install --group dev --group test -e packages/durabletask "durabletask==1.11.0" "${requirements[@]}"
         else
           uv pip install --group dev --group test -e . -e ../durabletask "durabletask==1.11.0" "azure-functions==2.3.0" "azure-functions-durable==2.0.0rc2" "${requirements[@]}"
         fi
@@ -71,7 +71,7 @@ runs:
         from importlib import metadata
         expected = {"agent-framework-core": "1.19.0", "pydantic": "2.11.0", "opentelemetry-api": "1.39.0", "durabletask-azuremanaged": "1.4.0"}
         if os.environ["PACKAGE"] == "durabletask":
-            expected["durabletask"] = "1.7.1"
+            expected["durabletask"] = "1.11.0"
         else:
             expected.update({"durabletask": "1.11.0", "azure-functions": "2.3.0", "azure-functions-durable": "2.0.0rc2"})
         for package, version in expected.items():

@@ -218,8 +218,8 @@ def test_real_dt_task_retains_legacy_typed_success_and_failure(kind: str, precom
     else:
         assert task.is_failed
         failure = task.get_exception()
-        expected_type = "ValidationError" if kind == "error-invalid-json" else "ValueError"
-        assert failure.details.error_type == expected_type
+        expected_type = ValidationError if kind == "error-invalid-json" else ValueError
+        assert failure.details.is_caused_by(expected_type)
         expected_message = "Invalid JSON" if kind == "error-invalid-json" else "required format Answer"
         assert expected_message in failure.details.message
         with pytest.raises(TaskFailedError) as raised:
