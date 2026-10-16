@@ -12,6 +12,8 @@ pip install agent-framework-durabletask --pre
 
 The durable task integration lets you host Microsoft Agent Framework agents using the [Durable Task](https://github.com/microsoft/durabletask-python) framework so they can persist state, replay conversation history, and recover from failures automatically.
 
+For Schema v2 upgrade and history retention guidance, see the [Schema v2 migration guide](../../../docs/features/durable-agents/schema-v2-migration.md).
+
 <a id="current-runtime-contract-on-this-branch"></a>
 
 ### Current Runtime Contract On This Unreleased Stack

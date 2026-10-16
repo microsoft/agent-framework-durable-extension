@@ -79,5 +79,4 @@ An executed passing isolated run is mandatory before **either merge or release**
 gated skip is acceptable for **draft readiness only**; do not merge or release this correction until
 the real-backend test passes. Independent review acceptance does not waive this requirement.
 Shared schema/reader/writer/rollback agreement and late-duplicate/deletion policy remain additional
-rollout gates. Schema-2 writing/deletion remain internal test-only,
-default-off and inaccessible to production public options in this layer.
+rollout gates. `SchemaV2` enables Schema 2.0 writing for new sessions with either `KeepAll` or `Auto` retention, while existing `1.x` sessions are not converted in place. See the [Schema v2 migration guide](../../../docs/features/durable-agents/schema-v2-migration.md).

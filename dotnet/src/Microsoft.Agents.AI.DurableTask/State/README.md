@@ -5,6 +5,8 @@ state for an individual entity instance.
 
 For the ownership and lifecycle boundaries around this representation, see the
 [durable agent state architecture](../../../../docs/features/durable-agents/durable-state-architecture.md).
+Application owners should follow the shared
+[C# and Python schema-v2 migration guide](../../../../docs/features/durable-agents/schema-v2-migration.md).
 
 ## State Schema
 
@@ -64,8 +66,7 @@ rather than being silently reinterpreted. Automatic retention uses the same exac
 checks the cumulative increment and rejects overflow before committing any staged deletion or other working-state
 change. Opaque JSON and unknown metadata retain their existing exact preservation behavior.
 
-Mailbox lookup, delivery, and guarded entity-local commit behavior are implemented. Session ownership,
-replay filtering, transcript compaction, and provider behavior remain deferred to later stack layers.
+Mailbox lookup, delivery, and guarded entity-local commit behavior are implemented. Session ownership and provider restoration are runtime responsibilities rather than DTO behavior; see the [durable agent state architecture](../../../../docs/features/durable-agents/durable-state-architecture.md). Public `Auto` retention prunes eligible entity transcript, not external provider history.
 
 Version-aware validation is symmetric: historical 1.x free-form roles, string function-call `arguments`, and
 URI content without `mediaType` remain readable and writable, while schema 2 applies its closed role set and
@@ -74,20 +75,15 @@ other revised semantic checks consistently on read and write.
 ## Revised execution-state foundation
 
 > [!IMPORTANT]
-> Schema `2.0.0` is being adopted through a staged cross-runtime rollout. Production .NET readers and writers currently default to
-> schema `1.2.0` and reject schema 2 until the mailbox-aware runtime rollout requirements are met.
+> Production .NET readers and writers default to Schema `1.2.0` (`Legacy`), while readers also accept Schema `2.0.0`. Setting `options.DeploymentMode = DurableAgentDeploymentMode.SchemaV2` (or `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2`) enables Schema `2.0.0` writes for new sessions with either `KeepAll` or `Auto` retention. Existing `1.x` entities are not converted in place.
 
 The mailbox contract and optional opaque history profile use schema `2.0.0`. This is intentionally a fail-closed major
 version: a 1.x worker preserves unknown fields but does not understand completion receipts, so allowing it to
 process revised state could rerun work whose transcript result was already removed. The .NET reader now
-supports mailbox-aware 2.0 lookup, while new state continues to default to `1.2.0`.
-Producer activation is an internal test-only gate, disabled by default. There is no public opt-in until
-the compatible-reader deployment floor is enforced; this draft does not authorize production activation. Existing 2.0 state
-is preserved rather than downgraded, and committed duplicates remain readable with writes disabled.
-New requests against existing 2.0 state fail before agent execution when the internal write gate is disabled.
-The internal passive contract path remains available for serializer/fixture tests without authorizing new
-production writes.
-
+supports schema-2 results and receipts, while new state continues to default to `1.2.0`.
+See the [Schema v2 migration guide](../../../../docs/features/durable-agents/schema-v2-migration.md) for deployment and rollback guidance.
+Existing 2.0 state is preserved rather than downgraded, and committed duplicates remain readable when `DeploymentMode` is `Legacy`.
+New requests against existing 2.0 state fail before agent execution when `SchemaV2` is not enabled.
 In revised state, `terminalResults` stores immutable result envelopes by correlation ID outside
 `conversationHistory`, while `completionReceipts` retains completion evidence after a result payload expires.
 An `available` receipt requires a matching result; an `unavailable` receipt proves completion without a result
@@ -101,9 +97,8 @@ unchanged through the independent working clone. This layer never selects a prov
 
 The shared DTOs retain their schema contract. Delivery lookup and polling use the same resolver for both
 layouts. `ResultRetentionPeriod` defaults to the portable 60-second delivery window and accepts another
-positive duration or `null` for no payload expiry; expiry never removes the completion receipt. Binding
-selection/enforcement and transcript retention are not implemented by this layer.
-With the internal mailbox-writer gate enabled, successful new runs and the scheduled/explicit
+positive duration or `null` for no payload expiry; expiry never removes the completion receipt. The runtime enforces history ownership and applies configured transcript retention separately from these shared DTOs.
+With the mailbox writer explicitly enabled, successful new runs and the scheduled/explicit
 `CheckAndExpireResults` entity operation durably remove due `terminalResults` entries and transition
 their existing receipts to `unavailable`. The operation uses an independent state copy and commits its
 next self-signal with that state; it does not refresh whole-entity TTL or require the independent deletion
@@ -147,19 +142,16 @@ profile, and foreign runtimes preserve it opaquely without any requirement to ho
 schedulers honor the token contract. Do not roll back to an older scheduler that merely preserves the
 extension but starts a fresh chain on every run.
 
-Under the internal schema-2 test gate, one successful durable entity operation atomically stages the
+With the schema-2 writer enabled, one successful durable entity operation atomically stages the
 terminal result and receipt together with that operation's session continuation, ingestion bookkeeping,
 entity-local transcript, whole-entity TTL, optional binding, and other local control state. External provider
 writes and tool side effects are outside that entity-local transaction. A failed outer invocation or durable
-commit does not establish a new completion receipt. The only exception is an internal, default-off provider
-finalization capability: a certified adapter must explicitly attest accepted input, provider phase, and
-non-retryable/exhausted finality; the resulting session must serialize and the failed result, receipt, session,
-and accepted request evidence must pass the normal commit path. No generic exception/message/status inference
-is permitted. Legacy conversion uses only retained authoritative
+commit does not establish a new completion receipt. Unrecovered external load/store callback failures propagate without creating a framework failed result or receipt, rolling back local working state and staged outgoing signals to the last committed continuation ([#143](https://github.com/microsoft/agent-framework-durable-extension/issues/143)). A load failure before model execution leaves those model/tool calls unstarted; a store failure afterward can follow effects that do not roll back. Retrying the same uncommitted correlation may execute again under either `KeepAll` or `Auto`; there is no automatic-retry or remote-rollback guarantee. See [Make retries safe in your application](../../../../docs/features/durable-agents/schema-v2-migration.md#make-retries-safe-in-your-application) for result-ledger, duplicate-safe write, and reconciliation guidance.
+Legacy conversion uses only retained authoritative
 terminal evidence, never calls the model/tools, and cannot invent receipts for already-evicted results.
 Previously persisted legacy state stays legacy unless independently authorized as complete history;
 retained transcript alone does not establish that authorization. Known truncation/compaction prevents
-conversion. New missing-state generations can initialize 2.0 only under the internal gate.
+conversion. Public `SchemaV2` initializes `2.0.0` only for newly created sessions.
 Whole-entity deletion of 2.0 state has a separate internal gate, disabled by default. Stored legacy
 deadlines cannot erase receipts, and there is no implicit schema-2 entity TTL.
 
@@ -168,12 +160,7 @@ implements the mailbox/binding contract or explicitly rejects the new major vers
 fail-closed for unsupported versions and defaults new writes to 1.2. Other runtimes require coordinated version
 gating before a 2.0 producer is enabled; preserving unknown fields alone is not sufficient because an
 unaware worker could ignore completion receipts and rerun completed work.
-Production activation remains inaccessible through public options in this layer. An actual isolated
-backend/worker run proving state-and-outbox rollback, restart and duplicate dispatch is a mandatory
-**merge and release gate**, not a claim established by mock-only coverage or a skipped integration test.
-A clearly documented gated skip permits draft readiness only: do not merge or release this correction
-until the actual isolated-backend test passes. See the
-[integration safety and execution instructions](../../../tests/Microsoft.Agents.AI.DurableTask.IntegrationTests/README.md).
+See the [integration test instructions](../../../tests/Microsoft.Agents.AI.DurableTask.IntegrationTests/README.md) for verifying state-and-outbox rollback, restart, and duplicate dispatch against an isolated backend.
 
 ## State Examples
 
@@ -318,8 +305,8 @@ highest-seen position for one producer, not an array or proof that every earlier
 
 ### Schema 2.0
 
-This example is for contract review and contributor guidance only. Production runtimes must not emit schema 2
-until the activation requirements above are met. An `available` receipt has a matching terminal result; an
+SchemaV2 deployments use this state shape once the compatibility and isolation requirements above are met.
+An `available` receipt has a matching terminal result; an
 `unavailable` receipt remains after its result payload has been removed.
 
 ```json

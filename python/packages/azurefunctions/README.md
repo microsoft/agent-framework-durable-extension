@@ -12,6 +12,8 @@ pip install agent-framework-azurefunctions --pre
 
 The durable agent extension lets you host Microsoft Agent Framework agents on Azure Durable Functions so they can persist state, replay conversation history, and recover from failures automatically.
 
+For Schema v2 upgrade and history retention guidance, see the [Schema v2 migration guide](../../../docs/features/durable-agents/schema-v2-migration.md).
+
 <a id="current-runtime-contract-on-this-branch"></a>
 
 ### Current Runtime Contract On This Unreleased Stack

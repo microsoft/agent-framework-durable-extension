@@ -1,16 +1,21 @@
-# Opt-in Pressure Retention Sample
+# Automatic History Retention Sample
 
-> [!IMPORTANT]
-> This is a draft/experimental sample. Automatic transcript retention requires schema 2 mailbox
-> state, whose writer is internal and disabled by default. The runnable entry point fails closed
-> before reading credentials or contacting the model or DTS. Do not enable this scenario in
-> mixed-runtime production until Python, the dashboard, pollers, rollback tooling, and every other
-> reader meet the schema 2 rollout floor.
+> [!NOTE]
+> This sample enables **Schema v2** (`DurableAgentDeploymentMode.SchemaV2`) and **Automatic history retention** (`DurableAgentHistoryRetentionMode.Auto`) for a new durable agent session. For production upgrade and task-hub rollout steps, see the [Schema v2 migration guide](../../../../../docs/features/durable-agents/schema-v2-migration.md).
 
-The public sample source preserves the intended prompts, bounded model options, marker diagnostic,
-and OpenTelemetry registration. It does **not** configure a retention mode or state budget because
-those activation settings are internal. The real package unit tests apply the draft profile through
-the existing internal, default-disabled test hook.
+The sample configures a 32 KiB state budget so you can observe automatic history pruning after just a few turns:
+
+```csharp
+services.ConfigureDurableAgents(options =>
+{
+    options.DeploymentMode = DurableAgentDeploymentMode.SchemaV2; // Or set DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2
+    options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+    options.MaxStateBytes = 32 * 1024; // Demo override; Auto otherwise defaults to 1 MiB.
+    options.HistoryRetentionHighWatermark = 0.85;
+    options.HistoryRetentionLowWatermark = 0.70;
+    options.AddAIAgent(agent);
+});
+```
 
 ## Scenario
 
@@ -19,7 +24,7 @@ without printing their filler text, and asks the model to recall the exact marke
 retention. Agent instructions keep every response under 20 words and `MaxOutputTokens = 64`
 enforces a service-request bound so protected result mailboxes do not dominate the state floor.
 
-The 32 KiB budget was checked against schema 2 state containing eight bounded terminal results,
+The offline SDK tests check the 32 KiB budget against schema 2 state containing bounded terminal results,
 completion receipts, the fixed history binding, serialized agent session, and bookkeeping.
 Seven 4 KiB inputs plus their state envelopes cross the 85% high watermark, while the protected
 mailbox and session floor still fits below it. `Auto` can therefore remove old model-transcript
@@ -37,8 +42,9 @@ with an argument exception. The scenario validates before invoking callbacks or 
 invalid markers cannot cause model calls or mutate the session. Valid markers are preserved
 unchanged and compared using exact, case-sensitive matching.
 
-The real `Microsoft.Agents.AI.DurableTask.UnitTests` project provides the white-box correctness
-proof. It captures later model input, inspects persisted and reloaded entity state, retrieves the
+The real `Microsoft.Agents.AI.DurableTask.UnitTests` project provides white-box coverage through the
+SDK transactional entity batch dispatcher. It captures later model input, inspects serialized and
+reloaded state, retrieves the
 original completed result from the mailbox, and redelivers the original correlation while checking
 that the model is not executed again.
 
@@ -54,18 +60,15 @@ This is durable entity **pressure retention**, not Microsoft Agent Framework sta
 compaction or `FollowCompaction`. It does not summarize old messages. It removes old transcript
 from later model input while durable execution and delivery evidence remains available.
 
-This release exposes no public retention-mode selection. Internal `KeepAll` remains the
-default-off policy and performs no proactive transcript deletion.
+By default, .NET uses `Legacy` (Schema 1.2) and `KeepAll`. When `SchemaV2` is enabled, `Auto` defaults to a 1 MiB (`1,048,576` bytes) budget (`HighWatermark = 0.85`, `LowWatermark = 0.70`), which this sample overrides to 32 KiB. To stop automatic pruning, keep `SchemaV2` and switch `HistoryRetentionMode` to `KeepAll`.
 
 `Auto` cannot make every payload fit. A single oversized protected newest inline `DataContent`,
 tool result, terminal result, or other protected state can still exceed the high watermark. The
-operation then fails rather than persisting oversized state. That protected-state failure is
-different from cumulative transcript pressure, and application-level payload references or
-transport limits remain separate concerns.
+operation then fails rather than persisting oversized state.
 
 ## OpenTelemetry metrics
 
-The sample uses the standard OpenTelemetry metrics pipeline and console exporter:
+The sample registers the `agent_framework.durabletask` meter (`DurableAgentTelemetry.MeterName`) with the OpenTelemetry console exporter:
 
 ```csharp
 services.AddOpenTelemetry()
@@ -74,9 +77,7 @@ services.AddOpenTelemetry()
         .AddConsoleExporter(...));
 ```
 
-The shared meter is `agent_framework.durabletask`, exposed through
-`DurableAgentTelemetry.MeterName`. Corrected retention builds emit the cross-runtime
-`durable.retention.*` instruments:
+Emitted `durable.retention.*` instruments:
 
 - `durable.retention.evaluations`
 - `durable.retention.budget`
@@ -88,27 +89,21 @@ The shared meter is `agent_framework.durabletask`, exposed through
 - `durable.retention.write_attempts`
 - `durable.retention.operations`
 
-Retention dimensions are bounded operational fields such as `mechanism`, `outcome`,
-`commit_status`, `phase`, `stage`, and `deletion_staged`. They do not include agent, session,
-correlation, message, or content dimensions. Outcomes include `below_threshold`, `staged`,
-`protected_floor`, `returned`, and `failed`.
-
-These measurements are emitted for attempts before entity commit. A later persistence failure or
-retry can roll back or duplicate what telemetry observed. Metrics are operational evidence, not
-durable committed truth or an exact-once state query. Pair them with durable state and application
-behavior when correctness matters.
+Metrics are recorded while staging state before the entity commits, so a failed or retried commit may still emit attempt metrics.
 
 ## Run the sample
 
-The entry point is intentionally unsupported and exits before accessing credentials or services:
+Start the local Durable Task Scheduler emulator and set your Foundry model environment variables:
 
-```bash
-cd dotnet/samples/DurableAgents/ConsoleApps/10_AutoHistoryRetention
-dotnet run --framework net10.0
+```powershell
+$env:FOUNDRY_PROJECT_ENDPOINT = "https://YOUR-ENDPOINT/api/projects/YOUR-PROJECT"
+$env:FOUNDRY_MODEL = "YOUR-MODEL-DEPLOYMENT"
+Set-Location dotnet\samples\DurableAgents\ConsoleApps\10_AutoHistoryRetention
+dotnet restore --source https://packagefeedproxy.microsoft.io/nuget/v3/index.json
+dotnet run --framework net10.0 --no-restore
 ```
 
-It prints the draft-gate explanation and exits with code 2. A future public activation design must
-be reviewed before this becomes runnable.
+`DURABLE_TASK_SCHEDULER_CONNECTION_STRING` is optional and defaults to `Endpoint=http://localhost:8080;TaskHub=default;Authentication=None`. Enter a project topic (up to 80 characters) when prompted; the app creates a new durable session, sends seven turns, and prints whether the initial marker was recalled (`Present`, `Unavailable`, or `Inconclusive`).
 
 ## Tests
 
@@ -116,19 +111,10 @@ be reviewed before this becomes runnable.
 dotnet test --project tests\10_AutoHistoryRetention.Tests.csproj -c Release -f net10.0
 ```
 
-The sample-local tests use only public APIs. They cover bounded agent options, prompt construction,
-the no-wait marker diagnostic, conservative result classification, invalid-marker rejection before
-agent/model calls or output/session mutation, and real OpenTelemetry meter registration/export.
-
-The white-box retention regression lives in the real package unit-test project, which legitimately
-has friend access:
+To run the package unit tests for public `SchemaV2` and `Auto` retention:
 
 ```powershell
 dotnet test --project ..\..\..\..\tests\Microsoft.Agents.AI.DurableTask.UnitTests\Microsoft.Agents.AI.DurableTask.UnitTests.csproj `
     -c Release -f net10.0 `
-    --filter-method "*DraftSampleProfileEvictsTranscriptButPreservesCompletionAndIdempotencyAsync"
+    --filter-class "*AgentEntityPublicRetentionTests"
 ```
-
-That regression applies the draft profile through the internal test gate and proves transcript
-eviction, connected tool grouping, mailbox and receipt preservation, persisted-state reload,
-idempotent duplicate delivery, later model-input removal, and product retention telemetry.

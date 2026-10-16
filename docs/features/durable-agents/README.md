@@ -16,6 +16,9 @@ Durable agents extend the standard Microsoft Agent Framework with **durable stat
 > [!NOTE]
 > For a step-by-step tutorial and deployment guidance, see [Azure Functions (Durable)](https://learn.microsoft.com/agent-framework/integrations/azure-functions) on Microsoft Learn.
 
+> [!TIP]
+> **State Schema v2 and Automatic History Retention:** By default, .NET writes Schema `1.2` state and retains all conversation history (`KeepAll`). To opt into Schema `2.0` (`DurableAgentDeploymentMode.SchemaV2` or `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2`) and automatic byte-budget history pruning (`Auto`), see [Automatic history retention in .NET](automatic-history-retention.md) and the [Schema v2 migration guide](schema-v2-migration.md).
+
 ## How durable agents work
 
 Durable agents are implemented on top of [Durable Entities](https://learn.microsoft.com/azure/azure-functions/durable/durable-functions-entities) (also called "virtual actors"). Each **agent session** maps to one entity instance whose state contains the full conversation history. When you send a message to a durable agent, the following happens:
