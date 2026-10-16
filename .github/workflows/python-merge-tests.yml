@@ -75,8 +75,8 @@ jobs:
           python-version: "3.13"
 
   azurefunctions-minimum-dependencies:
-    # azure-functions-durable 2.0.0rc2 requires durabletask 1.11.0, so this package's
-    # durabletask floor is higher than the one the 3.10 job above resolves.
+    # Both hosts use durabletask 1.11.0. This separate job also checks the Functions
+    # SDK minimums on Python 3.13 while standalone retains Python 3.10 coverage.
     name: azurefunctions minimum dependencies (Python 3.13)
     runs-on: ubuntu-latest
     defaults:
