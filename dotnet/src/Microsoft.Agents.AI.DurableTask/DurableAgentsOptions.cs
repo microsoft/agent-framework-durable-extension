@@ -9,11 +9,18 @@ namespace Microsoft.Agents.AI.DurableTask;
 /// </summary>
 public sealed class DurableAgentsOptions
 {
+    private const int DefaultMaxStateBytes = 1_048_576;
+    private const string DeploymentModeEnvironmentVariableName = "DURABLE_AGENTS_DEPLOYMENT_MODE";
+    private const string SchemaV2EnvironmentValue = "isolated_v2";
     // Agent names are case-insensitive
     private readonly Dictionary<string, Func<IServiceProvider, AIAgent>> _agentFactories = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TimeSpan?> _agentTimeToLive = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DurableAgentHistoryConfiguration> _historyConfigurations = new(StringComparer.OrdinalIgnoreCase);
     private bool _defaultTimeToLiveConfigured;
+    private DurableAgentDeploymentMode? _configuredDeploymentMode;
+    private DurableAgentDeploymentMode? _resolvedDeploymentMode;
+    private bool _deploymentEnvironmentCaptured;
+    private string? _deploymentEnvironmentValue;
 
     // Agents that were discovered on a workflow rather than registered explicitly by the caller. Hosts use
     // this to decide whether an agent should get its own entry points: an agent that only exists because a
@@ -22,6 +29,32 @@ public sealed class DurableAgentsOptions
 
     internal DurableAgentsOptions()
     {
+    }
+
+    /// <summary>
+    /// Gets or sets the deployment's state writer mode. Defaults to <see cref="DurableAgentDeploymentMode.Legacy"/>.
+    /// </summary>
+    /// <remarks>
+    /// When unspecified, the exact environment value DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2 acknowledges
+    /// an isolated schema 2 deployment. Explicit Legacy conflicts with that environment value; all other
+    /// present values are rejected, including empty, case-varied and whitespace-bearing values.
+    /// The environment is captured once at completed configuration validation, not by this getter or setter.
+    /// After validation the getter reports the resolved mode. SchemaV2 is an acknowledgement, not proof
+    /// of isolation, and supports both KeepAll and Auto without migrating existing legacy sessions.
+    /// </remarks>
+    public DurableAgentDeploymentMode DeploymentMode
+    {
+        get => this._resolvedDeploymentMode ?? this._configuredDeploymentMode ?? DurableAgentDeploymentMode.Legacy;
+        set
+        {
+            if (!Enum.IsDefined(value))
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value, "The durable agent deployment mode is not supported.");
+            }
+
+            this._configuredDeploymentMode = value;
+            this._resolvedDeploymentMode = null;
+        }
     }
 
     /// <summary>
@@ -46,11 +79,14 @@ public sealed class DurableAgentsOptions
     /// Defaults to <see langword="false"/>.
     /// </summary>
     /// <remarks>
-    /// This internal switch supports execution tests only; it is not a production rollout API.
-    /// Public activation awaits shared contract, consumer/rollback, and late-duplicate policy agreement.
-    /// Readers support both layouts regardless of this setting.
+    /// The resolved isolated deployment enables this writer independently of history retention.
+    /// The setter remains internal for execution tests; readers support both layouts regardless of this setting.
     /// </remarks>
-    internal bool EnablePersistentRequestOutcomes { get; set; }
+    internal bool EnablePersistentRequestOutcomes
+    {
+        get => field || this.DeploymentMode == DurableAgentDeploymentMode.SchemaV2;
+        set;
+    }
 
     /// <summary>
     /// Gets or sets whether a certified provider adapter may commit explicitly attested terminal failures.
@@ -84,8 +120,8 @@ public sealed class DurableAgentsOptions
     /// When persistent request outcomes are enabled, committed runs schedule entity-local payload cleanup.
     /// Physical removal may lag expiry; polling reports unavailable without modifying state.
     /// Imported states without a scheduled check need an explicit cleanup operation or a successful new run.
-    /// The schema-2 mailbox writer remains an internal, default-off rollout capability in this release, so this
-    /// public setting does not activate mailbox persistence by itself.
+    /// This setting does not activate mailbox persistence by itself. SchemaV2 deployment acknowledgement
+    /// activates schema 2 for new entity generations; existing legacy sessions are not migrated.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The retention period is not positive.</exception>
     public TimeSpan? ResultRetentionPeriod
@@ -131,13 +167,16 @@ public sealed class DurableAgentsOptions
     } = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// Gets or sets the internal pressure-retention mode.
+    /// Gets or sets retention for durable entity conversation history. Defaults to
+    /// <see cref="DurableAgentHistoryRetentionMode.KeepAll"/>.
     /// </summary>
     /// <remarks>
-    /// Pressure retention remains behind the same internal rollout gate as schema 2 mailbox writes.
-    /// It is not a public activation surface until every participating reader and rollback target is compatible.
+    /// Auto requires <see cref="DurableAgentDeploymentMode.SchemaV2"/> and uses a 1 MiB budget by default.
+    /// Deployment acknowledgement and retention are independent: isolated KeepAll also writes schema 2.
+    /// Changing retention does not change the state schema or downgrade existing state.
+    /// Receipt-bearing entities are not automatically deleted by the legacy idle TTL.
     /// </remarks>
-    internal DurableAgentHistoryRetentionMode HistoryRetentionMode
+    public DurableAgentHistoryRetentionMode HistoryRetentionMode
     {
         get;
         set => field = Enum.IsDefined(value)
@@ -149,9 +188,15 @@ public sealed class DurableAgentsOptions
     } = DurableAgentHistoryRetentionMode.KeepAll;
 
     /// <summary>
-    /// Gets or sets the explicit storage-envelope byte budget for internal automatic retention.
+    /// Gets or sets the positive storage-envelope byte budget for automatic retention. Defaults to 1 MiB.
     /// </summary>
-    internal int? MaxStateBytes
+    /// <remarks>
+    /// The budget measures the complete UTF-8 escaped JSON-string entity state, including protected
+    /// results, completion receipts, session continuation and metadata. It is not a token or transcript limit.
+    /// A null value also resolves to 1 MiB under Auto; it does not disable Auto. Budget settings are inert
+    /// under KeepAll. Backend limits still apply regardless of this setting.
+    /// </remarks>
+    public int? MaxStateBytes
     {
         get;
         set => field = value is null or > 0
@@ -160,12 +205,14 @@ public sealed class DurableAgentsOptions
                 nameof(value),
                 value,
                 "The durable agent state budget must be null or a positive byte count.");
-    }
+    } = DefaultMaxStateBytes;
 
     /// <summary>
-    /// Gets or sets an internal override for the fraction at which pressure retention starts.
+    /// Gets or sets the fraction of <see cref="MaxStateBytes"/> at which automatic retention starts.
+    /// Defaults to 0.85 when not specified.
     /// </summary>
-    internal double? HistoryRetentionHighWatermark
+    /// <remarks>Under Auto, watermarks satisfy 0 &lt; low &lt; high &lt;= 1. They are inert under KeepAll.</remarks>
+    public double? HistoryRetentionHighWatermark
     {
         get;
         set
@@ -176,9 +223,14 @@ public sealed class DurableAgentsOptions
     }
 
     /// <summary>
-    /// Gets or sets an internal override for the fraction pressure retention targets.
+    /// Gets or sets the fraction of <see cref="MaxStateBytes"/> targeted by automatic retention.
+    /// Defaults to 0.70 when not specified.
     /// </summary>
-    internal double? HistoryRetentionLowWatermark
+    /// <remarks>
+    /// Under Auto, watermarks satisfy 0 &lt; low &lt; high &lt;= 1. They are inert under KeepAll. If protected state
+    /// prevents reaching this target, a write can still succeed below the high watermark.
+    /// </remarks>
+    public double? HistoryRetentionLowWatermark
     {
         get;
         set
@@ -190,16 +242,26 @@ public sealed class DurableAgentsOptions
 
     internal DurableAgentRetentionSettings GetRetentionSettings()
     {
+        if (!this._deploymentEnvironmentCaptured)
+        {
+            this._deploymentEnvironmentValue =
+                Environment.GetEnvironmentVariable(DeploymentModeEnvironmentVariableName);
+            this._deploymentEnvironmentCaptured = true;
+        }
+
+        this._resolvedDeploymentMode = ResolveDeploymentMode(
+            this._configuredDeploymentMode, this._deploymentEnvironmentValue);
+        if (this.HistoryRetentionMode == DurableAgentHistoryRetentionMode.Auto &&
+            this._resolvedDeploymentMode != DurableAgentDeploymentMode.SchemaV2)
+        {
+            throw new InvalidOperationException(
+                "Automatic durable history retention requires schema-v2 deployment acknowledgement. " +
+                "Set DurableAgentsOptions.DeploymentMode to DurableAgentDeploymentMode.SchemaV2, " +
+                "or set DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2 before startup.");
+        }
+
         if (this.HistoryRetentionMode == DurableAgentHistoryRetentionMode.KeepAll)
         {
-            if (this.MaxStateBytes.HasValue ||
-                this.HistoryRetentionHighWatermark.HasValue ||
-                this.HistoryRetentionLowWatermark.HasValue)
-            {
-                throw new InvalidOperationException(
-                    "A durable state budget and retention watermarks are only valid when automatic history retention is enabled.");
-            }
-
             return new(
                 DurableAgentHistoryRetentionMode.KeepAll,
                 MaxStateBytes: null,
@@ -207,11 +269,7 @@ public sealed class DurableAgentsOptions
                 DurableAgentStateRetention.DefaultLowWatermark);
         }
 
-        if (this.MaxStateBytes is not int maxStateBytes)
-        {
-            throw new InvalidOperationException(
-                "Automatic durable history retention requires an explicit positive state byte budget.");
-        }
+        int maxStateBytes = this.MaxStateBytes ?? DefaultMaxStateBytes;
 
         double highWatermark =
             this.HistoryRetentionHighWatermark ?? DurableAgentStateRetention.DefaultHighWatermark;
@@ -228,6 +286,36 @@ public sealed class DurableAgentsOptions
             maxStateBytes,
             highWatermark,
             lowWatermark);
+    }
+
+    internal void ValidateConfiguration()
+    {
+        _ = this.GetRetentionSettings();
+    }
+
+    private static DurableAgentDeploymentMode ResolveDeploymentMode(
+        DurableAgentDeploymentMode? configuredMode,
+        string? environmentValue)
+    {
+        if (environmentValue is not null &&
+            !string.Equals(environmentValue, SchemaV2EnvironmentValue, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "DURABLE_AGENTS_DEPLOYMENT_MODE must be unset or exactly 'isolated_v2'; " +
+                "empty values, aliases, case changes and surrounding whitespace are not supported.");
+        }
+
+        if (environmentValue is not null && configuredMode == DurableAgentDeploymentMode.Legacy)
+        {
+            throw new InvalidOperationException(
+                "Explicit Legacy deployment mode conflicts with DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2. " +
+                "Remove the environment setting to keep Legacy, or set DurableAgentsOptions.DeploymentMode " +
+                "to DurableAgentDeploymentMode.SchemaV2.");
+        }
+
+        return configuredMode ?? (environmentValue is null
+            ? DurableAgentDeploymentMode.Legacy
+            : DurableAgentDeploymentMode.SchemaV2);
     }
 
     private static void ValidateWatermark(double? value, string parameterName)
@@ -311,9 +399,6 @@ public sealed class DurableAgentsOptions
     /// <remarks>
     /// Registering an agent that a workflow already discovered is allowed: the explicit registration takes over,
     /// so an agent can be promoted to a standalone agent regardless of whether the workflow was configured first.
-    /// Static fixed-owner incompatibilities are rejected during this call when the internal schema 2 writer is
-    /// active. Validation that depends on the completed options composition or restored session remains at entity
-    /// execution time, before provider, session, or model side effects.
     /// </remarks>
     public DurableAgentsOptions AddAIAgent(
         AIAgent agent,
@@ -327,11 +412,6 @@ public sealed class DurableAgentsOptions
             throw new ArgumentException($"{nameof(agent.Name)} must not be null or whitespace.", nameof(agent));
         }
 
-        // Direct registrations expose the constructed pipeline, so reject static incompatibilities now.
-        // Factory registrations are validated after their single per-operation construction.
-        DurableAgentHistoryOwnershipResolver.ValidateStaticConfiguration(
-            agent,
-            this.EnablePersistentRequestOutcomes);
         DurableAgentHistoryConfiguration historyConfiguration = CreateHistoryConfiguration(configureHistory);
         this.AddExplicitAgentFactory(agent.Name, sp => agent, nameof(agent));
         this._historyConfigurations[agent.Name] = historyConfiguration;

@@ -49,12 +49,6 @@ internal static class DurableAgentStateRetention
     {
         if (mode == DurableAgentHistoryRetentionMode.KeepAll)
         {
-            if (maxStateBytes.HasValue)
-            {
-                throw new InvalidOperationException(
-                    "A durable state budget is not applicable when history retention is KeepAll.");
-            }
-
             return 0;
         }
 
@@ -81,12 +75,6 @@ internal static class DurableAgentStateRetention
     {
         if (mode == DurableAgentHistoryRetentionMode.KeepAll)
         {
-            if (maxStateBytes.HasValue)
-            {
-                throw new InvalidOperationException(
-                    "A durable state budget is not applicable when history retention is KeepAll.");
-            }
-
             return 0;
         }
 
@@ -371,7 +359,7 @@ internal static class DurableAgentStateRetention
             throw new ArgumentOutOfRangeException(
                 nameof(maxStateBytes),
                 maxStateBytes,
-                "Automatic durable history retention requires an explicit positive state byte budget.");
+                "Automatic durable history retention requires a positive state byte budget.");
         }
 
         if (!double.IsFinite(highWatermark) ||
