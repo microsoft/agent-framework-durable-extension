@@ -88,7 +88,7 @@ def test_registered_dt_root_rejects_internal_markers_before_decoding(parent: str
     )
     failure = _only_action(result, "completeOrchestration").completeOrchestration
     assert failure.orchestrationStatus == pb.ORCHESTRATION_STATUS_FAILED
-    assert failure.failureDetails.errorType == "ValueError"
+    assert failure.failureDetails.errorType == "builtins.ValueError"
     assert "requires SDK parent instance metadata" in failure.failureDetails.errorMessage
     assert not result.encoded_custom_status and echo.seen == [] and _PICKLE_CALLS == []
     assert value == before
@@ -106,7 +106,7 @@ def test_registered_dt_child_rejects_inconsistent_address_before_decoding(case: 
     )
     failure = _only_action(result, "completeOrchestration").completeOrchestration
     assert failure.orchestrationStatus == pb.ORCHESTRATION_STATUS_FAILED
-    assert failure.failureDetails.errorType == "ValueError"
+    assert failure.failureDetails.errorType == "builtins.ValueError"
     assert "workflow child" in failure.failureDetails.errorMessage
     assert not result.encoded_custom_status and echo.seen == [] and _PICKLE_CALLS == []
 
@@ -126,7 +126,7 @@ def test_registered_dt_metadata_must_match_immediate_parent_and_current_child(pa
     result = host.start("dafx-provenance-leaf", instance, wrap_workflow_input(value), parent)
     failure = _only_action(result, "completeOrchestration").completeOrchestration
     assert failure.orchestrationStatus == pb.ORCHESTRATION_STATUS_FAILED
-    assert failure.failureDetails.errorType == "ValueError"
+    assert failure.failureDetails.errorType == "builtins.ValueError"
     assert "does not match SDK instance metadata" in failure.failureDetails.errorMessage
     assert not result.encoded_custom_status and echo.seen == [] and _PICKLE_CALLS == []
 

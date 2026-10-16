@@ -253,7 +253,7 @@ def test_real_sdk_tasks_fail_malformed_delivery_without_logging_payload(
     assert task.is_complete and task.is_failed
     assert child.get_result() is raw
     failure = task.get_exception()
-    assert failure.details.error_type == "TypeError"
+    assert failure.details.is_caused_by(TypeError)
     diagnostic = failure.details.message
     assert diagnostic == CONTAINER_ERROR
     assert PRIVATE not in caplog.text

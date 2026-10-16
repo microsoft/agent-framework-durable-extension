@@ -274,7 +274,7 @@ def test_real_tasks_report_encoding_failure_without_private_input(
     assert task.is_complete and task.is_failed
     assert child.get_result() is raw
     failure = task.get_exception()
-    assert failure.details.error_type == "ValueError"
+    assert failure.details.is_caused_by(ValueError)
     diagnostic = failure.details.message
     assert diagnostic == "Structured response value must be JSON serializable with finite numbers."
     assert PRIVATE_INPUT not in caplog.text

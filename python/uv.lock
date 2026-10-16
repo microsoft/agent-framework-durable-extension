@@ -149,7 +149,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agent-framework-core", specifier = ">=1.19.0,<2" },
-    { name = "durabletask", specifier = ">=1.7.1,<2" },
+    { name = "durabletask", specifier = ">=1.11.0,<2" },
     { name = "durabletask-azuremanaged", specifier = ">=1.4.0,<2" },
     { name = "opentelemetry-api", specifier = ">=1.39.0,<2" },
     { name = "pydantic", specifier = ">=2.11,<3" },
@@ -1097,7 +1097,7 @@ wheels = [
 
 [[package]]
 name = "durabletask"
-version = "1.7.2"
+version = "1.11.0"
 source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
 dependencies = [
     { name = "asyncio" },
@@ -1105,9 +1105,9 @@ dependencies = [
     { name = "packaging" },
     { name = "protobuf" },
 ]
-sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/durabletask/1.7.2/durabletask-1.7.2.tar.gz", hash = "sha256:b22c234d859c8ac3ad621d324132ffb7ba546c011ae3df8e22c2bd7ca7b108d2", size = 169101, upload-time = "2026-07-09T21:39:22Z" }
+sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/durabletask/1.11/durabletask-1.11.0.tar.gz", hash = "sha256:877ab7362c274acee7c2c20daffbdd265c6a40c67d785f2b5fe40349682063b1", size = 188325, upload-time = "2026-09-29T20:53:00Z" }
 wheels = [
-    { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/durabletask/1.7.2/durabletask-1.7.2-py3-none-any.whl", hash = "sha256:e4397649d9b63f75d5ddcfe65197aad646b2187ad7eff79cdbdaa67cb7f1782a", size = 195984, upload-time = "2026-07-24T13:42:30Z" },
+    { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/durabletask/1.11/durabletask-1.11.0-py3-none-any.whl", hash = "sha256:ad85173652bdf19bf851db01afb459bc84e2931fd4994de060503ca8b5db44d6", size = 215655, upload-time = "2026-09-29T20:20:47Z" },
 ]
 
 [[package]]

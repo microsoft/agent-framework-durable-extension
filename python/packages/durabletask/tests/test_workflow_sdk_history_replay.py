@@ -212,7 +212,7 @@ def test_sdk_characterizes_historical_sibling_schedule_incompatibility(count: in
         assert len(result.actions) == 1 and result.actions[0].HasField("completeOrchestration")
         completed = result.actions[0].completeOrchestration
         assert completed.orchestrationStatus == pb.ORCHESTRATION_STATUS_FAILED
-        assert completed.failureDetails.errorType == "NonDeterminismError"
+        assert completed.failureDetails.errorType == "durabletask.task.NonDeterminismError"
         assert "dafx-audit-siblings-a" in completed.failureDetails.errorMessage
         assert "dafx-audit-siblings-b" in completed.failureDetails.errorMessage
         assert not completed.HasField("result")
