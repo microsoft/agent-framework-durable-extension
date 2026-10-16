@@ -10,7 +10,7 @@ as durable orchestrations with automatically generated activity functions.
 from __future__ import annotations
 
 import logging
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from agent_framework import SupportsAgentRun, Workflow
 from agent_framework._telemetry import mark_feature_used
@@ -20,18 +20,19 @@ from durabletask.worker import TaskHubGrpcWorker
 
 from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentResponseCallbackProtocol
+from ._compatibility import CompatibleAgentEntity, LegacyMigrationEvidenceProvider
 from ._configuration import (
     INHERIT,
     AgentRegistrationSettings,
     RegistrationIdentity,
     StateBudgetOverride,
+    resolve_runtime_deployment,
     resolve_state_budget_override,
     validate_agent_configuration,
     validate_response_delivery_window,
-    validate_runtime_deployment,
 )
 from ._constants import DELIVERY_WINDOW_SECONDS
-from ._entities import AgentEntity, DurableTaskEntityStateProvider
+from ._entities import DurableTaskEntityStateProvider
 from ._feature_usage import FeatureIndex
 from ._json_payload import JsonMigration, JsonPayload, install_json_payload_converter
 from ._response_utils import serialize_agent_response
@@ -43,7 +44,9 @@ from ._retention import (
     RetentionMode,
     validate_retention,
 )
-from ._workflows.activity import execute_workflow_activity
+from ._workflows._legacy_orchestrator import run_workflow_orchestrator as run_legacy_workflow_orchestrator
+from ._workflows.compatibility import WorkflowExecutionResolver, select_workflow_execution
+from ._workflows.compatibility import execute_compatible_activity as execute_workflow_activity
 from ._workflows.dt_context import DurableTaskWorkflowContext
 from ._workflows.hitl_checkpoint import execute_hitl_checkpoint, workflow_hitl_checkpoint_name
 from ._workflows.naming import (
@@ -54,7 +57,6 @@ from ._workflows.naming import (
     workflow_scoped_executor_id,
 )
 from ._workflows.orchestrator import run_workflow_orchestrator
-from ._workflows.protocol import unwrap_workflow_input, validate_workflow_start_provenance
 from ._workflows.registration import collect_hosted_workflows, plan_workflow_registration
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -111,6 +113,8 @@ class DurableAIAgentWorker:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         deployment_mode: str | None = None,
+        legacy_migration_evidence: LegacyMigrationEvidenceProvider | None = None,
+        workflow_execution_resolver: WorkflowExecutionResolver | None = None,
         retention: RetentionMode = DEFAULT_RETENTION,
         max_state_bytes: StateBudgetOverride = INHERIT,
         high_watermark: float = HIGH_WATERMARK,
@@ -122,8 +126,10 @@ class DurableAIAgentWorker:
         Args:
             worker: The durabletask worker instance to wrap
             callback: Optional callback for agent response notifications
-            deployment_mode: Exactly ``isolated_v2`` to acknowledge an isolated schema 2
-                deployment with upgraded clients. None reads ``DURABLE_AGENTS_DEPLOYMENT_MODE``.
+            deployment_mode: Prototype writer policy: unset defaults to v2; ``legacy`` keeps
+                all writes legacy. None reads ``DURABLE_AGENTS_DEPLOYMENT_MODE``.
+            legacy_migration_evidence: Trusted completion/delivery evidence for automatic legacy conversion.
+            workflow_execution_resolver: Trusted selector for ambiguous recorded workflow starts.
             retention: Eager pruning policy, defaulting to ``keep_all``. ``follow_compaction``
                 prunes compaction exclusions independently of the pressure budget.
             max_state_bytes: Serialized-state pressure budget. Omission or INHERIT uses the
@@ -135,7 +141,11 @@ class DurableAIAgentWorker:
             low_watermark: Target budget fraction after pressure eviction, defaulting to 0.70.
             response_delivery_window_seconds: Positive integer response delivery window in seconds.
         """
-        validate_runtime_deployment(deployment_mode)
+        self._deployment_mode: Literal["legacy", "isolated_v2"] = resolve_runtime_deployment(deployment_mode)
+        self._legacy_migration_evidence = legacy_migration_evidence
+        self._workflow_execution_resolver = workflow_execution_resolver
+        if self._deployment_mode == "legacy" and retention != "keep_all":
+            raise ValueError("The legacy compatibility spike requires retention='keep_all'.")
         validate_retention(retention, high_watermark, low_watermark)
         self._backend_limit = DTS_MAX_STATE_BYTES if isinstance(worker, DurableTaskSchedulerWorker) else None
         resolved_max_state_bytes = resolve_state_budget_override(
@@ -545,20 +555,23 @@ class DurableAIAgentWorker:
     def _register_workflow_orchestrator(self, workflow: Workflow) -> None:
         """Register a workflow's orchestrator function under its per-workflow name."""
         captured_workflow = workflow
+        mode = self._deployment_mode
+        resolver = self._workflow_execution_resolver
         orchestrator_name = workflow_orchestrator_name(workflow.name)
 
         def workflow_orchestrator(context: OrchestrationContext, input_data: JsonPayload) -> Any:
-            # Reject legacy recorded starts before entering the changed engine.
-            initial_message = unwrap_workflow_input(input_data)
-            validate_workflow_start_provenance(
-                initial_message,
+            profile, initial_message = select_workflow_execution(
+                input_data,
                 instance_id=context.instance_id,
                 parent_instance_id=context.parent_instance_id,
+                deployment_mode=mode,
+                resolver=resolver,
             )
             shared_state: dict[str, Any] = {}
 
-            dt_ctx = DurableTaskWorkflowContext(context)
-            outputs = yield from run_workflow_orchestrator(dt_ctx, captured_workflow, initial_message, shared_state)
+            dt_ctx = DurableTaskWorkflowContext(context, execution_protocol=1 if profile == "legacy" else 2)
+            runner = run_legacy_workflow_orchestrator if profile == "legacy" else run_workflow_orchestrator
+            outputs = yield from runner(dt_ctx, captured_workflow, initial_message, shared_state)
             return outputs  # noqa: B901
 
         workflow_orchestrator.__name__ = orchestrator_name
@@ -601,6 +614,8 @@ class DurableAIAgentWorker:
         """
         agent_name = entity_id or agent.name or type(agent).__name__
         entity_name = f"dafx-{agent_name}"
+        deployment_mode = self._deployment_mode
+        legacy_migration_evidence = self._legacy_migration_evidence
 
         class ConfiguredAgentEntity(DurableTaskEntityStateProvider):
             """Durable entity configured with a specific agent instance."""
@@ -608,10 +623,12 @@ class DurableAIAgentWorker:
             def __init__(self) -> None:
                 super().__init__()
                 # Create the AgentEntity with this state provider
-                self._agent_entity = AgentEntity(
+                self._agent_entity = CompatibleAgentEntity(
                     agent=agent,
                     callback=callback,
                     state_provider=self,
+                    deployment_mode=deployment_mode,
+                    legacy_migration_evidence=legacy_migration_evidence,
                     retention=retention,
                     max_state_bytes=max_state_bytes,
                     high_watermark=high_watermark,

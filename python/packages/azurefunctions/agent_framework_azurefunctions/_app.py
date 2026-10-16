@@ -49,6 +49,7 @@ from agent_framework_durabletask import (
     ApiResponseFields,
     DurableAIAgent,
     LegacyDurableAgentState,
+    LegacyMigrationEvidenceProvider,
     RegistrationIdentity,
     RetentionMode,
     RunRequest,
@@ -56,19 +57,26 @@ from agent_framework_durabletask import (
     StateBudget,
     StateBudgetOverride,
     deserialize_workflow_output,
-    execute_workflow_activity,
     plan_workflow_registration,
     read_agent_state,
+    resolve_runtime_deployment,
     resolve_state_budget,
     resolve_state_budget_override,
     serialize_agent_response,
-    unwrap_workflow_input,
     validate_agent_configuration,
     validate_response_delivery_window,
     validate_retention,
-    validate_runtime_deployment,
     validate_workflow_start_input,
     wrap_workflow_input,
+)
+from agent_framework_durabletask._legacy_delivery import read_legacy_deliveries
+from agent_framework_durabletask._workflows._legacy_serialization import deserialize_value as deserialize_legacy_value
+from agent_framework_durabletask._workflows.compatibility import (
+    WorkflowExecutionResolver,
+    execute_compatible_activity,
+    recorded_legacy_child_ordinal,
+    select_workflow_execution,
+    uses_legacy_workflow_serialization,
 )
 from agent_framework_durabletask._workflows.hitl_checkpoint import (
     execute_hitl_checkpoint,
@@ -84,7 +92,6 @@ from agent_framework_durabletask._workflows.naming import (
     workflow_orchestrator_name,
     workflow_scoped_executor_id,
 )
-from agent_framework_durabletask._workflows.protocol import validate_workflow_start_provenance
 from agent_framework_durabletask._workflows.registration import collect_hosted_workflows
 from agent_framework_durabletask._workflows.serialization import strip_pickle_markers, strip_subworkflow_markers
 from azure.durable_functions.models.utils.http_utils import post_async_request as _sdk_post_async_request
@@ -360,6 +367,8 @@ class AgentFunctionApp(DFAppBase):
         max_state_bytes: StateBudget = DEFAULT_MAX_STATE_BYTES,
         *,
         deployment_mode: str | None = None,
+        legacy_migration_evidence: LegacyMigrationEvidenceProvider | None = None,
+        workflow_execution_resolver: WorkflowExecutionResolver | None = None,
         high_watermark: float = HIGH_WATERMARK,
         low_watermark: float = LOW_WATERMARK,
         response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
@@ -387,8 +396,10 @@ class AgentFunctionApp(DFAppBase):
             Defaults to ``DEFAULT_POLL_INTERVAL_SECONDS``. Polling only applies to
             HTTP wait-for-response reads of host state.
         :param default_callback: Optional callback invoked for agents without specific callbacks.
-        :param deployment_mode: Exactly ``isolated_v2`` to acknowledge an isolated schema 2
-            deployment with upgraded clients. None reads ``DURABLE_AGENTS_DEPLOYMENT_MODE``.
+        :param deployment_mode: Prototype writer policy: unset defaults to v2; ``legacy``
+            keeps all writes legacy. None reads ``DURABLE_AGENTS_DEPLOYMENT_MODE``.
+        :param legacy_migration_evidence: Trusted completion/delivery evidence for automatic legacy conversion.
+        :param workflow_execution_resolver: Trusted selector for ambiguous recorded workflow starts.
         :param retention: Eager pruning policy, defaulting to ``keep_all``. ``follow_compaction``
             prunes compaction exclusions independently of the pressure budget.
         :param max_state_bytes: Positive integer serialized-state budget, or None to disable pressure
@@ -406,7 +417,9 @@ class AgentFunctionApp(DFAppBase):
 
         :note: If no agents are provided, they can be added later using :meth:`add_agent`.
         """
-        validate_runtime_deployment(deployment_mode)
+        resolved_mode = resolve_runtime_deployment(deployment_mode)
+        if resolved_mode == "legacy" and retention != "keep_all":
+            raise ValueError("The legacy compatibility spike requires retention='keep_all'.")
         validate_retention(retention, high_watermark, low_watermark)
         resolved_budget = resolve_state_budget(max_state_bytes)
         validate_response_delivery_window(response_delivery_window_seconds)
@@ -441,7 +454,9 @@ class AgentFunctionApp(DFAppBase):
         self.enable_http_endpoints = enable_http_endpoints
         self.enable_mcp_tool_trigger = enable_mcp_tool_trigger
         self.default_callback = default_callback
-        self._deployment_mode = "isolated_v2"
+        self._deployment_mode = resolved_mode
+        self._legacy_migration_evidence = legacy_migration_evidence
+        self._workflow_execution_resolver = workflow_execution_resolver
         self._retention: RetentionMode = retention
         self._workflow_retention: RetentionMode = resolved_workflow_retention
         self._max_state_bytes = resolved_budget
@@ -819,7 +834,7 @@ class AgentFunctionApp(DFAppBase):
             if not executor:
                 raise ValueError(f"Unknown executor: {captured_executor_id}")
 
-            return execute_workflow_activity(executor, inputData, captured_workflow)
+            return execute_compatible_activity(executor, inputData, captured_workflow)
 
         # Ensure the function is registered (prevents garbage collection)
         _ = executor_activity
@@ -851,18 +866,24 @@ class AgentFunctionApp(DFAppBase):
             """Generic orchestrator for running the configured workflow."""
             input_data = get_workflow_start_input(context)
 
-            # Reject legacy recorded starts before entering the changed engine.
-            initial_message = unwrap_workflow_input(input_data)
-            validate_workflow_start_provenance(
-                initial_message,
+            profile, initial_message = select_workflow_execution(
+                input_data,
                 instance_id=context.instance_id,
                 parent_instance_id=context.parent_instance_id,
+                deployment_mode=self._deployment_mode,
+                resolver=self._workflow_execution_resolver,
             )
 
             # Create local shared state dict for cross-executor state sharing
             shared_state: dict[str, Any] = {}
 
-            outputs = yield from run_workflow_orchestrator(context, captured_workflow, initial_message, shared_state)
+            outputs = yield from run_workflow_orchestrator(
+                context,
+                captured_workflow,
+                initial_message,
+                shared_state,
+                **({"execution_protocol": 1} if profile == "legacy" else {}),
+            )
             # Durable Functions runtime extracts return value from StopIteration
             return outputs  # noqa: B901
 
@@ -917,7 +938,9 @@ class AgentFunctionApp(DFAppBase):
                 # trusted-deserialization path (see strip_subworkflow_markers).
                 client_input = strip_subworkflow_markers(client_input)
                 client_input = strip_pickle_markers(client_input)
-                workflow_input = wrap_workflow_input(client_input)
+                workflow_input = (
+                    client_input if self._deployment_mode == "legacy" else wrap_workflow_input(client_input)
+                )
             except ValueError as exc:
                 return self._build_error_response(str(exc), status_code=400)
 
@@ -969,7 +992,7 @@ class AgentFunctionApp(DFAppBase):
             # the originals so the HTTP response carries clean domain JSON, matching
             # what DurableWorkflowClient.await_workflow_output returns in-process.
             # status.output is the workflow's own (trusted) orchestration result.
-            decoded_output = deserialize_workflow_output(status.output) if status.output is not None else None
+            decoded_output = self._decode_workflow_output(status, instance_id=instance_id)
 
             response = {
                 "instanceId": status.instance_id,
@@ -988,7 +1011,11 @@ class AgentFunctionApp(DFAppBase):
             # single addressing surface.
             custom_status = status.custom_status
             if isinstance(custom_status, dict) and not self._is_terminal_hitl_state(status):
-                gathered = await self._gather_pending_hitl_requests(client, cast("dict[str, Any]", custom_status))
+                gathered = await self._gather_pending_hitl_requests(
+                    client,
+                    cast("dict[str, Any]", custom_status),
+                    instance_id=instance_id,
+                )
                 if gathered:
                     base_url, route_prefix = split_request_url(req.url)
                     pending_requests: list[dict[str, Any]] = [
@@ -1097,6 +1124,7 @@ class AgentFunctionApp(DFAppBase):
         custom_status: dict[str, Any],
         *,
         prefix: str = "",
+        instance_id: str | None = None,
     ) -> list[tuple[str, dict[str, Any]]]:
         """Collect ``(qualifiedRequestId, requestData)`` pairs for an instance and its sub-workflows.
 
@@ -1126,7 +1154,12 @@ class AgentFunctionApp(DFAppBase):
         if isinstance(subworkflows, dict):
             sep = SUBWORKFLOW_REQUEST_SEPARATOR
             for executor_id, child_ids in cast("dict[str, Any]", subworkflows).items():
-                for ordinal, child_instance_id in iter_subworkflow_instances(child_ids):
+                for ordinal, child_instance_id in await self._compatible_children(
+                    client,
+                    instance_id,
+                    executor_id,
+                    child_ids,
+                ):
                     child_status = await client.get_status(child_instance_id)
                     if self._is_terminal_hitl_state(child_status):
                         continue
@@ -1137,6 +1170,7 @@ class AgentFunctionApp(DFAppBase):
                                 client,
                                 cast("dict[str, Any]", child_custom),
                                 prefix=f"{prefix}{executor_id}{sep}{ordinal}{sep}",
+                                instance_id=child_instance_id,
                             )
                         )
 
@@ -1173,10 +1207,38 @@ class AgentFunctionApp(DFAppBase):
         if not isinstance(subworkflows, dict):
             return None
         children_raw = cast("dict[str, Any]", subworkflows).get(executor_id)
-        child_instance_id = dict(iter_subworkflow_instances(children_raw)).get(ordinal)
+        child_instance_id = dict(await self._compatible_children(client, instance_id, executor_id, children_raw)).get(
+            ordinal
+        )
         if child_instance_id is None:
             return None
         return await self._resolve_hitl_target(client, child_instance_id, remainder)
+
+    async def _compatible_children(
+        self,
+        client: df.DurableOrchestrationClient,
+        instance_id: str | None,
+        executor_id: str,
+        children: Any,
+    ) -> list[tuple[int, str]]:
+        if not isinstance(children, list):
+            return list(iter_subworkflow_instances(children))
+        if instance_id is None:
+            return []
+        result: list[tuple[int, str]] = []
+        for child in cast(list[Any], children):
+            if not isinstance(child, str):
+                continue
+            status = await client.get_status(child)
+            ordinal = recorded_legacy_child_ordinal(
+                getattr(status, "input", None),
+                executor_id=executor_id,
+                parent_instance_id=instance_id,
+                child_instance_id=child,
+            )
+            if ordinal is not None:
+                result.append((ordinal, child))
+        return result
 
     def _is_owned_orchestration(self, status: Any, workflow_name: str) -> bool:
         """Return whether a durable orchestration status belongs to the named workflow.
@@ -1196,6 +1258,18 @@ class AgentFunctionApp(DFAppBase):
         expected = workflow_orchestrator_name(workflow_name)
         name = getattr(status, "name", None)
         return isinstance(name, str) and name.casefold() == expected.casefold()
+
+    def _decode_workflow_output(self, status: Any, *, instance_id: str | None = None) -> Any:
+        if status.output is None:
+            return None
+        legacy = uses_legacy_workflow_serialization(
+            getattr(status, "input", object()),
+            getattr(status, "custom_status", None),
+            instance_id=instance_id or getattr(status, "instance_id", None),
+            parent_instance_id=getattr(status, "parent_instance_id", None),
+            resolver=self._workflow_execution_resolver,
+        )
+        return deserialize_legacy_value(status.output) if legacy else deserialize_workflow_output(status.output)
 
     @property
     def agents(self) -> dict[str, SupportsAgentRun]:
@@ -1626,6 +1700,7 @@ class AgentFunctionApp(DFAppBase):
             agent,
             callback,
             deployment_mode=self._deployment_mode,
+            legacy_migration_evidence=self._legacy_migration_evidence,
             retention=retention,
             max_state_bytes=max_state_bytes,
             high_watermark=high_watermark,
@@ -2002,6 +2077,10 @@ class AgentFunctionApp(DFAppBase):
                     correlation_id=correlation_id,
                     state=state,
                 )
+                if correlation_id in read_legacy_deliveries(state.data.extension_data):
+                    delivery = serialize_agent_response(agent_response)
+                    result["agent_response"] = delivery
+                    result["agentResponse"] = delivery
                 logger.debug(f"[HTTP Trigger] Found response for correlation ID: {correlation_id}")
 
         except Exception:
@@ -2140,7 +2219,7 @@ class AgentFunctionApp(DFAppBase):
                 status_code=500,
             )
 
-        decoded_output = deserialize_workflow_output(status.output) if status.output is not None else None
+        decoded_output = self._decode_workflow_output(status, instance_id=instance_id)
         response: dict[str, Any] = {
             "instanceId": status.instance_id or instance_id,
             "runtimeStatus": runtime_status.name,

@@ -78,7 +78,7 @@ def wrap_workflow_input(value: Any) -> dict[str, Any]:
     """Mark a newly scheduled workflow input without changing its application payload.
 
     This envelope is not an authorization boundary. It distinguishes recorded starts
-    from the prior engine, which must remain on their original deployment.
+    from the published predecessor selected by the host's compatibility dispatcher.
 
     Args:
         value: The application input, or trusted internal child input.
@@ -93,8 +93,8 @@ def wrap_workflow_input(value: Any) -> dict[str, Any]:
 def unwrap_workflow_input(envelope: Any) -> Any:
     """Reject old starts before a hosted orchestrator executes any revised actions.
 
-    Rewrapping recorded history does not migrate it. Deploy the old engine to finish
-    old instances, and schedule only new instances with this engine's clients.
+    Rewrapping recorded history does not migrate it. The host's compatibility dispatcher
+    selects the supported predecessor before this v2-only parser.
 
     Args:
         envelope: The durable orchestration's recorded start input.

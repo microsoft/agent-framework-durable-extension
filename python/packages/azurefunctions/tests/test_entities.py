@@ -150,7 +150,7 @@ class TestCreateAgentEntity:
         }
 
     def test_entity_function_restores_existing_state(self) -> None:
-        """Legacy state remains read-only and reset refuses to overwrite it."""
+        """Legacy reset clears only its transcript while retaining the schema."""
         mock_agent = Mock()
 
         entity_function = create_agent_entity(mock_agent)
@@ -203,13 +203,17 @@ class TestCreateAgentEntity:
 
         assert mock_context.set_result.called
         result = mock_context.set_result.call_args[0][0]
-        assert result["status"] == "error"
-        assert "Legacy state is read-only" in result["error"]
-        assert mock_context.set_state.call_count == 0
+        assert result == {"status": "reset"}
+        mock_context.set_state.assert_called_once_with({
+            "schemaVersion": "1.0.0",
+            "data": {"conversationHistory": []},
+        })
 
     def test_entity_function_restores_legacy_1_1_state(self) -> None:
-        """Legacy 1.1 state is rejected before any decode or run occurs."""
+        """An empty legacy profile is automatically promoted before its first v2 turn."""
         mock_agent = Mock()
+        mock_agent.context_providers = None
+        mock_agent.client.STORES_BY_DEFAULT = False
         mock_agent.run = AsyncMock(return_value=_agent_response("Response"))
 
         entity_function = create_agent_entity(mock_agent)
@@ -222,13 +226,13 @@ class TestCreateAgentEntity:
         with patch.object(DurableAgentState, "from_dict", wraps=DurableAgentState.from_dict) as from_dict_mock:
             entity_function(mock_context)
 
-        from_dict_mock.assert_not_called()
-        mock_agent.run.assert_not_called()
-        mock_context.set_state.assert_not_called()
+        from_dict_mock.assert_called()
+        mock_agent.run.assert_called_once()
+        mock_context.set_state.assert_called_once()
+        assert mock_context.set_state.call_args.args[0]["schemaVersion"] == "2.0.0"
         mock_context.set_result.assert_called_once()
         result = mock_context.set_result.call_args[0][0]
-        assert result["status"] == "error"
-        assert "Legacy state is read-only" in result["error"]
+        assert "status" not in result or result["status"] != "error"
 
     def test_entity_function_handles_string_input(self) -> None:
         """Test that the entity function handles non-dict input by converting to string."""
@@ -271,15 +275,12 @@ class TestCreateAgentEntity:
         # Verify the result was set (likely error result)
         assert mock_context.set_result.called
 
-    def test_create_agent_entity_rejects_missing_isolated_acknowledgement(self) -> None:
-        """The factory requires explicit isolated-v2 acknowledgement when the env is absent."""
+    def test_create_agent_entity_allows_missing_isolated_acknowledgement(self) -> None:
+        """The prototype defaults to v2 without an acknowledgement-only setting."""
         mock_agent = Mock()
 
-        with (
-            patch("os.getenv", return_value=None),
-            pytest.raises(ValueError, match="Schema 2 requires an isolated task hub/deployment"),
-        ):
-            create_agent_entity(mock_agent)
+        with patch("os.getenv", return_value=None):
+            assert callable(create_agent_entity(mock_agent))
 
     def test_create_agent_entity_allows_explicit_isolated_v2_mode(self) -> None:
         """An explicit deployment_mode avoids relying on the root test fixture."""

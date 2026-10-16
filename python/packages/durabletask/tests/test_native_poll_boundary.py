@@ -18,7 +18,7 @@ from unittest.mock import Mock, call
 
 import grpc
 import pytest
-from agent_framework import AgentResponse, Content
+from agent_framework import AgentResponse, Content, Message
 from dateutil import parser as date_parser
 from dateutil import tz
 from durabletask.client import TaskHubGrpcClient as NativeTaskHubGrpcClient
@@ -41,6 +41,54 @@ NativePoll = tuple[NativeTaskHubGrpcClient, Mock, Mock]
 
 class Answer(BaseModel):
     answer: int
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize("history", [False, True])
+@pytest.mark.parametrize("typed", [False, True])
+async def test_public_client_polling_prefers_complete_legacy_delivery(
+    native_poll: NativePoll,
+    version: str,
+    history: bool,
+    typed: bool,
+) -> None:
+    from _execution_test_support import JsonStateProvider
+    from test_agent_compatibility_prototype import _legacy
+    from test_legacy_review_boundaries import _RichReplyAgent
+
+    from agent_framework_durabletask import CompatibleAgentEntity, RunRequest, serialize_agent_response
+
+    client, rpc, sleep = native_poll
+    provider = JsonStateProvider(
+        _legacy(version=version),
+        session_id="poll-boundary-session",
+        entity_name="dafx-assistant",
+    )
+    response = AgentResponse[Any](
+        messages=[Message("assistant", ["not JSON"])],
+        value={"answer": 42},
+        response_id="complete-delivery",
+        finish_reason="stop",
+    )
+    producer = CompatibleAgentEntity(_RichReplyAgent(response), state_provider=provider, deployment_mode="legacy")
+    original = await producer.run(RunRequest("question", correlation_id=CORRELATION))
+    raw = deepcopy(provider.raw)
+    if not history:
+        raw["data"].pop("conversationHistory")
+    before = _json(raw)
+    rpc.GetEntity.return_value = _wire(before)
+    result = _run(client, typed=typed)
+    assert result.response_id == "complete-delivery" and result.finish_reason == "stop"
+    value = result.value
+    if typed:
+        assert isinstance(value, Answer) and value.answer == 42
+    else:
+        assert isinstance(value, dict) and value["answer"] == 42
+    if not typed:
+        assert serialize_agent_response(result) == serialize_agent_response(original)
+    assert _json(raw) == before
+    _assert_calls(rpc, sleep, 1)
 
 
 def _shared(correlation_id: str = CORRELATION, outcome: str = "succeeded") -> dict[str, Any]:
@@ -86,7 +134,7 @@ def _errors(response: AgentResponse) -> list[Content]:
     return [item for message in response.messages for item in message.contents if item.type == "error"]
 
 
-def _run(client: NativeTaskHubGrpcClient, *, typed: bool = True) -> AgentResponse:
+def _run(client: NativeTaskHubGrpcClient, *, typed: bool = True) -> AgentResponse[Any]:
     agent = DurableAIAgentClient(client, max_poll_retries=3, poll_interval_seconds=0.25).get_agent("assistant")
     session = DurableAgentSession.from_session_id(AgentSessionId("assistant", "poll-boundary-session"))
     options: dict[str, Any] = {"temperature": 0, "metadata": {"caller": [False, 0]}}

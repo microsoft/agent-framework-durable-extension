@@ -46,6 +46,7 @@ from agent_framework import (
 from dateutil import parser as date_parser
 
 from ._constants import ContentTypes, DurableStateFields
+from ._legacy_delivery import lookup_legacy_delivery
 from ._models import RunRequest, serialize_response_format
 from ._shared_state_validation import load_state_json, validate_legacy_counters
 
@@ -485,8 +486,8 @@ class DurableAgentState:
     def try_get_agent_response(self, correlation_id: str) -> AgentResponse | None:
         """Try to get an agent response by correlation ID.
 
-        This method searches the conversation history for a response entry matching the given
-        correlation ID and returns a dictionary suitable for HTTP API responses.
+        Prefer a declared full legacy delivery snapshot, falling back to a historical
+        transcript projection without inferring missing response fields.
 
         Note: The returned dictionary includes computed properties (message_count) that are
         NOT part of the persisted state schema. These are derived values included for backward
@@ -500,6 +501,10 @@ class DurableAgentState:
             Response data dict with 'content', 'message_count', and 'correlationId' if found,
             None otherwise
         """
+        if self.schema_version in ("1.0.0", "1.1.0", "1.2.0"):
+            response = lookup_legacy_delivery(self.data.extension_data, correlation_id)
+            if response is not None:
+                return response
         # Search through conversation history for a response with this correlationId
         for entry in self.data.conversation_history:
             if entry.correlation_id == correlation_id and isinstance(entry, DurableAgentStateResponse):

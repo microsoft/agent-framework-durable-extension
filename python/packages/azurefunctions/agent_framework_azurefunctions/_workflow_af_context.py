@@ -438,8 +438,9 @@ class _DeferredEventCallbacks(dict[int | str, Any]):
 class AzureFunctionsWorkflowContext:
     """Adapter that maps ``DurableOrchestrationContext`` to ``WorkflowOrchestrationContext``."""
 
-    def __init__(self, context: DurableOrchestrationContext) -> None:
+    def __init__(self, context: DurableOrchestrationContext, *, execution_protocol: int = 2) -> None:
         self._context = context
+        self._execution_protocol = execution_protocol
         tasks: Any = getattr(context, "open_tasks", None)
         if type(tasks) is defaultdict and tasks.default_factory is list:
             orchestration_context: Any = context
@@ -557,6 +558,8 @@ class AzureFunctionsWorkflowContext:
     # -- Status / utility -----------------------------------------------------
 
     def set_custom_status(self, status: Any) -> None:
+        if self._execution_protocol == 1 and isinstance(status, dict):
+            status = {**cast(dict[str, Any], status), "executionProtocol": 1}
         self._context.set_custom_status(status)
 
     def new_uuid(self) -> str:

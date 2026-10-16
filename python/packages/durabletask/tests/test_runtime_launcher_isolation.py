@@ -118,11 +118,9 @@ def test_mcp_sample_template_overrides_host_with_the_same_task_hub() -> None:
     assert f"TaskHub={values['TASKHUB_NAME']};" in values["DURABLE_TASK_SCHEDULER_CONNECTION_STRING"]
 
 
-def test_real_host_constructor_rejects_absent_acknowledgement(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_real_host_constructor_allows_absent_acknowledgement(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DURABLE_AGENTS_DEPLOYMENT_MODE", raising=False)
-    with pytest.raises(ValueError, match="isolated task hub"):
-        DurableAIAgentWorker(Mock())
-    with pytest.raises(ValueError, match="isolated task hub"):
-        AgentFunctionApp(enable_health_check=False)
+    assert DurableAIAgentWorker(Mock()) is not None
+    assert AgentFunctionApp(enable_health_check=False)._deployment_mode == "isolated_v2"
     assert DurableAIAgentWorker(Mock(), deployment_mode="isolated_v2") is not None
     assert AgentFunctionApp(enable_health_check=False, deployment_mode="isolated_v2") is not None

@@ -10,12 +10,14 @@ from . import _constants
 from ._async_bridge import run_agent_coroutine
 from ._callbacks import AgentCallbackContext, AgentResponseCallbackProtocol
 from ._client import DurableAIAgentClient
+from ._compatibility import CompatibleAgentEntity, LegacyMigrationEvidence, LegacyMigrationEvidenceProvider
 from ._configuration import (
     INHERIT,
     AgentRegistrationSettings,
     Inherit,
     RegistrationIdentity,
     StateBudgetOverride,
+    resolve_runtime_deployment,
     resolve_state_budget_override,
     validate_agent_configuration,
     validate_response_delivery_window,
@@ -88,6 +90,7 @@ from ._state_reader import SharedAgentStateReader, read_agent_state
 from ._worker import DurableAIAgentWorker
 from ._workflows.activity import execute_workflow_activity
 from ._workflows.client import DurableWorkflowClient
+from ._workflows.compatibility import WorkflowExecutionResolver, WorkflowStart
 from ._workflows.context import WorkflowOrchestrationContext
 from ._workflows.dt_context import DurableTaskWorkflowContext
 from ._workflows.naming import (
@@ -178,6 +181,7 @@ __all__ = [
     "AgentSessionId",
     "ApiResponseFields",
     "CapturingRunnerContext",
+    "CompatibleAgentEntity",
     "ContentTypes",
     "DurableAIAgent",
     "DurableAIAgentClient",
@@ -214,6 +218,8 @@ __all__ = [
     "DurableWorkflowClient",
     "Inherit",
     "LegacyDurableAgentState",
+    "LegacyMigrationEvidence",
+    "LegacyMigrationEvidenceProvider",
     "RegistrationIdentity",
     "RetentionMode",
     "RunRequest",
@@ -221,8 +227,10 @@ __all__ = [
     "StateBudget",
     "StateBudgetOverride",
     "StateCapacityError",
+    "WorkflowExecutionResolver",
     "WorkflowOrchestrationContext",
     "WorkflowRegistrationPlan",
+    "WorkflowStart",
     "__version__",
     "build_agent_task",
     "collect_hosted_workflows",
@@ -234,6 +242,7 @@ __all__ = [
     "migrate_legacy_state",
     "plan_workflow_registration",
     "read_agent_state",
+    "resolve_runtime_deployment",
     "resolve_state_budget",
     "resolve_state_budget_override",
     "run_agent_coroutine",

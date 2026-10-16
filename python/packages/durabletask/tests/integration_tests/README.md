@@ -41,6 +41,22 @@ docker run -d --name redis -p 6379:6379 redis:latest
 
 The tests automatically start and stop worker processes for each sample.
 
+### Compatibility prototype without model credentials
+
+`test_16_dt_live_compatibility.py` needs only the Scheduler emulator. It replaces workers
+exclusively on a unique hub and checks persisted legacy continuation, a pending legacy human
+wait resumed by a default worker, conversion using independently recorded successful call
+results, and duplicate suppression after another worker restart. Its deterministic model
+does not call Foundry. It does not exercise an incompatible overlapping worker fleet or
+Azure Functions hosting.
+
+From the repository root, with the workspace dependencies restored:
+
+```powershell
+$env:ENDPOINT = "http://localhost:8080"
+uv run --frozen --no-sync --project .\python python -m pytest -c .\python\pyproject.toml .\python\packages\durabletask\tests\integration_tests\test_16_dt_live_compatibility.py -o addopts=-ra -q
+```
+
 ### Run all sample tests
 ```bash
 uv run pytest packages/durabletask/tests/integration_tests -v

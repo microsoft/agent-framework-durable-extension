@@ -91,8 +91,8 @@ async def test_workflow_run_route_neutralizes_reserved_marker_shaped_input() -> 
     assert client.start_new.await_args.kwargs["client_input"] == wrap_workflow_input(None)
 
 
-def test_workflow_orchestrator_rejects_legacy_recorded_start_before_actions() -> None:
-    """Old recorded starts fail before the hosted orchestrator can run revised actions."""
+def test_workflow_orchestrator_routes_legacy_recorded_start_without_sdk_custom_decoding() -> None:
+    """Unversioned starts reach the frozen predecessor, not the revised engine."""
     executor = _Start()
     workflow = WorkflowBuilder(name="input_boundary", start_executor=executor, output_from=[executor]).build()
     orchestrator = _capture_workflow_orchestrator(workflow)
@@ -100,13 +100,18 @@ def test_workflow_orchestrator_rejects_legacy_recorded_start_before_actions() ->
     context._input = json.dumps({"input": "raw-without-version"})
     context.get_input.side_effect = AssertionError("Generated workflow starts must not use SDK custom decoding")
     context.is_replaying = True
+    context.instance_id = "legacy-input"
+    context.parent_instance_id = None
 
     with (
         patch.object(workflow_module, "_run_workflow_orchestrator_shared") as engine,
-        pytest.raises(ValueError, match="unsupported execution protocol"),
+        patch.object(workflow_module, "_run_legacy_shared", return_value=iter([])) as legacy,
+        pytest.raises(StopIteration),
     ):
         next(orchestrator(context))
 
     engine.assert_not_called()
+    legacy.assert_called_once()
+    assert legacy.call_args.args[2] == {"input": "raw-without-version"}
     context.get_input.assert_not_called()
     assert context.mock_calls == []

@@ -20,6 +20,14 @@ from agent_framework import WorkflowEvent
 from durabletask.azuremanaged.client import DurableTaskSchedulerClient
 from durabletask.client import OrchestrationStatus, TaskHubGrpcClient
 
+from .._configuration import resolve_runtime_deployment
+from ._legacy_serialization import (
+    deserialize_value as deserialize_legacy_value,
+)
+from ._legacy_serialization import (
+    deserialize_workflow_event as deserialize_legacy_event,
+)
+from .compatibility import WorkflowExecutionResolver, recorded_legacy_child_ordinal, uses_legacy_workflow_serialization
 from .naming import (
     iter_subworkflow_instances,
     qualify_subworkflow_request_id,
@@ -72,11 +80,20 @@ class DurableWorkflowClient:
         ```
     """
 
-    def __init__(self, client: TaskHubGrpcClient, *, workflow_name: str | None = None):
+    def __init__(
+        self,
+        client: TaskHubGrpcClient,
+        *,
+        workflow_name: str | None = None,
+        deployment_mode: str | None = None,
+        workflow_execution_resolver: WorkflowExecutionResolver | None = None,
+    ):
         """Initialize the workflow client wrapper.
 
         Args:
             client: The durabletask client instance to wrap.
+            deployment_mode: Unset defaults to v2 starts; legacy preserves the published raw start wire contract.
+            workflow_execution_resolver: Trusted selector for reading ambiguous historical results and events.
             workflow_name: Optional default workflow name to target. When set, the
                 per-call ``workflow_name`` may be omitted. When a worker hosts a
                 single workflow, set this once here; when it hosts several, either
@@ -84,7 +101,9 @@ class DurableWorkflowClient:
                 each call.
         """
         self._client = client
+        self._workflow_execution_resolver = workflow_execution_resolver
         self._default_workflow_name = workflow_name
+        self._deployment_mode = resolve_runtime_deployment(deployment_mode)
         logger.debug("[DurableWorkflowClient] Initialized with client type: %s", type(client).__name__)
 
     def _resolve_workflow_name(self, workflow_name: str | None) -> str:
@@ -134,7 +153,11 @@ class DurableWorkflowClient:
             # internal child dispatch (post trust boundary) may carry those reserved
             # keys, so stripping them here keeps untrusted input off the orchestrator's
             # trusted-deserialization path even if start_workflow is exposed remotely.
-            input=wrap_workflow_input(strip_subworkflow_markers(input)),
+            input=(
+                strip_pickle_markers(strip_subworkflow_markers(input))
+                if self._deployment_mode == "legacy"
+                else wrap_workflow_input(strip_subworkflow_markers(input))
+            ),
             instance_id=instance_id,
         )
         logger.debug("[DurableWorkflowClient] Started workflow instance: %s", new_instance_id)
@@ -195,7 +218,12 @@ class DurableWorkflowClient:
         # The shared activity encodes each yielded output with serialize_value()
         # before it reaches the orchestrator, so typed objects come back as
         # checkpoint-marker dicts. Reconstruct the originals before returning.
-        return deserialize_workflow_output(json.loads(metadata.serialized_output))
+        decode = (
+            deserialize_legacy_value
+            if self._uses_legacy_serialization(metadata, instance_id)
+            else deserialize_workflow_output
+        )
+        return decode(json.loads(metadata.serialized_output))
 
     async def run_workflow(
         self,
@@ -330,8 +358,13 @@ class DurableWorkflowClient:
                     events = status.get("events")
                     if isinstance(events, list):
                         typed_events = cast("list[dict[str, Any]]", events)
+                        decode_event = (
+                            deserialize_legacy_event
+                            if self._uses_legacy_serialization(state, instance_id)
+                            else deserialize_workflow_event
+                        )
                         while cursor < len(typed_events):
-                            yield deserialize_workflow_event(typed_events[cursor])
+                            yield decode_event(typed_events[cursor])
                             cursor += 1
 
             runtime_status = state.runtime_status.name if state is not None else None
@@ -376,7 +409,7 @@ class DurableWorkflowClient:
         if self._is_terminal_hitl_state(state):
             return []
 
-        return self._collect_pending_hitl_requests(state.serialized_custom_status)
+        return self._collect_pending_hitl_requests(state.serialized_custom_status, instance_id)
 
     @staticmethod
     def _is_terminal_hitl_state(state: Any) -> bool:
@@ -387,6 +420,19 @@ class DurableWorkflowClient:
             OrchestrationStatus.FAILED,
             OrchestrationStatus.TERMINATED,
         }
+
+    def _uses_legacy_serialization(self, state: Any, instance_id: str) -> bool:
+        recorded = getattr(state, "serialized_input", object())
+        if isinstance(recorded, str):
+            recorded = json.loads(recorded)
+        status = DurableWorkflowClient._parse_custom_status(getattr(state, "serialized_custom_status", None))
+        return uses_legacy_workflow_serialization(
+            recorded,
+            status,
+            instance_id=instance_id,
+            parent_instance_id=getattr(state, "parent_instance_id", None),
+            resolver=self._workflow_execution_resolver,
+        )
 
     @staticmethod
     def _parse_custom_status(serialized_custom_status: str | None) -> dict[str, Any] | None:
@@ -404,7 +450,9 @@ class DurableWorkflowClient:
             return None
         return cast("dict[str, Any]", parsed) if isinstance(parsed, dict) else None
 
-    def _collect_pending_hitl_requests(self, serialized_custom_status: str) -> list[dict[str, Any]]:
+    def _collect_pending_hitl_requests(
+        self, serialized_custom_status: str, instance_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Collect an orchestration's pending requests plus any nested sub-workflow ones.
 
         Nested requests (discovered via the ``subworkflows`` map the parent records in
@@ -438,13 +486,15 @@ class DurableWorkflowClient:
         subworkflows = status_dict.get("subworkflows")
         if isinstance(subworkflows, dict):
             for executor_id, child_ids in cast(dict[str, Any], subworkflows).items():
-                for ordinal, child_instance_id in iter_subworkflow_instances(child_ids):
+                for ordinal, child_instance_id in self._compatible_children(instance_id, executor_id, child_ids):
                     child_state = self._client.get_orchestration_state(child_instance_id)
                     if child_state is None or not child_state.serialized_custom_status:
                         continue
                     if self._is_terminal_hitl_state(child_state):
                         continue
-                    for child_req in self._collect_pending_hitl_requests(child_state.serialized_custom_status):
+                    for child_req in self._collect_pending_hitl_requests(
+                        child_state.serialized_custom_status, child_instance_id
+                    ):
                         qualified = dict(child_req)
                         qualified["request_id"] = qualify_subworkflow_request_id(
                             executor_id, ordinal, child_req["request_id"]
@@ -452,6 +502,29 @@ class DurableWorkflowClient:
                         requests.append(qualified)
 
         return requests
+
+    def _compatible_children(self, instance_id: str | None, executor_id: str, children: Any) -> list[tuple[int, str]]:
+        if not isinstance(children, list):
+            return list(iter_subworkflow_instances(children))
+        if instance_id is None:
+            return []
+        result: list[tuple[int, str]] = []
+        for child in cast(list[Any], children):
+            if not isinstance(child, str):
+                continue
+            state = self._client.get_orchestration_state(child)
+            if state is None:
+                continue
+            recorded = getattr(state, "serialized_input", None)
+            ordinal = recorded_legacy_child_ordinal(
+                recorded,
+                executor_id=executor_id,
+                parent_instance_id=instance_id,
+                child_instance_id=child,
+            )
+            if ordinal is not None:
+                result.append((ordinal, child))
+        return result
 
     def send_hitl_response(
         self, instance_id: str, request_id: str, response: Any, *, workflow_name: str | None = None
@@ -553,4 +626,4 @@ class DurableWorkflowClient:
         if not isinstance(subworkflows, dict):
             return None
         children_raw = cast(dict[str, Any], subworkflows).get(executor_id)
-        return dict(iter_subworkflow_instances(children_raw)).get(ordinal)
+        return dict(self._compatible_children(instance_id, executor_id, children_raw)).get(ordinal)

@@ -42,6 +42,21 @@ docker run -d -p 8080:8080 -p 8082:8082 -e DTS_USE_DYNAMIC_TASK_HUBS=true mcr.mi
 
 The tests automatically start and stop the Azure Functions app for each sample.
 
+### Compatibility prototype without model credentials
+
+`test_17_live_compatibility.py` generates a local app with a deterministic model and a unique
+hub. It exercises legacy continuation, evidence-backed in-place conversion, and committed
+duplicate suppression across exclusive Functions-host replacements. It requires working
+Python Core Tools v4, the workspace's test dependencies, local Azurite on
+10000/10001/10002 with `--skipApiVersionCheck`, and the Scheduler prerequisite on 8080.
+It does not require Foundry credentials, launch a sample app, or exercise overlapping versions.
+
+From the repository root:
+
+```powershell
+uv run --frozen --no-sync --project .\python python -m pytest -c .\python\pyproject.toml .\python\packages\azurefunctions\tests\integration_tests\test_17_live_compatibility.py -o addopts=-ra -q
+```
+
 ### Run all sample tests
 ```bash
 uv run pytest packages/azurefunctions/tests/integration_tests -v

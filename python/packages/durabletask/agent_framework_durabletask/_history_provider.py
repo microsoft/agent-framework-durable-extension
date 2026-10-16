@@ -14,7 +14,7 @@ import copy
 import json
 import logging
 from collections import deque
-from collections.abc import Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -29,6 +29,7 @@ from agent_framework import (
     SUMMARY_OF_MESSAGE_IDS_KEY,
     AgentResponse,
     CompactionProvider,
+    CompactionStrategy,
     HistoryProvider,
     InMemoryHistoryProvider,
     Message,
@@ -1123,7 +1124,12 @@ class _ObservedHistoryProvider(HistoryProvider):
     persistence surface only and does not instrument opaque custom hook behavior here.
     """
 
-    def __init__(self, provider: HistoryProvider) -> None:
+    def __init__(
+        self,
+        provider: HistoryProvider,
+        accept_inputs: Callable[[Sequence[Message]], None] | None = None,
+        record_history: Callable[[Sequence[Message], AgentResponse | None, bool], None] | None = None,
+    ) -> None:
         super().__init__(
             source_id=provider.source_id,
             load_messages=provider.load_messages,
@@ -1133,6 +1139,9 @@ class _ObservedHistoryProvider(HistoryProvider):
             store_context_from=provider.store_context_from,
         )
         self.__wrapped__ = provider
+        self._accept_inputs = accept_inputs
+        self._record_history = record_history
+        self._record_response: AgentResponse | None = None
         if hasattr(provider, "after_run_once_per_turn"):
             self.after_run_once_per_turn = provider.after_run_once_per_turn
 
@@ -1143,10 +1152,41 @@ class _ObservedHistoryProvider(HistoryProvider):
         return await self.__wrapped__.get_messages(session_id, **kwargs)
 
     async def save_messages(self, session_id: str | None, messages: Sequence[Message], **kwargs: Any) -> None:
+        memory = type(self.__wrapped__) is InMemoryHistoryProvider
+        previous: set[int] = set()
+        if self._record_history is not None and memory:
+            previous = {id(message) for message in self._memory_messages(kwargs.get("state"))}
         await self.__wrapped__.save_messages(session_id, messages, **kwargs)
-        binding = current_durable_history_binding()
-        if binding is not None and self.store_inputs:
-            binding.accept(messages)
+        if self._record_history is not None:
+            saved: Sequence[Message] = messages
+            if memory:
+                saved = [
+                    message for message in self._memory_messages(kwargs.get("state")) if id(message) not in previous
+                ]
+            self._record_history(saved, self._record_response, memory)
+        if self.store_inputs:
+            self._accept(messages)
+
+    @staticmethod
+    def _memory_messages(state: Any) -> list[Message]:
+        if state is None:
+            return []
+        if not isinstance(state, dict):
+            raise ValueError("Memory history state must be an object.")
+        messages = cast("dict[str, Any]", state).get("messages", [])
+        if not isinstance(messages, list) or any(
+            not isinstance(message, Message) for message in cast("list[Any]", messages)
+        ):
+            raise ValueError("Memory history messages must be a list of Core messages.")
+        return cast("list[Message]", messages)
+
+    def _accept(self, messages: Sequence[Message]) -> None:
+        if self._accept_inputs is not None:
+            self._accept_inputs(messages)
+        else:
+            binding = current_durable_history_binding()
+            if binding is not None:
+                binding.accept(messages)
 
     async def before_run(self, *, agent: Any, session: Any, context: Any, state: dict[str, Any]) -> None:
         await self.__wrapped__.before_run(agent=agent, session=session, context=context, state=state)
@@ -1167,10 +1207,14 @@ class _ObservedHistoryProvider(HistoryProvider):
             and after_run.__self__ is self.__wrapped__
             and after_run.__func__ is HistoryProvider.after_run
         ):
-            await super().after_run(agent=agent, session=session, context=context, state=state)
+            self._record_response = context.response
+            try:
+                await super().after_run(agent=agent, session=session, context=context, state=state)
+            finally:
+                self._record_response = None
             binding = current_durable_history_binding()
-            if binding is not None and not binding.service_owns_history:
-                binding.accept(context.input_messages)
+            if self._accept_inputs is not None or (binding is not None and not binding.service_owns_history):
+                self._accept(context.input_messages)
         else:
             await after_run(agent=agent, session=session, context=context, state=state)
 
@@ -1200,10 +1244,31 @@ def _compaction_id_scope(messages: list[Message]) -> Generator[None]:
                 message.message_id = public_ids[history_id]
 
 
+class _ObservedHistoryCompactionStrategy:
+    """Observe strategy results without hiding tokenizer or other caller-owned attributes."""
+
+    def __init__(self, strategy: CompactionStrategy, observe: Callable[[Sequence[Message], bool], None]) -> None:
+        self.__wrapped__ = strategy
+        self._observe = observe
+        self.__name__ = getattr(strategy, "__name__", type(strategy).__name__)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.__wrapped__, name)
+
+    async def __call__(self, messages: list[Message]) -> bool:
+        changed = await self.__wrapped__(messages)
+        self._observe(messages, True)
+        return changed
+
+
 class _DurableCompactionProvider(CompactionProvider):
     """Preserve a configured compaction provider while isolating its internal IDs."""
 
-    def __init__(self, provider: CompactionProvider) -> None:
+    def __init__(
+        self,
+        provider: CompactionProvider,
+        after_history: Callable[[Sequence[Message], bool], None] | None = None,
+    ) -> None:
         super().__init__(
             before_strategy=provider.before_strategy,
             after_strategy=provider.after_strategy,
@@ -1212,6 +1277,11 @@ class _DurableCompactionProvider(CompactionProvider):
             history_source_id=provider.history_source_id,
         )
         self.__wrapped__ = provider
+        self._after_history = after_history
+        if after_history is not None and provider.after_strategy is not None:
+            prepared = copy.copy(provider)
+            prepared.after_strategy = _ObservedHistoryCompactionStrategy(provider.after_strategy, after_history)
+            self.__wrapped__ = prepared
         if hasattr(provider, "after_run_once_per_turn"):
             self.after_run_once_per_turn = provider.after_run_once_per_turn
 
@@ -1230,6 +1300,11 @@ class _DurableCompactionProvider(CompactionProvider):
         )
         with _compaction_id_scope(cast("list[Message]", messages) if isinstance(messages, list) else []):
             await self.__wrapped__.after_run(agent=agent, session=session, context=context, state=state)
+        if self._after_history is not None:
+            self._after_history(
+                _ObservedHistoryProvider._memory_messages(history_state),  # pyright: ignore[reportPrivateUsage]
+                False,
+            )
 
 
 class _ServiceOwnedHistoryProvider(HistoryProvider):

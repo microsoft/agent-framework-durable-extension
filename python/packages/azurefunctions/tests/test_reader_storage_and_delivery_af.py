@@ -38,6 +38,44 @@ from pydantic import ValidationError
 
 from agent_framework_azurefunctions._orchestration import AgentTask
 
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "1.2.0"])
+@pytest.mark.parametrize("history", [False, True])
+async def test_legacy_full_delivery_reaches_registered_http_response(
+    version: str,
+    history: bool,
+    handlers: tuple[HttpHandler, McpHandler],
+    sleep: AsyncMock,
+) -> None:
+    from _execution_test_support import JsonStateProvider
+    from agent_framework import Message
+    from agent_framework_durabletask import CompatibleAgentEntity, RunRequest
+    from test_agent_compatibility_prototype import _legacy
+    from test_legacy_review_boundaries import _RichReplyAgent
+
+    provider = JsonStateProvider(_legacy(version=version))
+    original = AgentResponse[Any](
+        messages=[Message("assistant", ["cached text"])],
+        value={"answer": 42},
+        response_id="complete-http-delivery",
+        finish_reason="stop",
+    )
+    producer = CompatibleAgentEntity(_RichReplyAgent(original), state_provider=provider, deployment_mode="legacy")
+    await producer.run(RunRequest("question", correlation_id=CORRELATION_ID))
+    raw = deepcopy(provider.raw)
+    if not history:
+        raw["data"].pop("conversationHistory")
+    client = _client(raw)
+    response = await handlers[0](_request(), client)
+    payload = json.loads(response.get_body())
+    assert response.status_code == 200 and payload["response"] == "cached text"
+    assert payload["agentResponse"]["value"] == {"answer": 42}
+    assert payload["agentResponse"]["response_id"] == "complete-http-delivery"
+    assert payload["agentResponse"]["finish_reason"] == "stop"
+    client.read_entity_state.assert_awaited_once()
+    sleep.assert_awaited_once()
+
+
 SPARSE_ERRORS = [
     pytest.param({}, id="missing-both"),
     pytest.param({"errorCode": ""}, id="empty-code-only"),

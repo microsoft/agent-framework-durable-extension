@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""Shared registration validation for isolated canonical-state deployments."""
+"""Shared registration validation and prototype state-writer policy."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ __all__ = [
     "Inherit",
     "RegistrationIdentity",
     "StateBudgetOverride",
+    "resolve_runtime_deployment",
     "resolve_state_budget_override",
     "validate_agent_configuration",
     "validate_response_delivery_window",
@@ -58,17 +59,22 @@ def resolve_state_budget_override(
     return resolve_state_budget(default if isinstance(value, Inherit) else value, backend_limit=backend_limit)
 
 
-def validate_runtime_deployment(deployment_mode: str | None = None) -> None:
-    """Require operator acknowledgement, not runtime proof, of deployment isolation."""
+def resolve_runtime_deployment(deployment_mode: str | None = None) -> Literal["legacy", "isolated_v2"]:
+    """Resolve the prototype writer policy without claiming fleet isolation."""
     effective_mode = os.getenv("DURABLE_AGENTS_DEPLOYMENT_MODE") if deployment_mode is None else deployment_mode
-    if not isinstance(effective_mode, str) or effective_mode != "isolated_v2":
-        raise ValueError(
-            "Schema 2 requires an isolated task hub/deployment with upgraded clients. "
-            "Old workflow histories must remain on the old engine. "
-            "Set deployment_mode='isolated_v2' or DURABLE_AGENTS_DEPLOYMENT_MODE='isolated_v2'; "
-            "no other deployment mode is accepted. This is an explicit operator acknowledgement, "
-            "not runtime proof of isolation, and cannot detect peer workers."
-        )
+    if effective_mode is None:
+        return "isolated_v2"
+    if isinstance(effective_mode, str):
+        if effective_mode == "isolated_v2":
+            return "isolated_v2"
+        if effective_mode == "legacy":
+            return "legacy"
+    raise ValueError("deployment_mode must be unset, 'isolated_v2', or 'legacy'; other values are not supported.")
+
+
+def validate_runtime_deployment(deployment_mode: str | None = None) -> None:
+    """Validate the prototype writer policy; this does not detect peer workers."""
+    resolve_runtime_deployment(deployment_mode)
 
 
 def validate_response_delivery_window(response_delivery_window_seconds: int) -> None:

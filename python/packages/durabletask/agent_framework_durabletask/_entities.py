@@ -90,6 +90,9 @@ _MIGRATION_BINDING_FIELDS = (
     "destinationSessionId",
     "evidenceId",
     "completionEvidenceId",
+    "mode",
+    "sourceEntitySessionId",
+    "sourceSchema",
 )
 
 try:
@@ -306,7 +309,19 @@ class AgentEntityStateProviderMixin:
                 raise ValueError(message)
         source_session_id = cast(str, migration["sourceSessionId"])
         destination = self.core_session_id
-        if migration["destinationSessionId"] != destination or source_session_id == destination:
+        mode = migration.get("mode", "transfer")
+        if mode not in ("transfer", "in_place"):
+            raise ValueError(message)
+        if mode == "in_place" and (
+            migration.get("sourceEntitySessionId") != destination
+            or migration.get("sourceSchema") not in ("1.0.0", "1.1.0", "1.2.0")
+            or not isinstance(migration.get("requestDigest"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", migration["requestDigest"]) is None
+        ):
+            raise ValueError(message)
+        if migration["destinationSessionId"] != destination or (
+            mode == "transfer" and source_session_id == destination
+        ):
             raise ValueError(message)
         # Reset clears the local session, but does not relinquish migration ownership.
         if stored is not None:
@@ -563,13 +578,16 @@ class AgentEntity:
         high_watermark: float = HIGH_WATERMARK,
         low_watermark: float = LOW_WATERMARK,
         response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
+        prepare_history: bool = True,
     ) -> None:
         validate_retention(retention, high_watermark, low_watermark)
         validate_response_delivery_window(response_delivery_window_seconds)
-        self.agent = ensure_durable_history(agent, prune_excluded=prunes_excluded(retention))
+        self.agent = (
+            ensure_durable_history(agent, prune_excluded=prunes_excluded(retention)) if prepare_history else agent
+        )
         self.callback = callback
         self._state_provider = state_provider
-        self._retention = retention
+        self._retention: RetentionMode = retention
         self._max_state_bytes = resolve_state_budget(max_state_bytes)
         self._high_watermark = high_watermark
         self._low_watermark = low_watermark
@@ -790,28 +808,7 @@ class AgentEntity:
         try:
             self.agent = prepare_history_owner(self.agent, service_owns_history)
             if not run_request.enable_tool_calls:
-                invocation_agent = copy(self.agent)
-                defaults = getattr(invocation_agent, "default_options", None)
-                if isinstance(defaults, Mapping):
-                    invocation_agent.default_options = {  # type: ignore[attr-defined]
-                        **cast("Mapping[str, Any]", defaults),
-                        "tools": [],
-                        "tool_choice": "none",
-                    }
-                client = getattr(invocation_agent, "client", None)
-                invocation_configuration = getattr(client, "function_invocation_configuration", None)
-                if client is not None and isinstance(invocation_configuration, Mapping):
-                    invocation_client = copy(client)
-                    invocation_client.function_invocation_configuration = {
-                        **cast("Mapping[str, Any]", invocation_configuration),
-                        "enabled": False,
-                    }
-                    invocation_agent.client = invocation_client  # type: ignore[attr-defined]
-                if isinstance(getattr(invocation_agent, "mcp_tools", None), list):
-                    invocation_agent.mcp_tools = []  # type: ignore[attr-defined]
-                self.agent = invocation_agent
-                options["tools"] = []
-                options["tool_choice"] = "none"
+                self._disable_tool_calls(options)
             if uses_context_pipeline:
                 session = await self._create_session()
                 if not service_owns_history:
@@ -1351,6 +1348,31 @@ class AgentEntity:
             self._state_provider.core_session_id,
             transient_history_source=history.source_id if history is not None else None,
         )
+
+    def _disable_tool_calls(self, options: dict[str, Any]) -> None:
+        """Apply the invocation-local policy without changing registered defaults."""
+        invocation_agent = copy(self.agent)
+        defaults = getattr(invocation_agent, "default_options", None)
+        if isinstance(defaults, Mapping):
+            invocation_agent.default_options = {  # type: ignore[attr-defined]
+                **cast("Mapping[str, Any]", defaults),
+                "tools": [],
+                "tool_choice": "none",
+            }
+        client = getattr(invocation_agent, "client", None)
+        configuration = getattr(client, "function_invocation_configuration", None)
+        if client is not None and isinstance(configuration, Mapping):
+            invocation_client = copy(client)
+            invocation_client.function_invocation_configuration = {
+                **cast("Mapping[str, Any]", configuration),
+                "enabled": False,
+            }
+            invocation_agent.client = invocation_client  # type: ignore[attr-defined]
+        if isinstance(getattr(invocation_agent, "mcp_tools", None), list):
+            invocation_agent.mcp_tools = []  # type: ignore[attr-defined]
+        self.agent = invocation_agent
+        options["tools"] = []
+        options["tool_choice"] = "none"
 
     def _drop_already_stored(
         self, messages: list[DurableAgentStateMessage], *, occurrence_ids: list[str] | None = None

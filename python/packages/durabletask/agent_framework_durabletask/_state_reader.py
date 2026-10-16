@@ -88,7 +88,8 @@ def read_agent_state(raw: dict[str, Any] | str) -> SharedAgentStateReader | Dura
     objects with a supported schemaVersion and object-valued data. Legacy payloads
     retain the existing loader's capabilities and limitations, including nullable
     usage counts. They are not passed through strict shared snapshot validation.
-    No private prototype detection, migration or writer policy is applied.
+    Declared full legacy deliveries are preferred during lookup, with the historical
+    transcript fallback retained. No migration or writer policy is applied.
     """
     if isinstance(raw, str):
         try:

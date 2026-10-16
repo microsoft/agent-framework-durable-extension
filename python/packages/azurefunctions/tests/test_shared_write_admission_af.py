@@ -193,7 +193,7 @@ def _assert_no_execution(agent: Any, callback: RecordingCallback) -> None:
 @pytest.mark.parametrize("populated", [False, True])
 @pytest.mark.parametrize("operation", ["run", "run_agent", "reset", "expire_responses"])
 @pytest.mark.parametrize("request_kind", ["new", "duplicate", "invalid-json"])
-def test_actual_factory_rejects_legacy_before_parsing_or_any_write(
+def test_actual_factory_rejects_unadmitted_legacy_before_parsing_or_any_write(
     monkeypatch: pytest.MonkeyPatch, version: str, populated: bool, operation: str, request_kind: str
 ) -> None:
     request = (
@@ -201,7 +201,9 @@ def test_actual_factory_rejects_legacy_before_parsing_or_any_write(
         if request_kind == "invalid-json"
         else {"message": "question", "correlationId": "previous" if request_kind == "duplicate" else "new"}
     )
-    backing = BackingStore(_legacy_state(populated=populated, version=version), operation, request)
+    source = _legacy_state(populated=populated, version=version)
+    source["data"]["historyBinding"] = {"unsupported": "schema-2-control-in-legacy"}
+    backing = BackingStore(source, operation, request)
     original, snapshot = backing.raw, deepcopy(backing.raw)
     agent: Any = MockSupportsAgentRun()
     callback = RecordingCallback()
@@ -211,7 +213,8 @@ def test_actual_factory_rejects_legacy_before_parsing_or_any_write(
 
     backing.context.set_result.assert_called_once()
     result = backing.context.set_result.call_args.args[0]
-    assert result == {"status": "error", "error": LEGACY_WRITE_ERROR}
+    assert result["status"] == "error"
+    assert "Legacy state must not contain terminalResults, completionReceipts, or historyBinding" in result["error"]
     backing.context.set_state.assert_not_called()
     assert backing.raw is original
     assert backing.raw == snapshot
@@ -503,14 +506,13 @@ def test_factory_v2_duplicate_delivers_retained_outcome_without_execution_or_wri
     _assert_no_execution(agent, callback)
 
 
-def test_factory_requires_explicit_deployment_acknowledgement_without_test_environment(
+def test_factory_defaults_to_v2_without_test_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("DURABLE_AGENTS_DEPLOYMENT_MODE", raising=False)
     agent: Any = MockSupportsAgentRun()
     callback = RecordingCallback()
-    with pytest.raises(ValueError, match="Schema 2 requires an isolated task hub/deployment"):
-        create_agent_entity(agent, callback)
+    assert callable(create_agent_entity(agent, callback))
     _assert_no_execution(agent, callback)
 
     backing = BackingStore(_canonical_state("empty"), "run", {"message": "question", "correlationId": "new"})

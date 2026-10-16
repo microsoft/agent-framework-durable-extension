@@ -261,16 +261,15 @@ def test_worker_rejects_shared_workflow_delivery_window_mismatch_before_partial_
     assert len(native.add_entity.call_args_list) == 1
 
 
-def test_app_constructor_requires_explicit_isolated_v2_when_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_app_constructor_defaults_to_v2_when_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DURABLE_AGENTS_DEPLOYMENT_MODE", raising=False)
-    with pytest.raises(ValueError, match="Schema 2 requires an isolated task hub/deployment"):
-        AgentFunctionApp(enable_health_check=False)
+    assert AgentFunctionApp(enable_health_check=False)._deployment_mode == "isolated_v2"
 
 
-@pytest.mark.parametrize("value", ["legacy", "isolated", "", "ISOLATED_V2"])
+@pytest.mark.parametrize("value", ["isolated", "", "ISOLATED_V2"])
 def test_app_constructor_rejects_invalid_deployment_mode_values(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.delenv("DURABLE_AGENTS_DEPLOYMENT_MODE", raising=False)
-    with pytest.raises(ValueError, match="no other deployment mode is accepted"):
+    with pytest.raises(ValueError, match="deployment_mode must be"):
         AgentFunctionApp(enable_health_check=False, deployment_mode=value)
 
 
@@ -280,10 +279,10 @@ def test_app_constructor_accepts_explicit_isolated_v2_without_env(monkeypatch: p
     assert app._deployment_mode == "isolated_v2"
 
 
-@pytest.mark.parametrize("value", ["legacy", "isolated", "", "ISOLATED_V2"])
+@pytest.mark.parametrize("value", ["isolated", "", "ISOLATED_V2"])
 def test_app_constructor_rejects_invalid_deployment_environment(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("DURABLE_AGENTS_DEPLOYMENT_MODE", value)
-    with pytest.raises(ValueError, match="no other deployment mode is accepted"):
+    with pytest.raises(ValueError, match="deployment_mode must be"):
         AgentFunctionApp(enable_health_check=False)
 
 

@@ -3,7 +3,7 @@
 """Private shared durable-agent state model and canonical writer bridge.
 
 This module is a private extraction of the shared-state implementation. It keeps the
-legacy mutable reader/writer in ``_durable_agent_state`` unchanged while providing
+legacy mutable state model in ``_durable_agent_state`` while providing
 the canonical transcript, opaque field preservation, session persistence, and exact
 delivery bookkeeping needed by later private callers.
 """
@@ -24,6 +24,7 @@ from dateutil import parser as date_parser
 
 from ._constants import ContentTypes, DurableStateFields
 from ._delivery_state import lookup_response, stage_expiry, stage_response
+from ._legacy_delivery import lookup_legacy_delivery
 from ._message_identity import message_identity
 from ._models import RunRequest, serialize_response_format
 from ._response_utils import (
@@ -695,6 +696,9 @@ class DurableAgentState:
     def try_get_agent_response(self, correlation_id: str, *, now: datetime | None = None) -> AgentResponse | None:
         if self.schema_version == "2.0.0":
             return lookup_response(self.to_dict(), correlation_id, now=now)
+        response = lookup_legacy_delivery(self.data.extension_data, correlation_id)
+        if response is not None:
+            return response
         for entry in self.data.conversation_history:
             if entry.correlation_id == correlation_id and isinstance(entry, DurableAgentStateResponse):
                 return DurableAgentStateResponse.to_run_response(entry)

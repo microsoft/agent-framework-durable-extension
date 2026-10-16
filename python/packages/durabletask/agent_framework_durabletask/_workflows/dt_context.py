@@ -30,8 +30,9 @@ logger = logging.getLogger(__name__)
 class DurableTaskWorkflowContext:
     """Adapter that maps ``OrchestrationContext`` to :class:`WorkflowOrchestrationContext`."""
 
-    def __init__(self, context: OrchestrationContext) -> None:
+    def __init__(self, context: OrchestrationContext, *, execution_protocol: int = 2) -> None:
         self._context = context
+        self._execution_protocol = execution_protocol
         self._executor = OrchestrationAgentExecutor(context)
 
     # -- Properties -----------------------------------------------------------
@@ -104,6 +105,8 @@ class DurableTaskWorkflowContext:
     # -- Status / utility -----------------------------------------------------
 
     def set_custom_status(self, status: Any) -> None:
+        if self._execution_protocol == 1 and isinstance(status, dict):
+            status = {**cast(dict[str, Any], status), "executionProtocol": 1}
         self._context.set_custom_status(status)
 
     def new_uuid(self) -> str:

@@ -77,7 +77,7 @@ def registered_entities() -> Iterator[dict[str, EntityHandler]]:
 def _consumer_settings(handler: EntityHandler) -> dict[str, Any]:
     context = Mock()
     context.operation_name = "reset"
-    with patch("agent_framework_azurefunctions._entities.AgentEntity") as consumer:
+    with patch("agent_framework_azurefunctions._entities.CompatibleAgentEntity") as consumer:
         handler(context)
     consumer.assert_called_once()
     consumer.return_value.reset.assert_called_once_with()
@@ -387,7 +387,7 @@ def test_registration_and_factory_validation_do_not_replace_history(
 ) -> None:
     agent = _agent()
     original_providers = agent.context_providers
-    with patch("agent_framework_azurefunctions._entities.AgentEntity") as consumer:
+    with patch("agent_framework_azurefunctions._entities.CompatibleAgentEntity") as consumer:
         _app(agents=[agent], retention="follow_compaction")
     consumer.assert_not_called()
     assert "dafx-assistant" in registered_entities

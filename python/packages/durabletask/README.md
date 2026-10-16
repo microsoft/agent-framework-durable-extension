@@ -57,27 +57,161 @@ the versioned `_durable_value_policy` marker so the matching loader can preserve
 after JSON transport. It does not prove execution authority, duplicate the value, or identify a
 runtime-native class by itself.
 
-Host construction now requires an explicit isolated v2 acknowledgement. Pass
-`deployment_mode="isolated_v2"` or set `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2`.
-There is no automatic probe and no other deployment mode is accepted. This is an operator
-acknowledgement that the task hub is isolated and the clients are upgraded. It is not runtime
-proof of isolation and it cannot detect peer workers. A new isolated hub with matching upgraded
-workers and clients is the recommended way to keep old workers and histories off this deployment.
+#### Agent compatibility prototype
 
-**Start fresh workflow instances after this update, including upgrades from earlier v2 builds.**
-Workflow protocol `2` is unchanged, but start admission is stricter and checkpointed HITL admission
-and mixed parent/child scheduling change the replay action graph, including generated child IDs.
-Existing v2 in-flight instances and recorded histories are not supported by this runtime and may
-fail. The version marker checks start-envelope admission, not feature or replay compatibility.
-Older v2 envelopes can still pass that check. There is no replay migration or compatibility fallback.
-If old runs must finish, keep them on their original workers and hub, including published histories
-with concatenated child IDs. Do not resume them here.
+This worktree contains a **Python compatibility prototype, not a release-ready upgrade contract**.
+Both host factories use `CompatibleAgentEntity`; direct `AgentEntity` remains the existing v2 executor.
+Host construction defaults to v2 without an acknowledgement setting. The explicit
+`deployment_mode="isolated_v2"` value remains accepted. Set `deployment_mode="legacy"` or
+`DURABLE_AGENTS_DEPLOYMENT_MODE=legacy` to keep all writes legacy, including fresh schema-1.1 sessions.
+Invalid or empty values are rejected. Resolve the policy before registering/starting the host.
+
+```python
+# Default: new sessions use v2; existing supported legacy sessions can continue.
+host = DurableAIAgentWorker(worker)
+# Alternatively, for an explicitly legacy-writing deployment:
+# host = DurableAIAgentWorker(worker, deployment_mode="legacy")
+host.add_agent(agent)
+```
+
+Both hosts support legacy state versions 1.0, 1.1 and 1.2, entity-owned transcripts,
+external history providers and service-owned conversations. They restore serialized provider
+state and the original logical session ID, preserve unknown session siblings, and retain an
+inactive service continuation across local-history turns. Registered providers are not mutated.
+If a legacy session lacks a saved ID, restoration supplies the resolved entity identity on a
+detached snapshot, without changing committed continuation before a successful run.
+Used sessions without authoritative migration evidence continue on the legacy execution path.
+Legacy history is never pressure-pruned; an enabled byte budget rejects oversized writes instead.
+New legacy completions retain their complete canonical Core delivery snapshots in the declared
+`extensionData._dafx_legacy_delivery` profile, preserving structured values and response metadata
+for cold duplicates. Historical transcript projections are not promoted into these snapshots.
+Both legacy readers and public client polling consult the same validated delivery profile.
+Functions includes the full `agentResponse`/`agent_response` fields for declared full deliveries,
+while historical text-only payloads and legacy status behavior remain unchanged.
+Legacy validation failures use the same sanitized diagnostic-first logging as v2, including
+wrapped and grouped Pydantic errors, without logging their private input values or tracebacks.
+The profile is bounded by the entity-state budget, retained with legacy history, and cleared by
+legacy reset. It does not establish a complete historical completion journal; conversion evidence
+must preserve any full snapshots that are known.
+A nonempty delivery cache counts as used state even if retained history or session data is absent,
+so it cannot bypass conversion evidence or cause a known completion to execute again.
+
+An empty legacy profile can be converted automatically. Used profiles require a trusted
+`legacy_migration_evidence` callback returning `LegacyMigrationEvidence` with the complete,
+source-digest-bound journals described below, or `None` to defer conversion. The callback receives
+a detached source snapshot; invalid evidence is an error, not permission to silently fall back.
+Valid delivery-only evidence can authorize legacy context delivery without forcing conversion
+when completion evidence is missing.
+Conversion is staged at the same entity address and shares the next v2 turn's state setter.
+The active, immutable `data.migration` binding records `mode="in_place"`, the physical
+`sourceEntitySessionId`/`destinationSessionId`, original logical `sourceSessionId`, source schema,
+source digest and request digest. Cold v2 operations validate this binding and restore the original
+provider identity. This is **not** evidence of fleet isolation or fencing.
+The source is preserved when staging or a pre-write failure occurs; uncertain acknowledgements
+are reconciled from the subsequently read state.
+
+Legacy mode can return committed v2 duplicates but cannot run new v2 turns, reset v2 state,
+expire v2 results or perform migration. It never downgrades receipts. Legacy cleanup is a no-op,
+and legacy reset retains its schema and unrelated metadata.
+Legacy reset rejects an external primary history provider, matching v2. The runtime provides no
+generic provider-owned clear operation, so it must not report a local-only reset as complete.
+The committed legacy owner is checked before continuation or conversion, so completion evidence
+never authorizes switching providers. Disabling tool calls uses the same invocation-local policy
+in both paths, removing configured/request tools without mutating registered agents or clients.
+
+Legacy workflow context uses explicit delivery occurrences and content fingerprints, not public
+message IDs or cursor maxima as inferred provenance. The declared `_dafx_legacy_ingestion`
+extension records bridge-era acceptances; `_dafx_legacy_owner` binds the selected provider.
+A present ingestion field must contain a declared object profile; explicit null is not absence.
+The ingestion profile's v2 form stores historical public lookups in `publicMessages`, separate
+from accepted occurrences in `messages`. Its v1 form remains readable without activating unknown
+siblings. Public lookups are consulted only when explicit occurrence IDs are absent.
+Promotion to the v2 ingestion profile rejects an existing opaque v1 `publicMessages` sibling
+before execution rather than overwriting it.
+Existing nonempty scalar cursors require trusted delivery evidence before accepting new context
+when no bridge ledger exists. Failed runs do not advance that ledger. Conversion merges its
+acceptances into v2. Remote provider/model/tool effects remain at-least-once: a local state rollback
+cannot undo a remote side effect.
+New context receipts follow post-middleware acceptance by the primary history owner, or a completed
+observed service request. Filtering an input does not consume its delivery occurrence, even when
+input transcript storage is disabled. Replay is recorded separately from successful primary history
+writes, preserving edited content, context selection, storage flags and tool-call ordering. Receipt
+fingerprints still describe the original delivered input, not the edited replay representation.
+External save payloads and response classification are captured at the completed save boundary.
+Built-in memory bodies remain live until session persistence, while their classification stays fixed.
+Disabling output history does not remove the full duplicate-response delivery cache, and storage
+flags do not retroactively erase historical bodies. Observation uses the same history/service hooks
+as v2 without binding a v2 writer to legacy state. Opaque custom hooks and unobserved service requests
+do not establish acceptance or provider writes by inference.
+Only memory providers substituted for `DurableHistoryProvider` are transient. Caller-configured
+store-only `InMemoryHistoryProvider` audit state retains its prior and newly stored messages across
+cold continuation.
+Failed context deliveries also remove their staged request from replayable local history while
+retaining the terminal error, so a cold redelivery does not include the uncommitted input twice.
+Fingerprints use the original input identity, including message extras, rather than a transcript
+projection that may omit them.
+Validated delivery-only evidence is carried into legacy fallback even without scalar cursors or
+when bridge receipts already exist. Its public lookups never consume an explicit delivery occurrence.
+Successful ordinary turns retain supplied delivery evidence even when `context_messages` is omitted.
+History substitution preserves configured `after_run_once_per_turn` metadata and Core's iteration cadence.
+Session-capable custom agents without a context pipeline receive prior history directly rather than
+relying on a nonexistent provider to load it.
+Entity-owned legacy after-run compaction reconciles its final buffer before transient memory is
+stripped. Original request/response envelopes and bodies remain available, including excluded
+messages under `keep_all`. The declared `extensionData._dafx_legacy_history` profile records
+message-slot replay order and generated summary/revision slots without changing public message IDs
+or creating input receipts. Anonymous and duplicate public IDs use distinct transient reconciliation
+identities. Unknown profile siblings and untouched historical JSON are retained.
+Late buffer insertions receive identities at final reconciliation. In-place summary revisions retain
+distinct archived source identities and backlinks, including sources from the current turn's writes.
+Cold legacy turns honor that order even without a compaction provider. Reset clears only the
+profile's owned ordering fields. Migration materializes the order as canonical v2 history after
+validating the original source and journals; generated summaries never become delivered-input
+evidence. Older binaries do not gain this new profile's semantics merely by reading legacy JSON.
+Automatic in-place conversion seeds active occurrence receipts only from the bridge ledger.
+Historical delivery journals validate accepted public lookups and cursor consistency; their
+public message IDs do not establish transport occurrence IDs. Exact public journal receipts are
+preserved separately in `extensionData._dafx_legacy_public_ingestion` and consulted only when a
+request falls back to public IDs instead of supplying explicit occurrence IDs. Neither public
+transcript IDs nor public journal lookup IDs become occurrence receipts. Exact bridge fingerprints
+never expand into acceptance of every future revision. This does not change the manual transfer helper.
+
+Workflow compatibility is pinned to the published unversioned engine from
+`v1.16.0-preview.260922.1`, alongside this branch's current v2 engine. Both hosts dispatch
+recorded unversioned starts and activities through that predecessor, retaining its action ordering,
+HITL behavior and concatenated child IDs. Default client/HTTP starts use v2; legacy mode emits the
+old raw wire shape. Legacy child routing reads each child's recorded public ordinal instead of
+renumbering the remaining child list.
+The predecessor retains its checkpoint codec: later v2 response-envelope keys remain literal
+legacy application data, including in recorded activity results and client/HTTP output decoding.
+
+An optional trusted `workflow_execution_resolver(WorkflowStart)` selects `"legacy"` or `"v2"`
+using the backend instance ID, immediate parent ID and detached recorded input. Use it when
+historical application data collides with the reserved v2 envelope shape. Configure the matching
+resolver on `DurableWorkflowClient` when reading old results/events too; `AgentFunctionApp`
+uses its resolver for both execution and result reads. This also covers already-completed legacy
+records that cannot acquire a new protocol marker. Parent identity can be unavailable in read
+metadata, in which case the resolver receives `None`. Invalid explicit v2
+envelopes fail rather than silently falling back; internal child payloads require SDK parent
+provenance. **Earlier unreleased v2 action graphs are not covered merely because their marker is
+also `2`.** Start fresh runs or retain the matching old workers/hub for those histories.
+
+Prevent incompatible workers from consuming the hub before enabling v2 writes. The prototype
+does not detect peers, fence old consumers, certify real-backend atomicity, or reconstruct missing
+historical outcomes. The local replay fixtures exercise both SDKs, not arbitrary captured
+production histories.
+
+From the repository root, run the focused executable examples:
+
+```powershell
+uv run --frozen --no-sync --project .\python python -m pytest -c .\python\pyproject.toml .\python\packages\durabletask\tests\test_agent_compatibility_prototype.py .\python\packages\durabletask\tests\test_complete_compatibility.py -o addopts=-ra -q
+```
 
 #### Migration
 
-The current layer includes canonical transaction state, session capture, the workflow
-protocol boundary, and a privileged manual migration path. Migration is a backend entity
-operation only. There is no generated HTTP or MCP migration endpoint. The helper stages a
+In addition to automatic in-place conversion above, the runtime retains a privileged manual
+transfer operation. Manual `migrate` is a backend entity operation only, with no generated HTTP
+or MCP endpoint. The helper stages a
 detached result with no model, tool, provider, storage, or transcript I/O. The operator must
 quiesce the legacy owner, fence it, authorize ownership transfer, and commit the staged result
 exactly once into a separate empty isolated v2 destination. The migration evidence cannot prove
@@ -87,7 +221,7 @@ The request contract is explicit and complete. `migrate(request)` requires `sour
 `sourceDigest`, `sourceSessionId`, `destinationSessionId`, `migrationId`, and
 `ownershipTransferId`. It optionally accepts `deliveryEvidence`, `completionEvidence`, and
 `requireKnownOutcomes`. The destination must match the current entity, must be separately
-addressed, and must still be empty. This is never an in-place rewrite and never a replay into a
+addressed, and must still be empty. This manual operation is never an in-place rewrite or replay into a
 used destination. The same exact request may be retried idempotently. The runtime records a
 `requestDigest` and accepts only an identical retry after commit, without rewriting results or
 refreshing their grace period. Changed requests are rejected, including after acknowledgement

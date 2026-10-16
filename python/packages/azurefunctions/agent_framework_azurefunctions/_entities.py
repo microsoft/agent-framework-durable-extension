@@ -21,18 +21,19 @@ from agent_framework_durabletask import (
     DELIVERY_WINDOW_SECONDS,
     HIGH_WATERMARK,
     LOW_WATERMARK,
-    AgentEntity,
     AgentEntityStateProviderMixin,
     AgentResponseCallbackProtocol,
+    CompatibleAgentEntity,
+    LegacyMigrationEvidenceProvider,
     RetentionMode,
     StateBudget,
+    resolve_runtime_deployment,
     resolve_state_budget,
     run_agent_coroutine,
     serialize_agent_response,
     validate_agent_configuration,
     validate_response_delivery_window,
     validate_retention,
-    validate_runtime_deployment,
 )
 from agent_framework_durabletask._entities import _validation_diagnostic  # pyright: ignore[reportPrivateUsage]
 
@@ -74,6 +75,7 @@ def create_agent_entity(
     callback: AgentResponseCallbackProtocol | None = None,
     *,
     deployment_mode: str | None = None,
+    legacy_migration_evidence: LegacyMigrationEvidenceProvider | None = None,
     retention: RetentionMode = DEFAULT_RETENTION,
     max_state_bytes: StateBudget = DEFAULT_MAX_STATE_BYTES,
     high_watermark: float = HIGH_WATERMARK,
@@ -85,7 +87,8 @@ def create_agent_entity(
     Args:
         agent: The Microsoft Agent Framework agent instance (must implement SupportsAgentRun)
         callback: Optional callback invoked during streaming and final responses
-        deployment_mode: Explicit isolated-v2 acknowledgement, or None to read the environment.
+        deployment_mode: Prototype writer policy; None reads the environment and otherwise defaults to v2.
+        legacy_migration_evidence: Trusted evidence resolver for the agent-only migration spike.
         retention: Eager pruning policy, independent of pressure eviction.
         max_state_bytes: Positive integer pressure budget, or None to disable it. Functions cannot
             resolve ``backend_limit`` because the storage backend is configured outside Python.
@@ -96,7 +99,9 @@ def create_agent_entity(
     Returns:
         Entity function configured with the agent
     """
-    validate_runtime_deployment(deployment_mode)
+    mode = resolve_runtime_deployment(deployment_mode)
+    if mode == "legacy" and retention != "keep_all":
+        raise ValueError("The legacy compatibility spike requires retention='keep_all'.")
     validate_retention(retention, high_watermark, low_watermark)
     resolved_budget = resolve_state_budget(max_state_bytes)
     validate_response_delivery_window(response_delivery_window_seconds)
@@ -109,10 +114,12 @@ def create_agent_entity(
             logger.debug("[entity_function] Operation: %s", context.operation_name)
 
             state_provider = AzureFunctionEntityStateProvider(context)
-            entity = AgentEntity(
+            entity = CompatibleAgentEntity(
                 agent,
                 callback,
                 state_provider=state_provider,
+                deployment_mode=mode,
+                legacy_migration_evidence=legacy_migration_evidence,
                 retention=retention,
                 max_state_bytes=resolved_budget,
                 high_watermark=high_watermark,

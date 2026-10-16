@@ -351,7 +351,7 @@ def test_mutable_state_getter_accepts_canonical_v2(monkeypatch: pytest.MonkeyPat
 @pytest.mark.parametrize("populated", [False, True])
 @pytest.mark.parametrize("request_kind", REQUEST_KINDS)
 @pytest.mark.parametrize("cache_kind", ["cold", "loaded-v2", "altered-v2"])
-async def test_run_rejects_legacy_before_parsing_execution_callbacks_or_error_recording(
+async def test_run_rejects_unadmitted_legacy_before_parsing_execution_callbacks_or_error_recording(
     monkeypatch: pytest.MonkeyPatch,
     surface: str,
     version: str,
@@ -365,6 +365,10 @@ async def test_run_rejects_legacy_before_parsing_execution_callbacks_or_error_re
         if cache_kind == "altered-v2":
             cached.schema_version = "1.0.0"
     backing.raw = _legacy_state(version, populated=populated)
+    if surface == "registered":
+        # The registered prototype admits entity-owned legacy transcripts, but
+        # provider continuation remains outside this spike's execution contract.
+        backing.raw["data"]["historyBinding"] = {"unsupported": "schema-2-control-in-legacy"}
     assert V2_MAPS.isdisjoint(backing.raw["data"])
     original, snapshot = backing.raw, deepcopy(backing.raw)
     cache = provider._state_cache
@@ -391,7 +395,7 @@ async def test_run_rejects_legacy_before_parsing_execution_callbacks_or_error_re
 @pytest.mark.parametrize("cache_kind", ["cold", "loaded-v2", "altered-v2"])
 @pytest.mark.parametrize("version", LEGACY_VERSIONS)
 @pytest.mark.parametrize("populated", [False, True])
-def test_writes_check_legacy_backing_not_replacement_or_cached_schema(
+def test_writes_check_unadmitted_legacy_backing_not_replacement_or_cached_schema(
     monkeypatch: pytest.MonkeyPatch,
     surface: str,
     operation: str,
@@ -406,6 +410,8 @@ def test_writes_check_legacy_backing_not_replacement_or_cached_schema(
             cached.schema_version = "1.0.0"
     # A real canonical cache cannot authorize writes to newly observed legacy backing.
     backing.raw = _legacy_state(version, populated=populated)
+    if surface == "registered":
+        backing.raw["data"]["historyBinding"] = {"unsupported": "schema-2-control-in-legacy"}
     assert V2_MAPS.isdisjoint(backing.raw["data"])
     original, snapshot = backing.raw, deepcopy(backing.raw)
     cache = provider._state_cache

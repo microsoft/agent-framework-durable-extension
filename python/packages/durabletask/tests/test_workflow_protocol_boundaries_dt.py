@@ -43,12 +43,6 @@ from agent_framework_durabletask._workflows.serialization import (
 @pytest.mark.parametrize(
     "recorded",
     [
-        pytest.param({"input": "a user's field"}, id="raw-dict-with-input"),
-        pytest.param("old start", id="raw-string"),
-        pytest.param("", id="raw-empty-string"),
-        pytest.param([], id="raw-empty-list"),
-        pytest.param({}, id="raw-empty-object"),
-        pytest.param(None, id="raw-null"),
         pytest.param({SUBWORKFLOW_INPUT_KEY: _UNTRUSTED, SUBWORKFLOW_ADDRESS_KEY: _FORGED_ADDRESS}, id="legacy-child"),
         pytest.param({_VERSION: 1, "input": "old"}, id="protocol-one"),
         pytest.param({_VERSION: True, "input": "old"}, id="boolean-true"),
@@ -70,7 +64,7 @@ def test_recorded_unsupported_start_fails_before_engine_or_actions(
     original = deepcopy(recorded)
     before_nodes = dict(workflow.executors)
 
-    with pytest.raises(ValueError, match="unsupported execution protocol"):
+    with pytest.raises(ValueError, match="unsupported execution protocol|Legacy child input"):
         next(functions["dafx-protocol"](host, recorded))
 
     engine.assert_not_called()

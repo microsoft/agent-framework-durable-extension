@@ -17,6 +17,9 @@ from collections.abc import Generator
 from typing import Any
 
 from agent_framework import Workflow
+from agent_framework_durabletask._workflows._legacy_orchestrator import (
+    run_workflow_orchestrator as _run_legacy_shared,
+)
 from agent_framework_durabletask._workflows.orchestrator import (
     SOURCE_HITL_RESPONSE,
     SOURCE_ORCHESTRATOR,
@@ -61,6 +64,8 @@ def run_workflow_orchestrator(
     workflow: Workflow,
     initial_message: Any,
     shared_state: dict[str, Any] | None = None,
+    *,
+    execution_protocol: int = 2,
 ) -> Generator[Any, Any, list[Any] | dict[str, Any]]:
     """Azure Functions wrapper around the shared workflow orchestrator.
 
@@ -72,6 +77,7 @@ def run_workflow_orchestrator(
         workflow: The MAF Workflow instance to execute.
         initial_message: Initial message to send to the start executor.
         shared_state: Optional dict for cross-executor state sharing.
+        execution_protocol: Select the published legacy engine (1) or current engine (2).
 
     Returns:
         For a top-level run, the list of workflow outputs collected from executor
@@ -79,5 +85,6 @@ def run_workflow_orchestrator(
         "events": [...]}`` so the parent can bubble nested progress (see the shared
         ``run_workflow_orchestrator`` in the durabletask package).
     """
-    af_ctx = AzureFunctionsWorkflowContext(context)
-    return _run_workflow_orchestrator_shared(af_ctx, workflow, initial_message, shared_state)
+    af_ctx = AzureFunctionsWorkflowContext(context, execution_protocol=execution_protocol)
+    runner = _run_legacy_shared if execution_protocol == 1 else _run_workflow_orchestrator_shared
+    return runner(af_ctx, workflow, initial_message, shared_state)

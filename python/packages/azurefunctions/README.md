@@ -20,16 +20,27 @@ This unreleased host uses the [canonical Python runtime contract](../durabletask
 for schema `2.0.0` writes, legacy readers, response values, migration, sessions and workflow replay.
 This guide covers the Functions-specific behavior, not a separate compatibility promise.
 
-`AgentFunctionApp` requires `deployment_mode="isolated_v2"` or
-`DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2`. No other mode or automatic probe is supported.
-This acknowledges an isolated hub with upgraded workers and clients. It cannot prove isolation
-or detect peers. Use a new isolated hub and **fresh workflow instances, even after earlier v2 builds**.
-Protocol `2` does not guarantee replay compatibility. Keep old runs on their original workers and hub.
+This worktree contains the shared [agent compatibility prototype](../durabletask/README.md#agent-compatibility-prototype),
+not a certified upgrade contract. `AgentFunctionApp` and `create_agent_entity` default to v2
+without an acknowledgement-only setting. `deployment_mode="legacy"` (or the same environment value)
+keeps all writes legacy, including new schema-1.1 sessions; invalid/empty values still fail.
+`legacy_migration_evidence` forwards a trusted evidence resolver to the shared prototype.
+Both hosts continue entity/external/service-owned legacy sessions and support evidence-backed
+in-place conversion. Workflow dispatch supports the published unversioned
+`v1.16.0-preview.260922.1` engine and this branch's current v2 engine, including legacy HITL
+and nested child routing. Default HTTP starts use v2; legacy mode preserves the old raw start shape.
+`workflow_execution_resolver` forwards the trusted recorded-start resolver.
+
+The prototype cannot prove fleet isolation or detect peers. Use a compatible deployment boundary
+before allowing v2 writes. Protocol `2` alone does not guarantee replay compatibility with earlier
+unreleased v2 action graphs; keep those runs on matching workers and hubs or start fresh.
 The [ADR rollout gates](../../../docs/decisions/0032-durable-thread-compaction.md#state-evolution-and-compatibility) remain in force.
 
-Migration is a privileged backend entity operation, with no generated HTTP or MCP endpoint.
+Manual migration is a privileged backend entity operation, with no generated HTTP or MCP endpoint.
 Follow the shared [migration contract and request example](../durabletask/README.md#migration),
-including operator quiescence, fencing, evidence and a separate empty destination.
+including operator quiescence, fencing, evidence and a separate empty destination. Automatic
+conversion uses the distinct validated in-place binding described in the shared prototype section;
+neither path proves that incompatible workers have been excluded.
 
 ### HTTP Routes and Responses
 

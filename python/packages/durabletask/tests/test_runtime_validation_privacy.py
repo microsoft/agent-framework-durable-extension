@@ -46,7 +46,7 @@ from durabletask.task import CompletableTask
 from openai import AsyncOpenAI
 from pydantic import ValidationError
 
-from agent_framework_durabletask import AgentEntity, DurableAIAgentWorker, RunRequest
+from agent_framework_durabletask import AgentEntity, CompatibleAgentEntity, DurableAIAgentWorker, RunRequest
 from agent_framework_durabletask._entities import _validation_diagnostic
 from agent_framework_durabletask._executors import DurableAgentTask
 from agent_framework_durabletask._history_provider import current_durable_history_binding
@@ -236,6 +236,33 @@ async def test_direct_validation_failure_commits_sanitized_result_only(
     duplicate = await AgentEntity(cast(Any, agent), state_provider=cold).run(request)
     assert serialize_agent_response(duplicate) == wire
     assert agent.calls == 1 and cold.attempted_writes == 0
+    assert_private_logs(caplog)
+
+
+@pytest.mark.parametrize("kind", ["plain", "wrapped", "group", "serialization"])
+async def test_legacy_validation_failure_does_not_log_private_inputs_or_tracebacks(
+    kind: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    error: BaseException = validation_error(wrapped=kind == "wrapped")
+    if kind == "group":
+        error = grouped_error(RuntimeError("ordinary sibling"), grouped_error(error))
+
+    class FailingAgent(StructuredAgent):
+        async def run(self, **kwargs: Any) -> AgentResponse[Any]:
+            self.calls += 1
+            raise error
+
+    agent = StructuredAgent() if kind == "serialization" else FailingAgent()
+    provider = JsonStateProvider()
+    caplog.set_level(logging.WARNING)
+    entity = CompatibleAgentEntity(cast(Any, agent), state_provider=provider, deployment_mode="legacy")
+    response = await entity.run(RunRequest(message="public question", correlation_id="private"))
+    assert response.additional_properties["durable_status"] == "error"
+    errors = [content for message in response.messages for content in message.contents if content.type == "error"]
+    assert len(errors) == 1 and errors[0].message == SAFE
+    assert PRIVATE not in json.dumps(serialize_agent_response(response))
+    assert PRIVATE not in json.dumps(provider.raw)
     assert_private_logs(caplog)
 
 

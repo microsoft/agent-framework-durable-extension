@@ -742,23 +742,20 @@ class TestAgentEntityFactory:
         with patch.object(DurableAgentState, "from_dict", wraps=DurableAgentState.from_dict) as from_dict_mock:
             entity_function(mock_context)
 
-        from_dict_mock.assert_not_called()
+        from_dict_mock.assert_called()
         mock_agent.run.assert_not_called()
         mock_context.set_state.assert_not_called()
         mock_context.set_result.assert_called_once()
         result_call = mock_context.set_result.call_args[0][0]
         assert result_call["status"] == "error"
-        assert "Legacy state is read-only" in result_call["error"]
+        assert "Legacy create_session must return a session with object-valued state" in result_call["error"]
 
-    def test_create_agent_entity_requires_explicit_isolated_acknowledgement(self) -> None:
-        """Entity registration fails without the isolated-v2 deployment acknowledgement."""
+    def test_create_agent_entity_allows_missing_isolated_acknowledgement(self) -> None:
+        """The prototype defaults to v2 without an acknowledgement-only setting."""
         mock_agent = Mock()
 
-        with (
-            patch("os.getenv", return_value=None),
-            pytest.raises(ValueError, match="Schema 2 requires an isolated task hub/deployment"),
-        ):
-            create_agent_entity(mock_agent)
+        with patch("os.getenv", return_value=None):
+            assert callable(create_agent_entity(mock_agent))
 
     def test_create_agent_entity_allows_explicit_isolated_acknowledgement(self) -> None:
         """An explicit isolated-v2 deployment mode bypasses the ambient environment check."""

@@ -11,6 +11,12 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
+from ._legacy_history import (
+    generated_legacy_history,
+    legacy_history_profile,
+    materialize_legacy_history,
+    ordered_legacy_history,
+)
 from ._message_identity import message_identity
 from ._response_utils import load_agent_response
 from ._shared_agent_state import (
@@ -184,14 +190,14 @@ def _journal_receipts(
 
 def _retained_request_ids(state: DurableAgentState) -> Iterator[str]:
     """Yield opaque public lookup IDs, not reconciliation IDs or inferred provenance."""
-    for entry in state.data.conversation_history:
-        if isinstance(entry, DurableAgentStateRequest):
-            for message in entry.messages:
-                identity = message.public_message_id
-                if identity is not None:
-                    if isinstance(identity, str) and not identity.strip():
-                        continue
-                    yield _nonblank(identity, "Legacy request message ID")
+    generated = generated_legacy_history(state)
+    for reference, entry, message in ordered_legacy_history(state):
+        if isinstance(entry, DurableAgentStateRequest) and reference not in generated:
+            identity = message.public_message_id
+            if identity is not None:
+                if isinstance(identity, str) and not identity.strip():
+                    continue
+                yield _nonblank(identity, "Legacy request message ID")
 
 
 def _apply_journal(state: DurableAgentState, journal: dict[str, list[str]]) -> None:
@@ -453,6 +459,7 @@ def migrate_legacy_state(
     # The parent loader validates the published shared source before projection.
     # Its raw shadows preserve unknown fields and optional-field representations.
     state = DurableAgentState.from_dict(snapshot)
+    legacy_history_profile(state)
     positions = _legacy_positions(raw_data)
     if positions and delivery_evidence is None:
         raise ValueError(_JOURNAL_REQUIRED)
@@ -499,6 +506,7 @@ def migrate_legacy_state(
 
     # Switch the detached root before emitting or validating target maps. The
     # data shadow must merge those new fields rather than revalidate as legacy.
+    materialize_legacy_history(state)
     state.schema_version = DurableAgentState.SCHEMA_VERSION
     state.data.response_mailbox = results
     state.data.completed_correlations = receipts
