@@ -19,11 +19,12 @@ pip install "agent-framework-durabletask[azure-blob-payloads]" --pre
 ```
 
 The Functions package's `azure-blob-payloads` extra forwards to this extra. The dependency
-list has one owner; installation alone does not enable offloading. The shared extra preserves
-the existing `durabletask>=1.7.1` floor. Functions independently requires `durabletask>=1.11.0`.
-Keep SDK versions locked across clients and workers. When upgrading to SDK 1.11 or later, drain
-affected older nested-race orchestrations or use a fresh isolated hub. Existing migration and
-fresh-instance requirements still apply.
+list has one owner; installation alone does not enable offloading. The shared extra uses the
+same `durabletask>=1.11.0,<2` baseline as both hosts, including non-blocking asynchronous Blob
+compression. Keep SDK versions locked across clients and workers. When upgrading from older
+SDKs, finish affected nested-race runs on pinned old workers or use a separate hub for new
+instances. Already-stuck runs may require deliberate recovery. Existing migration and
+fresh-instance requirements still apply; see the [SDK upgrade guidance](#upgrading-the-durable-task-sdk).
 
 Configure a compatible `payload_store` on each SDK worker and client before wrapping them:
 

@@ -158,7 +158,7 @@ requires-dist = [
     { name = "agent-framework-core", specifier = ">=1.19.0,<2" },
     { name = "aiohttp", marker = "extra == 'azure-blob-payloads'", specifier = ">=3.13.4,<4" },
     { name = "durabletask", specifier = ">=1.11.0,<2" },
-    { name = "durabletask", extras = ["azure-blob-payloads"], marker = "extra == 'azure-blob-payloads'", specifier = ">=1.7.1,<2" },
+    { name = "durabletask", extras = ["azure-blob-payloads"], marker = "extra == 'azure-blob-payloads'", specifier = ">=1.11.0,<2" },
     { name = "durabletask-azuremanaged", specifier = ">=1.4.0,<2" },
     { name = "opentelemetry-api", specifier = ">=1.39.0,<2" },
     { name = "pydantic", specifier = ">=2.11,<3" },
