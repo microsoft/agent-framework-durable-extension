@@ -98,7 +98,8 @@ public sealed class LegacyPromotionMetadataTests
             Assert.Equal(Text, response.Text);
             Assert.Equal(2, response.Usage!.TotalTokenCount);
             Assert.Equal(JsonValueKind.False, Assert.IsType<JsonElement>(response.AdditionalProperties!["false"]).ValueKind);
-            committed = Assert.IsType<DurableAgentState>(duplicate.PersistedState);
+            Assert.False(duplicate.StateWasPersisted);
+            Assert.Equal(beforePoll, Serialize(committed));
             Assert.Empty(committed.Data.ConversationHistory);
             Assert.Single(committed.Data.CompletionReceipts!);
             Assert.Single(committed.Data.TerminalResults!);

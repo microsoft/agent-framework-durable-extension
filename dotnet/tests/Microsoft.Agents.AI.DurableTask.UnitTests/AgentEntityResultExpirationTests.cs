@@ -345,9 +345,9 @@ public sealed class AgentEntityResultExpirationTests
         List<DateTimeOffset> signals = [];
         EntityHarness cleanup = CleanupHarness(state, signals, s_now);
         await cleanup.CheckResultsExpirationAsync();
-        DurableAgentState persisted = Assert.IsType<DurableAgentState>(cleanup.PersistedState);
-        Assert.Equal(schemaVersion, persisted.SchemaVersion);
-        Assert.Null(persisted.Data.CompletionReceipts);
+        Assert.False(cleanup.StateWasPersisted);
+        Assert.Equal(schemaVersion, state.SchemaVersion);
+        Assert.Null(state.Data.CompletionReceipts);
         Assert.Empty(signals);
     }
 
@@ -358,7 +358,10 @@ public sealed class AgentEntityResultExpirationTests
         string before = Serialize(state);
         EntityHarness cleanup = CreateHarness(new RecordingAgent("agent"), state, enablePersistentRequestOutcomes: false,
             onSignal: (_, _) => Assert.Fail("must not schedule"));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => cleanup.CheckResultsExpirationAsync());
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() => cleanup.CheckResultsExpirationAsync());
+        Assert.Contains("DurableAgentsOptions.DeploymentMode", error.Message, StringComparison.Ordinal);
+        Assert.Contains("DurableAgentDeploymentMode.SchemaV2", error.Message, StringComparison.Ordinal);
+        Assert.Contains("DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2", error.Message, StringComparison.Ordinal);
         Assert.Equal(before, Serialize(state));
         Assert.False(cleanup.StateWasPersisted);
     }

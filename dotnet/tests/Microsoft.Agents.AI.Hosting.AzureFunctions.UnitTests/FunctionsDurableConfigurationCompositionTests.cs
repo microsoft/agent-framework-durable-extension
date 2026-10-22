@@ -2,6 +2,7 @@
 
 using System.Collections;
 using System.Reflection;
+using Microsoft.Agents.AI.DurableTask;
 using Microsoft.Agents.AI.Workflows;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Builder;
@@ -9,6 +10,8 @@ using Microsoft.Azure.Functions.Worker.Core.FunctionMetadata;
 using Microsoft.Azure.Functions.Worker.Invocation;
 using Microsoft.Azure.Functions.Worker.Middleware;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Moq;
 
 namespace Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests;
@@ -90,6 +93,83 @@ public sealed class FunctionsDurableConfigurationCompositionTests
 
         Assert.Contains(typeof(DurableAgentFunctionMetadataTransformer), transformers);
         Assert.Contains(typeof(DurableWorkflowsFunctionMetadataTransformer), transformers);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task MetadataManager_ValidatesCompletedOptionsBeforeMcpFactoryAsync(bool valid, bool reverse)
+    {
+        FunctionsApplicationBuilder builder = FunctionsApplication.CreateBuilder([]);
+        builder.Logging.ClearProviders();
+        int callbacks = 0;
+        int factories = 0;
+        string agentName = $"MetadataAgent-{Guid.NewGuid():N}";
+        void ConfigureRetention(DurableAgentsOptions options)
+        {
+            callbacks++;
+            options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+            options.AddAIAgentFactory(agentName, _ =>
+            {
+                factories++;
+                return new TestAgent(agentName, "MCP description");
+            }, enableHttpTrigger: false, enableMcpToolTrigger: true);
+            options.AddAIAgentFactory($"{agentName}-unused",
+                _ => throw new InvalidOperationException("Non-MCP factories must not run."),
+                enableHttpTrigger: false, enableMcpToolTrigger: false);
+        }
+        void ConfigureDeployment(DurableOptions options)
+        {
+            callbacks++;
+            if (valid)
+            {
+                options.Agents.DeploymentMode = DurableAgentDeploymentMode.SchemaV2;
+            }
+        }
+        if (reverse)
+        {
+            builder.ConfigureDurableOptions(ConfigureDeployment);
+            builder.ConfigureDurableAgents(ConfigureRetention);
+        }
+        else
+        {
+            builder.ConfigureDurableAgents(ConfigureRetention);
+            builder.ConfigureDurableOptions(ConfigureDeployment);
+        }
+        builder.ConfigureDurableWorkflows(_ => { });
+        Assert.Equal(2, callbacks);
+        Assert.Equal(0, factories);
+        Assert.Contains(builder.Services, service => service.IsKeyedService && Equals(service.ServiceKey, agentName));
+
+        using IHost host = builder.Build();
+        string metadataDirectory = Path.Combine(AppContext.BaseDirectory, $"functions-metadata-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(metadataDirectory);
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(metadataDirectory, "functions.metadata"), "[]", TestContext.Current.CancellationToken);
+            async Task<IReadOnlyList<IFunctionMetadata>> GenerateAsync() =>
+                await host.Services.GetRequiredService<IFunctionMetadataManager>().GetFunctionMetadataAsync(metadataDirectory);
+
+            if (!valid)
+            {
+                InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(GenerateAsync);
+                Assert.Contains("schema-v2 deployment acknowledgement", exception.Message, StringComparison.Ordinal);
+                Assert.Equal(0, factories);
+                return;
+            }
+            IReadOnlyList<IFunctionMetadata> metadata = await GenerateAsync();
+            Assert.Equal(1, factories);
+            IFunctionMetadata tool = Assert.Single(metadata, function => function.Name == $"mcptool-{agentName}");
+            Assert.Contains("MCP description", tool.RawBindings![0], StringComparison.Ordinal);
+            Assert.Contains(metadata, function => function.Name == $"dafx-{agentName}");
+            Assert.DoesNotContain(metadata, function => function.Name == $"http-{agentName}");
+        }
+        finally
+        {
+            Directory.Delete(metadataDirectory, recursive: true);
+        }
     }
 
     /// <summary>
