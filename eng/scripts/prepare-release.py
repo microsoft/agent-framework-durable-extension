@@ -30,7 +30,9 @@ def read_current_python_version(pyproject_path: Path) -> str:
     return match.group(1).strip()
 
 
-def update_dotnet_version(props_path: Path, version_prefix: str, date_suffix: str, dotnet_version: str) -> None:
+def update_dotnet_version(
+    props_path: Path, version_prefix: str, date_suffix: str, dotnet_version: str, dry_run: bool = False
+) -> None:
     content = props_path.read_text(encoding="utf-8")
     content = re.sub(
         r"<VersionPrefix>[^<]+</VersionPrefix>",
@@ -48,10 +50,11 @@ def update_dotnet_version(props_path: Path, version_prefix: str, date_suffix: st
         f"<GitTag>{dotnet_version}</GitTag>",
         content,
     )
-    props_path.write_text(content, encoding="utf-8")
+    if not dry_run:
+        props_path.write_text(content, encoding="utf-8")
 
 
-def update_python_version(repo_root: Path, python_version: str) -> None:
+def update_python_version(repo_root: Path, python_version: str, dry_run: bool = False) -> None:
     pyproject_files = [
         repo_root / "python" / "pyproject.toml",
         repo_root / "python" / "packages" / "durabletask" / "pyproject.toml",
@@ -71,10 +74,11 @@ def update_python_version(repo_root: Path, python_version: str) -> None:
             rf"\g<1>{python_version}\2",
             content,
         )
-        path.write_text(content, encoding="utf-8")
+        if not dry_run:
+            path.write_text(content, encoding="utf-8")
 
 
-def stamp_changelog(changelog_path: Path, version_header: str) -> bool:
+def stamp_changelog(changelog_path: Path, version_header: str, dry_run: bool = False) -> bool:
     """Stamp the ## [Unreleased] section with ## v<version_header> if it has entries."""
     if not changelog_path.exists():
         return False
@@ -100,7 +104,8 @@ def stamp_changelog(changelog_path: Path, version_header: str) -> bool:
 
     replacement = f"## [Unreleased]\n\n{target_heading}\n\n{unreleased_body}\n\n"
     updated = content[: match.start()] + replacement + content[match.end() :].lstrip("\n")
-    changelog_path.write_text(updated, encoding="utf-8")
+    if not dry_run:
+        changelog_path.write_text(updated, encoding="utf-8")
     return True
 
 
@@ -119,10 +124,16 @@ def main() -> int:
     )
     parser.add_argument("--skip-dotnet", action="store_true", help="Skip updating .NET versions and changelogs")
     parser.add_argument("--skip-python", action="store_true", help="Skip updating Python versions and changelogs")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview version bumps and changelog stamps without modifying files on disk",
+    )
     args = parser.parse_args()
 
     repo_root: Path = args.repo_root.resolve()
     props_path = repo_root / "dotnet" / "nuget" / "nuget-package.props"
+    mode_prefix = "[DRY RUN] " if args.dry_run else ""
 
     if not args.skip_dotnet:
         props_content = props_path.read_text(encoding="utf-8")
@@ -135,13 +146,16 @@ def main() -> int:
             current_date_match.group(1).strip() if current_date_match else ""
         )
         dotnet_version = args.dotnet_version or f"{version_prefix}-preview.{date_suffix}.1"
-        update_dotnet_version(props_path, version_prefix, date_suffix, dotnet_version)
+        update_dotnet_version(props_path, version_prefix, date_suffix, dotnet_version, dry_run=args.dry_run)
+        print(f"{mode_prefix}.NET version -> {dotnet_version} ({props_path.relative_to(repo_root)})")
 
         for changelog in [
             repo_root / "dotnet" / "src" / "Microsoft.Agents.AI.DurableTask" / "CHANGELOG.md",
             repo_root / "dotnet" / "src" / "Microsoft.Agents.AI.Hosting.AzureFunctions" / "CHANGELOG.md",
         ]:
-            stamp_changelog(changelog, dotnet_version)
+            stamped = stamp_changelog(changelog, dotnet_version, dry_run=args.dry_run)
+            status = "stamped" if stamped else "unchanged"
+            print(f"{mode_prefix}{changelog.relative_to(repo_root)}: {status}")
 
     if not args.skip_python:
         python_version = args.python_version
@@ -150,13 +164,13 @@ def main() -> int:
                 python_version = read_current_python_version(repo_root / "python" / "pyproject.toml")
             else:
                 python_version = f"1.0.0b{args.date_suffix}"
-        update_python_version(repo_root, python_version)
-        for changelog in [
-            repo_root / "python" / "CHANGELOG.md",
-            repo_root / "python" / "packages" / "durabletask" / "CHANGELOG.md",
-            repo_root / "python" / "packages" / "azurefunctions" / "CHANGELOG.md",
-        ]:
-            stamp_changelog(changelog, python_version)
+        update_python_version(repo_root, python_version, dry_run=args.dry_run)
+        print(f"{mode_prefix}Python version -> {python_version}")
+
+        py_changelog = repo_root / "python" / "CHANGELOG.md"
+        stamped = stamp_changelog(py_changelog, python_version, dry_run=args.dry_run)
+        status = "stamped" if stamped else "unchanged"
+        print(f"{mode_prefix}{py_changelog.relative_to(repo_root)}: {status}")
 
     return 0
 

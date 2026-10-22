@@ -97,10 +97,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DATE_SUFFIX: ${{ inputs.date_suffix }}
         run: |
-          branch="release/prepare-${DATE_SUFFIX}"
+          BRANCH="release/prepare-${DATE_SUFFIX}"
+          TITLE="chore: prepare release (${DATE_SUFFIX})"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$branch"
+          git checkout -B "$BRANCH"
           git add dotnet/nuget/nuget-package.props \
                   dotnet/src/Microsoft.Agents.AI.DurableTask/CHANGELOG.md \
                   dotnet/src/Microsoft.Agents.AI.Hosting.AzureFunctions/CHANGELOG.md \
@@ -108,18 +109,45 @@ jobs:
                   python/packages/durabletask/pyproject.toml \
                   python/packages/azurefunctions/pyproject.toml \
                   python/CHANGELOG.md \
-                  python/packages/durabletask/CHANGELOG.md \
-                  python/packages/azurefunctions/CHANGELOG.md \
                   python/uv.lock \
                   python/packages/azurefunctions/uv.lock
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
-          git commit -m "chore: prepare release (${DATE_SUFFIX})"
-          git push -u origin "$branch" --force
-          gh pr create \
+          git commit -m "$TITLE"
+          git push -u origin "$BRANCH" --force
+          if pr_url=$(gh pr create \
             --base main \
-            --head "$branch" \
-            --title "chore: prepare release (${DATE_SUFFIX})" \
-            --body-file artifacts/release-notes-preview.md
+            --head "$BRANCH" \
+            --title "$TITLE" \
+            --body-file artifacts/release-notes-preview.md 2>&1); then
+            echo "Created PR: $pr_url"
+            {
+              echo ""
+              echo "## Release Preparation PR"
+              echo ""
+              echo "Created pull request: $pr_url"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::gh pr create failed (GITHUB_TOKEN is not permitted to create PRs by organization policy). Branch '${BRANCH}' was pushed; see step summary for one-click PR creation."
+            echo "$pr_url"
+            {
+              echo ""
+              echo "## Manual PR Creation Required"
+              echo ""
+              echo "GitHub Actions is not permitted to create pull requests in this repository with \`GITHUB_TOKEN\`, so the release preparation branch was pushed to origin."
+              echo ""
+              echo "- **Branch:** \`${BRANCH}\`"
+              echo "- **Compare & Open PR:** https://github.com/${{ github.repository }}/compare/main...${BRANCH}?expand=1"
+              echo ""
+              echo "### Create the PR via GitHub CLI"
+              echo ""
+              echo "\`\`\`bash"
+              echo "gh pr create --repo ${{ github.repository }} --base main \\"
+              echo "  --head ${BRANCH} \\"
+              echo "  --title \"${TITLE}\" \\"
+              echo "  --body-file artifacts/release-notes-preview.md"
+              echo "\`\`\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

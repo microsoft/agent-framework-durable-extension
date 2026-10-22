@@ -75,8 +75,8 @@ def split_breaking_and_fixes(bullets: list[str]) -> tuple[list[str], list[str]]:
     breaking: list[str] = []
     fixes: list[str] = []
     for item in bullets:
-        if item.startswith("[BREAKING]"):
-            cleaned = re.sub(r"^\[BREAKING\]\s*", "", item)
+        if item.startswith("[BREAKING]") or re.search(r":\s*\[BREAKING\]\s*", item):
+            cleaned = re.sub(r"\[BREAKING\]\s*", "", item, count=1)
             breaking.append(cleaned)
         else:
             fixes.append(item)
@@ -102,9 +102,7 @@ def build_release_notes(
 ) -> str:
     dt_changelog = repo_root / "dotnet" / "src" / "Microsoft.Agents.AI.DurableTask" / "CHANGELOG.md"
     af_changelog = repo_root / "dotnet" / "src" / "Microsoft.Agents.AI.Hosting.AzureFunctions" / "CHANGELOG.md"
-    py_dt_changelog = repo_root / "python" / "packages" / "durabletask" / "CHANGELOG.md"
-    py_af_changelog = repo_root / "python" / "packages" / "azurefunctions" / "CHANGELOG.md"
-    py_root_changelog = repo_root / "python" / "CHANGELOG.md"
+    py_changelog = repo_root / "python" / "CHANGELOG.md"
 
     lines: list[str] = ["## Packages", ""]
 
@@ -152,18 +150,12 @@ def build_release_notes(
         )
 
     if include_python:
-        py_dt_bullets = extract_section_bullets(py_dt_changelog, python_version)
-        py_af_bullets = extract_section_bullets(py_af_changelog, python_version)
-        if py_dt_bullets or py_af_bullets:
-            package_sections.append(("agent-framework-durabletask", py_dt_bullets))
-            package_sections.append(("agent-framework-azurefunctions", py_af_bullets))
-        else:
-            package_sections.append(
-                (
-                    "agent-framework-durabletask / agent-framework-azurefunctions",
-                    extract_section_bullets(py_root_changelog, python_version),
-                )
+        package_sections.append(
+            (
+                "agent-framework-durabletask / agent-framework-azurefunctions",
+                extract_section_bullets(py_changelog, python_version),
             )
+        )
 
     breaking_by_pkg: list[tuple[str, list[str]]] = []
     all_fixes: list[str] = []
