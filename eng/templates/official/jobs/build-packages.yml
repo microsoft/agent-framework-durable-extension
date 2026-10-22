@@ -366,3 +366,10 @@ jobs:
 
       - pwsh: Get-ChildItem -Recurse "$(Build.ArtifactStagingDirectory)/packages" | Select-Object -ExpandProperty FullName
         displayName: 'List package artifacts'
+
+      - pwsh: |
+          New-Item -ItemType Directory -Force -Path "$(Build.ArtifactStagingDirectory)/packages/release-notes" | Out-Null
+          python eng/scripts/generate-release-notes.py --output "$(Build.ArtifactStagingDirectory)/packages/release-notes/RELEASE_NOTES.md"
+          Write-Host "Generated release notes at $(Build.ArtifactStagingDirectory)/packages/release-notes/RELEASE_NOTES.md:"
+          Get-Content "$(Build.ArtifactStagingDirectory)/packages/release-notes/RELEASE_NOTES.md"
+        displayName: 'Generate GitHub release notes from CHANGELOG.md'

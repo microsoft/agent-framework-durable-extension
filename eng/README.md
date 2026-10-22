@@ -12,7 +12,9 @@ Azure DevOps is used for jobs that need a more controlled execution environment,
 | --- | --- |
 | `eng/ci/code-mirror.yml` | Mirrors the GitHub repository into Azure Repos so Azure DevOps can run trusted pipelines from a controlled copy of the source. |
 | `eng/ci/integration-tests.yml` | Runs integration tests on pull requests and on a daily schedule, reaching Azure models through a service connection identity. |
-| `eng/ci/package-release.yml` | Builds package artifacts and, when explicitly enabled, publishes .NET and Python packages. |
+| `eng/ci/package-release.yml` | Builds package artifacts, generates unified release notes from `CHANGELOG.md`, and, when explicitly enabled, publishes .NET and Python packages. |
+| `eng/scripts/prepare-release.py` | Bumps `.NET` and `Python` package versions and stamps `## [Unreleased]` in `CHANGELOG.md` files (invoked by `.github/workflows/prepare-release.yml`). |
+| `eng/scripts/generate-release-notes.py` | Extracts versioned release notes from the `.NET` and `Python` `CHANGELOG.md` files (invoked by `.github/workflows/create-release.yml` and `eng/templates/official/jobs/build-packages.yml`). |
 | `eng/templates/jobs/` | Reusable jobs for shared test infrastructure and language-specific integration test runs. |
 | `eng/templates/official/jobs/` | Reusable jobs for package build and release stages. |
 
