@@ -15,5 +15,7 @@ updates:
     schedule:
       interval: "weekly"
     labels:
-      - "dependencies"
       - ".NET"
+      - "dependencies"
+    cooldown:
+      default-days: 7
