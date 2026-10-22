@@ -186,6 +186,67 @@ public sealed class EntityAgentWrapperTests
         Assert.Empty(history);
     }
 
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(false, false, true)]
+    [InlineData(false, true, false)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, false)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    [InlineData(true, true, true)]
+    public async Task ObservedProviderReleasesOnlySuccessfulServiceOwnedCompletionAsync(
+        bool streaming,
+        bool serviceManaged,
+        bool failingStore)
+    {
+        IOException failure = new("provider store failed");
+        RecordingHistoryProvider provider = new() { StoreException = failingStore ? failure : null };
+        ObservedChatHistoryProvider observed = new(provider);
+        RecordingChatClient client = new() { ResponseConversationId = serviceManaged ? "service-id" : null };
+        ChatClientAgent agent = new(client, new ChatClientAgentOptions
+        {
+            Name = "agent",
+            ChatHistoryProvider = provider,
+            ThrowOnChatHistoryProviderConflict = false,
+            ClearOnChatHistoryProviderConflict = false,
+        });
+        AgentSession session = await agent.CreateSessionAsync();
+        EntityAgentWrapper wrapper = new(
+            agent,
+            CreateContext().Object,
+            new RunRequest("request") { CorrelationId = "correlation" },
+            chatHistoryProvider: observed);
+        ChatOptions? invocationOptions = null;
+        ChatClientAgentRunOptions callerOptions = new()
+        {
+            ChatClientFactory = inner => new OptionsCapturingChatClient(inner, options => invocationOptions = options),
+        };
+
+        async Task<AgentResponse> InvokeAsync() => streaming
+            ? await wrapper.RunStreamingAsync("request", session, callerOptions).ToAgentResponseAsync()
+            : await wrapper.RunAsync("request", session, callerOptions);
+
+        if (failingStore && !serviceManaged)
+        {
+            Assert.Same(failure, await Assert.ThrowsAsync<IOException>(InvokeAsync));
+            Assert.True(observed.FailedWith(failure));
+        }
+        else
+        {
+            Assert.Equal("response", (await InvokeAsync()).Text);
+            Assert.False(observed.FailedWith(failure));
+        }
+
+        Assert.Equal(1, provider.LoadCount);
+        Assert.Equal(serviceManaged ? 0 : 1, provider.StoreCount);
+        Assert.Equal(1, client.InvocationCount);
+        Assert.Equal(client.ResponseConversationId, Assert.IsType<ChatClientAgentSession>(session).ConversationId);
+        Assert.Same(provider, agent.ChatHistoryProvider);
+        Assert.NotNull(invocationOptions);
+        Assert.Equal(!serviceManaged, invocationOptions.AdditionalProperties!.Contains<ChatHistoryProvider>());
+    }
+
     [Fact]
     public async Task PartialServiceStreamFailureRetainsDurableProviderForSdkFailureCallbacksAsync()
     {
@@ -300,6 +361,8 @@ public sealed class EntityAgentWrapperTests
 
     private sealed class RecordingHistoryProvider : ChatHistoryProvider
     {
+        public Exception? StoreException { get; init; }
+
         public int LoadCount { get; private set; }
 
         public int StoreCount { get; private set; }
@@ -317,6 +380,10 @@ public sealed class EntityAgentWrapperTests
             CancellationToken cancellationToken = default)
         {
             this.StoreCount++;
+            if (this.StoreException is not null)
+            {
+                throw this.StoreException;
+            }
             return default;
         }
     }

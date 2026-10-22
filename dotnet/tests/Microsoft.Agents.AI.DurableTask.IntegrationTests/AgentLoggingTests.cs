@@ -46,6 +46,7 @@ public sealed class AgentLoggingTests(ITestOutputHelper output)
     [InlineData("Microsoft.DurableTask.Agents.othertestagent.session")]
     [InlineData("Microsoft.DurableTask.Agents.testagentextra.session")]
     [InlineData("Microsoft.DurableTask.Agents.testagent")]
+    [InlineData("Microsoft.DurableTask.Agents.testagent.session")]
     [InlineData("Microsoft.DurableTask.Agents.OtherTestAgent.session")]
     [InlineData("Microsoft.DurableTask.Agents.TestAgentExtra.session")]
     [InlineData("Microsoft.DurableTask.Agents.TestAgent")]
@@ -82,6 +83,43 @@ public sealed class AgentLoggingTests(ITestOutputHelper output)
         Assert.Single(childLogs, log => log.EventId.Name == "LogAgentRequest");
         Assert.Single(childLogs, log => log.EventId.Name == "LogAgentResponse");
         Assert.Contains(childLogs, log => log.Message.Contains("Child request", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task EntityDispatchDistinguishesCollidingAgentAndSessionCategoriesAsync()
+    {
+        TestLoggerProvider loggerProvider = new(output);
+        using IHost host = CreateHost(loggerProvider, "TestAgent", "TestAgent.Child");
+        AgentSessionId parentSession = new("TestAgent", "child.shared");
+        AgentSessionId childSession = new("TestAgent.Child", "shared");
+        Assert.Equal("@dafx-testagent@child.shared", parentSession.ToString());
+        Assert.Equal("@dafx-testagent.child@shared", childSession.ToString());
+        Assert.NotEqual(parentSession, childSession);
+
+        await DispatchAsync(host, parentSession, "Parent request");
+        await DispatchAsync(host, childSession, "Child request");
+
+        LogEntry[] requests = loggerProvider.GetAllLogs()
+            .Where(log => log.EventId.Name == "LogAgentRequest").ToArray();
+        Assert.Equal(2, requests.Length);
+        Assert.All(requests, log =>
+        {
+            Assert.Equal("Microsoft.DurableTask.Agents.testagent.child.shared", log.Category);
+            IEnumerable<KeyValuePair<string, object?>> state =
+                Assert.IsAssignableFrom<IEnumerable<KeyValuePair<string, object?>>>(log.State);
+            AgentSessionId identity = Assert.IsType<AgentSessionId>(
+                Assert.Single(state, value => value.Key == "SessionId").Value);
+            Assert.True(identity == parentSession || identity == childSession);
+        });
+
+        IReadOnlyCollection<LogEntry> parentLogs = loggerProvider.GetAgentLogs(parentSession);
+        Assert.Single(parentLogs, log => log.EventId.Name == "LogAgentRequest");
+        Assert.Single(parentLogs, log => log.EventId.Name == "LogAgentResponse");
+        Assert.DoesNotContain(parentLogs, log => log.Message.Contains("Child request", StringComparison.Ordinal));
+        IReadOnlyCollection<LogEntry> childLogs = loggerProvider.GetAgentLogs(childSession);
+        Assert.Single(childLogs, log => log.EventId.Name == "LogAgentRequest");
+        Assert.Single(childLogs, log => log.EventId.Name == "LogAgentResponse");
+        Assert.DoesNotContain(childLogs, log => log.Message.Contains("Parent request", StringComparison.Ordinal));
     }
 
     [Theory]

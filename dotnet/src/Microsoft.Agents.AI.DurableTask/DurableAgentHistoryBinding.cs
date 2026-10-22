@@ -27,7 +27,100 @@ internal static class DurableAgentHistoryBinding
 {
     internal const string DurableStateProviderKey = "durable-state.v1";
     internal const string FrameworkLocalHistoryConversationId = "_agent_local_chat_history";
+    internal const string PendingProviderInitializationProfile =
+        "Microsoft.Agents.AI.DurableTask.pendingProviderInitialization";
     private const string CSharpFixedOwnerProperty = "csharpFixedOwner";
+
+    internal static bool IsPendingProviderInitialization(System.Text.Json.JsonElement binding) =>
+        binding.ValueKind == System.Text.Json.JsonValueKind.Object &&
+        binding.TryGetProperty("profile", out System.Text.Json.JsonElement profile) &&
+        profile.ValueKind == System.Text.Json.JsonValueKind.String &&
+        profile.GetString() == PendingProviderInitializationProfile;
+
+    internal static bool IsPristineMailbox(DurableAgentState state) =>
+        state.SchemaVersion == DurableAgentState.RevisedSchemaVersion &&
+        !HasPriorContinuity(state);
+
+    internal static string? ValidatePendingProviderInitialization(
+        DurableAgentState state,
+        string? configuredProviderKey)
+    {
+        System.Text.Json.JsonElement binding = state.Data.HistoryBinding;
+        if (!IsPendingProviderInitialization(binding))
+        {
+            return null;
+        }
+
+        if (!binding.TryGetProperty("version", out System.Text.Json.JsonElement version) ||
+            version.ValueKind != System.Text.Json.JsonValueKind.Number ||
+            !version.TryGetInt32(out int number) || number != 1 ||
+            !binding.TryGetProperty("providerKey", out System.Text.Json.JsonElement key) ||
+            key.ValueKind != System.Text.Json.JsonValueKind.String ||
+            !IsValidProviderKey(key.GetString()) ||
+            binding.TryGetProperty("ownerKind", out _) ||
+            binding.TryGetProperty(CSharpFixedOwnerProperty, out _) ||
+            binding.EnumerateObject().Select(property => property.Name).Distinct(StringComparer.Ordinal).Count() !=
+                binding.EnumerateObject().Count() ||
+            state.SchemaVersion != DurableAgentState.RevisedSchemaVersion ||
+            state.Data.Session is not null ||
+            state.Data.ConversationHistory.Count != 0 ||
+            state.Data.IngestedPositions is not null ||
+            state.Data.Truncation is not null ||
+            state.Data.CompletionReceipts is not { Count: > 0 } ||
+            state.Data.CompletionReceipts.Values.Any(
+                receipt => receipt.Outcome != DurableAgentStateCompletionReceipt.FailedOutcome) ||
+            state.Data.TerminalResults?.Values.Any(
+                result => result.Outcome != DurableAgentStateCompletionReceipt.FailedOutcome ||
+                    result.Error?.Code != ObservedChatHistoryProvider.FailureCode) != false)
+        {
+            throw new DurableAgentHistoryBindingMismatchException(
+                "The pending provider-initialization profile is malformed, unsupported, or conflicts with durable conversation evidence.");
+        }
+
+        string providerKey = key.GetString()!;
+        if (!string.Equals(providerKey, configuredProviderKey, StringComparison.Ordinal))
+        {
+            throw new DurableAgentHistoryBindingMismatchException(
+                $"Pending provider initialization requires the original configured logical provider key '{providerKey}'.");
+        }
+
+        return providerKey;
+    }
+
+    internal static void ValidatePendingProviderOwnership(DurableAgentHistoryOwnership ownership)
+    {
+        if (ownership != DurableAgentHistoryOwnership.ExternalProvider)
+        {
+            throw new DurableAgentHistoryBindingMismatchException(
+                "Pending provider initialization requires the original external history-provider pipeline.");
+        }
+    }
+
+    internal static DurableAgentState MarkPendingProviderInitialization(
+        DurableAgentState state,
+        string providerKey)
+    {
+        // Empty or failed-only imported state is not provenance. The caller must also prove
+        // that this operation initialized a previously absent durable mailbox generation.
+        if (!IsPristineMailbox(state))
+        {
+            throw new DurableAgentHistoryBindingMismatchException(
+                "Only a newly initialized pristine mailbox can record pending provider initialization.");
+        }
+
+        _ = new DurableAgentHistoryProviderKey(providerKey);
+        using MemoryStream stream = new();
+        using (System.Text.Json.Utf8JsonWriter writer = new(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("profile", PendingProviderInitializationProfile);
+            writer.WriteNumber("version", 1);
+            writer.WriteString("providerKey", providerKey);
+            writer.WriteEndObject();
+        }
+        using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(stream.ToArray());
+        return WithBinding(state, document.RootElement);
+    }
 
     public static DurableAgentStateHistoryBinding Create(
         DurableAgentHistoryOwnership ownership,
@@ -361,16 +454,22 @@ internal static class DurableAgentHistoryBinding
     public static DurableAgentState Seal(
         DurableAgentState state,
         DurableAgentStateHistoryBinding binding)
+        => WithBinding(state, ToJson(binding));
+
+    private static DurableAgentState WithBinding(
+        DurableAgentState state,
+        System.Text.Json.JsonElement binding)
     {
         return new DurableAgentState
         {
             SchemaVersion = state.SchemaVersion,
+            PersistentRequestOutcomesAuthorized = state.PersistentRequestOutcomesAuthorized,
             Data = new DurableAgentStateData
             {
                 ConversationHistory = state.Data.ConversationHistory,
                 TerminalResults = state.Data.TerminalResults,
                 CompletionReceipts = state.Data.CompletionReceipts,
-                HistoryBinding = ToJson(binding),
+                HistoryBinding = binding,
                 Session = state.Data.Session,
                 IngestedPositions = state.Data.IngestedPositions,
                 Truncation = state.Data.Truncation,

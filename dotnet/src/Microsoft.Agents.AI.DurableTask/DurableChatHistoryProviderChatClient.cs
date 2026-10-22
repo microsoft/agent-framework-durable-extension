@@ -6,11 +6,11 @@ using Microsoft.Extensions.AI;
 namespace Microsoft.Agents.AI.DurableTask;
 
 /// <summary>
-/// Releases an operation-scoped durable history override after the model service supplies conversation ownership.
+/// Releases an operation-scoped history override after the model service supplies conversation ownership.
 /// </summary>
 internal sealed class DurableChatHistoryProviderChatClient(
     IChatClient innerClient,
-    DurableChatHistoryProvider historyProvider) : DelegatingChatClient(innerClient)
+    ChatHistoryProvider historyProvider) : DelegatingChatClient(innerClient)
 {
     public override async Task<ChatResponse> GetResponseAsync(
         IEnumerable<ChatMessage> messages,

@@ -37,7 +37,13 @@ internal sealed class TestLoggerProvider(ITestOutputHelper output) : ILoggerProv
         AgentSessionId normalizedSessionId = (Microsoft.DurableTask.Entities.EntityInstanceId)sessionId;
         string category = $"Microsoft.DurableTask.Agents.{normalizedSessionId.Name}.{sessionId.Key}";
         return this.GetAllLogs()
-            .Where(log => string.Equals(log.Category, category, StringComparison.Ordinal))
+            .Where(log =>
+                string.Equals(log.Category, category, StringComparison.Ordinal) &&
+                log.State is IEnumerable<KeyValuePair<string, object?>> state &&
+                state.Any(property =>
+                    property.Key == "SessionId" &&
+                    property.Value is AgentSessionId identity &&
+                    identity == sessionId))
             .ToArray();
     }
 
