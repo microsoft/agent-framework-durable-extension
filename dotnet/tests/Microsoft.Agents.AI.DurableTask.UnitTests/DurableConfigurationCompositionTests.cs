@@ -3,8 +3,10 @@
 using System.Text.Json;
 using Microsoft.Agents.AI.DurableTask.Workflows;
 using Microsoft.Agents.AI.Workflows;
+using Microsoft.DurableTask.Worker;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace Microsoft.Agents.AI.DurableTask.UnitTests;
 
@@ -151,6 +153,88 @@ public sealed class DurableConfigurationCompositionTests
             () => services.ConfigureDurableAgents(agents => agents.AddAIAgent(new CompositionTestAgent("DuplicateAssistant"))));
 
         Assert.Contains("has already been registered", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("v2-assistant")]
+    [InlineData("V2-Assistant")]
+    [InlineData("v2-")]
+    public void ConfigureDurableAgents_RejectsReservedV2AgentNamePrefix(string reservedName)
+    {
+        ServiceCollection services = new();
+
+        ArgumentException agentException = Assert.Throws<ArgumentException>(
+            () => services.ConfigureDurableAgents(agents => agents.AddAIAgent(new CompositionTestAgent(reservedName))));
+        Assert.Contains("v2-", agentException.Message, StringComparison.OrdinalIgnoreCase);
+
+        ArgumentException factoryException = Assert.Throws<ArgumentException>(
+            () => services.ConfigureDurableAgents(agents => agents.AddAIAgentFactory(reservedName, _ => new CompositionTestAgent("valid"))));
+        Assert.Contains("v2-", factoryException.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ConfigureDurableOptions_PopulatesWorkItemFiltersForPhase1AndPhase2(bool processLegacyEntities)
+    {
+        ServiceCollection services = new();
+        CompositionTestAgent standaloneAgent = new("StandaloneAssistant");
+        CompositionTestAgent workflowAgent = new("WorkflowAssistant");
+
+        services.ConfigureDurableOptions(
+            options =>
+            {
+                options.Agents.ProcessLegacyEntities = processLegacyEntities;
+                options.Agents.AddAIAgent(standaloneAgent);
+                options.Workflows.AddWorkflow(BuildAgentWorkflow("OrderWorkflow", workflowAgent));
+            },
+            workerBuilder: _ => { });
+
+        using ServiceProvider provider = services.BuildServiceProvider();
+        DurableTaskWorkerWorkItemFilters filters =
+            provider.GetRequiredService<IOptionsMonitor<DurableTaskWorkerWorkItemFilters>>().Get(Options.DefaultName);
+
+        string[] entityNames = [.. filters.Entities.Select(e => e.Name)];
+        Assert.Contains("dafx-v2-StandaloneAssistant", entityNames);
+        Assert.Contains("dafx-v2-WorkflowAssistant", entityNames);
+
+        if (processLegacyEntities)
+        {
+            Assert.Contains("dafx-StandaloneAssistant", entityNames);
+            Assert.Contains("dafx-WorkflowAssistant", entityNames);
+        }
+        else
+        {
+            Assert.DoesNotContain("dafx-StandaloneAssistant", entityNames);
+            Assert.DoesNotContain("dafx-WorkflowAssistant", entityNames);
+        }
+
+        Assert.Contains(filters.Orchestrations, o => o.Name == "dafx-OrderWorkflow");
+        Assert.Contains(filters.Activities, a => a.Name == "dafx-start");
+    }
+
+    [Fact]
+    public void ConfigureDurableAgents_AllowsWorkerBuilderToOverrideWorkItemFilters()
+    {
+        ServiceCollection services = new();
+        DurableTaskWorkerWorkItemFilters customFilters = new()
+        {
+            Entities = [new DurableTaskWorkerWorkItemFilters.EntityFilter { Name = "dafx-v2-PrimaryAssistant" }],
+        };
+
+        services.ConfigureDurableAgents(
+            agents =>
+            {
+                agents.AddAIAgent(new CompositionTestAgent("PrimaryAssistant"));
+                agents.AddAIAgent(new CompositionTestAgent("SecondaryAssistant"));
+            },
+            workerBuilder: builder => builder.UseWorkItemFilters(customFilters));
+
+        using ServiceProvider provider = services.BuildServiceProvider();
+        DurableTaskWorkerWorkItemFilters resolved =
+            provider.GetRequiredService<IOptionsMonitor<DurableTaskWorkerWorkItemFilters>>().Get(Options.DefaultName);
+
+        Assert.Equal(["dafx-v2-PrimaryAssistant"], resolved.Entities.Select(e => e.Name));
     }
 
     private static DurableOptions GetRegisteredOptions(IServiceCollection services)

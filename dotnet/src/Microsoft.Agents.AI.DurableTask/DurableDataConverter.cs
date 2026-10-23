@@ -23,7 +23,7 @@ namespace Microsoft.Agents.AI.DurableTask;
 /// committed JSON without changing how unrelated serializers represent <see cref="AgentResponse"/>.
 /// </para>
 /// </remarks>
-internal sealed class DurableDataConverter : DataConverter
+internal sealed class DurableDataConverter(DurableAgentsOptions? agentOptions = null) : DataConverter
 {
     private const string ResponseEnvelopeProperty = "$microsoftAgentFrameworkDurableTask";
     private const string ResponseEnvelopeKind = "agentResponse";
@@ -51,7 +51,7 @@ internal sealed class DurableDataConverter : DataConverter
         // The entity-side response object no longer exists after serialization. Read its retained result from the
         // framework envelope, create the orchestration-side response, and establish the same sidecar association on
         // that new object. Otherwise GetDurableResult() would be lost at exactly the process boundary it must survive.
-        (JsonElement? RetainedResult, DurableAgentFailureData? Failure) durableMetadata =
+        (JsonElement? RetainedResult, DurableAgentFailureData? Failure, int? EntityVersion) durableMetadata =
             typeof(AgentResponse).IsAssignableFrom(targetType)
                 ? ReadDurableResponseMetadata(data)
                 : default;
@@ -59,12 +59,18 @@ internal sealed class DurableDataConverter : DataConverter
         object? deserialized = typeInfo is not null
             ? JsonSerializer.Deserialize(data, typeInfo)
             : JsonSerializer.Deserialize(data, targetType, s_options);
-        if (durableMetadata.RetainedResult is JsonElement result && deserialized is AgentResponse response)
+        if (deserialized is AgentResponse response)
         {
-            DurableAgentJsonUtilities.CaptureRetainedResult(response, result);
-            if (durableMetadata.Failure is DurableAgentFailureData failure)
+            DurableAgentJsonUtilities.CaptureResponseEntityVersion(
+                response,
+                durableMetadata.EntityVersion ?? 1);
+            if (durableMetadata.RetainedResult is JsonElement result)
             {
-                DurableAgentJsonUtilities.CaptureCommittedFailure(response, failure);
+                DurableAgentJsonUtilities.CaptureRetainedResult(response, result);
+                if (durableMetadata.Failure is DurableAgentFailureData failure)
+                {
+                    DurableAgentJsonUtilities.CaptureCommittedFailure(response, failure);
+                }
             }
         }
 
@@ -79,6 +85,12 @@ internal sealed class DurableDataConverter : DataConverter
         if (value is null)
         {
             return null;
+        }
+
+        if (value is RunRequest { TargetAgentName: string targetAgentName } &&
+            agentOptions?.ContainsAgent(targetAgentName) == false)
+        {
+            throw new AgentNotRegisteredException(targetAgentName);
         }
 
         if (value is DurableAgentState durableAgentState)
@@ -99,7 +111,8 @@ internal sealed class DurableDataConverter : DataConverter
             return WriteResponseEnvelope(
                 native,
                 result,
-                DurableAgentJsonUtilities.GetCommittedFailure(response));
+                DurableAgentJsonUtilities.GetCommittedFailure(response),
+                DurableAgentJsonUtilities.GetResponseEntityVersion(response));
         }
 
         return typeInfo is not null
@@ -147,7 +160,8 @@ internal sealed class DurableDataConverter : DataConverter
     private static string WriteResponseEnvelope(
         JsonElement nativeResponse,
         JsonElement result,
-        DurableAgentFailureData? failure)
+        DurableAgentFailureData? failure,
+        int? entityVersion = null)
     {
         using MemoryStream stream = new();
         using (Utf8JsonWriter writer = new(stream))
@@ -167,6 +181,11 @@ internal sealed class DurableDataConverter : DataConverter
             writer.WriteStartObject();
             writer.WriteString("kind", ResponseEnvelopeKind);
             writer.WriteNumber("version", failure is null ? 1 : 2);
+            if (entityVersion is int version and >= 1)
+            {
+                writer.WriteNumber("entityVersion", version);
+            }
+
             writer.WritePropertyName("result");
             result.WriteTo(writer);
             if (failure is not null)
@@ -193,7 +212,7 @@ internal sealed class DurableDataConverter : DataConverter
     /// present, however, malformed, duplicate, or unsupported fields fail closed so untrusted or corrupted metadata
     /// cannot be exposed as the entity's committed outcome.
     /// </remarks>
-    private static (JsonElement? RetainedResult, DurableAgentFailureData? Failure)
+    private static (JsonElement? RetainedResult, DurableAgentFailureData? Failure, int? EntityVersion)
         ReadDurableResponseMetadata(string data)
     {
         using JsonDocument document = JsonDocument.Parse(data);
@@ -208,7 +227,7 @@ internal sealed class DurableDataConverter : DataConverter
 
         DurableAgentStateJsonConverter.ValidateNoDuplicateRecognizedProperties(
             envelope, "durable response envelope", StringComparer.OrdinalIgnoreCase,
-            "kind", "version", "result", "failure");
+            "kind", "version", "result", "failure", "entityVersion");
         if (envelope.ValueKind != JsonValueKind.Object ||
             !TryGetResponseMetadataProperty(envelope, "kind", out JsonElement kind) ||
             kind.ValueKind != JsonValueKind.String || kind.GetString() != ResponseEnvelopeKind ||
@@ -219,6 +238,19 @@ internal sealed class DurableDataConverter : DataConverter
             !result.TryGetProperty("messages", out JsonElement messages) || messages.ValueKind != JsonValueKind.Array)
         {
             throw new JsonException("The durable response metadata envelope is malformed or unsupported.");
+        }
+
+        int? entityVersion = null;
+        if (TryGetResponseMetadataProperty(envelope, "entityVersion", out JsonElement entityVersionElement))
+        {
+            if (entityVersionElement.ValueKind != JsonValueKind.Number ||
+                !entityVersionElement.TryGetInt32(out int parsedEntityVersion) ||
+                parsedEntityVersion < 1)
+            {
+                throw new JsonException("The durable response metadata envelope is malformed or unsupported.");
+            }
+
+            entityVersion = parsedEntityVersion;
         }
 
         DurableAgentFailureData? failure = null;
@@ -280,7 +312,7 @@ internal sealed class DurableDataConverter : DataConverter
             }
         }
 
-        return (result.Clone(), failure);
+        return (result.Clone(), failure, entityVersion);
     }
 
     private static bool TryGetResponseMetadataProperty(JsonElement element, string name, out JsonElement value)

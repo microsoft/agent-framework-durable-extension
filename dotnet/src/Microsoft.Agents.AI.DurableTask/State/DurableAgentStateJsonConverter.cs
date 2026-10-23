@@ -22,7 +22,7 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
             DurableAgentStateJsonContext.Default.JsonElement);
 
         DurableAgentState? state = ReadElement(element, allowRevisedSchema: true);
-        if (state?.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
+        if (state is not null && DurableAgentStateSchemaVersion.IsRevisedSchemaFamily(state.SchemaVersion))
         {
             // This worker understands receipts. Preserve already revised state without a downgrade,
             // including when a read-only duplicate operation republishes the hydrated state.
@@ -100,7 +100,7 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
         ValidateKnownFieldShapes(dataElement);
         DurableAgentStateSchemaVersion schemaVersion =
             DurableAgentStateSchemaVersion.ParseSupported(schemaVersionText);
-        if (schemaVersion.Major == DurableAgentState.RevisedSchemaMajorVersion)
+        if (schemaVersion.Major >= DurableAgentState.RevisedSchemaMajorVersion)
         {
             if (!allowRevisedSchema)
             {
@@ -159,7 +159,13 @@ internal sealed class DurableAgentStateJsonConverter : JsonConverter<DurableAgen
     {
         DurableAgentStateSchemaVersion schemaVersion =
             DurableAgentStateSchemaVersion.ParseSupported(value.SchemaVersion);
-        if (value.SchemaVersion == DurableAgentState.RevisedSchemaVersion && !allowRevisedSchema)
+        if (schemaVersion.Major > DurableAgentState.RevisedSchemaMajorVersion)
+        {
+            throw new InvalidOperationException(
+                $"The durable agent state schema version '{value.SchemaVersion}' is not supported.");
+        }
+
+        if (schemaVersion.Major == DurableAgentState.RevisedSchemaMajorVersion && !allowRevisedSchema)
         {
             throw new InvalidOperationException(
                 "Durable agent state schema 2.0.0 requires mailbox-aware runtime activation.");

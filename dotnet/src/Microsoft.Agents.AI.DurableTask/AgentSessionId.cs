@@ -1,5 +1,6 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.DurableTask.Entities;
@@ -12,7 +13,10 @@ namespace Microsoft.Agents.AI.DurableTask;
 [JsonConverter(typeof(AgentSessionIdJsonConverter))]
 public readonly struct AgentSessionId : IEquatable<AgentSessionId>
 {
-    private const string EntityNamePrefix = "dafx-";
+    internal const int CurrentEntityVersion = 2;
+    internal const string EntityNamePrefix = "dafx-v2-";
+    internal const string LegacyEntityNamePrefix = "dafx-";
+    internal const string ReservedVersionPrefix = "v2-";
     private readonly EntityInstanceId _entityId;
 
     /// <summary>
@@ -23,7 +27,15 @@ public readonly struct AgentSessionId : IEquatable<AgentSessionId>
     public AgentSessionId(string name, string key)
     {
         this.Name = name;
-        this._entityId = new EntityInstanceId(ToEntityName(name), key);
+        this.EntityVersion = CurrentEntityVersion;
+        this._entityId = new EntityInstanceId(ToEntityName(name, CurrentEntityVersion), key);
+    }
+
+    private AgentSessionId(string name, EntityInstanceId entityId, int entityVersion)
+    {
+        this.Name = name;
+        this._entityId = entityId;
+        this.EntityVersion = entityVersion;
     }
 
     /// <summary>
@@ -37,11 +49,90 @@ public readonly struct AgentSessionId : IEquatable<AgentSessionId>
     public string Key => this._entityId.Key;
 
     /// <summary>
-    /// Converts an agent name to its underlying entity name representation.
+    /// Gets the entity protocol version encoded in the underlying entity name (<c>1</c> for <c>dafx-{name}</c>,
+    /// or <c>N</c> for <c>dafx-v{N}-{name}</c>).
+    /// </summary>
+    internal int EntityVersion { get; }
+
+    /// <summary>
+    /// Gets a value indicating whether this session ID targets a prior-version entity (<c>EntityVersion &lt; CurrentEntityVersion</c>).
+    /// </summary>
+    internal bool IsLegacyEntity => this.EntityVersion < CurrentEntityVersion;
+
+    /// <summary>
+    /// Converts an agent name to its underlying current-version entity name representation (<c>dafx-v2-{name}</c>).
     /// </summary>
     /// <param name="name">The agent name.</param>
-    /// <returns>The entity name used by Durable Task for this agent.</returns>
-    internal static string ToEntityName(string name) => $"{EntityNamePrefix}{name}";
+    /// <returns>The current-version entity name used by Durable Task for this agent.</returns>
+    internal static string ToEntityName(string name) => ToEntityName(name, CurrentEntityVersion);
+
+    /// <summary>
+    /// Converts an agent name to its underlying entity name representation for the specified entity version
+    /// (<c>dafx-{name}</c> for version 1, or <c>dafx-v{version}-{name}</c> for version 2 and above).
+    /// </summary>
+    /// <param name="name">The agent name.</param>
+    /// <param name="version">The entity protocol version (<c>&gt;= 1</c>).</param>
+    /// <returns>The entity name used by Durable Task for this agent and version.</returns>
+    internal static string ToEntityName(string name, int version)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(version, 1);
+        return version == 1
+            ? $"{LegacyEntityNamePrefix}{name}"
+            : $"{LegacyEntityNamePrefix}v{version.ToString(CultureInfo.InvariantCulture)}-{name}";
+    }
+
+    /// <summary>
+    /// Converts an agent name to its legacy v1 entity name representation (<c>dafx-{name}</c>).
+    /// </summary>
+    /// <param name="name">The agent name.</param>
+    /// <returns>The legacy v1 entity name used by Durable Task for this agent.</returns>
+    internal static string ToLegacyEntityName(string name) => ToEntityName(name, version: 1);
+
+    /// <summary>
+    /// Creates a legacy v1 <see cref="AgentSessionId"/> targeting <c>@dafx-{name}@{key}</c>.
+    /// </summary>
+    /// <param name="name">The name of the agent that owns the session.</param>
+    /// <param name="key">The unique key of the agent session.</param>
+    /// <returns>A legacy <see cref="AgentSessionId"/> targeting <c>@dafx-{name}@{key}</c>.</returns>
+    internal static AgentSessionId CreateLegacy(string name, string key) =>
+        new(name, new EntityInstanceId(ToEntityName(name, version: 1), key), entityVersion: 1);
+
+    /// <summary>
+    /// Creates a copy of this <see cref="AgentSessionId"/> targeting the specified entity protocol version.
+    /// </summary>
+    internal AgentSessionId WithVersion(int version) =>
+        version == this.EntityVersion
+            ? this
+            : new(this.Name, new EntityInstanceId(ToEntityName(this.Name, version), this.Key), version);
+
+    /// <summary>
+    /// Determines whether the specified agent name begins with a reserved <c>v{digits}-</c> version prefix.
+    /// </summary>
+    internal static bool HasReservedVersionPrefix(ReadOnlySpan<char> value, out int dashIndex)
+    {
+        dashIndex = -1;
+        if (value.Length < 3 || value[0] is not ('v' or 'V'))
+        {
+            return false;
+        }
+
+        int separator = value.IndexOf('-');
+        if (separator < 2)
+        {
+            return false;
+        }
+
+        for (int index = 1; index < separator; index++)
+        {
+            if (value[index] is < '0' or > '9')
+            {
+                return false;
+            }
+        }
+
+        dashIndex = separator;
+        return true;
+    }
 
     /// <summary>
     /// Converts the <see cref="AgentSessionId"/> to an <see cref="EntityInstanceId"/>.
@@ -111,12 +202,7 @@ public readonly struct AgentSessionId : IEquatable<AgentSessionId>
     public static AgentSessionId Parse(string sessionIdString)
     {
         EntityInstanceId entityId = EntityInstanceId.FromString(sessionIdString);
-        if (!entityId.Name.StartsWith(EntityNamePrefix, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ArgumentException($"'{sessionIdString}' is not a valid agent session ID.", nameof(sessionIdString));
-        }
-
-        return new AgentSessionId(entityId.Name[EntityNamePrefix.Length..], entityId.Key);
+        return FromEntityId(entityId, nameof(sessionIdString), sessionIdString);
     }
 
     /// <summary>
@@ -135,11 +221,35 @@ public readonly struct AgentSessionId : IEquatable<AgentSessionId>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1065:Do not raise exceptions in unexpected locations", Justification = "Implicit conversion must validate format.")]
     public static implicit operator AgentSessionId(EntityInstanceId entityId)
     {
-        if (!entityId.Name.StartsWith(EntityNamePrefix, StringComparison.OrdinalIgnoreCase))
+        return FromEntityId(entityId, nameof(entityId), entityId.ToString());
+    }
+
+    private static AgentSessionId FromEntityId(EntityInstanceId entityId, string paramName, string rawValue)
+    {
+        if (entityId.Name.StartsWith(LegacyEntityNamePrefix, StringComparison.OrdinalIgnoreCase))
         {
-            throw new ArgumentException($"'{entityId}' is not a valid agent session ID.", nameof(entityId));
+            ReadOnlySpan<char> remainder = entityId.Name.AsSpan(LegacyEntityNamePrefix.Length);
+            if (HasReservedVersionPrefix(remainder, out int dashIndex))
+            {
+                ReadOnlySpan<char> versionDigits = remainder[1..dashIndex];
+                if (versionDigits[0] != '0' &&
+                    int.TryParse(versionDigits, NumberStyles.None, CultureInfo.InvariantCulture, out int version) &&
+                    version >= 2)
+                {
+                    string agentName = remainder[(dashIndex + 1)..].ToString();
+                    if (agentName.Length > 0)
+                    {
+                        return new AgentSessionId(agentName, entityId, version);
+                    }
+                }
+            }
+            else if (remainder.Length > 0)
+            {
+                return new AgentSessionId(remainder.ToString(), entityId, entityVersion: 1);
+            }
         }
-        return new AgentSessionId(entityId.Name[EntityNamePrefix.Length..], entityId.Key);
+
+        throw new ArgumentException($"'{rawValue}' is not a valid agent session ID.", paramName);
     }
 
     /// <summary>

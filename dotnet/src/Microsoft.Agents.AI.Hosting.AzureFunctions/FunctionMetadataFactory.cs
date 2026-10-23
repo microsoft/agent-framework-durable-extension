@@ -13,15 +13,35 @@ namespace Microsoft.Agents.AI.Hosting.AzureFunctions;
 internal static class FunctionMetadataFactory
 {
     /// <summary>
-    /// Creates function metadata for an entity trigger function.
+    /// Creates function metadata for a current-version entity trigger function (<c>dafx-v2-{name}</c>).
     /// </summary>
     /// <param name="name">The base name used to derive the entity function name.</param>
     /// <returns>A <see cref="DefaultFunctionMetadata"/> configured for an entity trigger.</returns>
-    internal static DefaultFunctionMetadata CreateEntityTrigger(string name)
+    internal static DefaultFunctionMetadata CreateEntityTrigger(string name) =>
+        CreateEntityTrigger(name, AgentSessionId.CurrentEntityVersion);
+
+    /// <summary>
+    /// Creates function metadata for a versioned entity trigger function (<c>dafx-{name}</c> or <c>dafx-v{version}-{name}</c>).
+    /// </summary>
+    /// <param name="name">The base name used to derive the entity function name.</param>
+    /// <param name="version">The entity protocol version.</param>
+    /// <returns>A <see cref="DefaultFunctionMetadata"/> configured for an entity trigger.</returns>
+    internal static DefaultFunctionMetadata CreateEntityTrigger(string name, int version) =>
+        CreateEntityTriggerWithFunctionName(AgentSessionId.ToEntityName(name, version));
+
+    /// <summary>
+    /// Creates function metadata for a legacy v1 entity trigger function (<c>dafx-{name}</c>).
+    /// </summary>
+    /// <param name="name">The base name used to derive the legacy entity function name.</param>
+    /// <returns>A <see cref="DefaultFunctionMetadata"/> configured for a legacy entity trigger.</returns>
+    internal static DefaultFunctionMetadata CreateLegacyEntityTrigger(string name) =>
+        CreateEntityTrigger(name, version: 1);
+
+    private static DefaultFunctionMetadata CreateEntityTriggerWithFunctionName(string entityFunctionName)
     {
         return new DefaultFunctionMetadata()
         {
-            Name = AgentSessionId.ToEntityName(name),
+            Name = entityFunctionName,
             Language = "dotnet-isolated",
             RawBindings =
             [

@@ -94,7 +94,7 @@
     <PackageVersion Include="Microsoft.Extensions.AI.Evaluation.Quality" Version="10.6.0" />
     <PackageVersion Include="Microsoft.Extensions.AI.Evaluation.Safety" Version="10.6.0" />
     <PackageVersion Include="Microsoft.Extensions.AI.OpenAI" Version="10.10.1" />
-    <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="10.0.0" />
+    <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="10.0.2" />
     <PackageVersion Include="Microsoft.Extensions.Compliance.Abstractions" Version="10.10.0" />
     <PackageVersion Include="Microsoft.Extensions.Configuration" Version="10.0.1" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.1" />
@@ -142,10 +142,10 @@
     <PackageVersion Include="Microsoft.Agents.ObjectModel.PowerFx" Version="2026.2.4.1" />
     <PackageVersion Include="Microsoft.PowerFx.Interpreter" Version="1.8.1" />
     <!-- Durable Task -->
-    <PackageVersion Include="Microsoft.DurableTask.Client" Version="1.18.0" />
-    <PackageVersion Include="Microsoft.DurableTask.Client.AzureManaged" Version="1.18.0" />
-    <PackageVersion Include="Microsoft.DurableTask.Worker" Version="1.18.0" />
-    <PackageVersion Include="Microsoft.DurableTask.Worker.AzureManaged" Version="1.18.0" />
+    <PackageVersion Include="Microsoft.DurableTask.Client" Version="1.26.0" />
+    <PackageVersion Include="Microsoft.DurableTask.Client.AzureManaged" Version="1.26.0" />
+    <PackageVersion Include="Microsoft.DurableTask.Worker" Version="1.26.0" />
+    <PackageVersion Include="Microsoft.DurableTask.Worker.AzureManaged" Version="1.26.0" />
     <!-- Azure Functions -->
     <PackageVersion Include="Microsoft.Azure.Functions.Worker" Version="2.50.0" />
     <PackageVersion Include="Microsoft.Azure.Functions.Worker.Extensions.DurableTask" Version="1.12.1" />

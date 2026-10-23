@@ -68,6 +68,9 @@ internal static partial class DurableAgentJsonUtilities
     private static readonly ConditionalWeakTable<AgentResponse, CommittedFailureHolder>
         s_committedFailuresByResponse = new();
 
+    private static readonly ConditionalWeakTable<AgentResponse, ResponseEntityVersionHolder>
+        s_responseEntityVersionsByResponse = new();
+
     /// <summary>
     /// Gets the singleton <see cref="JsonSerializerOptions"/> used for Durable Agent serialization.
     /// </summary>
@@ -107,6 +110,21 @@ internal static partial class DurableAgentJsonUtilities
         return s_committedFailuresByResponse.TryGetValue(response, out CommittedFailureHolder? failure)
             ? failure.Value
             : null;
+    }
+
+    internal static int? GetResponseEntityVersion(AgentResponse response)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        return s_responseEntityVersionsByResponse.TryGetValue(response, out ResponseEntityVersionHolder? holder)
+            ? holder.Value
+            : null;
+    }
+
+    internal static void CaptureResponseEntityVersion(AgentResponse response, int entityVersion)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        ArgumentOutOfRangeException.ThrowIfLessThan(entityVersion, 1);
+        s_responseEntityVersionsByResponse.AddOrUpdate(response, new ResponseEntityVersionHolder(entityVersion));
     }
 
     /// <summary>
@@ -206,6 +224,11 @@ internal static partial class DurableAgentJsonUtilities
         {
             CaptureCommittedFailure(target, failure);
         }
+
+        if (GetResponseEntityVersion(source) is int entityVersion)
+        {
+            CaptureResponseEntityVersion(target, entityVersion);
+        }
     }
 
     /// <summary>
@@ -222,6 +245,11 @@ internal static partial class DurableAgentJsonUtilities
     private sealed class CommittedFailureHolder(DurableAgentFailureData value)
     {
         public DurableAgentFailureData Value { get; } = value;
+    }
+
+    private sealed class ResponseEntityVersionHolder(int value)
+    {
+        public int Value { get; } = value;
     }
 
     /// <summary>

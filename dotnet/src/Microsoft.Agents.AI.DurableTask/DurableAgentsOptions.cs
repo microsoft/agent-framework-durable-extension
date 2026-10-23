@@ -9,11 +9,17 @@ namespace Microsoft.Agents.AI.DurableTask;
 /// </summary>
 public sealed class DurableAgentsOptions
 {
+    private const int DefaultMaxStateBytes = 1_048_576;
+    private const string ProcessLegacyEntitiesEnvironmentVariableName = "DURABLE_AGENTS_PROCESS_LEGACY_ENTITIES";
     // Agent names are case-insensitive
     private readonly Dictionary<string, Func<IServiceProvider, AIAgent>> _agentFactories = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TimeSpan?> _agentTimeToLive = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DurableAgentHistoryConfiguration> _historyConfigurations = new(StringComparer.OrdinalIgnoreCase);
     private bool _defaultTimeToLiveConfigured;
+    private bool? _configuredProcessLegacyEntities;
+    private bool? _resolvedProcessLegacyEntities;
+    private bool _processLegacyEntitiesEnvironmentCaptured;
+    private string? _processLegacyEntitiesEnvironmentValue;
 
     // Agents that were discovered on a workflow rather than registered explicitly by the caller. Hosts use
     // this to decide whether an agent should get its own entry points: an agent that only exists because a
@@ -22,6 +28,34 @@ public sealed class DurableAgentsOptions
 
     internal DurableAgentsOptions()
     {
+    }
+
+    /// <summary>
+    /// Gets or sets whether workers register and process legacy v1 agent entities (<c>dafx-{agent}</c>)
+    /// in addition to v2 agent entities (<c>dafx-v2-{agent}</c>), converting loaded schema 1.x state
+    /// in-place to schema 2.0.0 on the next turn. Defaults to <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Leave this setting <see langword="false"/> during Phase 1 rolling upgrades while legacy v1 workers
+    /// share the same Task Hub: v2 workers will register and filter only <c>dafx-v2-{agent}</c> entities,
+    /// leaving existing <c>dafx-{agent}</c> sessions on the base entity queue for v1 workers.
+    /// </para>
+    /// <para>
+    /// Enable this setting (<see langword="true"/> or <c>DURABLE_AGENTS_PROCESS_LEGACY_ENTITIES=true</c>)
+    /// in Phase 2 after all legacy v1 workers have been stopped. V2 workers will then register and filter
+    /// both <c>dafx-v2-{agent}</c> and <c>dafx-{agent}</c> entities and upgrade loaded 1.x state in-place
+    /// to schema 2.0.0.
+    /// </para>
+    /// </remarks>
+    public bool ProcessLegacyEntities
+    {
+        get => this._resolvedProcessLegacyEntities ?? this._configuredProcessLegacyEntities ?? false;
+        set
+        {
+            this._configuredProcessLegacyEntities = value;
+            this._resolvedProcessLegacyEntities = null;
+        }
     }
 
     /// <summary>
@@ -43,14 +77,14 @@ public sealed class DurableAgentsOptions
 
     /// <summary>
     /// Gets or sets whether successful entity operations may persist schema 2.0 request outcomes.
-    /// Defaults to <see langword="false"/>.
+    /// Defaults to <see langword="true"/>.
     /// </summary>
     /// <remarks>
-    /// This internal switch supports execution tests only; it is not a production rollout API.
-    /// Public activation awaits shared contract, consumer/rollback, and late-duplicate policy agreement.
-    /// Readers support both layouts regardless of this setting.
+    /// New sessions use <c>dafx-v2-{agent}</c> entities with work-item filtering, so schema 2.0 request
+    /// outcomes are enabled by default. The setter remains internal for legacy-writer execution tests;
+    /// readers support both layouts regardless of this setting.
     /// </remarks>
-    internal bool EnablePersistentRequestOutcomes { get; set; }
+    internal bool EnablePersistentRequestOutcomes { get; set; } = true;
 
     /// <summary>
     /// Gets or sets whether a certified provider adapter may commit explicitly attested terminal failures.
@@ -61,10 +95,10 @@ public sealed class DurableAgentsOptions
     internal bool EnableProviderFailureFinalization { get; set; }
 
     /// <summary>
-    /// Gets or sets the test-only agreement to delete receipt-bearing entities after an explicit TTL.
-    /// Production deletion remains disabled until a late-duplicate policy is agreed.
+    /// Gets or sets whether receipt-bearing entities may be deleted after an explicit TTL.
+    /// Defaults to <see langword="true"/>; unconfigured default TTLs still do not delete revised state.
     /// </summary>
-    internal bool EnableMailboxEntityDeletion { get; set; }
+    internal bool EnableMailboxEntityDeletion { get; set; } = true;
 
     /// <summary>
     /// Gets or sets a trusted, per-state authorization for complete synthetic legacy migration fixtures.
@@ -84,8 +118,8 @@ public sealed class DurableAgentsOptions
     /// When persistent request outcomes are enabled, committed runs schedule entity-local payload cleanup.
     /// Physical removal may lag expiry; polling reports unavailable without modifying state.
     /// Imported states without a scheduled check need an explicit cleanup operation or a successful new run.
-    /// The schema-2 mailbox writer remains an internal, default-off rollout capability in this release, so this
-    /// public setting does not activate mailbox persistence by itself.
+    /// This setting does not activate mailbox persistence by itself. SchemaV2 deployment acknowledgement
+    /// activates schema 2 for new entity generations; existing legacy sessions are not migrated.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The retention period is not positive.</exception>
     public TimeSpan? ResultRetentionPeriod
@@ -131,13 +165,14 @@ public sealed class DurableAgentsOptions
     } = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// Gets or sets the internal pressure-retention mode.
+    /// Gets or sets retention for durable entity conversation history. Defaults to
+    /// <see cref="DurableAgentHistoryRetentionMode.KeepAll"/>.
     /// </summary>
     /// <remarks>
-    /// Pressure retention remains behind the same internal rollout gate as schema 2 mailbox writes.
-    /// It is not a public activation surface until every participating reader and rollback target is compatible.
+    /// Auto uses a 1 MiB budget by default. Changing retention does not change the state schema or
+    /// downgrade existing state. Receipt-bearing entities are not automatically deleted by the legacy idle TTL.
     /// </remarks>
-    internal DurableAgentHistoryRetentionMode HistoryRetentionMode
+    public DurableAgentHistoryRetentionMode HistoryRetentionMode
     {
         get;
         set => field = Enum.IsDefined(value)
@@ -149,9 +184,15 @@ public sealed class DurableAgentsOptions
     } = DurableAgentHistoryRetentionMode.KeepAll;
 
     /// <summary>
-    /// Gets or sets the explicit storage-envelope byte budget for internal automatic retention.
+    /// Gets or sets the positive storage-envelope byte budget for automatic retention. Defaults to 1 MiB.
     /// </summary>
-    internal int? MaxStateBytes
+    /// <remarks>
+    /// The budget measures the complete UTF-8 escaped JSON-string entity state, including protected
+    /// results, completion receipts, session continuation and metadata. It is not a token or transcript limit.
+    /// A null value also resolves to 1 MiB under Auto; it does not disable Auto. Budget settings are inert
+    /// under KeepAll. Backend limits still apply regardless of this setting.
+    /// </remarks>
+    public int? MaxStateBytes
     {
         get;
         set => field = value is null or > 0
@@ -160,12 +201,14 @@ public sealed class DurableAgentsOptions
                 nameof(value),
                 value,
                 "The durable agent state budget must be null or a positive byte count.");
-    }
+    } = DefaultMaxStateBytes;
 
     /// <summary>
-    /// Gets or sets an internal override for the fraction at which pressure retention starts.
+    /// Gets or sets the fraction of <see cref="MaxStateBytes"/> at which automatic retention starts.
+    /// Defaults to 0.85 when not specified.
     /// </summary>
-    internal double? HistoryRetentionHighWatermark
+    /// <remarks>Under Auto, watermarks satisfy 0 &lt; low &lt; high &lt;= 1. They are inert under KeepAll.</remarks>
+    public double? HistoryRetentionHighWatermark
     {
         get;
         set
@@ -176,9 +219,14 @@ public sealed class DurableAgentsOptions
     }
 
     /// <summary>
-    /// Gets or sets an internal override for the fraction pressure retention targets.
+    /// Gets or sets the fraction of <see cref="MaxStateBytes"/> targeted by automatic retention.
+    /// Defaults to 0.70 when not specified.
     /// </summary>
-    internal double? HistoryRetentionLowWatermark
+    /// <remarks>
+    /// Under Auto, watermarks satisfy 0 &lt; low &lt; high &lt;= 1. They are inert under KeepAll. If protected state
+    /// prevents reaching this target, a write can still succeed below the high watermark.
+    /// </remarks>
+    public double? HistoryRetentionLowWatermark
     {
         get;
         set
@@ -190,16 +238,19 @@ public sealed class DurableAgentsOptions
 
     internal DurableAgentRetentionSettings GetRetentionSettings()
     {
+        if (!this._processLegacyEntitiesEnvironmentCaptured)
+        {
+            this._processLegacyEntitiesEnvironmentValue =
+                Environment.GetEnvironmentVariable(ProcessLegacyEntitiesEnvironmentVariableName);
+            this._processLegacyEntitiesEnvironmentCaptured = true;
+        }
+
+        this._resolvedProcessLegacyEntities = ResolveProcessLegacyEntities(
+            this._configuredProcessLegacyEntities,
+            this._processLegacyEntitiesEnvironmentValue);
+
         if (this.HistoryRetentionMode == DurableAgentHistoryRetentionMode.KeepAll)
         {
-            if (this.MaxStateBytes.HasValue ||
-                this.HistoryRetentionHighWatermark.HasValue ||
-                this.HistoryRetentionLowWatermark.HasValue)
-            {
-                throw new InvalidOperationException(
-                    "A durable state budget and retention watermarks are only valid when automatic history retention is enabled.");
-            }
-
             return new(
                 DurableAgentHistoryRetentionMode.KeepAll,
                 MaxStateBytes: null,
@@ -207,11 +258,7 @@ public sealed class DurableAgentsOptions
                 DurableAgentStateRetention.DefaultLowWatermark);
         }
 
-        if (this.MaxStateBytes is not int maxStateBytes)
-        {
-            throw new InvalidOperationException(
-                "Automatic durable history retention requires an explicit positive state byte budget.");
-        }
+        int maxStateBytes = this.MaxStateBytes ?? DefaultMaxStateBytes;
 
         double highWatermark =
             this.HistoryRetentionHighWatermark ?? DurableAgentStateRetention.DefaultHighWatermark;
@@ -228,6 +275,46 @@ public sealed class DurableAgentsOptions
             maxStateBytes,
             highWatermark,
             lowWatermark);
+    }
+
+    internal void ValidateConfiguration()
+    {
+        _ = this.GetRetentionSettings();
+    }
+
+    private static bool ResolveProcessLegacyEntities(
+        bool? configuredValue,
+        string? environmentValue)
+    {
+        bool? parsedEnvironment = null;
+        if (environmentValue is not null)
+        {
+            if (string.Equals(environmentValue, "true", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(environmentValue, "1", StringComparison.Ordinal))
+            {
+                parsedEnvironment = true;
+            }
+            else if (string.Equals(environmentValue, "false", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(environmentValue, "0", StringComparison.Ordinal))
+            {
+                parsedEnvironment = false;
+            }
+            else
+            {
+                throw new InvalidOperationException(
+                    "DURABLE_AGENTS_PROCESS_LEGACY_ENTITIES must be unset or 'true', 'false', '1', or '0'; " +
+                    "empty values, aliases, and surrounding whitespace are not supported.");
+            }
+
+            if (configuredValue.HasValue && configuredValue.Value != parsedEnvironment.Value)
+            {
+                throw new InvalidOperationException(
+                    $"Explicit ProcessLegacyEntities={configuredValue.Value} conflicts with " +
+                    $"DURABLE_AGENTS_PROCESS_LEGACY_ENTITIES={environmentValue}.");
+            }
+        }
+
+        return configuredValue ?? parsedEnvironment ?? false;
     }
 
     private static void ValidateWatermark(double? value, string parameterName)
@@ -311,9 +398,6 @@ public sealed class DurableAgentsOptions
     /// <remarks>
     /// Registering an agent that a workflow already discovered is allowed: the explicit registration takes over,
     /// so an agent can be promoted to a standalone agent regardless of whether the workflow was configured first.
-    /// Static fixed-owner incompatibilities are rejected during this call when the internal schema 2 writer is
-    /// active. Validation that depends on the completed options composition or restored session remains at entity
-    /// execution time, before provider, session, or model side effects.
     /// </remarks>
     public DurableAgentsOptions AddAIAgent(
         AIAgent agent,
@@ -327,11 +411,6 @@ public sealed class DurableAgentsOptions
             throw new ArgumentException($"{nameof(agent.Name)} must not be null or whitespace.", nameof(agent));
         }
 
-        // Direct registrations expose the constructed pipeline, so reject static incompatibilities now.
-        // Factory registrations are validated after their single per-operation construction.
-        DurableAgentHistoryOwnershipResolver.ValidateStaticConfiguration(
-            agent,
-            this.EnablePersistentRequestOutcomes);
         DurableAgentHistoryConfiguration historyConfiguration = CreateHistoryConfiguration(configureHistory);
         this.AddExplicitAgentFactory(agent.Name, sp => agent, nameof(agent));
         this._historyConfigurations[agent.Name] = historyConfiguration;
@@ -353,6 +432,13 @@ public sealed class DurableAgentsOptions
     /// </remarks>
     private void AddExplicitAgentFactory(string name, Func<IServiceProvider, AIAgent> factory, string paramName)
     {
+        if (AgentSessionId.HasReservedVersionPrefix(name, out _))
+        {
+            throw new ArgumentException(
+                $"Agent name '{name}' cannot start with a reserved version prefix (such as '{AgentSessionId.ReservedVersionPrefix}').",
+                paramName);
+        }
+
         if (this._agentFactories.ContainsKey(name) && !this._workflowRegisteredAgents.Contains(name))
         {
             throw new ArgumentException($"An agent with name '{name}' has already been registered.", paramName);

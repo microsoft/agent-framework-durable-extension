@@ -1,6 +1,8 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using Microsoft.Agents.AI.DurableTask;
 using Microsoft.Azure.Functions.Worker.Core.FunctionMetadata;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Agents.AI.Hosting.AzureFunctions;
@@ -38,6 +40,9 @@ internal sealed class DurableAgentFunctionMetadataTransformer : IFunctionMetadat
     {
         this._logger.LogTransformingFunctionMetadata(original.Count);
 
+        bool processLegacyEntities =
+            this._serviceProvider.GetService<DurableAgentsOptions>()?.ProcessLegacyEntities == true;
+
         // Seed with existing function names to avoid duplicates across transformers. An agent that a workflow
         // references and that is also registered explicitly (a promoted agent) is emitted by both transformers,
         // and whichever runs second must not re-add a trigger the other already contributed.
@@ -57,6 +62,13 @@ internal sealed class DurableAgentFunctionMetadataTransformer : IFunctionMetadat
             }
 
             AddIfNew(original, registeredFunctions, FunctionMetadataFactory.CreateEntityTrigger(agentName), () => this._logger.LogRegisteringTriggerForAgent(agentName, "entity"));
+            if (processLegacyEntities)
+            {
+                for (int version = 1; version < AgentSessionId.CurrentEntityVersion; version++)
+                {
+                    AddIfNew(original, registeredFunctions, FunctionMetadataFactory.CreateEntityTrigger(agentName, version), () => this._logger.LogRegisteringTriggerForAgent(agentName, "entity"));
+                }
+            }
 
             if (agentTriggerOptions.HttpTrigger.IsEnabled)
             {

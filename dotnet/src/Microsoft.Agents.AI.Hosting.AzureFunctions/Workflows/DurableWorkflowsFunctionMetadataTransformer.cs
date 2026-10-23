@@ -50,6 +50,9 @@ internal sealed class DurableWorkflowsFunctionMetadataTransformer : IFunctionMet
         int initialCount = original.Count;
         this._logger.LogTransformingFunctionMetadata(initialCount);
 
+        this._options.Agents.ValidateConfiguration();
+        bool processLegacyEntities = this._options.Agents.ProcessLegacyEntities;
+
         // Seed with existing function names to avoid duplicates across transformers
         // (e.g., when DurableAgentFunctionMetadataTransformer already registered entity triggers).
         HashSet<string> registeredFunctions = new(
@@ -147,6 +150,19 @@ internal sealed class DurableWorkflowsFunctionMetadataTransformer : IFunctionMet
                     {
                         this._logger.LogRegisteringWorkflowTrigger(workflow.Key, entityName, "entity");
                         original.Add(FunctionMetadataFactory.CreateEntityTrigger(executorName));
+                    }
+
+                    if (processLegacyEntities)
+                    {
+                        for (int version = 1; version < AgentSessionId.CurrentEntityVersion; version++)
+                        {
+                            string legacyEntityName = AgentSessionId.ToEntityName(executorName, version);
+                            if (registeredFunctions.Add(legacyEntityName))
+                            {
+                                this._logger.LogRegisteringWorkflowTrigger(workflow.Key, legacyEntityName, "entity");
+                                original.Add(FunctionMetadataFactory.CreateEntityTrigger(executorName, version));
+                            }
+                        }
                     }
                 }
                 else

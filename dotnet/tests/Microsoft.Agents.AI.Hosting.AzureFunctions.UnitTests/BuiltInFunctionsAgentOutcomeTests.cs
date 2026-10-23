@@ -302,6 +302,73 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
         Assert.True(body.RootElement.TryGetProperty("response", out _));
     }
 
+    [Theory]
+    [InlineData("@dafx-TestAgent@legacy-key", "dafx-testagent", "legacy-key", true)]
+    [InlineData("@dafx-v2-TestAgent@v2-key", "dafx-v2-testagent", "v2-key", false)]
+    [InlineData("plain-key", "dafx-v2-testagent", "plain-key", false)]
+    public async Task HttpAndMcp_FullOrBareSessionId_RoutesToExpectedEntityAndReturnsSessionKeyAsync(
+        string suppliedSessionId,
+        string expectedEntityName,
+        string expectedKey,
+        bool expectedIsLegacy)
+    {
+        AgentSessionId resolved = BuiltInFunctions.ResolveAgentSessionId(AgentName, suppliedSessionId, "fallback");
+        Assert.Equal(AgentName, resolved.Name, ignoreCase: true);
+        Assert.Equal(expectedKey, resolved.Key);
+        Assert.Equal(expectedIsLegacy, resolved.IsLegacyEntity);
+        Assert.Equal(new EntityInstanceId(expectedEntityName, expectedKey), resolved.ToEntityId());
+
+        using EndpointFixture httpFixture = new(sessionIdOverride: suppliedSessionId);
+        HttpResponseData httpResponse = await BuiltInFunctions.RunAgentHttpAsync(
+            httpFixture.Request, httpFixture.Client.Object, httpFixture.Context);
+        Assert.Equal(HttpStatusCode.OK, httpResponse.StatusCode);
+        Assert.Equal(expectedKey, Assert.Single(httpResponse.Headers.GetValues("x-ms-session-id")));
+        httpFixture.Entities.Verify(
+            c => c.SignalEntityAsync(
+                new EntityInstanceId(expectedEntityName, expectedKey),
+                It.IsAny<string>(),
+                It.IsAny<object>(),
+                It.IsAny<SignalEntityOptions>(),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+
+        using EndpointFixture mcpFixture = new();
+        ToolInvocationContext mcpContext = CreateToolContext("json");
+        mcpContext.Arguments!["sessionId"] = suppliedSessionId;
+        string? mcpResponse = await BuiltInFunctions.RunMcpToolAsync(
+            mcpContext, mcpFixture.Client.Object, mcpFixture.Context);
+        using JsonDocument mcpDoc = JsonDocument.Parse(Assert.IsType<string>(mcpResponse));
+        Assert.Equal(expectedKey, mcpDoc.RootElement.GetProperty("session_id").GetString());
+        mcpFixture.Entities.Verify(
+            c => c.SignalEntityAsync(
+                new EntityInstanceId(expectedEntityName, expectedKey),
+                It.IsAny<string>(),
+                It.IsAny<object>(),
+                It.IsAny<SignalEntityOptions>(),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Theory]
+    [InlineData("@dafx-OtherAgent@key")]
+    [InlineData("@dafx-v2-OtherAgent@key")]
+    [InlineData("@invalid")]
+    public async Task HttpAndMcp_MismatchedOrInvalidFullSessionId_RejectsWithoutDispatchingAsync(string invalidSessionId)
+    {
+        using EndpointFixture httpFixture = new(sessionIdOverride: invalidSessionId);
+        HttpResponseData httpResponse = await BuiltInFunctions.RunAgentHttpAsync(
+            httpFixture.Request, httpFixture.Client.Object, httpFixture.Context);
+        Assert.Equal(HttpStatusCode.BadRequest, httpResponse.StatusCode);
+        httpFixture.Entities.VerifyNoOtherCalls();
+
+        using EndpointFixture mcpFixture = new();
+        ToolInvocationContext mcpContext = CreateToolContext();
+        mcpContext.Arguments!["sessionId"] = invalidSessionId;
+        await Assert.ThrowsAsync<ArgumentException>(() => BuiltInFunctions.RunMcpToolAsync(
+            mcpContext, mcpFixture.Client.Object, mcpFixture.Context));
+        mcpFixture.Entities.VerifyNoOtherCalls();
+    }
+
     private const string BuiltInFunctionsTestResponseFormat = "responseFormat";
 
     private static DurableAgentState CreateSuccessfulMailboxState(string correlation, string? value)
@@ -402,6 +469,7 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
             string accept = "application/json",
             Func<string, DurableAgentState>? stateFactory = null,
             bool legacyNames = true,
+            string? sessionIdOverride = null,
             CancellationToken cancellationToken = default)
         {
             ServiceCollection services = new();
@@ -432,11 +500,12 @@ public sealed class BuiltInFunctionsAgentOutcomeTests
             request.SetupGet(r => r.Body).Returns(this._requestBody);
             string sessionParameter = legacyNames ? "session_id" : "sessionId";
             string waitParameter = legacyNames ? "wait_for_response" : "waitForResponse";
+            string effectiveSessionId = sessionIdOverride ?? SessionKey;
             request.SetupGet(r => r.Url).Returns(new Uri(
-                $"https://localhost/api/agents/{AgentName}/run?{sessionParameter}={SessionKey}&{waitParameter}={waitForResponse}"));
+                $"https://localhost/api/agents/{AgentName}/run?{sessionParameter}={Uri.EscapeDataString(effectiveSessionId)}&{waitParameter}={waitForResponse}"));
             request.SetupGet(r => r.Query).Returns(new NameValueCollection
             {
-                [sessionParameter] = SessionKey,
+                [sessionParameter] = effectiveSessionId,
                 [waitParameter] = waitForResponse.ToString(),
             });
             request.Setup(r => r.CreateResponse()).Returns(response.Object);

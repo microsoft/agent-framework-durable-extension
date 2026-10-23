@@ -55,7 +55,7 @@ public sealed class AgentEntityTests(ITestOutputHelper outputHelper) : IDisposab
         DurableTaskClient client = testHelper.GetClient();
 
         AgentSessionId sessionId = session.GetService<AgentSessionId>();
-        EntityInstanceId expectedEntityId = new($"dafx-{simpleAgent.Name}", sessionId.Key);
+        EntityInstanceId expectedEntityId = new($"dafx-v2-{simpleAgent.Name}", sessionId.Key);
 
         EntityMetadata? entity = await client.Entities.GetEntityAsync(expectedEntityId, false, this.TestTimeoutToken);
 
@@ -102,7 +102,7 @@ public sealed class AgentEntityTests(ITestOutputHelper outputHelper) : IDisposab
         DurableTaskClient client = testHelper.GetClient();
 
         AgentSessionId sessionId = session.GetService<AgentSessionId>();
-        EntityInstanceId expectedEntityId = new($"dafx-{simpleAgent.Name}", sessionId.Key);
+        EntityInstanceId expectedEntityId = new($"dafx-v2-{simpleAgent.Name}", sessionId.Key);
 
         EntityMetadata? entity = await client.Entities.GetEntityAsync(expectedEntityId, false, this.TestTimeoutToken);
 

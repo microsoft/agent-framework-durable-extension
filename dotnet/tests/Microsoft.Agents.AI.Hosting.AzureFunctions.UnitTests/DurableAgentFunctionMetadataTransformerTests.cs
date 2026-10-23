@@ -2,6 +2,7 @@
 
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
+using Microsoft.Agents.AI.DurableTask;
 using Microsoft.Azure.Functions.Worker.Core.FunctionMetadata;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -52,7 +53,7 @@ public sealed class DurableAgentFunctionMetadataTransformerTests
         Assert.Equal(initialMetadataEntryCount + expectedMetadataCount, metadataList.Count);
 
         DefaultFunctionMetadata agentTrigger = Assert.IsType<DefaultFunctionMetadata>(metadataList[initialMetadataEntryCount]);
-        Assert.Equal("dafx-testAgent", agentTrigger.Name);
+        Assert.Equal("dafx-v2-testAgent", agentTrigger.Name);
         Assert.Contains("entityTrigger", agentTrigger.RawBindings![0]);
 
         if (enableHttp)
@@ -120,10 +121,10 @@ public sealed class DurableAgentFunctionMetadataTransformerTests
 
         foreach (string agentName in agents.Keys)
         {
-            // The agent's entity trigger name is prefixed with "dafx-"
+            // The agent's v2 entity trigger name is prefixed with "dafx-v2-"
             DefaultFunctionMetadata entityMeta =
                 Assert.IsType<DefaultFunctionMetadata>(
-                    Assert.Single(metadataList, m => m.Name == $"dafx-{agentName}"));
+                    Assert.Single(metadataList, m => m.Name == $"dafx-v2-{agentName}"));
             Assert.NotNull(entityMeta.RawBindings);
             Assert.Contains("entityTrigger", entityMeta.RawBindings[0]);
 
@@ -203,9 +204,55 @@ public sealed class DurableAgentFunctionMetadataTransformerTests
         // Assert: only standaloneAgent should have triggers (entity + http = 2).
         // workflowAgent should be skipped entirely.
         Assert.Equal(2, metadataList.Count);
-        Assert.Contains(metadataList, m => m.Name == "dafx-standaloneAgent");
+        Assert.Contains(metadataList, m => m.Name == "dafx-v2-standaloneAgent");
         Assert.Contains(metadataList, m => m.Name == "http-standaloneAgent");
         Assert.DoesNotContain(metadataList, m => m.Name!.Contains("workflowAgent"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Transform_RespectsProcessLegacyEntitiesOption(bool processLegacyEntities)
+    {
+        Dictionary<string, Func<IServiceProvider, AIAgent>> agents = new()
+        {
+            { "testAgent", _ => new TestAgent("testAgent", "Test agent description") }
+        };
+
+        FunctionsAgentOptions triggerOptions = new();
+        triggerOptions.HttpTrigger.IsEnabled = false;
+        triggerOptions.McpToolTrigger.IsEnabled = false;
+
+        IFunctionsAgentOptionsProvider agentOptionsProvider = new FakeOptionsProvider(new Dictionary<string, FunctionsAgentOptions>
+        {
+            { "testAgent", triggerOptions }
+        });
+
+        DurableAgentsOptions durableAgentsOptions = new()
+        {
+            ProcessLegacyEntities = processLegacyEntities,
+        };
+
+        List<IFunctionMetadata> metadataList = [];
+        DurableAgentFunctionMetadataTransformer transformer = new(
+            agents,
+            NullLogger<DurableAgentFunctionMetadataTransformer>.Instance,
+            new FakeServiceProvider(durableAgentsOptions),
+            agentOptionsProvider);
+
+        transformer.Transform(metadataList);
+
+        Assert.Contains(metadataList, m => m.Name == "dafx-v2-testAgent");
+        if (processLegacyEntities)
+        {
+            Assert.Equal(2, metadataList.Count);
+            Assert.Contains(metadataList, m => m.Name == "dafx-testAgent");
+        }
+        else
+        {
+            Assert.Single(metadataList);
+            Assert.DoesNotContain(metadataList, m => m.Name == "dafx-testAgent");
+        }
     }
 
     private static List<IFunctionMetadata> BuildFunctionMetadataList(int numberOfFunctions)
@@ -226,9 +273,10 @@ public sealed class DurableAgentFunctionMetadataTransformerTests
         return list;
     }
 
-    private sealed class FakeServiceProvider : IServiceProvider
+    private sealed class FakeServiceProvider(DurableAgentsOptions? options = null) : IServiceProvider
     {
-        public object? GetService(Type serviceType) => null;
+        public object? GetService(Type serviceType) =>
+            serviceType == typeof(DurableAgentsOptions) ? options : null;
     }
 
     private sealed class FakeOptionsProvider : IFunctionsAgentOptionsProvider

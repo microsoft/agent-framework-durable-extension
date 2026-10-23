@@ -14,12 +14,13 @@ public sealed class DurableAgentSessionTests
 
         JsonElement serializedSession = session.Serialize();
 
-        // Expected format: "{\"sessionId\":\"@dafx-test-agent@<random-key>\"}"
-        string expectedSerializedSession = $"{{\"sessionId\":\"@dafx-{sessionId.Name}@{sessionId.Key}\",\"stateBag\":{{}}}}";
+        // Expected format: "{\"sessionId\":\"@dafx-v2-test-agent@<random-key>\"}"
+        string expectedSerializedSession = $"{{\"sessionId\":\"@dafx-v2-{sessionId.Name}@{sessionId.Key}\",\"stateBag\":{{}}}}";
         Assert.Equal(expectedSerializedSession, serializedSession.ToString());
 
         DurableAgentSession deserializedSession = DurableAgentSession.Deserialize(serializedSession);
         Assert.Equal(sessionId, deserializedSession.SessionId);
+        Assert.False(deserializedSession.SessionId.IsLegacyEntity);
     }
 
     [Fact]
@@ -32,13 +33,29 @@ public sealed class DurableAgentSessionTests
         // does serialization based on the static type of the object, not the runtime type.
         string serializedSession = JsonSerializer.Serialize(session, typeof(DurableAgentSession));
 
-        // Expected format: "{\"sessionId\":\"@dafx-test-agent@<random-key>\"}"
-        string expectedSerializedSession = $"{{\"sessionId\":\"@dafx-{sessionId.Name}@{sessionId.Key}\",\"stateBag\":{{}}}}";
+        // Expected format: "{\"sessionId\":\"@dafx-v2-test-agent@<random-key>\"}"
+        string expectedSerializedSession = $"{{\"sessionId\":\"@dafx-v2-{sessionId.Name}@{sessionId.Key}\",\"stateBag\":{{}}}}";
         Assert.Equal(expectedSerializedSession, serializedSession);
 
         DurableAgentSession? deserializedSession = JsonSerializer.Deserialize<DurableAgentSession>(serializedSession);
         Assert.NotNull(deserializedSession);
         Assert.Equal(sessionId, deserializedSession.SessionId);
+        Assert.False(deserializedSession.SessionId.IsLegacyEntity);
+    }
+
+    [Fact]
+    public void LegacySessionDeserialization_PreservesLegacyEntityPrefix()
+    {
+        const string LegacyJson = """{"sessionId":"@dafx-test-agent@legacy-key","stateBag":{}}""";
+        using JsonDocument doc = JsonDocument.Parse(LegacyJson);
+
+        DurableAgentSession deserialized = DurableAgentSession.Deserialize(doc.RootElement);
+
+        Assert.Equal("test-agent", deserialized.SessionId.Name);
+        Assert.Equal("legacy-key", deserialized.SessionId.Key);
+        Assert.True(deserialized.SessionId.IsLegacyEntity);
+        Assert.Equal("@dafx-test-agent@legacy-key", deserialized.SessionId.ToString());
+        Assert.Equal(LegacyJson, deserialized.Serialize().ToString());
     }
 
     [Fact]

@@ -41,7 +41,7 @@ public sealed class DurableAIAgent : AIAgent
     protected override ValueTask<AgentSession> CreateSessionCoreAsync(CancellationToken cancellationToken = default)
     {
         AgentSessionId sessionId = this._context.NewAgentSessionId(this._agentName);
-        return ValueTask.FromResult<AgentSession>(new DurableAgentSession(sessionId));
+        return ValueTask.FromResult<AgentSession>(new DurableAgentSession(sessionId, canAdoptReplayedEntityVersion: true));
     }
 
     /// <inheritdoc cref="AIAgent.RunAsync(AgentSession, AgentRunOptions, CancellationToken)"/>
@@ -227,7 +227,8 @@ public sealed class DurableAIAgent : AIAgent
 
         RunRequest request = new([.. messages], responseFormat, enableToolCalls, enableToolNames)
         {
-            OrchestrationId = this._context.InstanceId
+            OrchestrationId = this._context.InstanceId,
+            TargetAgentName = this._agentName,
         };
 
         try
@@ -236,6 +237,19 @@ public sealed class DurableAIAgent : AIAgent
                 durableSession.SessionId,
                 nameof(AgentEntity.Run),
                 request);
+            if (durableSession.CanAdoptReplayedEntityVersion)
+            {
+                if (this._context.IsReplaying &&
+                    DurableAgentJsonUtilities.GetResponseEntityVersion(response) is int replayedEntityVersion)
+                {
+                    durableSession.LockEntityVersion(replayedEntityVersion);
+                }
+                else if (!this._context.IsReplaying)
+                {
+                    durableSession.LockEntityVersion();
+                }
+            }
+
             if (DurableAgentJsonUtilities.GetCommittedFailure(response) is DurableAgentFailureData failure)
             {
                 throw new DurableAgentTerminalException(

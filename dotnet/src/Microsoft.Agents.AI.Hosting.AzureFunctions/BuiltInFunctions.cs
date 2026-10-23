@@ -412,13 +412,21 @@ internal static class BuiltInFunctions
             return response;
         }
 
-        // The caller-supplied value is treated as a session key (not a full session ID).
+        // The caller-supplied value is treated as a session key unless it is a full '@dafx-...' session ID.
         // If no session key is provided, use the function invocation ID as the session key
         // to help correlate the session with the function invocation.
         string agentName = GetAgentName(context);
-        AgentSessionId sessionId = string.IsNullOrEmpty(sessionIdValue)
-            ? new AgentSessionId(agentName, context.InvocationId)
-            : new AgentSessionId(agentName, sessionIdValue);
+        if (!TryResolveAgentSessionId(
+                agentName,
+                sessionIdValue,
+                context.InvocationId,
+                out AgentSessionId sessionId,
+                out string? sessionIdError))
+        {
+            HttpResponseData response = await CreateErrorResponseAsync(req, context, HttpStatusCode.BadRequest, sessionIdError);
+            AddAgentHttpDeprecationHeaders(response, usedLegacyAgentHttpNames);
+            return response;
+        }
 
         if (string.IsNullOrWhiteSpace(message))
         {
@@ -547,9 +555,10 @@ internal static class BuiltInFunctions
             sessionKey = threadArg;
         }
 
-        AgentSessionId sessionId = sessionKey is not null
-            ? new AgentSessionId(agentName, sessionKey)
-            : new AgentSessionId(agentName, functionContext.InvocationId);
+        AgentSessionId sessionId = ResolveAgentSessionId(
+            agentName,
+            sessionKey,
+            functionContext.InvocationId);
 
         AIAgent agentProxy = client.AsDurableAgentProxy(functionContext, agentName);
 
@@ -1208,6 +1217,62 @@ internal static class BuiltInFunctions
 
     internal static bool TryCombineSessionIdAliases(string? sessionId, string? legacyThreadId, out string? result) =>
         TryCombineSessionIdAliases(sessionId, null, legacyThreadId, out result);
+
+    internal static AgentSessionId ResolveAgentSessionId(
+        string agentName,
+        string? sessionIdValue,
+        string fallbackKey)
+    {
+        if (!TryResolveAgentSessionId(agentName, sessionIdValue, fallbackKey, out AgentSessionId sessionId, out string? errorMessage))
+        {
+            throw new ArgumentException(errorMessage, nameof(sessionIdValue));
+        }
+
+        return sessionId;
+    }
+
+    internal static bool TryResolveAgentSessionId(
+        string agentName,
+        string? sessionIdValue,
+        string fallbackKey,
+        out AgentSessionId sessionId,
+        [NotNullWhen(false)] out string? errorMessage)
+    {
+        if (string.IsNullOrEmpty(sessionIdValue))
+        {
+            sessionId = new AgentSessionId(agentName, fallbackKey);
+            errorMessage = null;
+            return true;
+        }
+
+        if (sessionIdValue[0] == '@')
+        {
+            try
+            {
+                AgentSessionId parsed = AgentSessionId.Parse(sessionIdValue);
+                if (!string.Equals(parsed.Name, agentName, StringComparison.OrdinalIgnoreCase))
+                {
+                    sessionId = default;
+                    errorMessage = $"The session ID '{sessionIdValue}' belongs to agent '{parsed.Name}', not '{agentName}'.";
+                    return false;
+                }
+
+                sessionId = parsed;
+                errorMessage = null;
+                return true;
+            }
+            catch (ArgumentException ex)
+            {
+                sessionId = default;
+                errorMessage = ex.Message;
+                return false;
+            }
+        }
+
+        sessionId = new AgentSessionId(agentName, sessionIdValue);
+        errorMessage = null;
+        return true;
+    }
 
     private static string GetAgentName(FunctionContext context)
     {

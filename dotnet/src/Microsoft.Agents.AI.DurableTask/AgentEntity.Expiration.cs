@@ -15,6 +15,49 @@ internal partial class AgentEntity
     private static readonly TimeSpan s_minimumResultExpirationSignalDelay = TimeSpan.FromMinutes(1);
 
     /// <summary>
+    /// Keeps loaded legacy state from being deleted and mistaken for a fresh schema-v2 generation on the next run.
+    /// </summary>
+    private bool ShouldPreserveLegacyCleanupState(TaskEntityOperation operation)
+    {
+        bool resultCleanup = string.Equals(operation.Name, nameof(CheckAndExpireResults), StringComparison.OrdinalIgnoreCase);
+        if (!resultCleanup &&
+            !string.Equals(operation.Name, nameof(CheckAndDeleteIfExpired), StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        DurableAgentState? persistedState =
+            (DurableAgentState?)operation.State.GetState(typeof(DurableAgentState));
+        if (persistedState is null)
+        {
+            return false;
+        }
+
+        if (DurableAgentStateSchemaVersion.IsRevisedSchemaFamily(persistedState.SchemaVersion))
+        {
+            // Idle deletion must not erase completion receipts, including on read-only rollback workers.
+            if (!resultCleanup && !this._options.EnableMailboxEntityDeletion)
+            {
+                ValidateForCommit(persistedState);
+                return true;
+            }
+
+            return false;
+        }
+
+        if (!this._schemaV2WritesEnabled &&
+            !resultCleanup && persistedState.Data.ExpirationTimeUtc.HasValue)
+        {
+            return false;
+        }
+
+        this._cancellationToken.ThrowIfCancellationRequested();
+        ValidateForCommit(persistedState);
+        // Even a successful no-op triggers SDK write-back. Bypass dispatch to preserve the original JSON bytes.
+        return true;
+    }
+
+    /// <summary>
     /// Determines whether a scheduled result-expiration signal still owns the current persisted schedule generation.
     /// </summary>
     /// <remarks>
@@ -37,7 +80,7 @@ internal partial class AgentEntity
         }
 
         _ = DurableAgentStateSchemaVersion.ParseSupported(persistedState.SchemaVersion);
-        if (persistedState.SchemaVersion != DurableAgentState.RevisedSchemaVersion)
+        if (!DurableAgentStateSchemaVersion.IsRevisedSchemaFamily(persistedState.SchemaVersion))
         {
             // Result expiration applies only to the revised mailbox. Validate legacy state, but do not dispatch a
             // successful no-op because the base dispatcher would still rewrite it.
@@ -116,7 +159,7 @@ internal partial class AgentEntity
                 return;
             }
 
-            if (this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion)
+            if (!DurableAgentStateSchemaVersion.IsRevisedSchemaFamily(this.State.SchemaVersion))
             {
                 ValidateForCommit(this.State);
                 return;
@@ -130,10 +173,10 @@ internal partial class AgentEntity
                 return;
             }
 
-            if (!this._options.EnablePersistentRequestOutcomes)
+            if (!this._schemaV2WritesEnabled)
             {
                 throw new InvalidOperationException(
-                    $"Result expiration requires {nameof(DurableAgentsOptions.EnablePersistentRequestOutcomes)} to be enabled.");
+                    $"Schema 2 result expiration requires {nameof(DurableAgentsOptions.EnablePersistentRequestOutcomes)} to be enabled.");
             }
 
             // Unlike a new run, cleanup must not assign history identities or promote legacy state.
@@ -178,7 +221,9 @@ internal partial class AgentEntity
             return;
         }
 
-        if (this.State.SchemaVersion == DurableAgentState.RevisedSchemaVersion &&
+        bool isRevisedState =
+            DurableAgentStateSchemaVersion.IsRevisedSchemaFamily(this.State.SchemaVersion);
+        if (isRevisedState &&
             !this._options.EnableMailboxEntityDeletion)
         {
             // A legacy deadline is not authorization to erase completion evidence.
@@ -187,23 +232,22 @@ internal partial class AgentEntity
 
         if (!this._options.ContainsAgent(sessionId.Name) ||
             !this._options.GetTimeToLive(
-                sessionId.Name, this.State.SchemaVersion == DurableAgentState.RevisedSchemaVersion).HasValue)
+                sessionId.Name, isRevisedState).HasValue)
         {
             if (expirationTime.HasValue)
             {
                 logger.LogTTLExpirationTimeCleared(sessionId);
                 bool migrateLegacy =
-                    this._options.EnablePersistentRequestOutcomes &&
-                    this._options.HistoryRetentionMode == DurableAgentHistoryRetentionMode.Auto &&
-                    this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
-                    this._options.AuthorizeLegacyMigration?.Invoke(this.State) == true;
-                if (this._options.HistoryRetentionMode == DurableAgentHistoryRetentionMode.Auto &&
-                    this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
+                    this._schemaV2WritesEnabled &&
+                    this.IsLegacyMigrationAuthorized(sessionId, this.State);
+                if (this._schemaV2WritesEnabled &&
+                    !isRevisedState &&
                     !migrateLegacy)
                 {
                     throw new DurableAgentStateCorruptionException(
-                        "Automatic history retention requires schema 2 mailbox state. Legacy terminal transcript " +
-                        "entries must be converted from independently authoritative complete history before TTL mutation.");
+                        "A schema-v2 deployment cannot change expiration for an existing legacy session " +
+                        "unless legacy entity migration is enabled. " +
+                        "Keep that session on its original deployment.");
                 }
 
                 DurableAgentState workingState = migrateLegacy
@@ -211,8 +255,8 @@ internal partial class AgentEntity
                         this.State,
                         hasAuthoritativeLegacyHistory: true)
                     : this.State.Clone();
-                if (this._options.EnablePersistentRequestOutcomes &&
-                    workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
+                if (this._schemaV2WritesEnabled &&
+                    DurableAgentStateSchemaVersion.IsRevisedSchemaFamily(workingState.SchemaVersion))
                 {
                     workingState.PersistentRequestOutcomesAuthorized = true;
                 }
@@ -305,7 +349,8 @@ internal partial class AgentEntity
         ILogger logger)
     {
         TimeSpan? timeToLive = this._options.GetTimeToLive(
-            sessionId.Name, workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion);
+            sessionId.Name,
+            DurableAgentStateSchemaVersion.IsRevisedSchemaFamily(workingState.SchemaVersion));
         DateTime? previousExpirationTime = workingState.Data.ExpirationTimeUtc;
         if (!timeToLive.HasValue)
         {
@@ -339,7 +384,7 @@ internal partial class AgentEntity
         out AgentEntityResultExpirationCheck? nextSignal)
     {
         nextSignal = null;
-        if (workingState.SchemaVersion != DurableAgentState.RevisedSchemaVersion)
+        if (!DurableAgentStateSchemaVersion.IsRevisedSchemaFamily(workingState.SchemaVersion))
         {
             return workingState;
         }

@@ -12,6 +12,20 @@ public sealed class FunctionMetadataFactoryTests
     {
         DefaultFunctionMetadata metadata = FunctionMetadataFactory.CreateEntityTrigger("myAgent");
 
+        Assert.Equal("dafx-v2-myAgent", metadata.Name);
+        Assert.Equal("dotnet-isolated", metadata.Language);
+        Assert.Equal(BuiltInFunctions.RunAgentEntityFunctionEntryPoint, metadata.EntryPoint);
+        Assert.NotNull(metadata.RawBindings);
+        Assert.Equal(2, metadata.RawBindings.Count);
+        Assert.Contains("entityTrigger", metadata.RawBindings[0]);
+        Assert.Contains("durableClient", metadata.RawBindings[1]);
+    }
+
+    [Fact]
+    public void CreateLegacyEntityTrigger_SetsCorrectNameAndBindings()
+    {
+        DefaultFunctionMetadata metadata = FunctionMetadataFactory.CreateLegacyEntityTrigger("myAgent");
+
         Assert.Equal("dafx-myAgent", metadata.Name);
         Assert.Equal("dotnet-isolated", metadata.Language);
         Assert.Equal(BuiltInFunctions.RunAgentEntityFunctionEntryPoint, metadata.EntryPoint);

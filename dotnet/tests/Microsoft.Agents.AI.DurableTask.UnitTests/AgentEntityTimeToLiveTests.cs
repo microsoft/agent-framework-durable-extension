@@ -148,6 +148,7 @@ public sealed class AgentEntityTimeToLiveTests
             TimeSpan.FromMinutes(5),
             state,
             registerAgent: false);
+        harness.Options.EnablePersistentRequestOutcomes = false;
 
         await harness.CheckExpirationAsync(
             new AgentEntityDeletionCheck(state.Data.ExpirationTimeUtc.Value));
@@ -159,7 +160,7 @@ public sealed class AgentEntityTimeToLiveTests
     }
 
     [Fact]
-    public async Task AutoRejectsUnauthorizedLegacyTtlMutationAsync()
+    public async Task IsolatedPreservesUnauthorizedLegacyTtlWithoutMutationAsync()
     {
         DurableAgentState state = new();
         state.Data.ExpirationTimeUtc = s_startTime.AddMinutes(5).UtcDateTime;
@@ -167,12 +168,10 @@ public sealed class AgentEntityTimeToLiveTests
             TimeSpan.FromMinutes(5),
             state,
             registerAgent: false);
-        harness.Options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
         harness.Options.AuthorizeLegacyMigration = null;
 
-        _ = await Assert.ThrowsAsync<DurableAgentStateCorruptionException>(
-            () => harness.CheckExpirationAsync(
-                new AgentEntityDeletionCheck(state.Data.ExpirationTimeUtc.Value)));
+        await harness.CheckExpirationAsync(
+            new AgentEntityDeletionCheck(state.Data.ExpirationTimeUtc.Value));
 
         Assert.Same(state, harness.State);
         Assert.Equal(s_startTime.AddMinutes(5).UtcDateTime, state.Data.ExpirationTimeUtc);

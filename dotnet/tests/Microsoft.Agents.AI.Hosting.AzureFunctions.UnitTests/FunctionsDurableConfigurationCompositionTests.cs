@@ -2,6 +2,7 @@
 
 using System.Collections;
 using System.Reflection;
+using Microsoft.Agents.AI.DurableTask;
 using Microsoft.Agents.AI.Workflows;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Builder;
@@ -9,6 +10,8 @@ using Microsoft.Azure.Functions.Worker.Core.FunctionMetadata;
 using Microsoft.Azure.Functions.Worker.Invocation;
 using Microsoft.Azure.Functions.Worker.Middleware;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Moq;
 
 namespace Microsoft.Agents.AI.Hosting.AzureFunctions.UnitTests;
@@ -92,6 +95,82 @@ public sealed class FunctionsDurableConfigurationCompositionTests
         Assert.Contains(typeof(DurableWorkflowsFunctionMetadataTransformer), transformers);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task MetadataManager_ValidatesCompletedOptionsBeforeMcpFactoryAsync(bool valid, bool reverse)
+    {
+        FunctionsApplicationBuilder builder = FunctionsApplication.CreateBuilder([]);
+        builder.Logging.ClearProviders();
+        int callbacks = 0;
+        int factories = 0;
+        string agentName = $"MetadataAgent-{Guid.NewGuid():N}";
+        void ConfigureRetention(DurableAgentsOptions options)
+        {
+            callbacks++;
+            options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+            options.HistoryRetentionHighWatermark = 0.6;
+            options.AddAIAgentFactory(agentName, _ =>
+            {
+                factories++;
+                return new TestAgent(agentName, "MCP description");
+            }, enableHttpTrigger: false, enableMcpToolTrigger: true);
+            options.AddAIAgentFactory($"{agentName}-unused",
+                _ => throw new InvalidOperationException("Non-MCP factories must not run."),
+                enableHttpTrigger: false, enableMcpToolTrigger: false);
+        }
+        void ConfigureWatermarks(DurableOptions options)
+        {
+            callbacks++;
+            options.Agents.HistoryRetentionLowWatermark = valid ? 0.4 : 0.8;
+        }
+        if (reverse)
+        {
+            builder.ConfigureDurableOptions(ConfigureWatermarks);
+            builder.ConfigureDurableAgents(ConfigureRetention);
+        }
+        else
+        {
+            builder.ConfigureDurableAgents(ConfigureRetention);
+            builder.ConfigureDurableOptions(ConfigureWatermarks);
+        }
+        builder.ConfigureDurableWorkflows(_ => { });
+        Assert.Equal(2, callbacks);
+        Assert.Equal(0, factories);
+        Assert.Contains(builder.Services, service => service.IsKeyedService && Equals(service.ServiceKey, agentName));
+
+        using IHost host = builder.Build();
+        string metadataDirectory = Path.Combine(AppContext.BaseDirectory, $"functions-metadata-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(metadataDirectory);
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(metadataDirectory, "functions.metadata"), "[]", TestContext.Current.CancellationToken);
+            async Task<IReadOnlyList<IFunctionMetadata>> GenerateAsync() =>
+                await host.Services.GetRequiredService<IFunctionMetadataManager>().GetFunctionMetadataAsync(metadataDirectory);
+
+            if (!valid)
+            {
+                InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(GenerateAsync);
+                Assert.Contains("0 < low < high <= 1", exception.Message, StringComparison.Ordinal);
+                Assert.Equal(0, factories);
+                return;
+            }
+            IReadOnlyList<IFunctionMetadata> metadata = await GenerateAsync();
+            Assert.Equal(1, factories);
+            IFunctionMetadata tool = Assert.Single(metadata, function => function.Name == $"mcptool-{agentName}");
+            Assert.Contains("MCP description", tool.RawBindings![0], StringComparison.Ordinal);
+            Assert.Contains(metadata, function => function.Name == $"dafx-v2-{agentName}");
+            Assert.DoesNotContain(metadata, function => function.Name == $"dafx-{agentName}");
+            Assert.DoesNotContain(metadata, function => function.Name == $"http-{agentName}");
+        }
+        finally
+        {
+            Directory.Delete(metadataDirectory, recursive: true);
+        }
+    }
+
     /// <summary>
     /// An agent registered through <c>ConfigureDurableOptions</c> must get the same entry points it would get
     /// from <c>ConfigureDurableAgents</c>. Previously it got none at all, not even the entity trigger, which
@@ -110,7 +189,7 @@ public sealed class FunctionsDurableConfigurationCompositionTests
             viaAgents.Select(name => name.Replace("ParityAgentsAgent", "<agent>", StringComparison.Ordinal)),
             viaOptions.Select(name => name.Replace("ParityOptionsAgent", "<agent>", StringComparison.Ordinal)));
 
-        Assert.Contains("dafx-ParityOptionsAgent", viaOptions);
+        Assert.Contains("dafx-v2-ParityOptionsAgent", viaOptions);
         Assert.Contains("http-ParityOptionsAgent", viaOptions);
     }
 
@@ -126,7 +205,8 @@ public sealed class FunctionsDurableConfigurationCompositionTests
             builder.ConfigureDurableOptions(options =>
                 options.Workflows.AddWorkflow(BuildAgentWorkflow("ImplicitWorkflow", "ImplicitAgent"))));
 
-        Assert.Contains("dafx-ImplicitAgent", functions);
+        Assert.Contains("dafx-v2-ImplicitAgent", functions);
+        Assert.DoesNotContain("dafx-ImplicitAgent", functions);
         Assert.DoesNotContain("http-ImplicitAgent", functions);
     }
 
@@ -147,7 +227,7 @@ public sealed class FunctionsDurableConfigurationCompositionTests
             builder.ConfigureDurableAgents(agents => agents.AddAIAgent(agent));
         });
 
-        Assert.Contains("dafx-PromotedFunctionsAgent", functions);
+        Assert.Contains("dafx-v2-PromotedFunctionsAgent", functions);
         Assert.Contains("http-PromotedFunctionsAgent", functions);
     }
 
@@ -168,7 +248,7 @@ public sealed class FunctionsDurableConfigurationCompositionTests
             builder.ConfigureDurableAgents(agents => agents.AddAIAgent(agent));
         });
 
-        Assert.Contains("dafx-DedupeWorkflowsFirstAgent", functions);
+        Assert.Contains("dafx-v2-DedupeWorkflowsFirstAgent", functions);
         AssertNoDuplicates(functions);
     }
 
@@ -188,7 +268,55 @@ public sealed class FunctionsDurableConfigurationCompositionTests
                 workflows.AddWorkflow(BuildAgentWorkflow("DedupeAgentsFirstWorkflow", agent)));
         });
 
-        Assert.Contains("dafx-DedupeAgentsFirstAgent", functions);
+        Assert.Contains("dafx-v2-DedupeAgentsFirstAgent", functions);
+        AssertNoDuplicates(functions);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ConfigureDurableOptions_Phase2ProcessLegacyEntities_EmitsBothV2AndLegacyTriggersWithoutDuplicates(
+        bool agentsFirst)
+    {
+        TestAgent promotedAgent = new("PromotedDualTriggerAgent", "desc");
+        TestAgent workflowOnlyAgent = new("WorkflowOnlyDualTriggerAgent", "desc");
+
+        List<string> functions = GenerateFunctionNames(builder =>
+        {
+            if (agentsFirst)
+            {
+                builder.ConfigureDurableAgents(agents =>
+                {
+                    agents.ProcessLegacyEntities = true;
+                    agents.AddAIAgent(promotedAgent);
+                });
+                builder.ConfigureDurableWorkflows(workflows =>
+                {
+                    workflows.AddWorkflow(BuildAgentWorkflow("DualTriggerWorkflow1", promotedAgent));
+                    workflows.AddWorkflow(BuildAgentWorkflow("DualTriggerWorkflow2", workflowOnlyAgent));
+                });
+            }
+            else
+            {
+                builder.ConfigureDurableWorkflows(workflows =>
+                {
+                    workflows.AddWorkflow(BuildAgentWorkflow("DualTriggerWorkflow1", promotedAgent));
+                    workflows.AddWorkflow(BuildAgentWorkflow("DualTriggerWorkflow2", workflowOnlyAgent));
+                });
+                builder.ConfigureDurableAgents(agents =>
+                {
+                    agents.ProcessLegacyEntities = true;
+                    agents.AddAIAgent(promotedAgent);
+                });
+            }
+        });
+
+        Assert.Contains("dafx-v2-PromotedDualTriggerAgent", functions);
+        Assert.Contains("dafx-PromotedDualTriggerAgent", functions);
+        Assert.Contains("http-PromotedDualTriggerAgent", functions);
+        Assert.Contains("dafx-v2-WorkflowOnlyDualTriggerAgent", functions);
+        Assert.Contains("dafx-WorkflowOnlyDualTriggerAgent", functions);
+        Assert.DoesNotContain("http-WorkflowOnlyDualTriggerAgent", functions);
         AssertNoDuplicates(functions);
     }
 

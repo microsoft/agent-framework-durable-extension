@@ -62,7 +62,6 @@ public sealed class HistoryRetentionScenario
 
 public static class HistoryRetentionDemo
 {
-    // This draft profile is exercised by the product unit tests through the internal rollout gate.
     public const int MaxStateBytes = 32 * 1024;
     public const int ScenarioTurns = 7;
     public const int NotesPerTurn = 4 * 1024;
@@ -85,6 +84,16 @@ public static class HistoryRetentionDemo
     public static int HighWatermarkBytes => (int)(MaxStateBytes * HighWatermark);
 
     public static int LowWatermarkBytes => (int)(MaxStateBytes * LowWatermark);
+
+    public static void ConfigureRetention(DurableAgentsOptions options, bool processLegacyEntities = false)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        options.ProcessLegacyEntities = processLegacyEntities;
+        options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
+        options.MaxStateBytes = MaxStateBytes;
+        options.HistoryRetentionHighWatermark = HighWatermark;
+        options.HistoryRetentionLowWatermark = LowWatermark;
+    }
 
     public static ChatClientAgentOptions CreateAgentOptions() =>
         new()

@@ -12,9 +12,10 @@ namespace Microsoft.Agents.AI.DurableTask;
 [DebuggerDisplay("{DebuggerDisplay,nq}")]
 public sealed class DurableAgentSession : AgentSession
 {
-    internal DurableAgentSession(AgentSessionId sessionId)
+    internal DurableAgentSession(AgentSessionId sessionId, bool canAdoptReplayedEntityVersion = false)
     {
         this.SessionId = sessionId;
+        this.CanAdoptReplayedEntityVersion = canAdoptReplayedEntityVersion;
     }
 
     [JsonConstructor]
@@ -28,7 +29,29 @@ public sealed class DurableAgentSession : AgentSession
     /// </summary>
     [JsonInclude]
     [JsonPropertyName("sessionId")]
-    internal AgentSessionId SessionId { get; }
+    internal AgentSessionId SessionId { get; set; }
+
+    /// <summary>
+    /// Gets a value indicating whether this session was newly created inside an orchestration and can adopt
+    /// the entity protocol version observed on its first replayed turn.
+    /// </summary>
+    [JsonIgnore]
+    internal bool CanAdoptReplayedEntityVersion { get; private set; }
+
+    internal void LockEntityVersion(int? entityVersion = null)
+    {
+        if (!this.CanAdoptReplayedEntityVersion)
+        {
+            return;
+        }
+
+        if (entityVersion is int version and >= 1)
+        {
+            this.SessionId = this.SessionId.WithVersion(version);
+        }
+
+        this.CanAdoptReplayedEntityVersion = false;
+    }
 
     /// <inheritdoc/>
     internal JsonElement Serialize(JsonSerializerOptions? jsonSerializerOptions = null)

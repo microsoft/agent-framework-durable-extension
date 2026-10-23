@@ -2794,7 +2794,7 @@ public sealed class AgentEntityHistoryTests
                 agent,
                 state,
                 firstRequest,
-                configureOptions: ConfigureDraftSampleRetention);
+                configureOptions: ConfigureSampleRetention);
             Assert.Equal(1, Assert.Single(operationMeasurements));
             for (int turn = 2; turn <= HistoryRetentionDemo.ScenarioTurns; turn++)
             {
@@ -2814,7 +2814,7 @@ public sealed class AgentEntityHistoryTests
                             ? NewestCorrelationId
                             : $"sample-middle-{turn}",
                     },
-                    configureOptions: ConfigureDraftSampleRetention);
+                    configureOptions: ConfigureSampleRetention);
                 Assert.Equal(turn, operationMeasurements.Count);
             }
 
@@ -2841,7 +2841,7 @@ public sealed class AgentEntityHistoryTests
             AgentResponse duplicate = await CreateHarness(
                 new ChatClientAgent(duplicateClient, name: "agent"),
                 reloaded,
-                configureOptions: ConfigureDraftSampleRetention).RunAsync(
+                configureOptions: ConfigureSampleRetention).RunAsync(
                     new RunRequest("different request") { CorrelationId = FirstCorrelationId });
             Assert.Equal("response", duplicate.Text);
             Assert.Equal(0, duplicateClient.InvocationCount);
@@ -2854,12 +2854,12 @@ public sealed class AgentEntityHistoryTests
                 {
                     CorrelationId = "sample-diagnostic",
                 },
-                configureOptions: ConfigureDraftSampleRetention);
+                configureOptions: ConfigureSampleRetention);
             Assert.DoesNotContain(
                 diagnosticClient.LastMessages,
                 message => message.Text?.Contains(Marker, StringComparison.Ordinal) is true);
 
-            static void ConfigureDraftSampleRetention(DurableAgentsOptions options)
+            static void ConfigureSampleRetention(DurableAgentsOptions options)
             {
                 options.HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto;
                 options.MaxStateBytes = HistoryRetentionDemo.MaxStateBytes;
@@ -3000,7 +3000,7 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
-    public async Task KeepAllRejectsInapplicableBudgetBeforeModelExecutionAsync()
+    public async Task KeepAllBudgetDoesNotPruneOrBlockModelExecutionAsync()
     {
         RecordingChatClient client = new();
         DurableAgentState initialState = CreateLargeState();
@@ -3009,14 +3009,12 @@ public sealed class AgentEntityHistoryTests
             initialState,
             configureOptions: options => options.MaxStateBytes = 500);
 
-        InvalidOperationException exception =
-            await Assert.ThrowsAsync<InvalidOperationException>(
-                () => harness.RunAsync(
-                    new RunRequest("new request") { CorrelationId = "new" }));
-
-        Assert.Contains("only valid", exception.Message, StringComparison.Ordinal);
-        Assert.Equal(0, client.InvocationCount);
-        Assert.False(harness.StateWasPersisted);
+        await harness.RunAsync(new RunRequest("new request") { CorrelationId = "new" });
+        DurableAgentState written = Assert.IsType<DurableAgentState>(harness.PersistedState);
+        Assert.Equal(initialState.Data.ConversationHistory.Count + 2, written.Data.ConversationHistory.Count);
+        Assert.Null(written.Data.Truncation);
+        Assert.Equal(1, client.InvocationCount);
+        Assert.True(harness.StateWasPersisted);
     }
 
     [Fact]
@@ -3041,7 +3039,7 @@ public sealed class AgentEntityHistoryTests
                     new RunRequest("new request") { CorrelationId = "new" }));
 
         Assert.Contains(
-            "independently authoritative complete history",
+            "original deployment",
             exception.Message,
             StringComparison.Ordinal);
         Assert.Equal(0, client.InvocationCount);
@@ -3097,7 +3095,7 @@ public sealed class AgentEntityHistoryTests
                     new RunRequest("different request") { CorrelationId = "duplicate" }));
 
         Assert.Contains(
-            "independently authoritative complete history",
+            "original deployment",
             exception.Message,
             StringComparison.Ordinal);
         Assert.Equal(0, client.InvocationCount);
@@ -3105,12 +3103,12 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
-    public void AutoDoesNotInitializeMailboxStateWithoutInternalGate()
+    public void PublicAutoInitializesMailboxStateWithoutInternalGate()
     {
         DurableAgentsOptions options = new()
         {
-            EnablePersistentRequestOutcomes = false,
             HistoryRetentionMode = DurableAgentHistoryRetentionMode.Auto,
+            MaxStateBytes = 32 * 1024,
         };
         Dictionary<Type, object> services = new()
         {
@@ -3124,10 +3122,10 @@ public sealed class AgentEntityHistoryTests
 
         DurableAgentState initialized = entity.Initialize(operation.Object);
 
-        Assert.Equal(DurableAgentState.CurrentSchemaVersion, initialized.SchemaVersion);
-        Assert.False(initialized.PersistentRequestOutcomesAuthorized);
-        Assert.Null(initialized.Data.TerminalResults);
-        Assert.Null(initialized.Data.CompletionReceipts);
+        Assert.Equal(DurableAgentState.RevisedSchemaVersion, initialized.SchemaVersion);
+        Assert.True(initialized.PersistentRequestOutcomesAuthorized);
+        Assert.Empty(initialized.Data.TerminalResults!);
+        Assert.Empty(initialized.Data.CompletionReceipts!);
     }
 
     [Fact]

@@ -137,17 +137,15 @@ internal static class DurableAgentSamples
         {
             Name = "DurableAgents_Console_10_AutoHistoryRetention",
             ProjectPath = "samples/DurableAgents/ConsoleApps/10_AutoHistoryRetention",
-            SkipReason = ExperimentalMailboxSkipReason,
             RequiredEnvironmentVariables =
             [
                 "FOUNDRY_PROJECT_ENDPOINT",
                 "FOUNDRY_MODEL",
-                "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
             ],
             Inputs = ["automatic retention sample"],
             ExpectedOutputDescription =
             [
-                "The output should explain that KeepAll is the default and this draft sample explicitly opts into Auto transcript pressure retention without exposing mailbox activation.",
+                "The output should explain that KeepAll is the default and this sample explicitly opts into Auto transcript pressure retention.",
                 "The output should print the original random marker, the diagnostic question, the model response, and an honest observation.",
                 "The output should explain that old model transcript can be removed while durable mailbox, completion, binding, session, and bookkeeping evidence stays protected.",
                 "The output should explain that OpenTelemetry metrics are attempt-level operational evidence rather than durable committed truth.",

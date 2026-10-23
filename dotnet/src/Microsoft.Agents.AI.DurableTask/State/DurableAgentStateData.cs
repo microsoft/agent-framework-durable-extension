@@ -179,7 +179,7 @@ internal sealed class DurableAgentStateData
 
         this.Truncation?.Validate();
 
-        if (version.Major == DurableAgentState.RevisedSchemaMajorVersion)
+        if (version.Major >= DurableAgentState.RevisedSchemaMajorVersion)
         {
             if (this.ConversationHistory is null)
             {
