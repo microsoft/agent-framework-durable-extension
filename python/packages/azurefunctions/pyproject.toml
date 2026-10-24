@@ -38,7 +38,7 @@ azure-blob-payloads = [
 # so it cannot inherit the workspace root's groups. Keep the pinned versions here
 # in lockstep with ../../pyproject.toml -- that file is the source of truth.
 dev = [
-    "uv==0.11.28",
+    "uv==0.13.4",
     "flit==3.12.0",
     "ruff==0.15.20",
     "pytest==9.1.1",
