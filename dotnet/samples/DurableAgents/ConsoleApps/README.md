@@ -12,6 +12,7 @@ This directory contains samples for console app hosting of durable agents. These
 - **[08_FoundryManagedAgent](08_FoundryManagedAgent)**: Draft/experimental source for binding a server-managed, versioned Microsoft Foundry agent to a stable logical service owner and restoring its opaque service continuation across a host restart. Runtime execution remains gated.
 - **[09_CustomHistoryProvider](09_CustomHistoryProvider)**: Draft/experimental JSON-file external history provider with a stable logical key, more than 1 MiB of cumulative history, a bounded model window, and cold-restored external references. Runtime execution remains gated.
 - **[10_AutoHistoryRetention](10_AutoHistoryRetention)**: Draft/experimental opt-in transcript-pressure retention sample with protected completion evidence and OpenTelemetry observations. Runtime execution remains gated.
+- **[11_GitHubCopilotAgent](11_GitHubCopilotAgent)**: Demonstrates hosting `GitHubCopilotAgent` (`Microsoft.Agents.AI.GitHub.Copilot` / `GitHub.Copilot.SDK`) as a multi-turn Durable Agent across host restarts, inside a Human-in-the-Loop Durable Orchestration, and inside a Durable Workflow using `DurableAgentHistoryReplayMode.CurrentRequestOnly`.
 
 Samples 08 through 10 require schema 2 mailbox state, whose writer remains internal and disabled by
 default. They cannot be enabled in mixed-runtime production until Python, the dashboard, pollers, and
