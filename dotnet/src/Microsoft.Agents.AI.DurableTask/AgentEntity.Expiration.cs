@@ -15,6 +15,49 @@ internal partial class AgentEntity
     private static readonly TimeSpan s_minimumResultExpirationSignalDelay = TimeSpan.FromMinutes(1);
 
     /// <summary>
+    /// Keeps loaded legacy state from being deleted and mistaken for a fresh schema-v2 generation on the next run.
+    /// </summary>
+    private bool ShouldPreserveLegacyCleanupState(TaskEntityOperation operation)
+    {
+        bool resultCleanup = string.Equals(operation.Name, nameof(CheckAndExpireResults), StringComparison.OrdinalIgnoreCase);
+        if (!resultCleanup &&
+            !string.Equals(operation.Name, nameof(CheckAndDeleteIfExpired), StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        DurableAgentState? persistedState =
+            (DurableAgentState?)operation.State.GetState(typeof(DurableAgentState));
+        if (persistedState is null)
+        {
+            return false;
+        }
+
+        if (persistedState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
+        {
+            // Idle deletion must not erase completion receipts, including on read-only rollback workers.
+            if (!resultCleanup && !this._options.EnableMailboxEntityDeletion)
+            {
+                ValidateForCommit(persistedState);
+                return true;
+            }
+
+            return false;
+        }
+
+        if (this._deploymentMode != DurableAgentDeploymentMode.SchemaV2 &&
+            !resultCleanup && persistedState.Data.ExpirationTimeUtc.HasValue)
+        {
+            return false;
+        }
+
+        this._cancellationToken.ThrowIfCancellationRequested();
+        ValidateForCommit(persistedState);
+        // Even a successful no-op triggers SDK write-back. Bypass dispatch to preserve the original JSON bytes.
+        return true;
+    }
+
+    /// <summary>
     /// Determines whether a scheduled result-expiration signal still owns the current persisted schedule generation.
     /// </summary>
     /// <remarks>
@@ -130,10 +173,12 @@ internal partial class AgentEntity
                 return;
             }
 
-            if (!this._options.EnablePersistentRequestOutcomes)
+            if (!this._schemaV2WritesEnabled)
             {
                 throw new InvalidOperationException(
-                    $"Result expiration requires {nameof(DurableAgentsOptions.EnablePersistentRequestOutcomes)} to be enabled.");
+                    "Schema 2 result expiration is disabled because schema-v2 deployment mode is not enabled. " +
+                    "Set DurableAgentsOptions.DeploymentMode to DurableAgentDeploymentMode.SchemaV2, " +
+                    "or set DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2 before startup.");
             }
 
             // Unlike a new run, cleanup must not assign history identities or promote legacy state.
@@ -193,17 +238,17 @@ internal partial class AgentEntity
             {
                 logger.LogTTLExpirationTimeCleared(sessionId);
                 bool migrateLegacy =
-                    this._options.EnablePersistentRequestOutcomes &&
-                    this._options.HistoryRetentionMode == DurableAgentHistoryRetentionMode.Auto &&
+                    this._schemaV2WritesEnabled &&
+                    this._deploymentMode == DurableAgentDeploymentMode.SchemaV2 &&
                     this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
                     this._options.AuthorizeLegacyMigration?.Invoke(this.State) == true;
-                if (this._options.HistoryRetentionMode == DurableAgentHistoryRetentionMode.Auto &&
+                if (this._deploymentMode == DurableAgentDeploymentMode.SchemaV2 &&
                     this.State.SchemaVersion != DurableAgentState.RevisedSchemaVersion &&
                     !migrateLegacy)
                 {
                     throw new DurableAgentStateCorruptionException(
-                        "Automatic history retention requires schema 2 mailbox state. Legacy terminal transcript " +
-                        "entries must be converted from independently authoritative complete history before TTL mutation.");
+                        "A schema-v2 deployment cannot change expiration for an existing legacy session. " +
+                        "Keep that session on its original deployment.");
                 }
 
                 DurableAgentState workingState = migrateLegacy
@@ -211,7 +256,7 @@ internal partial class AgentEntity
                         this.State,
                         hasAuthoritativeLegacyHistory: true)
                     : this.State.Clone();
-                if (this._options.EnablePersistentRequestOutcomes &&
+                if (this._schemaV2WritesEnabled &&
                     workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion)
                 {
                     workingState.PersistentRequestOutcomesAuthorized = true;
