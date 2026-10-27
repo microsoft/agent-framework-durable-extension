@@ -11,6 +11,35 @@ The migrated code covers:
 
 For the full Agent Framework source, see [microsoft/agent-framework](https://github.com/microsoft/agent-framework).
 
+## Packages and installation
+
+| Language | Hosting model | Package | Guide |
+| --- | --- | --- | --- |
+| .NET | Self-hosted / console / containers / AKS | `Microsoft.Agents.AI.DurableTask` | [README](dotnet/src/Microsoft.Agents.AI.DurableTask/README.md) |
+| .NET | Azure Functions (.NET isolated worker) | `Microsoft.Agents.AI.Hosting.AzureFunctions` | [README](dotnet/src/Microsoft.Agents.AI.Hosting.AzureFunctions/README.md) |
+| Python | Self-hosted / console / containers / AKS | `agent-framework-durabletask` | [README](python/packages/durabletask/README.md) |
+| Python | Azure Functions (Python v2) | `agent-framework-azurefunctions` | [README](python/packages/azurefunctions/README.md) |
+
+### .NET (NuGet)
+
+```bash
+# Self-hosted durable agents and workflows
+dotnet add package Microsoft.Agents.AI.DurableTask --prerelease
+
+# Azure Functions (.NET isolated worker) hosting
+dotnet add package Microsoft.Agents.AI.Hosting.AzureFunctions --prerelease
+```
+
+### Python (PyPI)
+
+```bash
+# Self-hosted durable agents and workflows
+pip install agent-framework-durabletask --pre
+
+# Azure Functions (Python v2) hosting
+pip install agent-framework-azurefunctions --pre
+```
+
 ## Repository layout
 
 ```text
