@@ -32,6 +32,7 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
     private readonly CancellationToken _cancellationToken = cancellationToken != default
         ? cancellationToken
         : services.GetService<IHostApplicationLifetime>()?.ApplicationStopping ?? CancellationToken.None;
+    private DurableAgentState? _initializedMailboxGeneration;
 
     /// <summary>
     /// Rejects stale scheduled result-expiration operations before the standard entity dispatcher can initialize
@@ -47,6 +48,7 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
     /// </remarks>
     ValueTask<object?> ITaskEntity.RunAsync(TaskEntityOperation operation)
     {
+        this._initializedMailboxGeneration = null;
         if (IsScheduledResultExpirationOperation(operation) &&
             !this.ShouldDispatchScheduledResultExpiration(operation))
         {
@@ -64,9 +66,15 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         // a revised mailbox containing authoritative terminal results and completion receipts.
         bool shouldInitializePersistentRequestOutcomes =
             this._options.EnablePersistentRequestOutcomes && IsAgentRunOperation(entityOperation);
-        return shouldInitializePersistentRequestOutcomes
-            ? CreateEmptyPersistentRequestOutcomeState()
-            : base.InitializeState(entityOperation);
+        if (!shouldInitializePersistentRequestOutcomes)
+        {
+            return base.InitializeState(entityOperation);
+        }
+
+        // SDK 1.18 calls InitializeState only when operation.State has no current state.
+        // Keep this operation-local identity; an empty imported mailbox is not a new generation.
+        this._initializedMailboxGeneration = CreateEmptyPersistentRequestOutcomeState();
+        return this._initializedMailboxGeneration;
     }
 
     /// <summary>
@@ -155,6 +163,7 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
 
         if (resolvedOutcome.Kind != DurableAgentRunOutcomeKind.Pending)
         {
+            // A pending-initialization profile permits only NEW correlations, never old failures.
             // Correlation is the caller's idempotency key. Retained terminal state is reused
             // without comparing request content, so callers must not reuse it for another request.
             // Surface failures before optional migration so failed delivery never writes state.
@@ -239,6 +248,12 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             _ = AgentEntityResultExpirySchedule.Read(workingState, this.Context.Id.ToString());
         }
 
+        DurableAgentHistoryConfiguration historyConfiguration =
+            this._options.GetHistoryConfiguration(sessionId.Name);
+        string? configuredHistoryProviderKey =
+            historyConfiguration.ProviderKey?.Value;
+        bool pendingProviderInitialization = DurableAgentHistoryBinding.ValidatePendingProviderInitialization(
+            this.State, configuredHistoryProviderKey) is not null;
         DurableAgentStateHistoryBinding? persistedHistoryBinding =
             DurableAgentHistoryBinding.Parse(this.State.Data.HistoryBinding);
         DurableAgentHistoryBinding.ValidateMarkedProfile(
@@ -248,10 +263,6 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             DurableAgentHistoryBinding.IsSealedByCSharp(persistedHistoryBinding)
                 ? persistedHistoryBinding
                 : null;
-        DurableAgentHistoryConfiguration historyConfiguration =
-            this._options.GetHistoryConfiguration(sessionId.Name);
-        string? configuredHistoryProviderKey =
-            historyConfiguration.ProviderKey?.Value;
         DurableAgentHistoryBinding.ValidateContinuationPresence(
             existingHistoryBinding,
             this.State.Data.Session);
@@ -294,6 +305,8 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         AgentSession? providerSession = null;
         ChatClientAgent? invocationChatClientAgent = null;
         DurableChatHistoryProvider? durableHistoryProvider = null;
+        ObservedChatHistoryProvider? observedHistoryProvider = null;
+        DurableAgentState? providerFailureState = null;
         DurableAgentHistoryOwnership? invocationOwnership = null;
         bool providerInvocationActive = false;
         try
@@ -317,6 +330,10 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             invocationOwnership = effectiveOwnership;
             if (fixedOwnershipContractActive)
             {
+                if (pendingProviderInitialization)
+                {
+                    DurableAgentHistoryBinding.ValidatePendingProviderOwnership(effectiveOwnership);
+                }
                 DurableAgentHistoryBinding.ValidatePreExecutionContinuationContract(
                     effectiveOwnership,
                     session,
@@ -324,7 +341,8 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                     validatedHistoryConfiguration.RequiresPerServiceCallPersistence);
                 if (effectiveOwnership != DurableAgentHistoryOwnership.Entity &&
                     this.State.Data.HistoryBinding.ValueKind != JsonValueKind.Undefined &&
-                    persistedHistoryBinding is null)
+                    persistedHistoryBinding is null &&
+                    !pendingProviderInitialization)
                 {
                     throw new DurableAgentHistoryBindingMismatchException(
                         "The durable session contains an opaque shared historyBinding that the C# runtime " +
@@ -336,7 +354,7 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                     DurableAgentHistoryBinding.Create(
                         effectiveOwnership,
                         configuredHistoryProviderKey);
-                if (existingHistoryBinding is null)
+                if (existingHistoryBinding is null && !pendingProviderInitialization)
                 {
                     DurableAgentHistoryBinding.ValidateLegacyAdoption(
                         this.State,
@@ -379,12 +397,22 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                     workingState.SchemaVersion == DurableAgentState.RevisedSchemaVersion
                     ? DurableAgentStateRequest.FromRunRequestV2(request, logger)
                     : null);
+            if (fixedOwnershipContractActive &&
+                effectiveOwnership == DurableAgentHistoryOwnership.ExternalProvider &&
+                chatClientAgent?.ChatHistoryProvider is ChatHistoryProvider configuredProvider)
+            {
+                observedHistoryProvider = new(configuredProvider);
+                // Provider callbacks can mutate the session before throwing, without proving input
+                // acceptance or a resumable continuation. Keep only the pre-invocation durable slice.
+                providerFailureState = workingState.Clone();
+            }
+
             agentWrapper = new(
                 agent,
                 this.Context,
                 request,
                 this._services,
-                durableHistoryProvider);
+                (ChatHistoryProvider?)observedHistoryProvider ?? durableHistoryProvider);
 
             // Restored configured provider state, including intentionally empty history, supersedes legacy entity replay.
             bool contextPipelineSuppliesHistory =
@@ -552,7 +580,18 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
         }
         catch (Exception exception)
         {
-            logger.LogDurableAgentExecutionFailed(exception, sessionId);
+            bool observedProviderFailure = observedHistoryProvider?.FailedWith(exception) is true;
+            if (observedProviderFailure)
+            {
+                logger.LogDurableAgentExecutionFailed(
+                    new InvalidOperationException(ObservedChatHistoryProvider.FailureMessage),
+                    sessionId);
+            }
+            else
+            {
+                logger.LogDurableAgentExecutionFailed(exception, sessionId);
+            }
+
             if (providerInvocationActive &&
                 providerSession is not null &&
                 invocationOwnership.HasValue)
@@ -578,6 +617,29 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                 {
                     return committedFailure;
                 }
+            }
+
+            if (providerInvocationActive &&
+                observedProviderFailure &&
+                !this._cancellationToken.IsCancellationRequested)
+            {
+                if (ReferenceEquals(this.State, this._initializedMailboxGeneration) &&
+                    DurableAgentHistoryBinding.IsPristineMailbox(providerFailureState!))
+                {
+                    providerFailureState = DurableAgentHistoryBinding.MarkPendingProviderInitialization(
+                        providerFailureState!,
+                        configuredHistoryProviderKey!);
+                }
+                return this.CommitFailedResult(
+                    providerFailureState!,
+                    new DurableAgentStateTerminalError
+                    {
+                        Code = ObservedChatHistoryProvider.FailureCode,
+                        Message = ObservedChatHistoryProvider.FailureMessage,
+                    },
+                    correlationId,
+                    sessionId,
+                    logger);
             }
 
             throw;
@@ -609,6 +671,8 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
     {
         DurableAgentHistoryOwnership finalOwnership = DurableAgentHistoryOwnership.Entity;
         DurableAgentStateHistoryBinding? finalHistoryBinding = null;
+        bool pendingProviderInitialization =
+            DurableAgentHistoryBinding.IsPendingProviderInitialization(this.State.Data.HistoryBinding);
         if (fixedOwnershipContractActive)
         {
             (finalOwnership, _) =
@@ -618,12 +682,17 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             finalOwnership = DurableAgentHistoryOwnershipResolver.GetEffectiveOwnership(
                 finalOwnership,
                 historyConfiguration.ReplayMode);
+            if (pendingProviderInitialization)
+            {
+                DurableAgentHistoryBinding.ValidatePendingProviderOwnership(finalOwnership);
+            }
             bool remoteServiceTransition =
                 finalOwnership != effectiveOwnership &&
                 finalOwnership == DurableAgentHistoryOwnership.Service;
             if (finalOwnership != DurableAgentHistoryOwnership.Entity &&
                 this.State.Data.HistoryBinding.ValueKind != JsonValueKind.Undefined &&
-                persistedHistoryBinding is null)
+                persistedHistoryBinding is null &&
+                !pendingProviderInitialization)
             {
                 throw new DurableAgentHistoryBindingMismatchException(
                     "The completed call resolved non-entity history ownership, but the durable session " +
@@ -691,9 +760,21 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                 this._cancellationToken).ConfigureAwait(false);
         if (fixedOwnershipContractActive)
         {
+            if (pendingProviderInitialization)
+            {
+                // Replace the pending profile only after the actual serialized continuation can resume.
+                AgentSession committedSession = await DurableAgentSessionState.RestoreAsync(
+                    agent, workingState.Data.Session, this._cancellationToken).ConfigureAwait(false);
+                (DurableAgentHistoryOwnership committedOwnership, ChatClientAgent? committedChatAgent) =
+                    DurableAgentHistoryOwnershipResolver.Resolve(committedSession, validatedHistoryConfiguration);
+                DurableAgentHistoryBinding.ValidatePendingProviderOwnership(committedOwnership);
+                DurableAgentHistoryBinding.ValidateBoundContinuation(
+                    committedOwnership, committedSession, committedChatAgent);
+            }
             if (existingHistoryBinding is not null ||
                 persistedHistoryBinding is not null ||
-                this.State.Data.HistoryBinding.ValueKind == JsonValueKind.Undefined)
+                this.State.Data.HistoryBinding.ValueKind == JsonValueKind.Undefined ||
+                pendingProviderInitialization)
             {
                 DurableAgentStateHistoryBinding bindingToSeal =
                     existingHistoryBinding ??
@@ -762,14 +843,24 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
             durableHistoryProvider,
             logger).ConfigureAwait(false);
 
-        DateTimeOffset completedAt = this._timeProvider.GetUtcNow();
         DurableAgentStateTerminalError error = new()
         {
             Code = certified.Code,
             Message = certified.Message,
             Details = certified.Details,
         };
+        return this.CommitFailedResult(workingState, error, correlationId, sessionId, logger);
+    }
+
+    private AgentResponse CommitFailedResult(
+        DurableAgentState workingState,
+        DurableAgentStateTerminalError error,
+        string correlationId,
+        AgentSessionId sessionId,
+        ILogger logger)
+    {
         error.Validate();
+        DateTimeOffset completedAt = this._timeProvider.GetUtcNow();
 
         AgentResponse response = new()
         {
