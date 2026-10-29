@@ -213,7 +213,7 @@ public sealed class HistorySampleRegistrationTests
             using IHost host = CreateHost(
                 agent,
                 stateStore,
-                static options => _ = options,
+                static options => options.EnablePersistentRequestOutcomes = false,
                 s_customHistoryProviderKey,
                 services => services.AddSingleton(provider));
             await host.StartAsync();

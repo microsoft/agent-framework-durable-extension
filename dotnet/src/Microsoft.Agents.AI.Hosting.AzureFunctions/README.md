@@ -61,6 +61,36 @@ app.Run();
 
 By default, each agent can be invoked via a built-in HTTP trigger function at the route `http[s]://[host]/api/agents/{agentName}/run`.
 
+### Host-side work-item filtering and rolling upgrades
+
+New sessions target `dafx-v2-{agent}` entity triggers by default, while `DurableAgentsOptions.ProcessLegacyEntities`
+(or `DURABLE_AGENTS_PROCESS_LEGACY_ENTITIES=true`) additionally registers `dafx-{agent}` triggers in Phase 2 after
+v1 workers are stopped. On Azure Functions, distinct entity trigger names only isolate dispatch across side-by-side
+hosts when host-side work-item filtering is enabled. Reference `Microsoft.Azure.Functions.Worker` `2.52.0+`,
+`Microsoft.Azure.Functions.Worker.Extensions.DurableTask` `1.19.0+`, and
+`Microsoft.Azure.Functions.Worker.Extensions.DurableTask.AzureManaged` `1.10.0+` (which brings
+`Microsoft.Azure.WebJobs.Extensions.DurableTask.AzureManaged` `1.8.0+`), and set `"workItemFilteringEnabled": true`
+in `host.json`:
+
+```json
+{
+  "version": "2.0",
+  "extensions": {
+    "durableTask": {
+      "hubName": "default",
+      "storageProvider": {
+        "type": "AzureManaged",
+        "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
+        "workItemFilteringEnabled": true
+      }
+    }
+  }
+}
+```
+
+When host-side work-item filtering is not enabled on the participating Functions hosts, use an offline rollout
+instead of running v1 and v2 Functions hosts concurrently against the same Task Hub.
+
 ### Agent completion outcomes
 
 HTTP fire-and-forget calls return `202 Accepted`; this acknowledges dispatch, not successful execution.
@@ -92,11 +122,11 @@ throw `DurableAgentTerminalException` and `DurableAgentResultUnavailableExceptio
 the MCP host to report as tool failures. They are never returned as successful text or JSON responses.
 Cancellation is propagated to the durable client.
 
-These endpoints use the same mailbox-aware client as `AgentRunHandle` and durable proxies. This does
-not authorize schema 2.0 writes: the [shared rollout gates](../Microsoft.Agents.AI.DurableTask/State/README.md)
-must be satisfied before a producer can be activated; this draft has only disabled internal test gates.
-Existing legacy response-format choices do not change
-the entity-state version.
+These endpoints use the same mailbox-aware client as `AgentRunHandle` and durable proxies. New sessions
+route to `dafx-v2-{agent}` entities and write schema 2.0.0 state by default, while explicit legacy session IDs
+(`@dafx-{agent}@{key}`) route to `dafx-{agent}` and are upgraded in-place to schema 2.0.0 when
+`DurableAgentsOptions.ProcessLegacyEntities` is enabled in Phase 2. Response-format choices (`"text"` or `"json"`)
+do not change the entity-state version.
 
 ### Orchestrating hosted agents
 

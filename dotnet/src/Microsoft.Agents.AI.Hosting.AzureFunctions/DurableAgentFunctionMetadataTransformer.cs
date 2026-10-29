@@ -1,6 +1,8 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using Microsoft.Agents.AI.DurableTask;
 using Microsoft.Azure.Functions.Worker.Core.FunctionMetadata;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Agents.AI.Hosting.AzureFunctions;
@@ -38,12 +40,20 @@ internal sealed class DurableAgentFunctionMetadataTransformer : IFunctionMetadat
     {
         this._logger.LogTransformingFunctionMetadata(original.Count);
 
-        // Seed with existing function names to avoid duplicates across transformers. An agent that a workflow
-        // references and that is also registered explicitly (a promoted agent) is emitted by both transformers,
-        // and whichever runs second must not re-add a trigger the other already contributed.
-        HashSet<string> registeredFunctions = new(
-            original.Select(f => f.Name!),
-            StringComparer.OrdinalIgnoreCase);
+        DurableAgentsOptions? durableAgentsOptions = this._serviceProvider.GetService<DurableAgentsOptions>();
+        durableAgentsOptions?.ValidateConfiguration();
+        bool processLegacyEntities = durableAgentsOptions?.ProcessLegacyEntities == true;
+
+        // Seed with existing functions by name to deduplicate same-kind triggers across transformers
+        // (such as a promoted agent emitted by both transformers) while rejecting cross-kind collisions.
+        Dictionary<string, IFunctionMetadata> registeredFunctions = new(StringComparer.OrdinalIgnoreCase);
+        foreach (IFunctionMetadata existing in original)
+        {
+            if (existing.Name is not null)
+            {
+                registeredFunctions[existing.Name] = existing;
+            }
+        }
 
         foreach (KeyValuePair<string, Func<IServiceProvider, AIAgent>> kvp in this._agents)
         {
@@ -57,6 +67,13 @@ internal sealed class DurableAgentFunctionMetadataTransformer : IFunctionMetadat
             }
 
             AddIfNew(original, registeredFunctions, FunctionMetadataFactory.CreateEntityTrigger(agentName), () => this._logger.LogRegisteringTriggerForAgent(agentName, "entity"));
+            if (processLegacyEntities)
+            {
+                for (int version = 1; version < AgentSessionId.CurrentEntityVersion; version++)
+                {
+                    AddIfNew(original, registeredFunctions, FunctionMetadataFactory.CreateEntityTrigger(agentName, version), () => this._logger.LogRegisteringTriggerForAgent(agentName, "entity"));
+                }
+            }
 
             if (agentTriggerOptions.HttpTrigger.IsEnabled)
             {
@@ -77,15 +94,22 @@ internal sealed class DurableAgentFunctionMetadataTransformer : IFunctionMetadat
 
     private static void AddIfNew(
         IList<IFunctionMetadata> original,
-        HashSet<string> registeredFunctions,
+        Dictionary<string, IFunctionMetadata> registeredFunctions,
         DefaultFunctionMetadata metadata,
         Action logRegistration)
     {
-        if (!registeredFunctions.Add(metadata.Name!))
+        if (registeredFunctions.TryGetValue(metadata.Name!, out IFunctionMetadata? existing))
         {
+            if (!string.Equals(existing.EntryPoint, metadata.EntryPoint, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Function name '{metadata.Name}' is already registered with entry point '{existing.EntryPoint}' and cannot also be registered with entry point '{metadata.EntryPoint}'.");
+            }
+
             return;
         }
 
+        registeredFunctions[metadata.Name!] = metadata;
         logRegistration();
         original.Add(metadata);
     }

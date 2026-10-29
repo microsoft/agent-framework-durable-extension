@@ -50,11 +50,20 @@ internal sealed class DurableWorkflowsFunctionMetadataTransformer : IFunctionMet
         int initialCount = original.Count;
         this._logger.LogTransformingFunctionMetadata(initialCount);
 
-        // Seed with existing function names to avoid duplicates across transformers
-        // (e.g., when DurableAgentFunctionMetadataTransformer already registered entity triggers).
-        HashSet<string> registeredFunctions = new(
-            original.Select(f => f.Name!),
-            StringComparer.OrdinalIgnoreCase);
+        this._options.Agents.ValidateConfiguration();
+        bool processLegacyEntities = this._options.Agents.ProcessLegacyEntities;
+
+        // Seed with existing functions by name to deduplicate same-kind triggers across transformers
+        // (e.g., when DurableAgentFunctionMetadataTransformer already registered entity triggers)
+        // while rejecting cross-kind collisions.
+        Dictionary<string, IFunctionMetadata> registeredFunctions = new(StringComparer.OrdinalIgnoreCase);
+        foreach (IFunctionMetadata existing in original)
+        {
+            if (existing.Name is not null)
+            {
+                registeredFunctions[existing.Name] = existing;
+            }
+        }
 
         DurableWorkflowOptions workflowOptions = this._options.Workflows;
         foreach (var workflow in workflowOptions.Workflows)
@@ -68,37 +77,37 @@ internal sealed class DurableWorkflowsFunctionMetadataTransformer : IFunctionMet
 
             // Register an orchestration function for the workflow.
             string orchestrationFunctionName = WorkflowNamingHelper.ToOrchestrationFunctionName(workflow.Key);
-            if (registeredFunctions.Add(orchestrationFunctionName))
-            {
-                this._logger.LogRegisteringWorkflowTrigger(workflow.Key, orchestrationFunctionName, "orchestration");
-                original.Add(FunctionMetadataFactory.CreateOrchestrationTrigger(
+            AddIfNew(
+                original,
+                registeredFunctions,
+                FunctionMetadataFactory.CreateOrchestrationTrigger(
                     orchestrationFunctionName,
-                    BuiltInFunctions.RunWorkflowOrchestrationFunctionEntryPoint));
-            }
+                    BuiltInFunctions.RunWorkflowOrchestrationFunctionEntryPoint),
+                () => this._logger.LogRegisteringWorkflowTrigger(workflow.Key, orchestrationFunctionName, "orchestration"));
 
             // Register an HTTP trigger so users can start this workflow via HTTP.
-            if (registeredFunctions.Add(httpFunctionName))
-            {
-                this._logger.LogRegisteringWorkflowTrigger(workflow.Key, httpFunctionName, "http");
-                original.Add(FunctionMetadataFactory.CreateHttpTrigger(
+            AddIfNew(
+                original,
+                registeredFunctions,
+                FunctionMetadataFactory.CreateHttpTrigger(
                     workflow.Key,
                     $"workflows/{workflow.Key}/run",
-                    BuiltInFunctions.RunWorkflowOrchestrationHttpFunctionEntryPoint));
-            }
+                    BuiltInFunctions.RunWorkflowOrchestrationHttpFunctionEntryPoint),
+                () => this._logger.LogRegisteringWorkflowTrigger(workflow.Key, httpFunctionName, "http"));
 
             // Register a status endpoint if opted in via AddWorkflow(enableStatusEndpoint: true).
             if (this._options.IsStatusEndpointEnabled(workflow.Key))
             {
                 string statusFunctionName = $"{BuiltInFunctions.HttpPrefix}{workflow.Key}{BuiltInFunctions.StatusFunctionSuffix}";
-                if (registeredFunctions.Add(statusFunctionName))
-                {
-                    this._logger.LogRegisteringWorkflowTrigger(workflow.Key, statusFunctionName, "http-status");
-                    original.Add(FunctionMetadataFactory.CreateHttpTrigger(
+                AddIfNew(
+                    original,
+                    registeredFunctions,
+                    FunctionMetadataFactory.CreateHttpTrigger(
                         $"{workflow.Key}-status",
                         $"workflows/{workflow.Key}/status/{{runId}}",
                         BuiltInFunctions.GetWorkflowStatusHttpFunctionEntryPoint,
-                        methods: "\"get\""));
-                }
+                        methods: "\"get\""),
+                    () => this._logger.LogRegisteringWorkflowTrigger(workflow.Key, statusFunctionName, "http-status"));
             }
 
             // Register a respond endpoint when the workflow contains RequestPort nodes.
@@ -106,25 +115,25 @@ internal sealed class DurableWorkflowsFunctionMetadataTransformer : IFunctionMet
             if (hasRequestPorts)
             {
                 string respondFunctionName = $"{BuiltInFunctions.HttpPrefix}{workflow.Key}{BuiltInFunctions.RespondFunctionSuffix}";
-                if (registeredFunctions.Add(respondFunctionName))
-                {
-                    this._logger.LogRegisteringWorkflowTrigger(workflow.Key, respondFunctionName, "http-respond");
-                    original.Add(FunctionMetadataFactory.CreateHttpTrigger(
+                AddIfNew(
+                    original,
+                    registeredFunctions,
+                    FunctionMetadataFactory.CreateHttpTrigger(
                         $"{workflow.Key}-respond",
                         $"workflows/{workflow.Key}/respond/{{runId}}",
-                        BuiltInFunctions.RespondToWorkflowHttpFunctionEntryPoint));
-                }
+                        BuiltInFunctions.RespondToWorkflowHttpFunctionEntryPoint),
+                    () => this._logger.LogRegisteringWorkflowTrigger(workflow.Key, respondFunctionName, "http-respond"));
             }
 
             // Register an MCP tool trigger if opted in via AddWorkflow(enableStatusEndpoint: ..., enableMcpToolTrigger: true).
             if (this._options.IsMcpToolTriggerEnabled(workflow.Key))
             {
                 string mcpToolFunctionName = $"{BuiltInFunctions.McpToolPrefix}{workflow.Key}";
-                if (registeredFunctions.Add(mcpToolFunctionName))
-                {
-                    this._logger.LogRegisteringWorkflowTrigger(workflow.Key, mcpToolFunctionName, "mcpTool");
-                    original.Add(FunctionMetadataFactory.CreateWorkflowMcpToolTrigger(workflow.Key, workflow.Value.Description));
-                }
+                AddIfNew(
+                    original,
+                    registeredFunctions,
+                    FunctionMetadataFactory.CreateWorkflowMcpToolTrigger(workflow.Key, workflow.Value.Description),
+                    () => this._logger.LogRegisteringWorkflowTrigger(workflow.Key, mcpToolFunctionName, "mcpTool"));
             }
 
             // Register activity or entity functions for each executor in the workflow.
@@ -143,24 +152,59 @@ internal sealed class DurableWorkflowsFunctionMetadataTransformer : IFunctionMet
                 if (entry.Value is AIAgentBinding)
                 {
                     string entityName = AgentSessionId.ToEntityName(executorName);
-                    if (registeredFunctions.Add(entityName))
+                    AddIfNew(
+                        original,
+                        registeredFunctions,
+                        FunctionMetadataFactory.CreateEntityTrigger(executorName),
+                        () => this._logger.LogRegisteringWorkflowTrigger(workflow.Key, entityName, "entity"));
+
+                    if (processLegacyEntities)
                     {
-                        this._logger.LogRegisteringWorkflowTrigger(workflow.Key, entityName, "entity");
-                        original.Add(FunctionMetadataFactory.CreateEntityTrigger(executorName));
+                        for (int version = 1; version < AgentSessionId.CurrentEntityVersion; version++)
+                        {
+                            string legacyEntityName = AgentSessionId.ToEntityName(executorName, version);
+                            AddIfNew(
+                                original,
+                                registeredFunctions,
+                                FunctionMetadataFactory.CreateEntityTrigger(executorName, version),
+                                () => this._logger.LogRegisteringWorkflowTrigger(workflow.Key, legacyEntityName, "entity"));
+                        }
                     }
                 }
                 else
                 {
                     string functionName = WorkflowNamingHelper.ToOrchestrationFunctionName(executorName);
-                    if (registeredFunctions.Add(functionName))
-                    {
-                        this._logger.LogRegisteringWorkflowTrigger(workflow.Key, functionName, "activity");
-                        original.Add(FunctionMetadataFactory.CreateActivityTrigger(functionName));
-                    }
+                    AddIfNew(
+                        original,
+                        registeredFunctions,
+                        FunctionMetadataFactory.CreateActivityTrigger(functionName),
+                        () => this._logger.LogRegisteringWorkflowTrigger(workflow.Key, functionName, "activity"));
                 }
             }
         }
 
         this._logger.LogTransformationComplete(original.Count - initialCount, original.Count);
+    }
+
+    private static void AddIfNew(
+        IList<IFunctionMetadata> original,
+        Dictionary<string, IFunctionMetadata> registeredFunctions,
+        DefaultFunctionMetadata metadata,
+        Action logRegistration)
+    {
+        if (registeredFunctions.TryGetValue(metadata.Name!, out IFunctionMetadata? existing))
+        {
+            if (!string.Equals(existing.EntryPoint, metadata.EntryPoint, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Function name '{metadata.Name}' is already registered with entry point '{existing.EntryPoint}' and cannot also be registered with entry point '{metadata.EntryPoint}'.");
+            }
+
+            return;
+        }
+
+        registeredFunctions[metadata.Name!] = metadata;
+        logRegistration();
+        original.Add(metadata);
     }
 }

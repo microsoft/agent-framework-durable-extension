@@ -16,13 +16,14 @@ public class DurableOptions
     /// </summary>
     internal DurableOptions()
     {
+        this.Agents = new DurableAgentsOptions(this);
         this.Workflows = new DurableWorkflowOptions(this);
     }
 
     /// <summary>
     /// Gets the configuration options for durable agents.
     /// </summary>
-    public DurableAgentsOptions Agents { get; } = new();
+    public DurableAgentsOptions Agents { get; }
 
     /// <summary>
     /// Gets the configuration options for durable workflows.

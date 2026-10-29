@@ -92,11 +92,222 @@ public sealed class DurableWorkflowOptions
             return this;
         }
 
+        // Validate cross-kind name collisions before mutating any state so a failed registration leaves no partial entries behind.
+        this.ValidateWorkflowCollisions(workflow);
+
         // Register executors first so a failure part-way through leaves no entry behind and a retry re-runs registration.
         this.RegisterWorkflowExecutors(workflow);
         this._workflows[workflow.Name] = workflow;
 
         return this;
+    }
+
+    internal void ValidateAgentNameCollisions(string agentName, bool processLegacyEntities)
+    {
+        HashSet<string> agentEntityNames = GetAgentEntityNames([agentName], processLegacyEntities);
+
+        foreach (string workflowName in this._workflows.Keys)
+        {
+            string orchestrationFunctionName = WorkflowNamingHelper.ToOrchestrationFunctionName(workflowName);
+            if (agentEntityNames.Contains(orchestrationFunctionName))
+            {
+                throw new InvalidOperationException(
+                    $"Agent '{agentName}' and workflow '{workflowName}' both generate function name '{orchestrationFunctionName}'.");
+            }
+        }
+
+        foreach ((string executorName, ExecutorRegistration registration) in this.Executors.Registrations)
+        {
+            if (registration.Binding is AIAgentBinding or SubworkflowBinding or RequestPortBinding)
+            {
+                continue;
+            }
+
+            if (string.Equals(executorName, agentName, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Agent '{agentName}' collides with activity executor '{executorName}'.");
+            }
+
+            string activityFunctionName = WorkflowNamingHelper.ToOrchestrationFunctionName(executorName);
+            if (agentEntityNames.Contains(activityFunctionName))
+            {
+                throw new InvalidOperationException(
+                    $"Agent '{agentName}' and activity executor '{executorName}' both generate function name '{activityFunctionName}'.");
+            }
+        }
+    }
+
+    internal void ValidateAllRegisteredCollisions(bool processLegacyEntities)
+    {
+        HashSet<string> agentNames = new(StringComparer.OrdinalIgnoreCase);
+        if (this.ParentOptions?.Agents is DurableAgentsOptions agentOptions)
+        {
+            foreach (string agentName in agentOptions.GetAgentFactories().Keys)
+            {
+                agentNames.Add(agentName);
+            }
+        }
+
+        HashSet<string> activityNames = new(StringComparer.OrdinalIgnoreCase);
+        foreach ((string executorName, ExecutorRegistration registration) in this.Executors.Registrations)
+        {
+            if (registration.Binding is SubworkflowBinding or RequestPortBinding)
+            {
+                continue;
+            }
+
+            if (registration.Binding is AIAgentBinding)
+            {
+                agentNames.Add(executorName);
+            }
+            else
+            {
+                activityNames.Add(executorName);
+            }
+        }
+
+        ValidateCrossKindCollisions(this._workflows.Keys, activityNames, agentNames, processLegacyEntities);
+    }
+
+    private void ValidateWorkflowCollisions(Workflow rootWorkflow)
+    {
+        HashSet<string> workflowNames = new(this._workflows.Keys, StringComparer.OrdinalIgnoreCase);
+        HashSet<string> activityNames = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> agentNames = new(StringComparer.OrdinalIgnoreCase);
+
+        if (this.ParentOptions?.Agents is DurableAgentsOptions agentOptions)
+        {
+            foreach (string agentName in agentOptions.GetAgentFactories().Keys)
+            {
+                agentNames.Add(agentName);
+            }
+        }
+
+        foreach ((string executorName, ExecutorRegistration registration) in this.Executors.Registrations)
+        {
+            if (registration.Binding is SubworkflowBinding or RequestPortBinding)
+            {
+                continue;
+            }
+
+            if (registration.Binding is AIAgentBinding)
+            {
+                agentNames.Add(executorName);
+            }
+            else
+            {
+                activityNames.Add(executorName);
+            }
+        }
+
+        HashSet<Workflow> visited = new(ReferenceEqualityComparer.Instance);
+        CollectWorkflowGraphNames(rootWorkflow, visited, workflowNames, activityNames, agentNames);
+
+        bool processLegacyEntities = this.ParentOptions?.Agents.ProcessLegacyEntities == true;
+        ValidateCrossKindCollisions(workflowNames, activityNames, agentNames, processLegacyEntities);
+    }
+
+    private static void CollectWorkflowGraphNames(
+        Workflow workflow,
+        HashSet<Workflow> visited,
+        HashSet<string> workflowNames,
+        HashSet<string> activityNames,
+        HashSet<string> agentNames)
+    {
+        if (!visited.Add(workflow) || string.IsNullOrEmpty(workflow.Name))
+        {
+            return;
+        }
+
+        workflowNames.Add(workflow.Name);
+
+        foreach ((string executorId, ExecutorBinding binding) in workflow.ReflectExecutors())
+        {
+            if (binding is RequestPortBinding)
+            {
+                continue;
+            }
+
+            if (binding is SubworkflowBinding subworkflowBinding)
+            {
+                CollectWorkflowGraphNames(subworkflowBinding.WorkflowInstance, visited, workflowNames, activityNames, agentNames);
+                continue;
+            }
+
+            string executorName = WorkflowNamingHelper.GetExecutorName(executorId);
+            if (binding is AIAgentBinding || binding.RawValue is AIAgent)
+            {
+                agentNames.Add(executorName);
+                if (binding.RawValue is AIAgent { Name: string rawAgentName } && !string.IsNullOrWhiteSpace(rawAgentName))
+                {
+                    agentNames.Add(rawAgentName);
+                }
+            }
+            else
+            {
+                activityNames.Add(executorName);
+            }
+        }
+    }
+
+    private static void ValidateCrossKindCollisions(
+        IEnumerable<string> workflowNames,
+        HashSet<string> activityNames,
+        HashSet<string> agentNames,
+        bool processLegacyEntities)
+    {
+        HashSet<string> agentEntityNames = GetAgentEntityNames(agentNames, processLegacyEntities);
+
+        foreach (string activityName in activityNames)
+        {
+            if (agentNames.Contains(activityName))
+            {
+                throw new InvalidOperationException(
+                    $"Activity executor '{activityName}' collides with an AI agent of the same name.");
+            }
+
+            string activityFunctionName = WorkflowNamingHelper.ToOrchestrationFunctionName(activityName);
+            if (agentEntityNames.Contains(activityFunctionName))
+            {
+                throw new InvalidOperationException(
+                    $"Activity executor '{activityName}' generates function name '{activityFunctionName}', which collides with a registered agent entity trigger.");
+            }
+        }
+
+        foreach (string workflowName in workflowNames)
+        {
+            string orchestrationFunctionName = WorkflowNamingHelper.ToOrchestrationFunctionName(workflowName);
+            if (agentEntityNames.Contains(orchestrationFunctionName))
+            {
+                throw new InvalidOperationException(
+                    $"Workflow '{workflowName}' generates function name '{orchestrationFunctionName}', which collides with a registered agent entity trigger.");
+            }
+
+            if (activityNames.Contains(workflowName))
+            {
+                throw new InvalidOperationException(
+                    $"Workflow '{workflowName}' and activity executor '{workflowName}' both generate function name '{orchestrationFunctionName}'.");
+            }
+        }
+    }
+
+    private static HashSet<string> GetAgentEntityNames(IEnumerable<string> agentNames, bool processLegacyEntities)
+    {
+        HashSet<string> entityNames = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string agentName in agentNames)
+        {
+            entityNames.Add(AgentSessionId.ToEntityName(agentName));
+            if (processLegacyEntities)
+            {
+                for (int version = 1; version < AgentSessionId.CurrentEntityVersion; version++)
+                {
+                    entityNames.Add(AgentSessionId.ToEntityName(agentName, version));
+                }
+            }
+        }
+
+        return entityNames;
     }
 
     /// <summary>

@@ -22,6 +22,11 @@ internal sealed class ExecutorRegistry
     internal int Count => this._executors.Count;
 
     /// <summary>
+    /// Gets the registered executors keyed by executor name.
+    /// </summary>
+    internal IReadOnlyDictionary<string, ExecutorRegistration> Registrations => this._executors;
+
+    /// <summary>
     /// Attempts to get an executor registration by name.
     /// </summary>
     /// <param name="executorName">The executor name to look up.</param>
@@ -50,7 +55,23 @@ internal sealed class ExecutorRegistry
             throw new InvalidOperationException($"Executor '{executorId}' not found in workflow.");
         }
 
-        this._executors.TryAdd(executorName, new ExecutorRegistration(executorId, binding));
+        if (binding is RequestPortBinding or SubworkflowBinding)
+        {
+            return;
+        }
+
+        if (this._executors.TryGetValue(executorName, out ExecutorRegistration? existing))
+        {
+            if ((existing.Binding is AIAgentBinding) != (binding is AIAgentBinding))
+            {
+                throw new InvalidOperationException(
+                    $"Executor name '{executorName}' cannot be registered as both an AI agent executor and a non-agent activity executor.");
+            }
+
+            return;
+        }
+
+        this._executors.Add(executorName, new ExecutorRegistration(executorId, binding));
     }
 }
 

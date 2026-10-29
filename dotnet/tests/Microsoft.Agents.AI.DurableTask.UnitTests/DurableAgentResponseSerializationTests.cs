@@ -301,6 +301,40 @@ public sealed class DurableAgentResponseSerializationTests
         Assert.DoesNotContain("$microsoftAgentFrameworkDurableTask", wire, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Serialize_RunRequestWithTargetAgentName_AllowsMixedLocalAndRemoteByDefaultAndValidatesWhenOptedIn()
+    {
+        RunRequest request = new([new ChatMessage(ChatRole.User, "hello")])
+        {
+            TargetAgentName = "RemoteAgent",
+        };
+
+        // Orchestration-only worker (0 local agents registered in DurableAgentsOptions): must not throw.
+        DurableDataConverter emptyOptionsConverter = new(new DurableAgentsOptions());
+        string serialized = emptyOptionsConverter.Serialize(request);
+        Assert.NotEmpty(serialized);
+
+        // Worker with local agent registrations: by default (ValidateLocalAgentRegistration == false),
+        // calling a remote agent hosted on another worker in the same Task Hub must not throw.
+        DurableAgentsOptions populatedOptions = new();
+        populatedOptions.AddAIAgentFactory("RegisteredAgent", _ => throw new NotSupportedException());
+        DurableDataConverter populatedOptionsConverter = new(populatedOptions);
+        string mixedSerialized = populatedOptionsConverter.Serialize(request);
+        Assert.NotEmpty(mixedSerialized);
+
+        // When ValidateLocalAgentRegistration is opted in, unregistered TargetAgentName is rejected.
+        populatedOptions.ValidateLocalAgentRegistration = true;
+        AgentNotRegisteredException ex = Assert.Throws<AgentNotRegisteredException>(
+            () => populatedOptionsConverter.Serialize(request));
+        Assert.Equal("RemoteAgent", ex.AgentName);
+
+        RunRequest localRequest = new([new ChatMessage(ChatRole.User, "hello")])
+        {
+            TargetAgentName = "RegisteredAgent",
+        };
+        Assert.NotEmpty(populatedOptionsConverter.Serialize(localRequest));
+    }
+
     private static JsonElement SerializeNative(AgentResponse response) =>
         JsonSerializer.SerializeToElement(response, DurableAgentJsonUtilities.DefaultOptions.GetTypeInfo(typeof(AgentResponse)));
 

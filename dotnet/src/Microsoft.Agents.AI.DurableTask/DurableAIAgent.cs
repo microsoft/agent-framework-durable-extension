@@ -41,7 +41,7 @@ public sealed class DurableAIAgent : AIAgent
     protected override ValueTask<AgentSession> CreateSessionCoreAsync(CancellationToken cancellationToken = default)
     {
         AgentSessionId sessionId = this._context.NewAgentSessionId(this._agentName);
-        return ValueTask.FromResult<AgentSession>(new DurableAgentSession(sessionId));
+        return ValueTask.FromResult<AgentSession>(new DurableAgentSession(sessionId, canAdoptReplayedEntityVersion: true));
     }
 
     /// <inheritdoc cref="AIAgent.RunAsync(AgentSession, AgentRunOptions, CancellationToken)"/>
@@ -227,15 +227,34 @@ public sealed class DurableAIAgent : AIAgent
 
         RunRequest request = new([.. messages], responseFormat, enableToolCalls, enableToolNames)
         {
-            OrchestrationId = this._context.InstanceId
+            OrchestrationId = this._context.InstanceId,
+            TargetAgentName = this._agentName,
         };
 
         try
         {
+            bool wasReplaying = this._context.IsReplaying;
             AgentResponse response = await this._context.Entities.CallEntityAsync<AgentResponse>(
                 durableSession.SessionId,
                 nameof(AgentEntity.Run),
                 request);
+            if (durableSession.CanAdoptReplayedEntityVersion)
+            {
+                if (DurableAgentJsonUtilities.GetResponseEntityVersion(response) is int responseEntityVersion &&
+                    (wasReplaying || this._context.IsReplaying || responseEntityVersion != AgentSessionId.CurrentEntityVersion))
+                {
+                    durableSession.LockEntityVersion(responseEntityVersion);
+                }
+                else if (wasReplaying)
+                {
+                    durableSession.LockEntityVersion(1);
+                }
+                else if (!this._context.IsReplaying)
+                {
+                    durableSession.LockEntityVersion();
+                }
+            }
+
             if (DurableAgentJsonUtilities.GetCommittedFailure(response) is DurableAgentFailureData failure)
             {
                 throw new DurableAgentTerminalException(

@@ -30,7 +30,7 @@ public sealed class AgentLoggingTests(ITestOutputHelper output)
         // The real SDK normalizes the entity name before the worker dispatches the operation.
         AgentSessionId sessionId = new(agentName, sessionKey);
         EntityInstanceId entityId = sessionId;
-        Assert.Equal($"dafx-{normalizedName}", entityId.Name);
+        Assert.Equal($"dafx-v2-{normalizedName}", entityId.Name);
         await DispatchAsync(host, sessionId, "Hello!");
         Assert.NotEmpty(loggerProvider.GetAllLogs());
         IReadOnlyCollection<LogEntry> agentLogs = loggerProvider.GetAgentLogs(sessionId);
@@ -159,12 +159,15 @@ public sealed class AgentLoggingTests(ITestOutputHelper output)
         EntityInstanceId entityId = sessionId;
         Mock<TaskEntityContext> context = new(MockBehavior.Strict);
         context.SetupGet(value => value.Id).Returns(entityId);
-        DurableAgentState initialState = new();
-        string expectedSchemaVersion = initialState.SchemaVersion;
+        context.Setup(value => value.SignalEntity(
+            entityId,
+            nameof(AgentEntity.CheckAndExpireResults),
+            It.IsAny<object?>(),
+            It.IsAny<SignalEntityOptions?>()));
         DurableAgentState? persistedState = null;
         Mock<TaskEntityState> state = new(MockBehavior.Strict);
-        state.SetupGet(value => value.HasState).Returns(true);
-        state.Setup(value => value.GetState(typeof(DurableAgentState))).Returns(initialState);
+        state.SetupGet(value => value.HasState).Returns(false);
+        state.Setup(value => value.GetState(typeof(DurableAgentState))).Returns((DurableAgentState?)null);
         state.Setup(value => value.SetState(It.IsAny<object?>()))
             .Callback<object?>(value => persistedState = Assert.IsType<DurableAgentState>(value));
         RunRequest request = new(prompt) { CorrelationId = "logging-request" };
@@ -180,8 +183,8 @@ public sealed class AgentLoggingTests(ITestOutputHelper output)
 
         Assert.NotEmpty(response.Text);
         Assert.NotNull(persistedState);
-        Assert.Equal(expectedSchemaVersion, persistedState.SchemaVersion);
-        Assert.False(host.Services.GetRequiredService<DurableAgentsOptions>().EnablePersistentRequestOutcomes);
+        Assert.Equal(DurableAgentState.RevisedSchemaVersion, persistedState.SchemaVersion);
+        Assert.True(host.Services.GetRequiredService<DurableAgentsOptions>().EnablePersistentRequestOutcomes);
     }
 
     private sealed class LocalChatClient : IChatClient

@@ -31,7 +31,7 @@ internal static class DurableAgentStateOutcomeResolver
 
         DurableAgentStateSchemaVersion version = ValidateOutcomeState(state);
 
-        return version.Major == DurableAgentState.RevisedSchemaMajorVersion
+        return version.Major >= DurableAgentState.RevisedSchemaMajorVersion
             ? ResolveRevised(state, correlationId, currentTime)
             : ResolveLegacy(state.Data.ConversationHistory, correlationId);
     }

@@ -3,8 +3,10 @@
 using System.Text.Json;
 using Microsoft.Agents.AI.DurableTask.Workflows;
 using Microsoft.Agents.AI.Workflows;
+using Microsoft.DurableTask.Worker;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace Microsoft.Agents.AI.DurableTask.UnitTests;
 
@@ -151,6 +153,183 @@ public sealed class DurableConfigurationCompositionTests
             () => services.ConfigureDurableAgents(agents => agents.AddAIAgent(new CompositionTestAgent("DuplicateAssistant"))));
 
         Assert.Contains("has already been registered", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("v2-assistant")]
+    [InlineData("V2-Assistant")]
+    [InlineData("v2-")]
+    public void ConfigureDurableAgents_RejectsReservedV2AgentNamePrefix(string reservedName)
+    {
+        ServiceCollection services = new();
+
+        ArgumentException agentException = Assert.Throws<ArgumentException>(
+            () => services.ConfigureDurableAgents(agents => agents.AddAIAgent(new CompositionTestAgent(reservedName))));
+        Assert.Contains("v2-", agentException.Message, StringComparison.OrdinalIgnoreCase);
+
+        ArgumentException factoryException = Assert.Throws<ArgumentException>(
+            () => services.ConfigureDurableAgents(agents => agents.AddAIAgentFactory(reservedName, _ => new CompositionTestAgent("valid"))));
+        Assert.Contains("v2-", factoryException.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ConfigureDurableOptions_PopulatesWorkItemFiltersForPhase1AndPhase2(bool processLegacyEntities)
+    {
+        ServiceCollection services = new();
+        CompositionTestAgent standaloneAgent = new("StandaloneAssistant");
+        CompositionTestAgent workflowAgent = new("WorkflowAssistant");
+
+        services.ConfigureDurableOptions(
+            options =>
+            {
+                options.Agents.ProcessLegacyEntities = processLegacyEntities;
+                options.Agents.AddAIAgent(standaloneAgent);
+                options.Workflows.AddWorkflow(BuildAgentWorkflow("OrderWorkflow", workflowAgent));
+            },
+            workerBuilder: _ => { });
+
+        using ServiceProvider provider = services.BuildServiceProvider();
+        DurableTaskWorkerWorkItemFilters filters =
+            provider.GetRequiredService<IOptionsMonitor<DurableTaskWorkerWorkItemFilters>>().Get(Options.DefaultName);
+
+        string[] entityNames = [.. filters.Entities.Select(e => e.Name)];
+        Assert.Contains("dafx-v2-StandaloneAssistant", entityNames);
+        Assert.Contains("dafx-v2-WorkflowAssistant", entityNames);
+
+        if (processLegacyEntities)
+        {
+            Assert.Contains("dafx-StandaloneAssistant", entityNames);
+            Assert.Contains("dafx-WorkflowAssistant", entityNames);
+        }
+        else
+        {
+            Assert.DoesNotContain("dafx-StandaloneAssistant", entityNames);
+            Assert.DoesNotContain("dafx-WorkflowAssistant", entityNames);
+        }
+
+        Assert.Contains(filters.Orchestrations, o => o.Name == "dafx-OrderWorkflow");
+        Assert.Contains(filters.Activities, a => a.Name == "dafx-start");
+    }
+
+    [Fact]
+    public void ConfigureDurableAgents_AllowsWorkerBuilderToOverrideWorkItemFilters()
+    {
+        ServiceCollection services = new();
+        DurableTaskWorkerWorkItemFilters customFilters = new()
+        {
+            Entities = [new DurableTaskWorkerWorkItemFilters.EntityFilter { Name = "dafx-v2-PrimaryAssistant" }],
+        };
+
+        services.ConfigureDurableAgents(
+            agents =>
+            {
+                agents.AddAIAgent(new CompositionTestAgent("PrimaryAssistant"));
+                agents.AddAIAgent(new CompositionTestAgent("SecondaryAssistant"));
+            },
+            workerBuilder: builder => builder.UseWorkItemFilters(customFilters));
+
+        using ServiceProvider provider = services.BuildServiceProvider();
+        DurableTaskWorkerWorkItemFilters resolved =
+            provider.GetRequiredService<IOptionsMonitor<DurableTaskWorkerWorkItemFilters>>().Get(Options.DefaultName);
+
+        Assert.Equal(["dafx-v2-PrimaryAssistant"], resolved.Entities.Select(e => e.Name));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ConfigureDurableOptions_RejectsCrossKindCollisionBetweenWorkflowV2PrefixAndAgent(bool workflowFirst)
+    {
+        ServiceCollection services = new();
+
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() =>
+        {
+            if (workflowFirst)
+            {
+                services.ConfigureDurableWorkflows(workflows => workflows.AddWorkflow(BuildWorkflow("v2-Writer")));
+                services.ConfigureDurableAgents(agents => agents.AddAIAgent(new CompositionTestAgent("Writer")));
+            }
+            else
+            {
+                services.ConfigureDurableAgents(agents => agents.AddAIAgent(new CompositionTestAgent("Writer")));
+                services.ConfigureDurableWorkflows(workflows => workflows.AddWorkflow(BuildWorkflow("v2-Writer")));
+            }
+        });
+
+        Assert.Contains("dafx-v2-Writer", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ConfigureDurableOptions_RejectsCrossKindCollisionBetweenActivityV2PrefixAndAgent(bool workflowFirst)
+    {
+        ServiceCollection services = new();
+        Workflow workflowWithCollidingActivity = new WorkflowBuilder(new FunctionExecutor<string>("v2-Writer", (_, _, _) => default))
+            .WithName("PublishingWorkflow")
+            .Build();
+
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() =>
+        {
+            if (workflowFirst)
+            {
+                services.ConfigureDurableWorkflows(workflows => workflows.AddWorkflow(workflowWithCollidingActivity));
+                services.ConfigureDurableAgents(agents => agents.AddAIAgent(new CompositionTestAgent("Writer")));
+            }
+            else
+            {
+                services.ConfigureDurableAgents(agents => agents.AddAIAgent(new CompositionTestAgent("Writer")));
+                services.ConfigureDurableWorkflows(workflows => workflows.AddWorkflow(workflowWithCollidingActivity));
+            }
+        });
+
+        Assert.Contains("dafx-v2-Writer", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ConfigureDurableOptions_AllowsRequestPortAndSubworkflowAliasSharingNameWithAgent(bool workflowFirst)
+    {
+        ServiceCollection services = new();
+        FunctionExecutor<string> childStart = new("child-start", (_, _, _) => default);
+        Workflow subWorkflow = new WorkflowBuilder(childStart)
+            .WithName("ChildReviewWorkflow")
+            .Build();
+        FunctionExecutor<string> parentStart = new("parent-start", (_, _, _) => default);
+        RequestPort<string, string> requestPort = RequestPort.Create<string, string>("ApprovalAgent");
+        ExecutorBinding subWorkflowAlias = subWorkflow.BindAsExecutor("SubworkflowAgent");
+        Workflow parentWorkflow = new WorkflowBuilder(parentStart)
+            .WithName("ParentApprovalWorkflow")
+            .AddEdge(parentStart, requestPort)
+            .AddEdge(requestPort, subWorkflowAlias)
+            .Build();
+
+        if (workflowFirst)
+        {
+            services.ConfigureDurableWorkflows(workflows => workflows.AddWorkflow(parentWorkflow));
+            services.ConfigureDurableAgents(agents =>
+            {
+                agents.AddAIAgent(new CompositionTestAgent("ApprovalAgent"));
+                agents.AddAIAgent(new CompositionTestAgent("SubworkflowAgent"));
+            });
+        }
+        else
+        {
+            services.ConfigureDurableAgents(agents =>
+            {
+                agents.AddAIAgent(new CompositionTestAgent("ApprovalAgent"));
+                agents.AddAIAgent(new CompositionTestAgent("SubworkflowAgent"));
+            });
+            services.ConfigureDurableWorkflows(workflows => workflows.AddWorkflow(parentWorkflow));
+        }
+
+        DurableOptions options = GetRegisteredOptions(services);
+        Assert.True(options.Agents.ContainsAgent("ApprovalAgent"));
+        Assert.True(options.Agents.ContainsAgent("SubworkflowAgent"));
+        Assert.Contains("ParentApprovalWorkflow", options.Workflows.Workflows.Keys);
     }
 
     private static DurableOptions GetRegisteredOptions(IServiceCollection services)

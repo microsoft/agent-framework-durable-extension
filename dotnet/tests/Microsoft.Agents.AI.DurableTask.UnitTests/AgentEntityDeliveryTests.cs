@@ -17,7 +17,8 @@ public sealed class AgentEntityDeliveryTests
     public async Task DefaultRolloutLeavesProductionWritesLegacyAsync()
     {
         DurableAgentsOptions defaults = new();
-        Assert.False(defaults.EnablePersistentRequestOutcomes);
+        Assert.True(defaults.EnablePersistentRequestOutcomes);
+        Assert.False(defaults.ProcessLegacyEntities);
         Assert.Equal(TimeSpan.FromSeconds(60), defaults.ResultRetentionPeriod);
         EntityHarness harness = CreateHarness(
             new RecordingAgent("agent"), new DurableAgentState(), enablePersistentRequestOutcomes: false);

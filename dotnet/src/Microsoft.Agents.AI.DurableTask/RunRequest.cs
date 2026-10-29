@@ -49,6 +49,13 @@ public record RunRequest
     internal string? OrchestrationId { get; set; }
 
     /// <summary>
+    /// Gets the target agent name for orchestration-dispatched requests so the worker's data converter
+    /// can fail fast with <see cref="AgentNotRegisteredException"/> when work-item filtering is active.
+    /// </summary>
+    [JsonIgnore]
+    internal string? TargetAgentName { get; init; }
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="RunRequest"/> class for a single message.
     /// </summary>
     /// <param name="message">The message to send to the agent.</param>

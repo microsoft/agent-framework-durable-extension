@@ -10,12 +10,11 @@ namespace Microsoft.Agents.AI.DurableTask.State;
 internal readonly record struct DurableAgentStateSchemaVersion(BigInteger Major, BigInteger Minor, BigInteger Patch)
     : IComparable<DurableAgentStateSchemaVersion>
 {
-    private static readonly HashSet<string> s_supportedVersions =
+    private static readonly HashSet<string> s_supportedLegacyVersions =
     [
         "1.0.0",
         "1.1.0",
         DurableAgentState.CurrentSchemaVersion,
-        DurableAgentState.RevisedSchemaVersion,
     ];
 
     /// <summary>
@@ -23,13 +22,48 @@ internal readonly record struct DurableAgentStateSchemaVersion(BigInteger Major,
     /// </summary>
     public static DurableAgentStateSchemaVersion ParseSupported(string? value)
     {
-        if (value is null || !s_supportedVersions.Contains(value))
+        if (value is null ||
+            !TryParse(value, out DurableAgentStateSchemaVersion version) ||
+            !IsSupportedVersion(value, version))
         {
             throw new InvalidOperationException($"The durable agent state schema version '{value}' is not supported.");
         }
 
-        _ = TryParse(value, out DurableAgentStateSchemaVersion version);
         return version;
+    }
+
+    /// <summary>
+    /// Determines whether the specified schema version belongs to the Schema v2 (<c>2.x.y</c>) family.
+    /// </summary>
+    public static bool IsRevisedSchemaFamily(string? schemaVersion) =>
+        TryParse(schemaVersion, out DurableAgentStateSchemaVersion version) &&
+        version.Major == DurableAgentState.RevisedSchemaMajorVersion;
+
+    /// <summary>
+    /// Attempts to parse the major version component of a strict <c>major.minor.patch</c> schema version string.
+    /// </summary>
+    public static bool TryParseMajorVersion(string? schemaVersion, out int major)
+    {
+        if (TryParse(schemaVersion, out DurableAgentStateSchemaVersion version) &&
+            version.Major >= int.MinValue &&
+            version.Major <= int.MaxValue)
+        {
+            major = (int)version.Major;
+            return true;
+        }
+
+        major = default;
+        return false;
+    }
+
+    private static bool IsSupportedVersion(string value, DurableAgentStateSchemaVersion version)
+    {
+        if (version.Major == 1)
+        {
+            return s_supportedLegacyVersions.Contains(value);
+        }
+
+        return version.Major >= DurableAgentState.RevisedSchemaMajorVersion;
     }
 
     /// <summary>

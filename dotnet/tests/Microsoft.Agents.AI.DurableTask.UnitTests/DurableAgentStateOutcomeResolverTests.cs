@@ -188,7 +188,7 @@ public sealed class DurableAgentStateOutcomeResolverTests
         DurableAgentState state = new() { SchemaVersion = version };
         state.Data.ConversationHistory.Add(CreateLegacyResponse("correlation", "stale"));
 
-        Assert.Throws<InvalidOperationException>(
+        Assert.ThrowsAny<InvalidOperationException>(
             () => DurableAgentStateOutcomeResolver.Resolve(state, "correlation", s_completedAt));
     }
 

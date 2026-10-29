@@ -12,7 +12,8 @@
       "hubName": "default",
       "storageProvider": {
         "type": "AzureManaged",
-        "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING"
+        "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
+        "workItemFilteringEnabled": true
       }
     }
   }

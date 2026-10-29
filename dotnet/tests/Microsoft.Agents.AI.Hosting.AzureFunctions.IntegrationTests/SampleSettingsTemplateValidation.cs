@@ -129,8 +129,13 @@ public sealed partial class SampleSettingsTemplateValidation
             .GetProperty("extensions")
             .GetProperty("durableTask");
 
-        yield return durableTask
-            .GetProperty("storageProvider")
+        JsonElement storageProvider = durableTask.GetProperty("storageProvider");
+        Assert.True(
+            storageProvider.TryGetProperty("workItemFilteringEnabled", out JsonElement filteringEnabled) &&
+            filteringEnabled.ValueKind == JsonValueKind.True,
+            $"{hostPath} must enable host-side work-item filtering (workItemFilteringEnabled: true) for AzureManaged storageProvider.");
+
+        yield return storageProvider
             .GetProperty("connectionStringName")
             .GetString()!;
     }

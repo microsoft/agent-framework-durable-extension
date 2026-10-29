@@ -53,6 +53,8 @@ public sealed class OrchestrationTests(ITestOutputHelper outputHelper) : IDispos
             this._outputHelper,
             configureAgents: agents =>
             {
+                agents.ValidateLocalAgentRegistration = true;
+
                 // Register a different agent, but not "NonExistentAgent"
                 agents.AddAIAgentFactory(
                     "OtherAgent",

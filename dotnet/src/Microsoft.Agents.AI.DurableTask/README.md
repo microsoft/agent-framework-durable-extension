@@ -101,19 +101,14 @@ before this layer can implement that retry safely.
 Completion receipts last until entity deletion. `DurableAgentsOptions.ResultRetentionPeriod` defaults
 to the shared 60-second delivery window and accepts another positive duration or `null` for no payload
 expiry. Result-payload retention and whole-entity TTL are separate policies. Deleting the entity also deletes its
-idempotency evidence. Keep schema 2.0 writes disabled until the shared rollout gates are agreed and every
-participating reader/worker is mailbox-aware or explicitly rejects the new major version.
-Producer activation and receipt-deleting entity TTL are internal test gates only, disabled by default.
-Automatic transcript retention is part of that same internal rollout surface rather than a public option.
-It requires a mailbox-aware state writer and remains inaccessible to applications until Python, dashboards,
-pollers, and every other participating reader can safely consume or reject schema 2. Internal activation
-fails closed when the writer gate is disabled or legacy migration is not explicitly authorized from
-independently authoritative complete history.
-Legacy TTL behavior is preserved, but old deadlines cannot delete schema-2 receipts without a separately agreed
-deletion policy. Unknown-field
-preservation by an older worker is not sufficient. See [state compatibility](State/README.md).
+idempotency evidence. New sessions target `dafx-v2-{agent}` entities and persist schema 2.0.0 state by default,
+while `DurableAgentsOptions.ProcessLegacyEntities = true` (or `DURABLE_AGENTS_PROCESS_LEGACY_ENTITIES=true`)
+enables Phase 2 registration of legacy `dafx-{agent}` entities and upgrades loaded schema 1.x state in-place
+to schema 2.0.0 on the next turn. Explicit agent or default TTL configurations can delete receipt-bearing
+entities after expiry, while the unconfigured legacy idle default does not delete revised state automatically.
+See [state compatibility](State/README.md).
 
-Under the internal mailbox-writer gate, a successful new run also removes already-expired mailbox
+A successful new run also removes already-expired mailbox
 payloads and maintains one logical entity-local `CheckAndExpireResults` schedule for the earliest
 remaining expiry. The optional version-1 runtime profile
 `extensionData["Microsoft.Agents.AI.DurableTask.resultExpiry"]` stores the entity identity, UTC scheduled
@@ -122,8 +117,7 @@ field or `historyBinding`. The replacement state, profile and signal outbox part
 entity operation commit.
 Cleanup preserves each completion's outcome, completion/expiry timestamps and unknown receipt metadata,
 marks its result unavailable, and records the first cleanup time. It does not delete receipts, invoke
-the agent/factory/tools, create a session, or refresh entity TTL. The independent entity-deletion gate
-is not required for payload cleanup.
+the agent/factory/tools, create a session, or refresh entity TTL.
 
 Entity operations are serialized. New runs reuse a pending check that already covers the earliest
 deadline; an earlier deadline replaces it once with a new token. Moving the earliest expiry later reuses
@@ -151,8 +145,7 @@ can be retried with the same input, or recovered without input once its persiste
 A later successful **new** run also performs this recovery. A host
 requiring a cleanup-time bound for otherwise idle imported entities must enqueue that operation as part
 of import/recovery and monitor failed operations. Read-only polling and terminal duplicate calls do not
-provide durable cleanup. Cleanup never migrates legacy state and rejects mailbox writes while the gate
-is off.
+provide durable cleanup. Cleanup never migrates legacy state.
 
 Malformed/unsupported scheduling profiles fail closed before a new model invocation or cleanup.
 Other extensions and unknown fields in a supported profile are preserved. This is a .NET-local profile,
@@ -160,16 +153,10 @@ not a shared-schema requirement: foreign runtimes preserve it opaquely but need 
 .NET writers honor its scheduling contract; preserving unknown JSON alone does not make another scheduler
 safe to deploy alongside this writer.
 
-**Merge and release gate:** this draft must not merge or release until the actual real-backend atomicity
-test passes in an explicitly isolated environment. A clearly documented gated skip is acceptable only
-for draft readiness, not for merge or release. Schema-2 production writing remains inaccessible in this
-layer, even when public
-`ResultRetentionPeriod` is set. Activation requires coordinated reader/writer/rollback compatibility,
-late-duplicate/deletion policy agreement, and an executed real-backend atomicity test in an explicitly
-isolated environment. The [gated integration test](../../tests/Microsoft.Agents.AI.DurableTask.IntegrationTests/README.md)
+**Backend atomicity verification:** the [gated integration test](../../tests/Microsoft.Agents.AI.DurableTask.IntegrationTests/README.md)
 checks state plus outgoing delayed signals, worker restart, duplicate delivery and a failure after
-state/outbox staging. A skipped test or passing mock tests **does not verify backend atomicity** and
-does not satisfy either the merge gate or the release gate.
+state/outbox staging against a real backend in an explicitly isolated environment. A skipped test or
+passing mock tests **does not verify backend atomicity**.
 
 `response.GetDurableResult()` returns the canonical retained terminal-response JSON for a durable
 delivery, including optional `value` and unknown metadata that the native `AgentResponse` cannot
@@ -226,25 +213,50 @@ workflow format; shared entity-state fixture compatibility is a separate contrac
 
 The shared schema 2 `historyBinding` remains optional, provisional configuration metadata. It does not
 pin an effective owner or prohibit Python or other runtimes from supporting per-run transitions.
-When the internal schema 2 writer is active, the C# durable-agent runtime applies a stricter profile:
+When writing schema 2 state, the C# durable-agent runtime applies a stricter profile:
 after the first successful turn it marks and seals one logical owner using the binding version, owner
 kind, and a stable non-secret provider key.
 Later C# turns must restore the same continuation and resolve the same identity; mismatches fail instead
 of silently resetting, migrating, or starting another logical conversation.
 
-Schema 2 production writes remain default-off and have no public activation API in this release.
-Under the public defaults, schema 1 operations preserve the existing Agent Framework behavior:
-custom history providers, explicit in-memory providers, and model-service conversation IDs can execute,
-the entity retains the completed outer turn, and no fixed `historyBinding` is created. The registration
-history options below become enforceable only with the internal schema 2 rollout gate; they do not
-silently activate schema 2.
+New durable sessions write schema 2.0.0 state to `dafx-v2-{agent}` entities by default. During a two-phase
+rolling upgrade from 1.x:
+- **Phase 1 (side-by-side):** leave `DurableAgentsOptions.ProcessLegacyEntities` set to `false` (default)
+  while v1 workers are still active so v2 workers register and filter only `dafx-v2-{agent}` entities and
+  in-flight `dafx-{agent}` sessions remain on v1 workers.
+- **Phase 2 (cutover):** once all v1 workers are stopped, set `DurableAgentsOptions.ProcessLegacyEntities = true`
+  (or `DURABLE_AGENTS_PROCESS_LEGACY_ENTITIES=true`) so v2 workers also register `dafx-{agent}` entities and
+  migrate loaded schema 1.x state in-place to schema 2.0.0 on the next turn.
 
-**Upgrade warning:** start new durable sessions after upgrading; do not silently reuse sessions from
-an older deployment, including legacy sessions with custom history providers. Legacy session migration
-is deferred until explicit migration support is certified. Keep old sessions on their original deployment
-or read them without running new turns, consistent with the
-[isolated rollout](../../../docs/features/durable-agents/durable-state-architecture.md) and the
-[maintainer-approved migration follow-up](https://github.com/microsoft/agent-framework-durable-extension/pull/95#discussion_r4168013434).
+For side-by-side rolling upgrades, standalone workers automatically register work-item filters via
+`UseWorkItemFilters()` for `dafx-v2-{agent}` (Phase 1) and add `dafx-{agent}` when
+`DurableAgentsOptions.ProcessLegacyEntities = true` (or `DURABLE_AGENTS_PROCESS_LEGACY_ENTITIES=true`)
+in Phase 2 after all v1 workers are stopped. On Azure Functions, distinct entity trigger names alone
+do not isolate dispatch unless the Functions host also enables work-item filtering: reference
+`Microsoft.Azure.Functions.Worker` `2.52.0+`,
+`Microsoft.Azure.Functions.Worker.Extensions.DurableTask` `1.19.0+`, and
+`Microsoft.Azure.Functions.Worker.Extensions.DurableTask.AzureManaged` `1.10.0+` (which resolves
+`Microsoft.Azure.WebJobs.Extensions.DurableTask.AzureManaged` `1.8.0+`), and enable
+`"workItemFilteringEnabled": true` under `extensions.durableTask.storageProvider` in `host.json`:
+
+```json
+{
+  "version": "2.0",
+  "extensions": {
+    "durableTask": {
+      "hubName": "default",
+      "storageProvider": {
+        "type": "AzureManaged",
+        "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
+        "workItemFilteringEnabled": true
+      }
+    }
+  }
+}
+```
+
+If host-side work-item filtering is not enabled on both old and new Azure Functions deployments, perform
+an offline cutover instead of running v1 and v2 Functions hosts side by side on the same Task Hub.
 
 The default in-memory history pipeline is entity-owned and appends its model transcript to
 `conversationHistory`. Custom providers, model services, and opaque `CurrentRequestOnly` agents remain
@@ -296,10 +308,12 @@ The pinned Agent Framework API cannot universally inspect builder-installed or p
 decorators; this implementation does not use reflection, type-name scanning, guessed session keys, or
 factory double invocation.
 
-Pressure retention is default-off and internal in this release. `KeepAll` performs no proactive history
-eviction; backend or provider size limits can still reject a write. The internal `Auto` path requires an
-explicit positive byte budget: there is no implicit 1 MiB portable default. Supplying a budget or watermark
-while retention remains `KeepAll` is rejected instead of being silently ignored.
+`DurableAgentsOptions.HistoryRetentionMode` defaults to `KeepAll`, which performs no proactive history
+eviction (backend or provider size limits can still reject a write). Set `HistoryRetentionMode` to
+`DurableAgentHistoryRetentionMode.Auto` to enable automatic pressure-based transcript retention.
+`DurableAgentsOptions.MaxStateBytes` defaults to 1 MiB (`1,048,576` bytes; `null` also resolves to 1 MiB
+under `Auto`), and `MaxStateBytes` and the watermark properties are inert while `HistoryRetentionMode`
+remains `KeepAll`.
 
 The high and low watermarks default to 0.85 and 0.70 and can be overridden only with finite values satisfying
 `0 < low < high <= 1`. The high watermark starts a retention attempt, which removes the oldest eligible
@@ -309,10 +323,9 @@ escaping. The state includes terminal-result mailboxes, completion receipts, fix
 provider or agent continuation, TTL, ingestion and workflow bookkeeping, truncation evidence, media, and
 metadata. Backend framing outside that stored string remains backend-specific.
 
-When the internal rollout gate is enabled, existing legacy sessions are migrated only when the configured
-migration authorization confirms independently authoritative complete history. Otherwise the operation fails
-before model or provider side effects. A deterministically impossible protected floor, including the accepted
-request for entity-owned history, is also rejected before model/provider invocation.
+When a legacy 1.x entity is processed in Phase 2 (`ProcessLegacyEntities = true`), its state is converted
+to schema 2.0.0 before automatic retention runs. A deterministically impossible protected floor, including
+the accepted request for entity-owned history, is rejected before model/provider invocation.
 
 Only `conversationHistory` transcript entries are eligible for pressure eviction. Mailbox result envelopes,
 completion receipts, fixed history binding, serialized continuation, TTL, and other execution controls are
@@ -326,13 +339,11 @@ newest entry or a system message can therefore connect to older history and rais
 the budget, in which case retention fails atomically without committing the working state.
 
 > [!WARNING]
-> Pressure retention is internal and unreleased. In long client-side tool or approval flows, transitive
-> correlation and tool links can connect most or all of the transcript to the protected newest component.
-> If the protected floor reaches the configured budget, later writes fail atomically without corrupting the
-> session. When testing an internal activation, use `KeepAll` or disable pressure retention as a workaround.
-> The public default is unaffected. Linked-flow support remains tracked under
-> [#4](https://github.com/microsoft/agent-framework-durable-extension/issues/4); the release deferral is recorded
-> in [the accepted review follow-up](https://github.com/microsoft/agent-framework-durable-extension/pull/97#discussion_r4168013183).
+> In long client-side tool or approval flows, transitive correlation and tool links can connect most or all
+> of the transcript to the protected newest component. If the protected floor reaches the configured budget,
+> later writes fail atomically without corrupting the session. Use `KeepAll` or increase `MaxStateBytes` as a
+> workaround while linked-flow support remains tracked under
+> [#4](https://github.com/microsoft/agent-framework-durable-extension/issues/4).
 
 Schema 2 mailbox results remain authoritative after their transcript copies are removed, so duplicate execution
 and polling return the same retained result. Legacy state is converted to schema 2 before entity retention once
