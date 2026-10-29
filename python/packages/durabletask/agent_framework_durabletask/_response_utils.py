@@ -83,7 +83,7 @@ def _constructor_fields(cls: type[AgentResponse[Any]] | type[Message] | type[Con
 def _constructor_kwargs(
     data: Mapping[str, Any], cls: type[AgentResponse[Any]] | type[Message] | type[Content]
 ) -> dict[str, Any]:
-    return {name: data[name] for name in _constructor_fields(cls) if name in data}
+    return {name: data[name] for name in _constructor_fields(cast(Any, cls)) if name in data}
 
 
 def _load_content(data: Any) -> Any:

@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
@@ -470,6 +470,7 @@ def _load_counter_json(value: str, *, migration: bool) -> Any:
     pending: list[Any] = [raw]
     while pending:
         container = pending.pop()
+        items: Iterable[tuple[Any, Any]]
         if isinstance(container, dict):
             items = cast(dict[str, Any], container).items()
         elif isinstance(container, list):
