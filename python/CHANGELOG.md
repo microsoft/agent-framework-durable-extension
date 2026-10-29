@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **agent-framework-durabletask**: Corrected source typing in state validation, response serialization, history retention, and workflow orchestration so release-build mypy checks run without error suppression.
+
 ## v1.0.0b261029
 
 - **agent-framework-durabletask**, **agent-framework-azurefunctions**: Added two-phase in-place entity schema migration (`two_phase` deployment mode, `dafx-v2-` entity and workflow naming, work-item filtering, and `process_legacy_entities` cutover) ([#165](https://github.com/microsoft/agent-framework-durable-extension/pull/165))
