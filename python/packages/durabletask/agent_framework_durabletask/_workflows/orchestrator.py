@@ -433,12 +433,12 @@ def _match_occurrences(
                 candidates = fingerprints.get(fingerprint, set[str]())
                 if len(candidates) != 1:
                     candidates = set[str]()
-        occurrence = next(iter(candidates)) if len(candidates) == 1 else None
+        matched_occurrence = next(iter(candidates)) if len(candidates) == 1 else None
         # By default a second selection is unmatched. Projection can retain the
         # source match to assign a separate, stable identity to each repetition.
-        matches.append(occurrence if preserve_repeated_matches or occurrence not in used else None)
-        if occurrence is not None:
-            used.add(occurrence)
+        matches.append(matched_occurrence if preserve_repeated_matches or matched_occurrence not in used else None)
+        if matched_occurrence is not None:
+            used.add(matched_occurrence)
     return matches
 
 
@@ -677,7 +677,7 @@ def _identify_context_messages(
     alias_selections: Counter[tuple[int, str]] = Counter()
     repetitions: dict[str, int] = defaultdict(int)
     selected_ids: list[str] = []
-    for index, occurrence in enumerate(matches):
+    for index, matched_occurrence in enumerate(matches):
         source = sources[index]
         if source is None:
             selected_ids.append(ledger.occurrence("selection", target, handoff, response_ordinal, index))
@@ -689,16 +689,16 @@ def _identify_context_messages(
             rank = alias_selections[alias] // alias_slots[alias]
             alias_selections[alias] += 1
             if rank == 0:
-                occurrence = source
+                matched_occurrence = source
         # Repeating a known source is a distinct selection occurrence, but not a
         # new occurrence on every handoff. Filtering an earlier, equal-valued
         # source must not renumber this source's repeated selections.
-        if occurrence is None:
-            occurrence = ledger.selection_copies.setdefault(
+        if matched_occurrence is None:
+            matched_occurrence = ledger.selection_copies.setdefault(
                 (target, source, rank),
                 ledger.occurrence("selection", target, handoff, response_ordinal, index),
             )
-        selected_ids.append(occurrence)
+        selected_ids.append(matched_occurrence)
     return selected_ids
 
 
@@ -750,12 +750,12 @@ def _prepare_agent_task(
         selected_ids.extend(staged.occurrence("input", executor_id, handoff, i) for i in range(len(inputs)))
     else:
         for response_ordinal, prior in enumerate(upstream):
-            selected = _select_context_messages(executor, prior)
-            selected_context.extend(selected)
+            selected_batch = _select_context_messages(executor, prior)
+            selected_context.extend(selected_batch)
             selected_ids.extend(
                 _identify_context_messages(
                     prior,
-                    selected,
+                    selected_batch,
                     executor_id,
                     handoff,
                     response_ordinal,
@@ -765,20 +765,20 @@ def _prepare_agent_task(
             )
 
     cache_only = isinstance(message, AgentExecutorRequest) and not message.should_respond
-    context_messages: list[dict[str, Any]] | None = []
-    context_message_ids: list[str] | None = []
+    context_messages: list[dict[str, Any]] = []
+    context_message_ids: list[str] = []
     pending_keys: set[tuple[str, str]] = set()
     message_content = ""
     sent = staged.sent.get(executor_id, set())
-    for selected, occurrence in zip(selected_context, selected_ids, strict=True):
-        key = (occurrence, message_identity(selected))
+    for selected_message, occurrence in zip(selected_context, selected_ids, strict=True):
+        key = (occurrence, message_identity(selected_message))
         if key in sent or key in pending_keys:
             continue
         # Deliver the same public-field presence and inert extras that were hashed.
-        context_messages.append(serialize_input_message(selected))
+        context_messages.append(serialize_input_message(selected_message))
         context_message_ids.append(occurrence)
         pending_keys.add(key)
-        message_content = selected.text[:_AGENT_TASK_MESSAGE_PREVIEW_LIMIT]
+        message_content = selected_message.text[:_AGENT_TASK_MESSAGE_PREVIEW_LIMIT]
 
     if isinstance(message, str) and message and not cached_messages:
         # Keep the original preview, but deliver the normalized input with its
@@ -2128,11 +2128,11 @@ def run_workflow_orchestrator(
                         publish_live_status("failed", pending_requests={})
                         raise
 
-                    index = next((key for key, task in outstanding.items() if task is completed), None)
-                    if index is not None:
-                        del outstanding[index]
-                        meta = task_metadata_list[index]
-                        raw_by_index[index] = raw_result
+                    completed_index = next((key for key, task in outstanding.items() if task is completed), None)
+                    if completed_index is not None:
+                        del outstanding[completed_index]
+                        meta = task_metadata_list[completed_index]
+                        raw_by_index[completed_index] = raw_result
                         if meta.task_type == TaskType.ACTIVITY:
                             # Discovery is independent of the shared-state commit.
                             preview = _process_activity_result(raw_result, meta.executor_id, None, [])

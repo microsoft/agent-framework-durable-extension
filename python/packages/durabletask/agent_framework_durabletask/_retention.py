@@ -394,16 +394,16 @@ def _tool_call_links(messages: list[Message]) -> tuple[list[tuple[int, int]], se
                 else:
                     held.add(index)
             elif (call_kind := result_kinds.get(content.type)) is not None and content.call_id:
-                key = (call_kind, content.call_id)
-                declarations = pending.get(key, [])
+                result_key = (call_kind, content.call_id)
+                declarations = pending.get(result_key, [])
                 if declarations:
                     # Overlapping declarations are already linked. One edge per
                     # result avoids a quadratic set of ambiguous pairings.
                     links.append((declarations[0], index))
-                elif key in completed:
-                    links.append((completed[key], index))
+                elif result_key in completed:
+                    links.append((completed[result_key], index))
                 if len(declarations) == 1:
-                    completed[key] = declarations.pop()
+                    completed[result_key] = declarations.pop()
     held.update(index for declarations in pending.values() for index in declarations)
     return links, held
 

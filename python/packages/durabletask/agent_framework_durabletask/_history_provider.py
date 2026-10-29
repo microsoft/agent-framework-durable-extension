@@ -438,10 +438,11 @@ class DurableHistoryProvider(HistoryProvider):
             created_at,
             used_ids=used_ids,
         )
+        entry: DurableAgentStateEntry
         if response is None:
             entry = DurableAgentStateRequest(binding.correlation_id, created_at, stored_messages)
         else:
-            entry = response_type(
+            response_entry = response_type(
                 binding.correlation_id,
                 created_at,
                 stored_messages,
@@ -450,7 +451,8 @@ class DurableHistoryProvider(HistoryProvider):
                 if response.additional_properties
                 else None,
             )
-            entry.preserve_response_timestamp(response.created_at)
+            response_entry.preserve_response_timestamp(response.created_at)
+            entry = response_entry
         # Admit the actual stored entry, not just Core's projection, which can
         # omit opaque metadata. Timestamp fallback must not skip admission.
         entry.to_dict()
