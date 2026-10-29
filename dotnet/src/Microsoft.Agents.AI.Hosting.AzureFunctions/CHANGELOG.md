@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v1.16.0-preview.261029.1
+
 - [BREAKING] Emit `dafx-v2-{agent}` entity triggers by default and add `dafx-{agent}` triggers when `DurableAgentsOptions.ProcessLegacyEntities` (`DURABLE_AGENTS_PROCESS_LEGACY_ENTITIES`) is enabled in Phase 2, preserve full `@dafx-...` session IDs across HTTP/MCP round-trips when targeting legacy entities or `@`-prefixed session keys, reject cross-kind function name collisions across workflows, activities, and agent entities, and require `"workItemFilteringEnabled": true` in `host.json` (with `Microsoft.Azure.Functions.Worker` `2.52.0+`, `Microsoft.Azure.Functions.Worker.Extensions.DurableTask` `1.19.0+`, and `Microsoft.Azure.Functions.Worker.Extensions.DurableTask.AzureManaged` `1.10.0+`) for side-by-side rolling upgrades or an offline cutover when host filtering is not enabled ([#155](https://github.com/microsoft/agent-framework-durable-extension/pull/155))
 - Prefer camelCase names on agent HTTP requests and responses (`sessionId`, `waitForResponse`, `statusCode`, `completionOutcome`) while retaining legacy snake_case request aliases and response fields during the migration window ([#103](https://github.com/microsoft/agent-framework-durable-extension/pull/103))
 - Updated Agent Framework dependencies to 1.23.0, including the compatible OpenAI dependencies used by the samples ([#116](https://github.com/microsoft/agent-framework-durable-extension/pull/116))

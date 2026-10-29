@@ -7,7 +7,7 @@ readme = "README.md"
 # worker's dependencies are not isolated from the app's, which collides with the
 # durable runtime's grpc at load time. 3.13 enables worker dependency isolation.
 requires-python = ">=3.13"
-version = "1.0.0b260922"
+version = "1.0.0b261029"
 license-files = ["LICENSE"]
 urls.homepage = "https://aka.ms/agent-framework"
 urls.source = "https://github.com/microsoft/agent-framework-durable-extension/tree/main/python"
@@ -23,14 +23,14 @@ classifiers = [
 ]
 dependencies = [
     "agent-framework-core>=1.19.0,<2",
-    "agent-framework-durabletask>=1.0.0b260922,<2",
+    "agent-framework-durabletask>=1.0.0b261029,<2",
     "azure-functions>=2.3.0,<3",
     "azure-functions-durable>=2.0.0rc2,<3",
 ]
 
 [project.optional-dependencies]
 azure-blob-payloads = [
-    "agent-framework-durabletask[azure-blob-payloads]>=1.0.0b260922,<2",
+    "agent-framework-durabletask[azure-blob-payloads]>=1.0.0b261029,<2",
 ]
 
 [dependency-groups]
