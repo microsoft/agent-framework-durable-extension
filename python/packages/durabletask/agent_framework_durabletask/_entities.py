@@ -37,6 +37,7 @@ from ._callbacks import AgentCallbackContext, AgentResponseCallbackProtocol
 from ._configuration import validate_response_delivery_window
 from ._constants import DELIVERY_WINDOW_SECONDS, DurableStateFields
 from ._delivery_state import validate_delivery_state
+from ._entity_schema import EntityMigrationContext, EntitySchemaRegistry, agent_entity_schema_registry
 from ._history_provider import (
     DurableHistoryBinding,
     DurableHistoryProvider,
@@ -78,7 +79,12 @@ from ._shared_agent_state import (
     DurableAgentStateResponse,
     DurableAgentStateUnknownEntry,
 )
-from ._shared_state_validation import validate_completion_transition, validate_identifier, validate_timestamp
+from ._shared_state_validation import (
+    validate_completion_transition,
+    validate_identifier,
+    validate_schema_metadata,
+    validate_timestamp,
+)
 from ._state_capacity import StateCapacityError
 from ._state_migration import migrate_legacy_state, state_snapshot_digest
 
@@ -228,6 +234,9 @@ class AgentEntityStateProviderMixin:
     _persisted_state_snapshot: dict[str, Any] | None = None
     _write_acknowledgement_uncertain: bool = False
     _migration_candidate: DurableAgentState | None = None
+    _entity_schema_registry: EntitySchemaRegistry | None = None
+    _schema_source_snapshot: dict[str, Any] | None = None
+    _schema_upgraded_snapshot: dict[str, Any] | None = None
 
     def _get_state_dict(self) -> dict[str, Any]:
         raise NotImplementedError
@@ -274,17 +283,44 @@ class AgentEntityStateProviderMixin:
         raw_state = self._read_raw_state_dict()
         if raw_state == {}:
             return raw_state
-        if raw_state.get(DurableStateFields.SCHEMA_VERSION) != DurableAgentState.SCHEMA_VERSION:
+        if self._entity_schema_registry is None and raw_state.get("schemaVersion") in ("1.0.0", "1.1.0", "1.2.0"):
+            raise ValueError("Legacy state is read-only unless two-phase legacy processing is explicitly enabled.")
+        registry = self._entity_schema_registry or agent_entity_schema_registry()
+        if (
+            self._schema_source_snapshot is not None
+            and self._schema_upgraded_snapshot is not None
+            and state_snapshot_digest(self._schema_source_snapshot) == state_snapshot_digest(raw_state)
+        ):
+            return deepcopy(self._schema_upgraded_snapshot)
+        candidate = registry.upgrade(
+            raw_state,
+            EntityMigrationContext(
+                self._get_entity_name_from_entity() if raw_state.get("schemaVersion") != "2.0.0" else "",
+                self.session_id if raw_state.get("schemaVersion") != "2.0.0" else "",
+                self._response_delivery_window_seconds(),
+                getattr(getattr(self, "_agent_entity", None), "_max_state_bytes", None),
+            ),
+        )
+        if candidate.get(DurableStateFields.SCHEMA_VERSION) != DurableAgentState.SCHEMA_VERSION:
             raise ValueError(
                 "Legacy state is read-only in this runtime. Keep it on its original deployment or use "
                 "an isolated v2 entity instead."
             )
-        validate_delivery_state(raw_state)
-        return raw_state
+        validate_delivery_state(candidate)
+        if candidate != raw_state:
+            self._schema_source_snapshot = deepcopy(raw_state)
+            self._schema_upgraded_snapshot = deepcopy(candidate)
+        return candidate
 
     @staticmethod
     def _transition_validation_baseline(snapshot: dict[str, Any]) -> dict[str, Any]:
         return DurableAgentState().to_dict() if snapshot == {} else deepcopy(snapshot)
+
+    @staticmethod
+    def _is_empty_migration_snapshot(snapshot: dict[str, Any]) -> bool:
+        """Ignore only validated schema metadata when admitting an empty destination."""
+        validate_schema_metadata(snapshot)
+        return {key: value for key, value in snapshot.items() if key != "dafxSchema"} == DurableAgentState().to_dict()
 
     def _migration_binding(self, metadata: dict[str, Any], stored: Any) -> dict[str, str] | None:
         """Validate and project only the reserved migration identity fields."""
@@ -333,7 +369,7 @@ class AgentEntityStateProviderMixin:
         elif new_binding is not None and (
             self._migration_candidate is None
             or self._state_cache is not self._migration_candidate
-            or previous != DurableAgentState().to_dict()
+            or not self._is_empty_migration_snapshot(previous)
         ):
             raise ValueError("Initial migration binding requires migrate into an empty destination.")
 
@@ -391,8 +427,7 @@ class AgentEntityStateProviderMixin:
                 raise ValueError("Committed migration binding does not match the retry request")
             self._validate_migration_write(committed_baseline, snapshot)
             return True
-        empty = DurableAgentState().to_dict()
-        if snapshot != empty or committed_baseline != empty:
+        if not self._is_empty_migration_snapshot(snapshot) or not self._is_empty_migration_snapshot(committed_baseline):
             raise ValueError(
                 "Migration destination must be empty; an existing or different migration cannot be replaced."
             )
@@ -416,6 +451,11 @@ class AgentEntityStateProviderMixin:
             self._state_cache = DurableAgentState() if raw_state == {} else DurableAgentState.from_dict(raw_state)
             self._persisted_state_snapshot = deepcopy(raw_state)
             self._write_acknowledgement_uncertain = False
+
+    @property
+    def schema_upgrade_pending(self) -> bool:
+        """Return whether a detached schema upgrade still needs a successful write."""
+        return self._schema_source_snapshot is not None
 
     @property
     def session_id(self) -> str:
@@ -487,6 +527,13 @@ class AgentEntityStateProviderMixin:
         finally:
             self._migration_candidate = None
 
+    def stamp_schema_metadata(self) -> None:
+        """Include writer metadata in staged state before capacity checks."""
+        if self._entity_schema_registry is not None:
+            payload = self.state.to_dict()
+            self._entity_schema_registry.stamp(payload)
+            self.state.unknown_fields["dafxSchema"] = payload["dafxSchema"]
+
     def persist_state(self) -> None:
         """Pass state to the host, which may stage rather than confirm a durable write."""
         from ._history_provider import current_durable_history_binding
@@ -500,6 +547,7 @@ class AgentEntityStateProviderMixin:
         transition_baseline = self._transition_validation_baseline(committed_snapshot)
         try:
             state.prepare_for_write(delivery_window_seconds=self._response_delivery_window_seconds())
+            self.stamp_schema_metadata()
             payload = state.to_dict()
             validate_completion_transition(transition_baseline, payload)
             self._validate_migration_write(transition_baseline, payload)
@@ -516,6 +564,8 @@ class AgentEntityStateProviderMixin:
             record_write(state, stage="set_state", outcome="failed")
             raise
         self._persisted_state_snapshot = deepcopy(payload)
+        self._schema_source_snapshot = None
+        self._schema_upgraded_snapshot = None
         record_write(state, stage="set_state", outcome="returned")
 
     def _restore_persisted_cache(self, snapshot: dict[str, Any] | None = None) -> None:
@@ -708,6 +758,7 @@ class AgentEntity:
 
     def _validate_control_budget(self) -> None:
         """Reject an oversized maintenance commit, without pruning any protected state."""
+        self._state_provider.stamp_schema_metadata()
         if self._max_state_bytes is not None:
             size = len(json.dumps(self.state.to_dict(), allow_nan=False))
             if size > self._max_state_bytes:
@@ -742,6 +793,8 @@ class AgentEntity:
         original.prepare_for_write(delivery_window_seconds=self._response_delivery_window_seconds)
         already_answered = original.try_get_agent_response(run_request.correlation_id)
         if already_answered is not None:
+            if self._state_provider.schema_upgrade_pending:
+                self.persist_state()
             return already_answered
         self._state_provider.replace_cached_state(deepcopy(original))
         with retention_operation(self.state):
@@ -1337,6 +1390,7 @@ class AgentEntity:
 
     async def _enforce_retention(self) -> None:
         """Apply optional whole-state pressure budgeting independently of eager pruning."""
+        self._state_provider.stamp_schema_metadata()
         if self._max_state_bytes is None:
             return
         await enforce_budget(
@@ -1455,6 +1509,8 @@ def create_agent_entity_class(
     high_watermark: float = HIGH_WATERMARK,
     low_watermark: float = LOW_WATERMARK,
     response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
+    entity_version: int = 1,
+    schema_registry: EntitySchemaRegistry | None = None,
 ) -> type[DurableTaskEntityStateProvider]:
     """Build a ``DurableEntity`` subclass bound to a specific agent instance.
 
@@ -1474,19 +1530,24 @@ def create_agent_entity_class(
         high_watermark: Budget fraction at which pressure eviction starts.
         low_watermark: Target budget fraction after pressure eviction.
         response_delivery_window_seconds: Response delivery window in seconds.
+        entity_version: Entity address generation. One retains the historical name.
+        schema_registry: Optional explicit in-place schema conversion registry.
 
     Returns:
         A new ``DurableTaskEntityStateProvider`` subclass configured for this agent,
         named ``dafx-{agent_name}``.
     """
     agent_name = entity_id or agent.name or type(agent).__name__
-    entity_name = f"dafx-{agent_name}"
+    from ._models import AgentSessionId
+
+    entity_name = AgentSessionId.to_entity_name(agent_name, entity_version=entity_version)
 
     class ConfiguredAgentEntity(DurableTaskEntityStateProvider):
         """Durable entity configured with a specific agent instance."""
 
         def __init__(self) -> None:
             super().__init__()
+            self._entity_schema_registry = schema_registry
             self._agent_entity = AgentEntity(
                 agent=agent,
                 callback=callback,
@@ -1542,6 +1603,11 @@ def create_agent_entity_class(
         def migrate(self, request: JsonMigration) -> dict[str, str]:
             """Import an authorized legacy export into a separate empty destination."""
             return self._agent_entity.migrate(cast(Any, request))
+
+        def delete(self, input: Any = None) -> None:
+            """Reject incompatible schemas before deleting persisted state."""
+            self.ensure_v2_writable()
+            super().delete(input)
 
     # The runtime derives the registered entity name from the class name.
     ConfiguredAgentEntity.__name__ = entity_name

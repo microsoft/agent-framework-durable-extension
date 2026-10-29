@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from typing import TYPE_CHECKING, Any, cast
 from agent_framework import AgentSession
 
 from ._constants import REQUEST_RESPONSE_FORMAT_TEXT
+from ._durable_names import durable_name
 
 if TYPE_CHECKING:  # pragma: no cover - type checking imports only
     from pydantic import BaseModel
@@ -269,29 +271,34 @@ class AgentSessionId:
 
     name: str
     key: str
+    entity_version: int = 1
 
     ENTITY_NAME_PREFIX: str = "dafx-"
 
     @staticmethod
-    def to_entity_name(name: str) -> str:
-        return f"{AgentSessionId.ENTITY_NAME_PREFIX}{name}"
+    def to_entity_name(name: str, *, entity_version: int = 1) -> str:
+        """Resolve an explicitly supported address generation without guessing."""
+        return durable_name(name, entity_version=entity_version)
 
     @staticmethod
-    def with_random_key(name: str) -> AgentSessionId:
-        return AgentSessionId(name=name, key=uuid.uuid4().hex)
+    def with_random_key(name: str, *, entity_version: int = 1) -> AgentSessionId:
+        return AgentSessionId(name=name, key=uuid.uuid4().hex, entity_version=entity_version)
 
     @property
     def entity_name(self) -> str:
-        return self.to_entity_name(self.name)
+        return self.to_entity_name(self.name, entity_version=self.entity_version)
 
     def __str__(self) -> str:
-        return f"@{self.name}@{self.key}"
+        name = self.name if self.entity_version == 1 else self.entity_name
+        return f"@{name}@{self.key}"
 
     def __repr__(self) -> str:
         return f"AgentSessionId(name='{self.name}', key='{self.key}')"
 
     @staticmethod
-    def parse(session_id_string: str, agent_name: str | None = None) -> AgentSessionId:
+    def parse(
+        session_id_string: str, agent_name: str | None = None, *, entity_version: int | None = None
+    ) -> AgentSessionId:
         """Parses a string representation of an agent session ID.
 
         Args:
@@ -301,6 +308,10 @@ class AgentSessionId:
                 If provided, only the key portion is extracted from session_id_string
                 (for @name@key format) or the entire string is used as the key
                 (for plain strings).
+            entity_version: Explicit serialized address generation. One preserves
+                historical logical names verbatim, including names containing dafx-.
+                Omission recognizes versioned external addresses unless the embedded
+                name matches the supplied historical logical agent name.
 
         Returns:
             AgentSessionId instance
@@ -311,12 +322,22 @@ class AgentSessionId:
         # Check if string is in @name@key format
         if session_id_string.startswith("@") and "@" in session_id_string[1:]:
             parts = session_id_string[1:].split("@", 1)
-            name = agent_name if agent_name is not None else parts[0]
-            return AgentSessionId(name=name, key=parts[1])
+            name, version = parts[0], 1 if entity_version is None else entity_version
+            historical_name = entity_version == 1 or (entity_version is None and agent_name == name)
+            match = None if historical_name else re.fullmatch(r"dafx-v([0-9]+)-(.+)", name)
+            if match is not None:
+                version, name = int(match[1]), match[2]
+                AgentSessionId.to_entity_name(name, entity_version=version)
+            if entity_version is not None and version != entity_version:
+                raise ValueError("Serialized DAFX entity address version does not match its metadata.")
+            name = agent_name if agent_name is not None else name
+            return AgentSessionId(name=name, key=parts[1], entity_version=version)
 
         # Plain string format - only valid when agent_name is provided
         if agent_name is not None:
-            return AgentSessionId(name=agent_name, key=session_id_string)
+            return AgentSessionId(
+                name=agent_name, key=session_id_string, entity_version=1 if entity_version is None else entity_version
+            )
 
         raise ValueError(f"Invalid agent session ID format: {session_id_string}")
 
@@ -325,6 +346,7 @@ class DurableAgentSession(AgentSession):
     """Durable agent session that tracks the owning :class:`AgentSessionId`."""
 
     _SERIALIZED_SESSION_ID_KEY = "durable_session_id"
+    _SERIALIZED_ENTITY_VERSION_KEY = "durable_entity_version"
 
     def __init__(
         self,
@@ -340,6 +362,8 @@ class DurableAgentSession(AgentSession):
         state = super().to_dict()
         if self.durable_session_id is not None:
             state[self._SERIALIZED_SESSION_ID_KEY] = str(self.durable_session_id)
+            if self.durable_session_id.entity_version != 1:
+                state[self._SERIALIZED_ENTITY_VERSION_KEY] = self.durable_session_id.entity_version
         return state
 
     @classmethod
@@ -362,6 +386,9 @@ class DurableAgentSession(AgentSession):
         """Create a DurableAgentSession from a state dict."""
         data = dict(data)  # defensive copy — avoid mutating caller's dict
         session_id_value = data.pop(cls._SERIALIZED_SESSION_ID_KEY, None)
+        entity_version = data.pop(cls._SERIALIZED_ENTITY_VERSION_KEY, 1)
+        if type(entity_version) is not int or entity_version not in (1, 2):
+            raise ValueError("Unsupported serialized durable_entity_version.")
         session = super().from_dict(data)
         service_session_id = session.service_session_id
         if service_session_id is not None and not isinstance(service_session_id, str):
@@ -371,7 +398,7 @@ class DurableAgentSession(AgentSession):
         if session_id_value is not None:
             if not isinstance(session_id_value, str):
                 raise ValueError("durable_session_id must be a string when present in serialized state")
-            durable_session_id = AgentSessionId.parse(session_id_value)
+            durable_session_id = AgentSessionId.parse(session_id_value, entity_version=entity_version)
 
         durable_session = cls(
             durable_session_id=durable_session_id,

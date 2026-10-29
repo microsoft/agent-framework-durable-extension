@@ -51,6 +51,8 @@ class DurableAIAgentClient(DurableAgentProvider[AgentResponse]):
         client: TaskHubGrpcClient,
         max_poll_retries: int = DEFAULT_MAX_POLL_RETRIES,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+        *,
+        entity_version: int = 1,
     ):
         """Initialize the client wrapper.
 
@@ -58,6 +60,8 @@ class DurableAIAgentClient(DurableAgentProvider[AgentResponse]):
             client: The durabletask client instance to wrap
             max_poll_retries: Maximum polling attempts when waiting for responses
             poll_interval_seconds: Delay in seconds between polling attempts
+            entity_version: Two for new sessions in a two-phase deployment. Existing
+                DurableAgentSession addresses always take precedence.
         """
         self._client = client
 
@@ -67,7 +71,9 @@ class DurableAIAgentClient(DurableAgentProvider[AgentResponse]):
             poll_interval_seconds if poll_interval_seconds > 0 else DEFAULT_POLL_INTERVAL_SECONDS
         )
 
-        self._executor = ClientAgentExecutor(self._client, self.max_poll_retries, self.poll_interval_seconds)
+        self._executor = ClientAgentExecutor(
+            self._client, self.max_poll_retries, self.poll_interval_seconds, entity_version=entity_version
+        )
         logger.debug("[DurableAIAgentClient] Initialized with client type: %s", type(client).__name__)
 
     def get_agent(self, agent_name: str) -> DurableAIAgent[AgentResponse]:

@@ -511,6 +511,16 @@
       "enum": ["1.0.0", "1.1.0", "1.2.0", "2.0.0"]
     },
     "data": { "$ref": "#/$defs/data" },
+    "dafxSchema": {
+      "type": "object",
+      "description": "Optional explicit Python DAFX entity compatibility contract. Historical unmarked snapshots require an explicit runtime compatibility registration. Metadata does not configure backend dispatch.",
+      "properties": {
+        "contract": { "const": "dafx.agent-state" },
+        "version": { "enum": ["1.0.0", "1.1.0", "1.2.0", "2.0.0"] }
+      },
+      "required": ["contract", "version"],
+      "additionalProperties": false
+    },
     "extensionData": {
       "type": "object",
       "description": "Explicit root metadata; preserve separately from unknown sibling properties."
@@ -519,6 +529,22 @@
   "required": ["schemaVersion", "data"],
   "additionalProperties": true,
   "allOf": [
+    {
+      "if": { "properties": { "schemaVersion": { "const": "1.0.0" } } },
+      "then": { "properties": { "dafxSchema": { "properties": { "version": { "const": "1.0.0" } } } } }
+    },
+    {
+      "if": { "properties": { "schemaVersion": { "const": "1.1.0" } } },
+      "then": { "properties": { "dafxSchema": { "properties": { "version": { "const": "1.1.0" } } } } }
+    },
+    {
+      "if": { "properties": { "schemaVersion": { "const": "1.2.0" } } },
+      "then": { "properties": { "dafxSchema": { "properties": { "version": { "const": "1.2.0" } } } } }
+    },
+    {
+      "if": { "properties": { "schemaVersion": { "const": "2.0.0" } } },
+      "then": { "properties": { "dafxSchema": { "properties": { "version": { "const": "2.0.0" } } } } }
+    },
     {
       "if": {
         "properties": { "schemaVersion": { "const": "2.0.0" } }

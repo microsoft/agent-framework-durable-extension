@@ -21,7 +21,7 @@ from agent_framework_durabletask import RunRequest, _entities
 from agent_framework_durabletask._entities import AgentEntity, DurableTaskEntityStateProvider
 
 _ENTITY = "@dafx-privacy@session"
-_OPERATIONS = ["run", "reset", "expire_responses", "migrate"]
+_OPERATIONS = ["run", "reset", "expire_responses", "migrate", "delete"]
 
 
 def _error(kind: str) -> BaseException:
@@ -47,7 +47,10 @@ def _raising(error: BaseException, *, is_async: bool = False) -> Callable[..., A
 
 
 def _fail_operation(monkeypatch: pytest.MonkeyPatch, operation: str, error: BaseException) -> None:
-    monkeypatch.setattr(AgentEntity, operation, _raising(error, is_async=operation == "run"))
+    if operation == "delete":
+        monkeypatch.setattr(DurableTaskEntityStateProvider, "ensure_v2_writable", _raising(error))
+    else:
+        monkeypatch.setattr(AgentEntity, operation, _raising(error, is_async=operation == "run"))
 
 
 def _request() -> dict[str, Any]:

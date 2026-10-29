@@ -13,6 +13,7 @@ import functools
 import inspect
 import json
 import logging
+import os
 import re
 import unicodedata
 import uuid
@@ -72,10 +73,12 @@ from agent_framework_durabletask import (
     validate_workflow_start_input,
     wrap_workflow_input,
 )
+from agent_framework_durabletask._durable_names import validate_two_phase_name
 from agent_framework_durabletask._entities import (
     _validation_diagnostic,  # pyright: ignore[reportPrivateUsage]
     create_agent_entity_class,
 )
+from agent_framework_durabletask._entity_schema import LegacyEvidenceProvider, agent_entity_schema_registry
 from agent_framework_durabletask._json_payload import JsonPayload, install_json_payload_converter
 from agent_framework_durabletask._workflows.hitl_checkpoint import (
     execute_hitl_checkpoint,
@@ -408,6 +411,9 @@ class AgentFunctionApp(df.DFApp):
         max_state_bytes: StateBudget = DEFAULT_MAX_STATE_BYTES,
         *,
         deployment_mode: str | None = None,
+        process_legacy_entities: bool = False,
+        legacy_evidence_provider: LegacyEvidenceProvider | None = None,
+        acknowledge_host_filtering: bool = False,
         high_watermark: float = HIGH_WATERMARK,
         low_watermark: float = LOW_WATERMARK,
         response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
@@ -437,6 +443,13 @@ class AgentFunctionApp(df.DFApp):
         :param default_callback: Optional callback invoked for agents without specific callbacks.
         :param deployment_mode: Exactly ``isolated_v2`` to acknowledge an isolated schema 2
             deployment with upgraded clients. None reads ``DURABLE_AGENTS_DEPLOYMENT_MODE``.
+            ``two_phase`` registers versioned names and requires host-level DTS filtering.
+        :param process_legacy_entities: Register historical names only after all old workers stop.
+        :param legacy_evidence_provider: Effect-free evidence resolver for ambiguous historical state.
+        :param acknowledge_host_filtering: Acknowledge that the deployed Functions host has
+            Durable extension 3.13.1 or later with the DTS provider and
+            storageProvider.workItemFilteringEnabled=true. This does not configure or
+            inspect the host. SDK worker filters do not control Functions dispatch.
         :param retention: Eager pruning policy, defaulting to ``keep_all``. ``follow_compaction``
             prunes compaction exclusions independently of the pressure budget.
         :param max_state_bytes: Positive integer serialized-state budget, or None to disable pressure
@@ -455,6 +468,20 @@ class AgentFunctionApp(df.DFApp):
         :note: If no agents are provided, they can be added later using :meth:`add_agent`.
         """
         validate_runtime_deployment(deployment_mode)
+        mode = os.getenv("DURABLE_AGENTS_DEPLOYMENT_MODE") if deployment_mode is None else deployment_mode
+        self._two_phase = mode == "two_phase"
+        self._schema_registry = agent_entity_schema_registry(
+            process_legacy_entities=process_legacy_entities, legacy_evidence_provider=legacy_evidence_provider
+        )
+        if process_legacy_entities and not self._two_phase:
+            raise ValueError("process_legacy_entities requires deployment_mode='two_phase'.")
+        if self._two_phase and acknowledge_host_filtering is not True:
+            raise ValueError(
+                "two_phase requires Functions host Durable extension >=3.13.1 with the DTS provider "
+                "and host.json storageProvider.workItemFilteringEnabled=true. After configuring the host, "
+                "set acknowledge_host_filtering=True. The Python SDK cannot enable host dispatch filters."
+            )
+        self._entity_versions = (2, 1) if process_legacy_entities else (2,) if self._two_phase else (1,)
         validate_retention(retention, high_watermark, low_watermark)
         resolved_budget = resolve_state_budget(max_state_bytes)
         validate_response_delivery_window(response_delivery_window_seconds)
@@ -489,7 +516,7 @@ class AgentFunctionApp(df.DFApp):
         self.enable_http_endpoints = enable_http_endpoints
         self.enable_mcp_tool_trigger = enable_mcp_tool_trigger
         self.default_callback = default_callback
-        self._deployment_mode = "isolated_v2"
+        self._deployment_mode = mode
         self._retention: RetentionMode = retention
         self._workflow_retention: RetentionMode = resolved_workflow_retention
         self._max_state_bytes = resolved_budget
@@ -643,11 +670,14 @@ class AgentFunctionApp(df.DFApp):
         if not isinstance(name, str) or not name:
             raise ValueError("Agent must have a name to be registered")
         validate_agent_configuration(agent, retention=settings.retention)
+        if self._deployment_mode == "two_phase":
+            validate_two_phase_name(name)
         label = f"workflow '{owner.name}' agent '{name}'" if owner is not None else f"agent '{name}'"
         identity = RegistrationIdentity(agent if owner is None else owner, agent, "entity", settings, label, endpoints)
-        entity_name = AgentSessionId.to_entity_name(name)
-        identity.reserve(identities, entity_name, namespace="entity-name")
-        identity.reserve(identities, entity_name, namespace="function-name")
+        for version in self._entity_versions:
+            entity_name = AgentSessionId.to_entity_name(name, entity_version=version)
+            identity.reserve(identities, entity_name, namespace="entity-name")
+            identity.reserve(identities, entity_name, namespace="function-name")
         if endpoints[0]:
             identity.reserve(identities, self._build_function_name(name, "http"), namespace="function-name")
         if endpoints[1]:
@@ -663,13 +693,16 @@ class AgentFunctionApp(df.DFApp):
         hosted_workflows = list(collect_hosted_workflows(workflow))
         for hosted in hosted_workflows:
             validate_workflow_name(hosted.name)
+            if self._deployment_mode == "two_phase":
+                validate_two_phase_name(hosted.name)
             for executor_id in hosted.executors:
                 validate_executor_id(executor_id)
             label = f"workflow '{hosted.name}'"
             identity = RegistrationIdentity(hosted, hosted, "orchestration", settings, label)
-            orchestrator_name = workflow_orchestrator_name(hosted.name)
-            identity.reserve(identities, orchestrator_name, namespace="orchestrator-name")
-            identity.reserve(identities, orchestrator_name, namespace="function-name")
+            for version in self._entity_versions:
+                orchestrator_name = workflow_orchestrator_name(hosted.name, entity_version=version)
+                identity.reserve(identities, orchestrator_name, namespace="orchestrator-name")
+                identity.reserve(identities, orchestrator_name, namespace="function-name")
             plan = plan_workflow_registration(hosted)
             if plan.agent_executors:
                 checkpoint = RegistrationIdentity(hosted, hosted, "hitl-checkpoint", settings, label)
@@ -937,8 +970,12 @@ class AgentFunctionApp(df.DFApp):
         every hosted workflow (including nested sub-workflows) so the parent can drive
         them via ``call_sub_orchestrator``.
         """
+        for version in self._entity_versions:
+            self._register_versioned_workflow_function(workflow, version)
+
+    def _register_versioned_workflow_function(self, workflow: Workflow, entity_version: int) -> None:
         captured_workflow = workflow
-        orchestrator_name = workflow_orchestrator_name(workflow.name)
+        orchestrator_name = workflow_orchestrator_name(workflow.name, entity_version=entity_version)
 
         @self.function_name(orchestrator_name)
         @self.orchestration_trigger(context_name="context")
@@ -961,7 +998,9 @@ class AgentFunctionApp(df.DFApp):
             # Create local shared state dict for cross-executor state sharing
             shared_state: dict[str, Any] = {}
 
-            outputs = yield from run_workflow_orchestrator(context, captured_workflow, initial_message, shared_state)
+            outputs = yield from run_workflow_orchestrator(
+                context, captured_workflow, initial_message, shared_state, entity_version=entity_version
+            )
             # Durable Functions runtime extracts return value from StopIteration
             return outputs  # noqa: B901
 
@@ -976,7 +1015,7 @@ class AgentFunctionApp(df.DFApp):
         not have to change URLs as an app grows.
         """
         workflow_name = workflow.name
-        orchestrator_name = workflow_orchestrator_name(workflow_name)
+        orchestrator_name = workflow_orchestrator_name(workflow_name, entity_version=self._entity_versions[0])
 
         @self.function_name(self._workflow_route_function_name(workflow, "start"))
         @self.route(route=f"workflow/{workflow_name}/run", methods=["POST"])
@@ -1282,9 +1321,12 @@ class AgentFunctionApp(df.DFApp):
         The orchestration name is compared case-insensitively so the check stays robust
         to host/runtime casing differences.
         """
-        expected = workflow_orchestrator_name(workflow_name)
+        expected = {
+            workflow_orchestrator_name(workflow_name, entity_version=version).casefold()
+            for version in self._entity_versions
+        }
         name = getattr(status, "name", None)
-        return isinstance(name, str) and name.casefold() == expected.casefold()
+        return isinstance(name, str) and name.casefold() in expected
 
     @property
     def agents(self) -> dict[str, SupportsAgentRun]:
@@ -1447,6 +1489,8 @@ class AgentFunctionApp(df.DFApp):
         context: OrchestrationContext,
         agent_name: str,
         workflow_name: str | None = None,
+        *,
+        entity_version: int = 1,
     ) -> DurableAIAgent[DurableAgentTask]:
         """Return a DurableAIAgent proxy for a registered agent.
 
@@ -1461,6 +1505,8 @@ class AgentFunctionApp(df.DFApp):
                 via ``agents=`` / ``add_agent`` use its bare name.
             workflow_name: Optional owning workflow name. When given, the agent is
                 resolved under the scoped id ``{workflow_name}-{agent_name}``.
+            entity_version: New-session address generation selected from recorded
+                orchestration input, never from replay status or fleet configuration.
 
         Returns:
             DurableAIAgent[DurableAgentTask] wrapper bound to the orchestration context.
@@ -1483,7 +1529,7 @@ class AgentFunctionApp(df.DFApp):
         if normalized_name not in self._agent_metadata:
             raise ValueError(f"Agent '{normalized_name}' is not registered with this app.")
 
-        executor = OrchestrationAgentExecutor(context)
+        executor = OrchestrationAgentExecutor(context, entity_version=entity_version)
         return DurableAIAgent(executor, normalized_name)
 
     def _setup_agent_functions(
@@ -1581,6 +1627,9 @@ class AgentFunctionApp(df.DFApp):
                         "Use sessionId and waitForResponse for new code."
                     )
                 session_id = self._resolve_session_id(req=req, req_body=req_body)
+                agent_session_id = self._create_session_id(agent_name, session_id)
+                if session_id is None:
+                    session_id = str(agent_session_id) if agent_session_id.entity_version == 2 else agent_session_id.key
                 wait_for_response = self._should_wait_for_response(req=req, req_body=req_body)
 
                 logger.debug(
@@ -1598,7 +1647,6 @@ class AgentFunctionApp(df.DFApp):
                         add_deprecation_headers=used_legacy_agent_http_names,
                     )
 
-                agent_session_id = self._create_session_id(agent_name, session_id)
                 correlation_id = self._generate_unique_id()
 
                 logger.debug(
@@ -1704,26 +1752,24 @@ class AgentFunctionApp(df.DFApp):
             low_watermark: Target budget fraction after pressure eviction.
             response_delivery_window_seconds: Response delivery window in seconds.
         """
-        # Use the prefixed entity name for both registration and function naming
-        entity_name_with_prefix = AgentSessionId.to_entity_name(agent_name)
-
-        # azure-functions-durable 2.x accepts a class-based ``DurableEntity`` here, so
-        # the Functions host registers the same entity implementation the standalone
-        # DurableTask worker uses instead of a bespoke function-style entity.
-        entity_class = create_agent_entity_class(
-            agent,
-            callback,
-            entity_id=agent_name,
-            retention=retention,
-            max_state_bytes=max_state_bytes,
-            high_watermark=high_watermark,
-            low_watermark=low_watermark,
-            response_delivery_window_seconds=response_delivery_window_seconds,
-        )
-        for operation in ("run", "reset", "expire_responses", "migrate"):
-            setattr(entity_class, operation, _without_validation_input(getattr(entity_class, operation)))
-        cast(Any, entity_class)._dafx_plain_json_input = True
-        self.entity_trigger(context_name="context", entity_name=entity_name_with_prefix)(entity_class)
+        for version in self._entity_versions:
+            entity_name_with_prefix = AgentSessionId.to_entity_name(agent_name, entity_version=version)
+            entity_class = create_agent_entity_class(
+                agent,
+                callback,
+                entity_id=agent_name,
+                retention=retention,
+                max_state_bytes=max_state_bytes,
+                high_watermark=high_watermark,
+                low_watermark=low_watermark,
+                response_delivery_window_seconds=response_delivery_window_seconds,
+                entity_version=version,
+                schema_registry=self._schema_registry if self._two_phase else None,
+            )
+            for operation in ("run", "reset", "expire_responses", "migrate", "delete"):
+                setattr(entity_class, operation, _without_validation_input(getattr(entity_class, operation)))
+            cast(Any, entity_class)._dafx_plain_json_input = True
+            self.entity_trigger(context_name="context", entity_name=entity_name_with_prefix)(entity_class)
 
     def _setup_mcp_tool_trigger(self, agent_name: str, agent_description: str | None) -> None:
         """Register an MCP tool trigger for an agent using Azure Functions native MCP support.
@@ -1832,19 +1878,7 @@ class AgentFunctionApp(df.DFApp):
                 break
 
         # Create or parse session ID
-        if session_key:
-            try:
-                session_id = AgentSessionId.parse(session_key, agent_name=agent_name)
-            except ValueError as e:
-                logger.warning(
-                    "Failed to parse AgentSessionId from session identifier '%s': %s. Falling back to new session ID.",
-                    session_key,
-                    e,
-                )
-                session_id = AgentSessionId(name=agent_name, key=session_key)
-        else:
-            # Generate new session ID
-            session_id = AgentSessionId.with_random_key(agent_name)
+        session_id = self._create_session_id(agent_name, session_key)
 
         # Build entity instance ID
         entity_instance_id = _agent_entity_id(session_id)
@@ -2336,8 +2370,8 @@ class AgentFunctionApp(df.DFApp):
     def _create_session_id(self, agent_name: str, session_key: str | None) -> AgentSessionId:
         """Create a session identifier using the provided session key or a random value."""
         if session_key:
-            return AgentSessionId(name=agent_name, key=session_key)
-        return AgentSessionId.with_random_key(name=agent_name)
+            return AgentSessionId.parse(session_key, agent_name=agent_name)
+        return AgentSessionId.with_random_key(name=agent_name, entity_version=self._entity_versions[0])
 
     @staticmethod
     def _uses_legacy_agent_http_names(req: func.HttpRequest, req_body: dict[str, Any] | None = None) -> bool:
@@ -2357,13 +2391,13 @@ class AgentFunctionApp(df.DFApp):
 
         return any(value is not None and str(value).strip() for value in legacy_values)
 
-    def _resolve_session_id(self, req: func.HttpRequest, req_body: dict[str, Any]) -> str:
+    def _resolve_session_id(self, req: func.HttpRequest, req_body: dict[str, Any]) -> str | None:
         """Retrieve the session identifier from the request body or query parameters.
 
         Callers may use the canonical ``sessionId`` name or a deprecated snake_case alias, in either
         the request body or the query string. Blank values are treated as absent. Any two non-blank
-        values that disagree are rejected, matching the .NET implementation. A random
-        identifier is generated when no name is supplied.
+        values that disagree are rejected, matching the .NET implementation. Absence
+        is preserved so the caller can select the configured new-session generation.
 
         Raises:
             IncomingRequestError: If conflicting session identifiers were supplied.
@@ -2387,8 +2421,7 @@ class AgentFunctionApp(df.DFApp):
         if distinct:
             return distinct.pop()
 
-        logger.debug("[HTTP Trigger] No session identifier provided; using a random session id")
-        return self._generate_unique_id()
+        return None
 
     def _parse_incoming_request(self, req: func.HttpRequest) -> tuple[dict[str, Any], str, str]:
         """Parse the incoming run request supporting JSON and plain text bodies."""

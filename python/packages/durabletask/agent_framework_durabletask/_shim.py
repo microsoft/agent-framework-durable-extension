@@ -51,7 +51,7 @@ def build_agent_task(
     Returns:
         A yieldable task whose result is an ``AgentResponse``.
     """
-    session_id = AgentSessionId(name=executor_id, key=orchestration_instance_id)
+    session_id = AgentSessionId(name=executor_id, key=orchestration_instance_id, entity_version=executor.entity_version)
     session = DurableAgentSession(durable_session_id=session_id)
     agent = DurableAIAgent(executor, executor_id)
     return agent.run(

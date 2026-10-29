@@ -139,14 +139,17 @@ the versioned `_durable_value_policy` marker so the matching loader can preserve
 after JSON transport. It does not prove execution authority, duplicate the value, or identify a
 runtime-native class by itself.
 
-Host construction now requires an explicit isolated v2 acknowledgement. Pass
+Host construction requires an explicit deployment strategy. The opt-in
+[two-phase entity migration path](ENTITY_MIGRATION.md) uses versioned names and DTS
+backend filtering, then permits in-place historical upgrades after old workers stop.
+For an isolated deployment, pass
 `deployment_mode="isolated_v2"` or set `DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2`.
-There is no automatic probe and no other deployment mode is accepted. This is an operator
+There is no automatic probe. This is an operator
 acknowledgement that the task hub is isolated and the clients are upgraded. It is not runtime
 proof of isolation and it cannot detect peer workers. A new isolated hub with matching upgraded
 workers and clients is the recommended way to keep old workers and histories off this deployment.
 
-**Start fresh workflow instances after this update, including upgrades from earlier v2 builds.**
+**The following inherited replay limitations apply to affected older workflow builds, not to entity address upgrades.**
 Workflow protocol `2` is unchanged, but start admission is stricter and checkpointed HITL admission
 and mixed parent/child scheduling change the replay action graph, including generated child IDs.
 Existing v2 in-flight instances and recorded histories are not supported by this runtime and may
@@ -156,6 +159,10 @@ If old runs must finish, keep them on their original workers and hub, including 
 with concatenated child IDs. Do not resume them here.
 
 #### Migration
+
+For on-demand upgrades at an existing address, see [in-place entity migration](ENTITY_MIGRATION.md).
+The export/import API below remains a separate explicit transfer operation, not the
+two-phase rollout path.
 
 The current layer includes canonical transaction state, session capture, the workflow
 protocol boundary, and a privileged manual migration path. Migration is a backend entity

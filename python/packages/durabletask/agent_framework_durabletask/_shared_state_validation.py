@@ -500,6 +500,15 @@ def validate_shared_data(data: dict[str, Any], *, version: str = "2.0.0") -> Non
     _data(data, version)
 
 
+def validate_schema_metadata(state: dict[str, Any], *, contract: str = "dafx.agent-state") -> None:
+    """Reject incompatible reserved metadata before interpreting version-sensitive data."""
+    if "dafxSchema" in state and state["dafxSchema"] != {
+        "contract": contract,
+        "version": state.get("schemaVersion"),
+    }:
+        raise ValueError("Malformed or incompatible DAFX entity schema metadata.")
+
+
 def validate_shared_state(state: dict[str, Any]) -> None:
     """Validate a canonical shared root and its data without mutating either.
 
@@ -513,6 +522,7 @@ def validate_shared_state(state: dict[str, Any]) -> None:
     state = _object(state, "state")
     _required(state, ("schemaVersion", "data"), "state")
     version = _enum(state["schemaVersion"], _VERSIONS, "schemaVersion")
+    validate_schema_metadata(state)
     _json_value(state)
     if "extensionData" in state:
         _object(state["extensionData"], "state.extensionData")

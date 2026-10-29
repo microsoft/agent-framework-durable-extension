@@ -65,6 +65,8 @@ def run_workflow_orchestrator(
     workflow: Workflow,
     initial_message: Any,
     shared_state: dict[str, Any] | None = None,
+    *,
+    entity_version: int = 1,
 ) -> Generator[Any, Any, list[Any] | dict[str, Any]]:
     """Azure Functions wrapper around the shared workflow orchestrator.
 
@@ -78,6 +80,7 @@ def run_workflow_orchestrator(
         workflow: The MAF Workflow instance to execute.
         initial_message: Initial message to send to the start executor.
         shared_state: Optional dict for cross-executor state sharing.
+        entity_version: Recorded orchestration name's entity address generation.
 
     Returns:
         For a top-level run, the list of workflow outputs collected from executor
@@ -90,5 +93,5 @@ def run_workflow_orchestrator(
     # Publishing the accumulating event log would overflow that cap and fail the
     # orchestrator, so events are omitted here; state, pending HITL requests, and
     # the final output remain available via the workflow status endpoint.
-    af_ctx = DurableTaskWorkflowContext(context, supports_event_streaming=False)
+    af_ctx = DurableTaskWorkflowContext(context, supports_event_streaming=False, entity_version=entity_version)
     return _run_workflow_orchestrator_shared(af_ctx, workflow, initial_message, shared_state)

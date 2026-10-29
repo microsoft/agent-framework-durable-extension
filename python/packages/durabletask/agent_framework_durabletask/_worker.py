@@ -10,6 +10,7 @@ as durable orchestrations with automatically generated activity functions.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from agent_framework import SupportsAgentRun, Workflow
@@ -30,9 +31,12 @@ from ._configuration import (
     validate_runtime_deployment,
 )
 from ._constants import DELIVERY_WINDOW_SECONDS
+from ._durable_names import validate_two_phase_name
 from ._entities import create_agent_entity_class
+from ._entity_schema import LegacyEvidenceProvider, agent_entity_schema_registry
 from ._feature_usage import FeatureIndex
 from ._json_payload import JsonPayload, install_json_payload_converter
+from ._models import AgentSessionId
 from ._retention import (
     DEFAULT_RETENTION,
     DTS_MAX_STATE_BYTES,
@@ -77,8 +81,10 @@ class DurableAIAgentWorker:
 
     Set ``deployment_mode="isolated_v2"`` or ``DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2``
     to acknowledge an isolated schema 2 task hub/deployment with upgraded clients.
-    Old workflow histories must remain on the old engine. This acknowledgement is
-    not runtime proof of isolation and cannot detect peer workers.
+    Incompatible workflow histories must remain on their original deployment.
+    Alternatively, ``deployment_mode="two_phase"`` uses versioned entity and generated
+    workflow entry names with DTS backend filtering. Enable ``process_legacy_entities``
+    only after old workers stop. Neither mode can detect peer workers.
 
     Example:
         ```python
@@ -109,6 +115,8 @@ class DurableAIAgentWorker:
         callback: AgentResponseCallbackProtocol | None = None,
         *,
         deployment_mode: str | None = None,
+        process_legacy_entities: bool = False,
+        legacy_evidence_provider: LegacyEvidenceProvider | None = None,
         retention: RetentionMode = DEFAULT_RETENTION,
         max_state_bytes: StateBudgetOverride = INHERIT,
         high_watermark: float = HIGH_WATERMARK,
@@ -122,6 +130,10 @@ class DurableAIAgentWorker:
             callback: Optional callback for agent response notifications
             deployment_mode: Exactly ``isolated_v2`` to acknowledge an isolated schema 2
                 deployment with upgraded clients. None reads ``DURABLE_AGENTS_DEPLOYMENT_MODE``.
+                ``two_phase`` enables versioned entities and backend work-item filters.
+            process_legacy_entities: Register historical names only after all old workers stop.
+            legacy_evidence_provider: Effect-free authoritative evidence resolver for
+                nonempty legacy state. Missing evidence rejects ambiguous conversions.
             retention: Eager pruning policy, defaulting to ``keep_all``. ``follow_compaction``
                 prunes compaction exclusions independently of the pressure budget.
             max_state_bytes: Serialized-state pressure budget. Omission or INHERIT uses the
@@ -134,6 +146,18 @@ class DurableAIAgentWorker:
             response_delivery_window_seconds: Positive integer response delivery window in seconds.
         """
         validate_runtime_deployment(deployment_mode)
+        mode = os.getenv("DURABLE_AGENTS_DEPLOYMENT_MODE") if deployment_mode is None else deployment_mode
+        self._two_phase = mode == "two_phase"
+        self._schema_registry = agent_entity_schema_registry(
+            process_legacy_entities=process_legacy_entities, legacy_evidence_provider=legacy_evidence_provider
+        )
+        if process_legacy_entities and not self._two_phase:
+            raise ValueError("process_legacy_entities requires deployment_mode='two_phase'.")
+        self._entity_versions = (2, 1) if process_legacy_entities else (2,) if self._two_phase else (1,)
+        if self._two_phase:
+            if not isinstance(worker, DurableTaskSchedulerWorker):
+                raise ValueError("two_phase requires a DurableTaskSchedulerWorker with backend work-item filtering.")
+            worker.use_work_item_filters()
         validate_retention(retention, high_watermark, low_watermark)
         self._backend_limit = DTS_MAX_STATE_BYTES if isinstance(worker, DurableTaskSchedulerWorker) else None
         resolved_max_state_bytes = resolve_state_budget_override(
@@ -225,30 +249,37 @@ class DurableAIAgentWorker:
             callback=effective_callback,
         )
         identities = dict(self._registration_identities)
-        RegistrationIdentity(agent, agent, "entity", settings, f"agent '{registration_name}'").reserve(
-            identities, f"dafx-{registration_name}", namespace="entity-name"
-        )
+        if self._two_phase:
+            validate_two_phase_name(registration_name)
+        for version in self._entity_versions:
+            RegistrationIdentity(agent, agent, "entity", settings, f"agent '{registration_name}'").reserve(
+                identities,
+                AgentSessionId.to_entity_name(registration_name, entity_version=version),
+                namespace="entity-name",
+            )
 
         logger.info(
             "[DurableAIAgentWorker] Registering agent: %s as entity: dafx-%s", registration_name, registration_name
         )
 
         # Create a configured entity class using the shared factory
-        entity_class = create_agent_entity_class(
-            agent,
-            effective_callback,
-            entity_id=registration_name,
-            retention=effective_retention,
-            max_state_bytes=effective_budget,
-            high_watermark=effective_high,
-            low_watermark=effective_low,
-            response_delivery_window_seconds=effective_window,
-        )
-
         # Register the entity class with the worker
         # The worker.add_entity method takes a class
         try:
-            entity_registered: str = self._worker.add_entity(entity_class)
+            for version in self._entity_versions:
+                entity_class = create_agent_entity_class(
+                    agent,
+                    effective_callback,
+                    entity_id=registration_name,
+                    retention=effective_retention,
+                    max_state_bytes=effective_budget,
+                    high_watermark=effective_high,
+                    low_watermark=effective_low,
+                    response_delivery_window_seconds=effective_window,
+                    entity_version=version,
+                    schema_registry=self._schema_registry if self._two_phase else None,
+                )
+                self._worker.add_entity(entity_class)
         except Exception:
             self._registration_failed = True
             raise
@@ -256,8 +287,8 @@ class DurableAIAgentWorker:
         self._registration_identities = identities
 
         logger.debug(
-            "[DurableAIAgentWorker] Successfully registered entity class %s for agent: %s",
-            entity_registered,
+            "[DurableAIAgentWorker] Successfully registered entity versions %s for agent: %s",
+            self._entity_versions,
             registration_name,
         )
 
@@ -389,12 +420,17 @@ class DurableAIAgentWorker:
         identities = dict(self._registration_identities)
         for hosted in hosted_workflows:
             validate_workflow_name(hosted.name)
+            if self._two_phase:
+                validate_two_phase_name(hosted.name)
             for executor_id in hosted.executors:
                 validate_executor_id(executor_id)
             label = f"workflow '{hosted.name}'"
-            RegistrationIdentity(hosted, hosted, "orchestration", settings, label).reserve(
-                identities, workflow_orchestrator_name(hosted.name), namespace="orchestrator-name"
-            )
+            for version in self._entity_versions:
+                RegistrationIdentity(hosted, hosted, "orchestration", settings, label).reserve(
+                    identities,
+                    workflow_orchestrator_name(hosted.name, entity_version=version),
+                    namespace="orchestrator-name",
+                )
             plan = plan_workflow_registration(hosted)
             if plan.agent_executors:
                 RegistrationIdentity(hosted, hosted, "hitl-checkpoint", settings, label).reserve(
@@ -403,17 +439,20 @@ class DurableAIAgentWorker:
             for agent_executor in plan.agent_executors:
                 validate_executor_id(agent_executor.id)
                 validate_agent_configuration(agent_executor.agent, retention=effective_retention)
-                RegistrationIdentity(
-                    hosted,
-                    agent_executor.agent,
-                    "entity",
-                    settings,
-                    f"{label} executor '{agent_executor.id}'",
-                ).reserve(
-                    identities,
-                    f"dafx-{workflow_scoped_executor_id(hosted.name, agent_executor.id)}",
-                    namespace="entity-name",
-                )
+                for version in self._entity_versions:
+                    RegistrationIdentity(
+                        hosted,
+                        agent_executor.agent,
+                        "entity",
+                        settings,
+                        f"{label} executor '{agent_executor.id}'",
+                    ).reserve(
+                        identities,
+                        AgentSessionId.to_entity_name(
+                            workflow_scoped_executor_id(hosted.name, agent_executor.id), entity_version=version
+                        ),
+                        namespace="entity-name",
+                    )
             for executor in plan.activity_executors:
                 validate_executor_id(executor.id)
                 RegistrationIdentity(
@@ -542,8 +581,12 @@ class DurableAIAgentWorker:
 
     def _register_workflow_orchestrator(self, workflow: Workflow) -> None:
         """Register a workflow's orchestrator function under its per-workflow name."""
+        for version in self._entity_versions:
+            self._register_versioned_workflow_orchestrator(workflow, version)
+
+    def _register_versioned_workflow_orchestrator(self, workflow: Workflow, entity_version: int) -> None:
         captured_workflow = workflow
-        orchestrator_name = workflow_orchestrator_name(workflow.name)
+        orchestrator_name = workflow_orchestrator_name(workflow.name, entity_version=entity_version)
 
         def workflow_orchestrator(context: OrchestrationContext, input_data: JsonPayload) -> Any:
             # Reject legacy recorded starts before entering the changed engine.
@@ -555,7 +598,7 @@ class DurableAIAgentWorker:
             )
             shared_state: dict[str, Any] = {}
 
-            dt_ctx = DurableTaskWorkflowContext(context)
+            dt_ctx = DurableTaskWorkflowContext(context, entity_version=entity_version)
             outputs = yield from run_workflow_orchestrator(dt_ctx, captured_workflow, initial_message, shared_state)
             return outputs  # noqa: B901
 

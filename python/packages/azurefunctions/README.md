@@ -20,14 +20,22 @@ This unreleased host uses the [canonical Python runtime contract](../durabletask
 for schema `2.0.0` writes, legacy readers, response values, migration, sessions and workflow replay.
 This guide covers the Functions-specific behavior, not a separate compatibility promise.
 
-`AgentFunctionApp` requires `deployment_mode="isolated_v2"` or
-`DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2`. No other mode or automatic probe is supported.
+`AgentFunctionApp` supports an isolated deployment through `deployment_mode="isolated_v2"` or
+`DURABLE_AGENTS_DEPLOYMENT_MODE=isolated_v2`. There is no automatic probe.
 This acknowledges an isolated hub with upgraded workers and clients. It cannot prove isolation
 or detect peers. Use a new isolated hub and **fresh workflow instances, even after earlier v2 builds**.
 Protocol `2` does not guarantee replay compatibility. Keep old runs on their original workers and hub.
 The [ADR rollout gates](../../../docs/decisions/0032-durable-thread-compaction.md#state-evolution-and-compatibility) remain in force.
 
-Migration is a privileged backend entity operation, with no generated HTTP or MCP endpoint.
+Alternatively, the opt-in [two-phase entity migration guide](../durabletask/ENTITY_MIGRATION.md)
+describes `deployment_mode="two_phase"`, versioned entity and generated workflow names,
+and in-place state upgrades after old workers stop. Functions requires actual host/provider
+filtering in `host.json` with a supported Durable extension, plus
+`acknowledge_host_filtering=True`. Calling the standalone SDK's filter method does not
+enable Functions dispatch filtering. This path does not repair the inherited incompatible
+workflow histories described above.
+
+The separate export/import migration is a privileged backend entity operation, with no generated HTTP or MCP endpoint.
 Follow the shared [migration contract and request example](../durabletask/README.md#migration),
 including operator quiescence, fencing, evidence and a separate empty destination.
 

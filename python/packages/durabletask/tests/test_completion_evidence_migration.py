@@ -197,6 +197,30 @@ def test_empty_complete_journal_can_assert_used_request_only_source_had_no_compl
     assert migrated.to_dict()["data"]["conversationHistory"] == source["data"]["conversationHistory"]
 
 
+def test_explicit_cutover_preserves_history_without_inventing_historical_completions() -> None:
+    source = _source(_entry("request"), _entry("response"), _entry("errorResponse", "failed-old"))
+    before = deepcopy(source)
+    _assert_rejected(source, None)
+    migrated = _cold(_migrate(source, completion_policy="cutover"))
+    assert migrated.to_dict()["data"]["conversationHistory"] == source["data"]["conversationHistory"]
+    assert migrated.data.response_mailbox == migrated.data.completed_correlations == {}
+    assert source == before
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"completion_policy": "other"},
+        {"completion_policy": "cutover", "require_known_outcomes": True},
+        {"completion_policy": "cutover", "completion_evidence": {}},
+    ],
+)
+def test_completion_policy_cannot_disguise_a_historical_outcome_claim(options: dict[str, Any]) -> None:
+    source = _source(_entry())
+    with pytest.raises(ValueError):
+        _migrate(source, **options)
+
+
 @pytest.mark.parametrize("kind", ["response", "errorResponse"])
 def test_empty_journal_cannot_discard_a_retained_completion(kind: str) -> None:
     source = _source(_entry(kind))

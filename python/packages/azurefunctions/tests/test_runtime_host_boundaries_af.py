@@ -9,16 +9,18 @@ import pytest
 from agent_framework_azurefunctions import AgentFunctionApp
 
 
-def test_app_constructor_requires_explicit_isolated_v2_when_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_app_constructor_requires_explicit_deployment_strategy_when_env_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("DURABLE_AGENTS_DEPLOYMENT_MODE", raising=False)
-    with pytest.raises(ValueError, match="Schema 2 requires an isolated task hub/deployment"):
+    with pytest.raises(ValueError, match="Schema 2 requires an explicit deployment strategy"):
         AgentFunctionApp(enable_health_check=False)
 
 
 @pytest.mark.parametrize("value", ["legacy", "isolated", "", "ISOLATED_V2"])
 def test_app_constructor_rejects_invalid_deployment_mode_values(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.delenv("DURABLE_AGENTS_DEPLOYMENT_MODE", raising=False)
-    with pytest.raises(ValueError, match="no other deployment mode is accepted"):
+    with pytest.raises(ValueError, match="isolated_v2.*two_phase"):
         AgentFunctionApp(enable_health_check=False, deployment_mode=value)
 
 
@@ -31,7 +33,7 @@ def test_app_constructor_accepts_explicit_isolated_v2_without_env(monkeypatch: p
 @pytest.mark.parametrize("value", ["legacy", "isolated", "", "ISOLATED_V2"])
 def test_app_constructor_rejects_invalid_deployment_environment(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("DURABLE_AGENTS_DEPLOYMENT_MODE", value)
-    with pytest.raises(ValueError, match="no other deployment mode is accepted"):
+    with pytest.raises(ValueError, match="isolated_v2.*two_phase"):
         AgentFunctionApp(enable_health_check=False)
 
 

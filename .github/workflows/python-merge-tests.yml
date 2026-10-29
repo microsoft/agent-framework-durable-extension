@@ -15,6 +15,65 @@ on:
   workflow_dispatch:
 
 jobs:
+  entity-migration-emulator:
+    name: Python entity migration (local DTS emulator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DTS_EMULATOR_CONTAINER: dafx-migration-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+
+      - name: Sync dependencies
+        working-directory: python
+        run: uv sync --frozen --all-packages --group dev --group test
+
+      - name: Start owned loopback emulator and wait for listener
+        shell: bash
+        run: |
+          docker run --detach --name "$DTS_EMULATOR_CONTAINER" \
+            --publish 127.0.0.1:8080:8080 --publish 127.0.0.1:8082:8082 \
+            --env DTS_USE_DYNAMIC_TASK_HUBS=true \
+            mcr.microsoft.com/dts/dts-emulator@sha256:361323065a608d605f9d3ae56b854eb11f1c47fcc16845a37f948f03ca9c5fac
+          # The emulator has no health endpoint. Any HTTP response establishes listener readiness.
+          timeout 60 bash -c 'until curl --silent --show-error --output /dev/null http://127.0.0.1:8080/healthz; do sleep 1; done'
+
+      - name: Execute both local entity migration acceptance cases
+        working-directory: python
+        env:
+          DTS_ENTITY_MIGRATION_ENDPOINT: "127.0.0.1:8080"
+        run: uv run --no-sync pytest -m integration packages/durabletask/tests/test_entity_migration_dts.py --junitxml=entity-migration-results.xml
+
+      - name: Verify acceptance cases executed without skips
+        if: success()
+        working-directory: python
+        shell: bash
+        run: |
+          uv run --no-sync python - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse("entity-migration-results.xml").getroot().findall(".//testcase")
+          assert len(cases) == 2, f"Expected two acceptance cases, collected {len(cases)}"
+          assert all(case.find("skipped") is None for case in cases), "Acceptance cases must not skip"
+          PY
+
+      - name: Emulator logs and cleanup
+        if: always()
+        shell: bash
+        run: |
+          if docker container inspect "$DTS_EMULATOR_CONTAINER" >/dev/null 2>&1; then
+            docker logs "$DTS_EMULATOR_CONTAINER"
+            docker rm --force "$DTS_EMULATOR_CONTAINER"
+          fi
+
   minimum-dependencies:
     # agent-framework-azurefunctions requires Python 3.13 and has its own minimum job
     # below, so this 3.10 job resolves the durabletask package's minimums on its own.

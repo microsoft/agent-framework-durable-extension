@@ -61,6 +61,21 @@ class TestWorkflowNameRoundTrip:
         # A bare orchestration name (no dafx- prefix) is "not one of ours".
         assert workflow_name_from_orchestrator("workflow_orchestrator") is None
 
+    @pytest.mark.parametrize("generation", [1, 2])
+    @pytest.mark.parametrize("name", ["orders", "v2-orders", "V3-customer", "dafx-v2-orders"])
+    def test_explicit_generation_round_trip_does_not_guess_from_logical_name(self, generation: int, name: str) -> None:
+        expected = f"dafx-{name}" if generation == 1 else f"dafx-v2-{name}"
+        assert workflow_orchestrator_name(name, entity_version=generation) == expected
+        assert workflow_name_from_orchestrator(expected, entity_version=generation) == name
+        assert workflow_name_from_orchestrator("dafx-v2-orders") == "v2-orders"
+
+    @pytest.mark.parametrize("generation", [True, 0, 3])
+    def test_unsupported_generation_is_rejected_by_both_helpers(self, generation: int) -> None:
+        with pytest.raises(ValueError, match="version"):
+            workflow_orchestrator_name("orders", entity_version=generation)
+        with pytest.raises(ValueError, match="version"):
+            workflow_name_from_orchestrator("dafx-orders", entity_version=generation)
+
 
 class TestValidateExecutorId:
     """``validate_executor_id`` guards the durable-naming / nested-HITL contract."""

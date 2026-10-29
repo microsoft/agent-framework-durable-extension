@@ -47,7 +47,7 @@ from dateutil import parser as date_parser
 
 from ._constants import ContentTypes, DurableStateFields
 from ._models import RunRequest, serialize_response_format
-from ._shared_state_validation import load_state_json, validate_legacy_counters
+from ._shared_state_validation import load_state_json, validate_legacy_counters, validate_schema_metadata
 
 logger = logging.getLogger("agent_framework.durabletask")
 
@@ -67,6 +67,7 @@ def _validate_legacy_state_layout(state: dict[str, Any]) -> None:
         raise ValueError("Shared schema 2.0.0 state is read-only in this version; v2 entity writes are not supported.")
     if not isinstance(version, str) or version not in ("1.0.0", "1.1.0", "1.2.0"):
         raise ValueError("Durable entity state schemaVersion is missing or unsupported.")
+    validate_schema_metadata(state)
     data = state.get("data")
     if not isinstance(data, dict):
         raise ValueError("Durable entity state data must be a JSON object.")

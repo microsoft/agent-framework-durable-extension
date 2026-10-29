@@ -101,6 +101,20 @@ class TestAgentSessionId:
         assert session_id.name == "OverriddenAgent"
         assert session_id.key == "test-key-123"
 
+    @pytest.mark.parametrize("entity_version", [None, 1, 2])
+    def test_embedded_historical_logical_name_preserves_its_address(self, entity_version: int | None) -> None:
+        session_id = AgentSessionId.parse(
+            "@dafx-v2-assistant@original-key",
+            agent_name="dafx-v2-assistant",
+            entity_version=entity_version,
+        )
+        assert session_id.key == "original-key"
+        assert session_id.name == "dafx-v2-assistant"
+        assert session_id.entity_version == (2 if entity_version == 2 else 1)
+        assert session_id.entity_name == (
+            "dafx-v2-dafx-v2-assistant" if entity_version == 2 else "dafx-dafx-v2-assistant"
+        )
+
     def test_parse_without_agent_name_uses_parsed_name(self) -> None:
         """Test parsing @name@key format without agent_name uses name from string."""
         session_id = AgentSessionId.parse("@ParsedAgent@test-key-123")

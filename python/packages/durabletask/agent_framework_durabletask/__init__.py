@@ -40,6 +40,13 @@ from ._constants import (
 )
 from ._durable_agent_state import DurableAgentState as LegacyDurableAgentState
 from ._entities import AgentEntity, AgentEntityStateProviderMixin
+from ._entity_schema import (
+    EntityConversion,
+    EntityMigrationContext,
+    EntitySchemaRegistry,
+    LegacyEvidenceProvider,
+    agent_entity_schema_registry,
+)
 from ._executors import DurableAgentExecutor, DurableAgentTask, OrchestrationAgentExecutor
 from ._history_provider import DurableHistoryProvider
 from ._models import AgentSessionId, DurableAgentSession, RunRequest
@@ -213,8 +220,12 @@ __all__ = [
     "DurableStateFields",
     "DurableTaskWorkflowContext",
     "DurableWorkflowClient",
+    "EntityConversion",
+    "EntityMigrationContext",
+    "EntitySchemaRegistry",
     "Inherit",
     "LegacyDurableAgentState",
+    "LegacyEvidenceProvider",
     "OrchestrationAgentExecutor",
     "RegistrationIdentity",
     "RetentionMode",
@@ -226,6 +237,7 @@ __all__ = [
     "WorkflowOrchestrationContext",
     "WorkflowRegistrationPlan",
     "__version__",
+    "agent_entity_schema_registry",
     "build_agent_task",
     "collect_hosted_workflows",
     "deserialize_workflow_output",

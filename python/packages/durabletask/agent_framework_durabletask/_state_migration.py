@@ -9,7 +9,7 @@ import json
 import re
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from ._message_identity import message_identity
 from ._response_utils import load_agent_response
@@ -336,6 +336,7 @@ def migrate_legacy_state(
     completion_evidence: dict[str, Any] | None = None,
     require_known_outcomes: bool = False,
     now: datetime | None = None,
+    completion_policy: Literal["historical", "cutover"] = "historical",
 ) -> DurableAgentState:
     """Stage a detached legacy migration for an explicit entity migrate operation.
 
@@ -358,7 +359,7 @@ def migrate_legacy_state(
     Without a journal, retained IDs preserve identity-only compatibility markers,
     not exact acceptance fingerprints or evidence for evicted inputs.
 
-    Any retained history, truncation, nonempty session or ingestedPositions, or
+    With the default historical policy, any retained history, truncation, nonempty session or ingestedPositions, or
     nonempty supplied accepted-message journal requires a
     COMPLETE authoritative completion journal from the quiesced legacy deployment,
     including original terminal results no longer in retained history. An empty
@@ -369,6 +370,12 @@ def migrate_legacy_state(
     agree with its journal outcome. Partial non-error content never proves success.
     Delivery evidence proves accepted inputs only, independently of this journal.
     No private prototype completion maps or unversioned ingestedMessages are read.
+
+    The explicit cutover policy instead preserves valid retained history without
+    historical completions. It cannot admit truncation or nonempty scalar cursors.
+    New completion guarantees begin with normal v2 operation commits. A late
+    retry of an old invocation can execute again, as on the legacy Python runtime.
+    Malformed supplied completion evidence never falls back to this policy.
 
     Any legacy data.pythonIngestion field is rejected before parsing, including
     null, empty, foreign and recognized profiles. It must not become active v2
@@ -412,6 +419,11 @@ def migrate_legacy_state(
         require_known_outcomes: Deprecated compatibility argument that must be a boolean.
             False cannot waive the shared target's requirement for known outcomes.
         now: Offset-aware timestamp for this staging call, defaulting to UTC now.
+        completion_policy: ``historical`` requires authoritative historical completion
+            evidence for used state. ``cutover`` preserves supported retained history
+            without importing old completions. It cannot be combined with completion
+            evidence, truncation or nonempty ingestion cursors. Late retries of old
+            correlations can execute again, as on the legacy Python runtime.
 
     Returns:
         A detached version-2 DurableAgentState ready for parent validation and commit.
@@ -426,6 +438,11 @@ def migrate_legacy_state(
     _positive_int(delivery_window_seconds, "delivery_window_seconds")
     if not isinstance(require_known_outcomes, bool):
         raise ValueError("require_known_outcomes must be a boolean.")
+    if completion_policy not in ("historical", "cutover"):
+        raise ValueError("completion_policy must be historical or cutover.")
+    cutover = completion_policy == "cutover"
+    if cutover and (completion_evidence is not None or require_known_outcomes):
+        raise ValueError("Completion cutover cannot claim authoritative historical outcomes.")
     if max_state_bytes is not None:
         _positive_int(max_state_bytes, "max_state_bytes")
     if not isinstance(source_digest, str) or _SHA256.fullmatch(source_digest) is None:
@@ -454,6 +471,10 @@ def migrate_legacy_state(
     # Its raw shadows preserve unknown fields and optional-field representations.
     state = DurableAgentState.from_dict(snapshot)
     positions = _legacy_positions(raw_data)
+    if cutover and ("truncation" in raw_data or positions):
+        raise ValueError(
+            "Completion cutover does not establish missing truncated history or ingestion cursor provenance."
+        )
     if positions and delivery_evidence is None:
         raise ValueError(_JOURNAL_REQUIRED)
     timestamp = now if now is not None else datetime.now(timezone.utc)
@@ -467,8 +488,10 @@ def migrate_legacy_state(
 
     if "migration" in state.data.unknown_fields:
         raise ValueError("Legacy state already contains reserved migration metadata; refusing to overwrite it.")
-    if completion_evidence is None and (
-        raw_data["conversationHistory"] or "truncation" in raw_data or positions or raw_data.get("session")
+    if (
+        not cutover
+        and completion_evidence is None
+        and (raw_data["conversationHistory"] or "truncation" in raw_data or positions or raw_data.get("session"))
     ):
         raise ValueError(_COMPLETION_REQUIRED)
     completion_evidence_id: str | None = None
@@ -485,12 +508,13 @@ def migrate_legacy_state(
         "terminalResults": results,
         "completionReceipts": receipts,
     })
-    _validate_retained_completions(raw_data["conversationHistory"], results)
+    if not cutover:
+        _validate_retained_completions(raw_data["conversationHistory"], results)
     _preserve_session(state, source_session_id)
     evidence_id: str | None = None
     if delivery_evidence is not None:
         evidence_id, journal = _journal_receipts(delivery_evidence, source_digest=source_digest, positions=positions)
-        if journal and completion_evidence is None:
+        if journal and completion_evidence is None and not cutover:
             raise ValueError(_COMPLETION_REQUIRED)
         _apply_journal(state, journal)
     else:
@@ -500,6 +524,11 @@ def migrate_legacy_state(
     # Switch the detached root before emitting or validating target maps. The
     # data shadow must merge those new fields rather than revalidate as legacy.
     state.schema_version = DurableAgentState.SCHEMA_VERSION
+    if "dafxSchema" in state.unknown_fields:
+        state.unknown_fields["dafxSchema"] = {
+            "contract": "dafx.agent-state",
+            "version": state.schema_version,
+        }
     state.data.response_mailbox = results
     state.data.completed_correlations = receipts
     state.data.unknown_fields["migration"] = {

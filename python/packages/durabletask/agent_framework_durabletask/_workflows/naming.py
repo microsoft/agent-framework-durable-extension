@@ -30,6 +30,8 @@ import re
 from collections.abc import Iterator
 from typing import Any, cast
 
+from .._durable_names import DURABLE_NAME_PREFIX, durable_name, durable_name_prefix
+
 __all__ = [
     "DURABLE_NAME_PREFIX",
     "MAX_EXECUTOR_ID_LENGTH",
@@ -54,8 +56,6 @@ __all__ = [
 # Shared prefix for every durable name this hosting layer registers. Matches
 # .NET's ``WorkflowNamingHelper.OrchestrationFunctionPrefix`` and the existing
 # ``AgentSessionId.ENTITY_NAME_PREFIX``.
-DURABLE_NAME_PREFIX = "dafx-"
-
 # Identifies the workflow's own input in the conversation chained between agent nodes. It has no
 # producing executor, so it carries a reserved id in that position.
 WORKFLOW_INPUT_EXECUTOR_ID = "input"
@@ -179,40 +179,44 @@ _AUTO_GENERATED_NAME_RE = re.compile(
 )
 
 
-def workflow_orchestrator_name(workflow_name: str) -> str:
+def workflow_orchestrator_name(workflow_name: str, *, entity_version: int = 1) -> str:
     """Return the durable orchestration name for a workflow.
 
     Args:
         workflow_name: The workflow's name. Must satisfy
             :func:`validate_workflow_name`.
+        entity_version: Explicit address generation. Defaults to historical naming.
 
     Returns:
-        ``"dafx-{workflow_name}"``.
+        ``"dafx-{workflow_name}"`` or ``"dafx-v2-{workflow_name}"``.
 
     Raises:
         ValueError: If ``workflow_name`` is not a valid, stable workflow name.
     """
     validate_workflow_name(workflow_name)
-    return f"{DURABLE_NAME_PREFIX}{workflow_name}"
+    return durable_name(workflow_name, entity_version=entity_version)
 
 
-def workflow_name_from_orchestrator(orchestrator_name: str) -> str | None:
+def workflow_name_from_orchestrator(orchestrator_name: str, *, entity_version: int = 1) -> str | None:
     """Recover the workflow name from a durable orchestration name.
 
     The inverse of :func:`workflow_orchestrator_name`. Intended to be applied to
     orchestration names (for example a durable instance's ``status.name``); it
-    strips the shared :data:`DURABLE_NAME_PREFIX`.
+    strips only the explicitly selected generation's prefix. It never infers
+    generation from the logical workflow name.
 
     Args:
         orchestrator_name: A durable orchestration name.
+        entity_version: Explicit address generation. Defaults to historical naming.
 
     Returns:
         The workflow name, or ``None`` if ``orchestrator_name`` does not carry the
         expected prefix (so a caller can treat it as "not one of ours").
     """
-    if not orchestrator_name.startswith(DURABLE_NAME_PREFIX):
+    prefix = durable_name_prefix(entity_version)
+    if not orchestrator_name.startswith(prefix):
         return None
-    name = orchestrator_name[len(DURABLE_NAME_PREFIX) :]
+    name = orchestrator_name[len(prefix) :]
     return name or None
 
 

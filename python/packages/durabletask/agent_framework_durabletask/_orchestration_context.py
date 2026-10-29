@@ -45,14 +45,16 @@ class DurableAIAgentOrchestrationContext(DurableAgentProvider[DurableAgentTask])
         ```
     """
 
-    def __init__(self, context: OrchestrationContext):
+    def __init__(self, context: OrchestrationContext, *, entity_version: int = 1):
         """Initialize the orchestration context wrapper.
 
         Args:
             context: The durabletask orchestration context to wrap
+            entity_version: Address generation for new sessions. Select from recorded
+                input or orchestration version, never from is_replaying or deployment state.
         """
         self._context = context
-        self._executor = OrchestrationAgentExecutor(self._context)
+        self._executor = OrchestrationAgentExecutor(self._context, entity_version=entity_version)
         logger.debug("[DurableAIAgentOrchestrationContext] Initialized")
 
     def get_agent(self, agent_name: str) -> DurableAIAgent[DurableAgentTask]:

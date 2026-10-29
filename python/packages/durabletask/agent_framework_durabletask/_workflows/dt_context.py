@@ -23,6 +23,7 @@ from .._executors import OrchestrationAgentExecutor
 from .._json_payload import JsonPayload
 from .._shim import build_agent_task
 from .context import WorkflowOrchestrationContext
+from .naming import workflow_name_from_orchestrator, workflow_orchestrator_name
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +36,13 @@ class DurableTaskWorkflowContext:
         context: OrchestrationContext,
         *,
         supports_event_streaming: bool = True,
+        entity_version: int = 1,
     ) -> None:
         """Wrap a durabletask orchestration context.
 
         Args:
             context: The durabletask orchestration context to adapt.
+            entity_version: Recorded orchestration name's entity address generation.
             supports_event_streaming: Whether the host can publish the accumulating
                 workflow event log. Defaults to ``True`` for the standalone
                 DurableTask host. Azure Functions passes ``False`` because the
@@ -48,7 +51,8 @@ class DurableTaskWorkflowContext:
                 fail the orchestrator.
         """
         self._context = context
-        self._executor = OrchestrationAgentExecutor(context)
+        self._executor = OrchestrationAgentExecutor(context, entity_version=entity_version)
+        self._entity_version = entity_version
         self._supports_event_streaming = supports_event_streaming
 
     # -- Properties -----------------------------------------------------------
@@ -96,6 +100,11 @@ class DurableTaskWorkflowContext:
         return cast(Any, self._context.call_activity(activity_name, input=input_json))
 
     def call_sub_orchestrator(self, name: str, input: Any, instance_id: str | None = None) -> Any:
+        if self._entity_version == 2:
+            logical_name = workflow_name_from_orchestrator(name)
+            if logical_name is None:
+                raise ValueError(f"Expected a DAFX workflow orchestration name, got {name!r}.")
+            name = workflow_orchestrator_name(logical_name, entity_version=self._entity_version)
         return cast(
             Any,
             self._context.call_sub_orchestrator(

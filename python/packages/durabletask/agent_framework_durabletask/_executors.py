@@ -110,6 +110,8 @@ class DurableAgentExecutor(ABC, Generic[TaskT]):
         TaskT: The task type returned by this executor
     """
 
+    entity_version: int = 1
+
     @abstractmethod
     def run_durable_agent(
         self,
@@ -149,7 +151,7 @@ class DurableAgentExecutor(ABC, Generic[TaskT]):
             return session.durable_session_id
         # Create new session ID - either no session provided or it's a regular AgentSession
         key = self.generate_unique_id()
-        return AgentSessionId(name=agent_name, key=key)
+        return AgentSessionId(name=agent_name, key=key, entity_version=self.entity_version)
 
     def generate_unique_id(self) -> str:
         """Generate a new Unique ID."""
@@ -233,7 +235,11 @@ class ClientAgentExecutor(DurableAgentExecutor[AgentResponse]):
         client: TaskHubGrpcClient,
         max_poll_retries: int = DEFAULT_MAX_POLL_RETRIES,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+        *,
+        entity_version: int = 1,
     ):
+        AgentSessionId.to_entity_name("validation", entity_version=entity_version)
+        self.entity_version = entity_version
         self._client = client
         self.max_poll_retries = max_poll_retries
         self.poll_interval_seconds = poll_interval_seconds
@@ -466,7 +472,9 @@ class ClientAgentExecutor(DurableAgentExecutor[AgentResponse]):
 class OrchestrationAgentExecutor(DurableAgentExecutor[DurableAgentTask]):
     """Execution strategy for orchestrations (sync/yield)."""
 
-    def __init__(self, context: OrchestrationContext):
+    def __init__(self, context: OrchestrationContext, *, entity_version: int = 1):
+        AgentSessionId.to_entity_name("validation", entity_version=entity_version)
+        self.entity_version = entity_version
         self._context = context
         logger.debug("[OrchestrationAgentExecutor] Initialized")
 

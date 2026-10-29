@@ -59,15 +59,17 @@ def resolve_state_budget_override(
 
 
 def validate_runtime_deployment(deployment_mode: str | None = None) -> None:
-    """Require operator acknowledgement, not runtime proof, of deployment isolation."""
+    """Select explicit isolation or a host-validated two-phase routing strategy."""
     effective_mode = os.getenv("DURABLE_AGENTS_DEPLOYMENT_MODE") if deployment_mode is None else deployment_mode
+    if effective_mode == "two_phase":
+        return
     if not isinstance(effective_mode, str) or effective_mode != "isolated_v2":
         raise ValueError(
-            "Schema 2 requires an isolated task hub/deployment with upgraded clients. "
-            "Old workflow histories must remain on the old engine. "
-            "Set deployment_mode='isolated_v2' or DURABLE_AGENTS_DEPLOYMENT_MODE='isolated_v2'; "
-            "no other deployment mode is accepted. This is an explicit operator acknowledgement, "
-            "not runtime proof of isolation, and cannot detect peer workers."
+            "Schema 2 requires an explicit deployment strategy with upgraded clients. "
+            "Set deployment_mode='isolated_v2' for an isolated task hub or 'two_phase' for supported DTS "
+            "name-filtered coexistence. DURABLE_AGENTS_DEPLOYMENT_MODE accepts the same values. "
+            "This is not runtime proof of isolation and cannot detect peer workers. "
+            "Incompatible workflow histories still require their original deployment."
         )
 
 
