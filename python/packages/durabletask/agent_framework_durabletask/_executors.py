@@ -14,7 +14,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, Literal, TypeVar, cast
 
 from agent_framework import AgentResponse, AgentSession, Content, Message
 from durabletask.client import TaskHubGrpcClient
@@ -32,6 +32,14 @@ logger = logging.getLogger("agent_framework.durabletask")
 
 # TypeVar for the task type returned by executors
 TaskT = TypeVar("TaskT")
+AcceptanceResponsePolicy = Literal["current", "published-v1"]
+RequestTimePolicy = Literal["wall-clock", "orchestration-clock"]
+
+
+def _validate_acceptance_policy(value: AcceptanceResponsePolicy) -> AcceptanceResponsePolicy:
+    if value not in ("current", "published-v1"):
+        raise ValueError("Unsupported acceptance response policy.")
+    return value
 
 
 class DurableAgentTask(CompositeTask[AgentResponse], CompletableTask[AgentResponse]):
@@ -110,6 +118,8 @@ class DurableAgentExecutor(ABC, Generic[TaskT]):
         TaskT: The task type returned by this executor
     """
 
+    _acceptance_response_policy: AcceptanceResponsePolicy = "current"
+
     @abstractmethod
     def run_durable_agent(
         self,
@@ -163,6 +173,9 @@ class DurableAgentExecutor(ABC, Generic[TaskT]):
         """
         return None
 
+    def _request_created_at(self) -> datetime | None:
+        return None
+
     def get_run_request(
         self,
         message: str,
@@ -192,6 +205,7 @@ class DurableAgentExecutor(ABC, Generic[TaskT]):
             context_messages=context_messages,
             context_message_ids=context_message_ids,
             orchestration_id=self._orchestration_id(),
+            created_at=self._request_created_at(),
         )
 
     def _create_acceptance_response(self, correlation_id: str) -> AgentResponse:
@@ -215,8 +229,11 @@ class DurableAgentExecutor(ABC, Generic[TaskT]):
         )
         return AgentResponse(
             messages=[acceptance_message],
-            created_at=datetime.now(timezone.utc).isoformat(),
-            additional_properties={"durable_status": "accepted", "correlation_id": correlation_id},
+            created_at=(self._request_created_at() or datetime.now(timezone.utc)).isoformat(),
+            additional_properties=(
+                {} if self._acceptance_response_policy == "published-v1"
+                else {"durable_status": "accepted", "correlation_id": correlation_id}
+            ),
         )
 
 
@@ -233,7 +250,10 @@ class ClientAgentExecutor(DurableAgentExecutor[AgentResponse]):
         client: TaskHubGrpcClient,
         max_poll_retries: int = DEFAULT_MAX_POLL_RETRIES,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+        *,
+        acceptance_response_policy: AcceptanceResponsePolicy = "current",
     ):
+        self._acceptance_response_policy = _validate_acceptance_policy(acceptance_response_policy)
         self._client = client
         self.max_poll_retries = max_poll_retries
         self.poll_interval_seconds = poll_interval_seconds
@@ -466,7 +486,16 @@ class ClientAgentExecutor(DurableAgentExecutor[AgentResponse]):
 class OrchestrationAgentExecutor(DurableAgentExecutor[DurableAgentTask]):
     """Execution strategy for orchestrations (sync/yield)."""
 
-    def __init__(self, context: OrchestrationContext):
+    def __init__(
+        self, context: OrchestrationContext, *,
+        acceptance_response_policy: AcceptanceResponsePolicy = "current",
+        request_time_policy: RequestTimePolicy = "wall-clock",
+    ):
+        """Use the replay clock only for an explicitly selected continuation contract."""
+        if request_time_policy not in ("wall-clock", "orchestration-clock"):
+            raise ValueError("Unsupported orchestration request time policy.")
+        self._acceptance_response_policy = _validate_acceptance_policy(acceptance_response_policy)
+        self._request_time_policy = request_time_policy
         self._context = context
         logger.debug("[OrchestrationAgentExecutor] Initialized")
 
@@ -476,6 +505,14 @@ class OrchestrationAgentExecutor(DurableAgentExecutor[DurableAgentTask]):
 
     def _orchestration_id(self) -> str | None:
         return self._context.instance_id
+
+    def _request_created_at(self) -> datetime | None:
+        if self._request_time_policy == "wall-clock":
+            return None
+        value = self._context.current_utc_datetime
+        if not isinstance(value, datetime):
+            raise TypeError("Orchestration request creation requires its authoritative replay clock.")
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
     def run_durable_agent(
         self,

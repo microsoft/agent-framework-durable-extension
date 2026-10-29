@@ -15,6 +15,7 @@ from agent_framework_durabletask import DurableAgentState, LegacyDurableAgentSta
 from agent_framework_durabletask._durable_agent_state import DurableAgentStateUriContent as LegacyUriContent
 from agent_framework_durabletask._shared_agent_state import DurableAgentStateMessage
 from agent_framework_durabletask._shared_state_validation import validate_shared_state
+from agent_framework_durabletask._state_reader import SharedAgentStateReader
 
 SCHEMAS = Path(__file__).resolve().parents[4] / "schemas"
 SCHEMA = json.loads((SCHEMAS / "durable-agent-entity-state.json").read_text(encoding="utf-8"))
@@ -92,6 +93,7 @@ def test_content_metadata_survives_real_core_projection_and_cold_shared_state(co
     mutable = DurableAgentState.from_dict(raw)
     assert _encoded(mutable.to_dict()) == before
     cold = read_agent_state(mutable.to_json())
+    assert isinstance(cold, SharedAgentStateReader)
     assert _encoded(cold.to_dict()) == before
     assert _encoded(json.loads(cold.to_json())) == before
     assert _encoded(raw) == before

@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, cast
 
 from agent_framework import (
@@ -80,9 +81,23 @@ from ._shared_agent_state import (
 )
 from ._shared_state_validation import validate_completion_transition, validate_identifier, validate_timestamp
 from ._state_capacity import StateCapacityError
-from ._state_migration import migrate_legacy_state, state_snapshot_digest
 
 logger = logging.getLogger("agent_framework.durabletask")
+
+
+def migrate_legacy_state(*args: Any, **kwargs: Any) -> Any:
+    """Load migration-only conversion lazily so current-only bundles stay cold."""
+    from ._state_migration import migrate_legacy_state as migrate
+
+    return migrate(*args, **kwargs)
+
+
+def state_snapshot_digest(*args: Any, **kwargs: Any) -> Any:
+    """Load migration-only digesting lazily so current-only bundles stay cold."""
+    from ._state_migration import state_snapshot_digest as digest
+
+    return digest(*args, **kwargs)
+
 
 _SESSION_ID_KEY = "session_id"
 _DELIVERY_WINDOW_SECONDS = DELIVERY_WINDOW_SECONDS
@@ -549,6 +564,45 @@ class AgentEntityStateProviderMixin:
         logger.debug("[AgentEntityStateProviderMixin.reset] State reset complete")
 
 
+class InvocationFailurePolicy(str, Enum):
+    CURRENT_V1 = "current-v1"
+
+
+def invocation_failure_policy_from_checkpoint(checkpoint: Mapping[str, Any]) -> InvocationFailurePolicy:
+    """Resolve the invocation contract recorded by a semantic checkpoint."""
+    if checkpoint.get("contract") != "agent-semantic-checkpoint/1":
+        raise ValueError("Unsupported semantic checkpoint format for invocation policy")
+    raw_policy = checkpoint.get("invocationFailurePolicy", InvocationFailurePolicy.CURRENT_V1.value)
+    if not isinstance(raw_policy, str):
+        raise ValueError("Semantic checkpoint invocationFailurePolicy must be a string")
+    try:
+        return InvocationFailurePolicy(raw_policy)
+    except ValueError as exc:
+        raise ValueError(f"Unsupported semantic invocation failure policy: {raw_policy!r}") from exc
+
+
+def filter_already_stored_messages(
+    messages: list[DurableAgentStateMessage],
+    *,
+    ingested_messages: dict[str, list[str] | None],
+    occurrence_ids: list[str] | None = None,
+) -> list[DurableAgentStateMessage]:
+    """Filter input occurrences already accepted by the durable state."""
+    kept: list[DurableAgentStateMessage] = []
+    for index, message in enumerate(messages):
+        identity = occurrence_ids[index] if occurrence_ids is not None else message.message_id
+        if identity and identity.strip():
+            fingerprint = message.ingestion_identity or message_identity(message.to_chat_message())
+            known = ingested_messages.get(identity, [])
+            if known is None or fingerprint in known:
+                continue
+            known.append(fingerprint)
+            ingested_messages[identity] = known
+            message.ingestion_occurrence = identity
+        kept.append(message)
+    return kept
+
+
 class AgentEntity:
     """Platform-agnostic agent execution logic.
 
@@ -569,10 +623,24 @@ class AgentEntity:
         high_watermark: float = HIGH_WATERMARK,
         low_watermark: float = LOW_WATERMARK,
         response_delivery_window_seconds: int = DELIVERY_WINDOW_SECONDS,
+        history_input: str = "durable",
+        invocation_failure_policy: InvocationFailurePolicy | str = InvocationFailurePolicy.CURRENT_V1,
     ) -> None:
         validate_retention(retention, high_watermark, low_watermark)
         validate_response_delivery_window(response_delivery_window_seconds)
-        self.agent = ensure_durable_history(agent, prune_excluded=prunes_excluded(retention))
+        try:
+            resolved_invocation_policy = InvocationFailurePolicy(invocation_failure_policy)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Unsupported invocation failure policy: {invocation_failure_policy!r}") from exc
+        if resolved_invocation_policy is not InvocationFailurePolicy.CURRENT_V1:
+            raise ValueError(f"Unsupported invocation failure policy: {resolved_invocation_policy.value!r}")
+        if history_input not in ("durable", "transcript"):
+            raise ValueError("Unsupported semantic history input policy.")
+        self._history_input = history_input
+        self.agent = (
+            agent if history_input == "transcript"
+            else ensure_durable_history(agent, prune_excluded=prunes_excluded(retention))
+        )
         self.callback = callback
         self._state_provider = state_provider
         self._retention = retention
@@ -655,6 +723,8 @@ class AgentEntity:
         Returns:
             The committed migration identity and destination session identity.
         """
+        from ._state_migration import migrate_legacy_state, state_snapshot_digest
+
         self._state_provider.ensure_v2_writable()
         self._state_provider.migration_session_id()
         required = {
@@ -1092,11 +1162,24 @@ class AgentEntity:
             while traceback is not None and traceback.tb_next is not None:
                 traceback = traceback.tb_next
             origin_code = traceback.tb_frame.f_code if traceback is not None else None
+            capability_agent = getattr(self.agent, "_stream_capability_agent", self.agent)
+            capability_run = getattr(capability_agent, "run", None)
+            capability_run_type = type(cast(object, capability_run))
+            capability_run_call = inspect.getattr_static(capability_run_type, "__call__", None)
+            capability_run_call_code = getattr(capability_run_call, "__code__", None)
+            wrapped_binding_failure = (
+                origin_code is getattr(run_callable, "__code__", None)
+                and capability_agent is not self.agent
+            )
+            binding_failure = binding_failure or wrapped_binding_failure
             entry_failure = origin_code is not None and (
                 origin_code is getattr(run_callable, "__code__", None)
                 or origin_code is getattr(type(run_callable).__call__, "__code__", None)
+                or origin_code is getattr(capability_run, "__code__", None)
+                or origin_code is capability_run_call_code
                 or any(
-                    origin_code is getattr(vars(base).get("run"), "__code__", None) for base in type(self.agent).__mro__
+                    origin_code is getattr(vars(base).get("run"), "__code__", None)
+                    for base in type(capability_agent).__mro__
                 )
             )
             # Retain explicit no-work refusals in run() or a callable's __call__,
@@ -1135,6 +1218,7 @@ class AgentEntity:
                 callback_context=callback_context,
                 progress=progress,
             )
+
         agent_run_response = run_callable(**run_kwargs)
         if inspect.isawaitable(agent_run_response):
             agent_run_response = await agent_run_response
@@ -1347,7 +1431,9 @@ class AgentEntity:
         )
 
     def _has_context_pipeline(self) -> bool:
-        return isinstance(getattr(self.agent, "context_providers", None), (list, tuple))
+        return self._history_input == "durable" and isinstance(
+            getattr(self.agent, "context_providers", None), (list, tuple)
+        )
 
     def _session_store(self) -> EntitySessionStore:
         """Bind session persistence to the current staged data, not a stale cached copy."""
@@ -1361,20 +1447,11 @@ class AgentEntity:
     def _drop_already_stored(
         self, messages: list[DurableAgentStateMessage], *, occurrence_ids: list[str] | None = None
     ) -> list[DurableAgentStateMessage]:
-        receipts = self.state.data.ingested_messages
-        kept: list[DurableAgentStateMessage] = []
-        for index, message in enumerate(messages):
-            identity = occurrence_ids[index] if occurrence_ids is not None else message.message_id
-            if identity and identity.strip():
-                fingerprint = message.ingestion_identity or message_identity(message.to_chat_message())
-                known = receipts.get(identity, [])
-                if known is None or fingerprint in known:
-                    continue
-                known.append(fingerprint)
-                receipts[identity] = known
-                message.ingestion_occurrence = identity
-            kept.append(message)
-        return kept
+        return filter_already_stored_messages(
+            messages,
+            ingested_messages=self.state.data.ingested_messages,
+            occurrence_ids=occurrence_ids,
+        )
 
     def _find_durable_history_provider(self) -> DurableHistoryProvider | None:
         providers = getattr(self.agent, "context_providers", None)

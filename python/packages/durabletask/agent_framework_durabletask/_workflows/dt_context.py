@@ -19,7 +19,7 @@ from durabletask.task import (
     when_any,
 )
 
-from .._executors import OrchestrationAgentExecutor
+from .._executors import AcceptanceResponsePolicy, OrchestrationAgentExecutor, RequestTimePolicy
 from .._json_payload import JsonPayload
 from .._shim import build_agent_task
 from .context import WorkflowOrchestrationContext
@@ -35,6 +35,8 @@ class DurableTaskWorkflowContext:
         context: OrchestrationContext,
         *,
         supports_event_streaming: bool = True,
+        acceptance_response_policy: AcceptanceResponsePolicy = "current",
+        request_time_policy: RequestTimePolicy = "wall-clock",
     ) -> None:
         """Wrap a durabletask orchestration context.
 
@@ -46,9 +48,17 @@ class DurableTaskWorkflowContext:
                 Durable Functions custom status is capped at 16 KB by the WebJobs
                 extension, and publishing the event log would overflow that cap and
                 fail the orchestrator.
+            acceptance_response_policy: Versioned asynchronous-start response.
+                The migration profile uses ``published-v1``.
+            request_time_policy: Select ``orchestration-clock`` for deterministic
+                new request and acceptance timestamps during checkpoint continuation.
+                The ordinary caller default remains wall-clock time.
         """
         self._context = context
-        self._executor = OrchestrationAgentExecutor(context)
+        self._executor = OrchestrationAgentExecutor(
+            context, acceptance_response_policy=acceptance_response_policy,
+            request_time_policy=request_time_policy,
+        )
         self._supports_event_streaming = supports_event_streaming
 
     # -- Properties -----------------------------------------------------------
@@ -123,6 +133,12 @@ class DurableTaskWorkflowContext:
 
     def set_custom_status(self, status: Any) -> None:
         self._context.set_custom_status(status)
+
+    def create_dispatch_checkpoint(self, input: Any) -> Any:
+        create_checkpoint = getattr(self._context, "create_dispatch_checkpoint", None)
+        if not callable(create_checkpoint):
+            raise RuntimeError("Automatic checkpoint emission requires the native replay-fence SDK proposal.")
+        return create_checkpoint(input)
 
     def new_uuid(self) -> str:
         return self._context.new_uuid()

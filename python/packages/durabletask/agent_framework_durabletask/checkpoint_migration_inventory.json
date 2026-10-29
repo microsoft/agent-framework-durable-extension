@@ -1,0 +1,240 @@
+{
+  "contract": "published-capture-inventory/6",
+  "release": "v1.16.0-preview.260922.1",
+  "commit": "8ca913651249fc4606a2646d17dd8090f0369774",
+  "scope": "Only the exact six pinned published producer modules and explicit original trusted workflow definitions. Not arbitrary foreign orchestrator programs.",
+  "source_scheduling_sites": [
+    {
+      "line": 271,
+      "operation": "prepare_agent_task",
+      "states": [
+        "parallel native entity",
+        "sequential native entity",
+        "unaccepted sequential future work"
+      ]
+    },
+    {
+      "line": 308,
+      "operation": "prepare_activity_task",
+      "states": [
+        "completed prefix",
+        "pending native activity",
+        "mixed native batch"
+      ]
+    },
+    {
+      "line": 333,
+      "operation": "call_sub_orchestrator",
+      "states": [
+        "completed prefix",
+        "pending original child",
+        "child outcome failure"
+      ]
+    },
+    {
+      "line": 1144,
+      "operation": "yield ctx.task_all(all_tasks)",
+      "states": [
+        "partial success",
+        "native failure under the SDK-first target join contract",
+        "suspended outcome buffering",
+        "accepted-prefix/future-suffix mixed native batch"
+      ]
+    },
+    {
+      "line": 1169,
+      "operation": "yield task",
+      "states": [
+        "accepted sequential agent",
+        "staged prior results",
+        "unaccepted sequential tail"
+      ]
+    },
+    {
+      "line": 1222,
+      "operation": "yield ctx.wait_for_external_event(request_id)",
+      "states": [
+        "unconsumed arrival",
+        "consumed rejected response",
+        "partial approvals",
+        "same-name rewait"
+      ]
+    }
+  ],
+  "source_non_yield_hooks": [
+    {
+      "location": "before superstep preparation",
+      "boundary": "prepare",
+      "authority": "Only semantic future work when no next native accepted task exists."
+    },
+    {
+      "location": "before sequential agent preparation",
+      "boundary": "sequential_prepare",
+      "authority": "Only remaining unaccepted calls. Prior outputs already applied and staged results retained for later batch routing."
+    },
+    {
+      "lines": [
+        1270,
+        1271
+      ],
+      "boundary": "awaiting_terminal_commitment",
+      "authority": "Preserve original outputs/envelope and complete through the actual native backend. Never synthesize a terminal event."
+    },
+    {
+      "line": 1265,
+      "boundary": "awaiting_failure_commitment",
+      "authority": "Preserve the source convergence guard's state and let the current semantic target raise the same WorkflowConvergenceException through the real native backend. No synthetic failure or successful return."
+    }
+  ],
+  "capture_api": {
+    "module": "agent_framework_durabletask.checkpoint_migration",
+    "entrypoint": "capture(source, definition, hydrated_history, *, event_streaming, shared_state, source_transport_profile, project=project_checkpoint)",
+    "source": "PublishedSource.load requires exactly context, naming, serialization, runner_context, orchestrator, activity. Every byte pin is checked before any module executes. No path discovery or bytecode-cache execution.",
+    "definition": "TrustedDefinition plus explicit original trusted modules, or load_definition(entrypoint, ordered module_files). Operator assertions are not historical definition fingerprints.",
+    "target_join_contract": "SDK-first upgrade explicitly selects published-batch-join/1. Original SDK distribution/version and historical first/all join policy are not migration inputs.",
+    "result": "Captured(boundary, control, state, prefix, evidence, lowered_source)",
+    "cold_exclusion": "Compiler and inventory must be excluded from cold bundles by the coordinator. Runtime delta imports neither compiler nor original source."
+  },
+  "runtime_api": {
+    "completed": "_checkpoints._capture_prefix.replay_checkpoint_prefix(context, prefix, checkpoint, *, instance_id, execution_id)",
+    "partial": "_checkpoints._capture_prefix.replay_capture_frontier(context, prefix, checkpoint, *, instance_id, execution_id)",
+    "mixed": "Same replay_capture_frontier API accepts mechanical-native-prefix/5 with phase native_mixed_batch. operation_batches are prior completed groups. pending_batch is the nonempty accepted prefix, including any completed results. future_batch is the nonempty receipt-free suffix. nativeBatch.operations is their concatenation and nativeBatch.accepted_count is len(pending_batch).",
+    "continuation": "_checkpoints._continuation.continue_checkpoint(ctx, workflow, checkpoint, **native_handles)",
+    "partial_handle": "Pass returned frontier['batch'] as native_batch_tasks. Native failures and completed siblings stay in the real native join selected by published-batch-join/1.",
+    "acquisition": "Native v3/v4 and both profiles' v5 require context.get_acquired_history() returning defensive durabletask.history.HistoryEvent rows. No signed capture-history fallback or acquired_history parameter.",
+    "adapter_policy": "Public release wiring validates the signed joinContract before deserialize_value and constructs the current adapter using the SDK-first published batch join. Checkpoint state and native prefix carry no original runtime-policy provenance.",
+    "descendants": "Protected parent admission retains exact instance/execution, definition, bundle and backend authority for current children. It does not propagate obsolete historical SDK join policy.",
+    "historical_artifacts": "Earlier runtime-policy artifacts remain historical investigation evidence only. The revised SDK-first contract does not require first/all provenance for state-only or prefix imports."
+  },
+  "transport_profiles": {
+    "classic-functions-v1": "Action IDs from zero. Classic start and child converter layers. Activity one-argument list envelope. Public SDK validate_replay_* fences.",
+    "native-sdk-v1": "Action IDs from one. Direct JSON start/activity/child input. Validate every accepted operation against actual host-acquired native history. Entity correlations and native request UUID allocation preserve original per-call order."
+  },
+  "control_and_terminal": {
+    "suspended": "A continuation boundary, not terminal. Buffer outcomes/external events according to explicit producer profile.",
+    "completed": "Native status 1 disposition, original terminal row retained. No restart state.",
+    "failed": "Native status 3 disposition, original failure bytes retained. No restart state.",
+    "terminated": "ExecutionTerminatedEvent or native status 5 disposition. No restart state.",
+    "continued_as_new": "Native status 2 is not produced by this pinned engine. Concrete unsupported-terminal-status rejection, not a generic SDK supported-state claim.",
+    "canceled": "Native status 4 is not produced by this pinned engine. Concrete unsupported-terminal-status rejection.",
+    "classic_repeated_suspend": "Original classic repeated suspend is a no-op while suspended. The earlier SDK proposal buffered and recursively reapplied it. Coordinator's corrected SDK is required. New repository regression requires actual completion. Original artifact falsifier remains unchanged.",
+    "native_repeated_suspend": "DEFAULT SDK retains its native recursive suspension behavior. It is not changed to classic semantics."
+  },
+  "preserved_semantics": [
+    "No generator cold replay, frame inspection, backend/provider calls, invented receipts, or definition fingerprints.",
+    "Consume external events only at actual source waits, FIFO. Rejection consumes the event, not the request. Duplicates remain unconsumed, not deduplicated.",
+    "Retain all admitted reply keys, queued response messages, unresolved requests, original child identity, and completed batch siblings.",
+    "Completed success-only source groups reduce in source task-list order. Failed outcomes remain in native handles. first releases the first arrived failure immediately. all waits for every sibling then releases the first arrived failure. Neither policy cancels siblings. Preserve null failure details.",
+    "shared_state null and empty object remain distinct operator inputs."
+  ],
+  "sdk_first_target": {
+    "standalone": "Upgrade durabletask to the current package-supported >=1.11,<2 line while pinned old DAFX remains deployed. Verify suspended/current runs under the upgraded SDK, stop every old DAFX worker, then deploy the checkpoint-only DAFX candidate. The pinned old DAFX manifest allowed >=1.5,<2, so the SDK update is independently installable. The observed SDK 1.12.0 native join waits for all accepted siblings; the target contract is published-batch-join/1.",
+    "classic_functions": "azure-functions-durable is an independent host package. Upgrading the standalone durabletask wheel does not update classic Functions semantics. No supported SDK-first classic route is claimed without separately upgrading and verifying that host.",
+    "historical_controls": "Prior exact-wheel first/all observations are historical migration evidence only. They do not require old runtime-policy provenance under the revised user-approved contract."
+  },
+  "checkpoint_emission_feasibility": {
+    "native_mechanism": "The reconstructed SDK proposal's OrchestrationContext.create_dispatch_checkpoint(input) creates a local replay fence. At a drained dispatch frontier, the worker emits a native CompleteOrchestration action with CONTINUED_AS_NEW and the checkpoint input as its result. It schedules no marker activity, customer task, or sidecar write, and consumes no task ID. Subsequent committed operations advance the fence during replay; at the actual frontier, the native execution continues as new with the semantic checkpoint as its native start input. This matches ordinary native at-least-once replay more closely than a TaskScheduled marker and avoids adding marker execution or duplicate marker handling.",
+    "proposal_runtime_observation": "Direct _OrchestrationExecutor probing of the reconstructed SDK candidate returned exactly one CONTINUED_AS_NEW completion action containing the semantic checkpoint and no customer activity action. Its source tests passed (20 passed): initial frontier dispatches no effect; a later acquired TaskScheduled retains its original task ID; committed activity/child results select the next checkpoint; suspension defers continuation; termination wins; buffered external events retain FIFO order. This is proposal-SDK executor evidence, not a real provider crash/recovery test.",
+    "azure_storage_mapping": "The native checkpoint is the Durable Task continue-as-new completion action and input, not a custom status, activity/entity sidecar, or manually written history row. AzureStorageOrchestrationService.CompleteTaskOrchestrationWorkItemAsync queues outbound messages, persists orchestration history through trackingStore.UpdateStateAsync, and only then deletes triggering messages. The provider documents replay and duplicate execution under queue/table non-transactionality. A continue-as-new checkpoint therefore relies on the same native dispatch commit and redelivery behavior; no exactly-once business-effect guarantee is added. Real Azure Storage crash/recovery for this specific candidate path was not run. Scheduler mapping is unverified.",
+    "identity_gap": "The reconstructed SDK proposal exposes acquired history and the local replay fence, but its ExecutionStartedEvent has no previous/continued-from execution identity. A public root start and a native continue-as-new generation can therefore present the same acquired event shape and checkpoint-shaped input. Accepting that input as trusted based only on its shape, execution_id, or acquired history would allow caller-supplied semantic state to bypass root-input admission. Do not wire cold continuation until a separately authenticated continuation capability or a native host-provided predecessor/execution-lineage fact is defined and tested. Any capability must bind backend, hub, logical instance, definition/bundle, source execution and checkpoint bytes without making a sidecar the checkpoint commit authority.",
+    "local_lineage_proposal": "An isolated copy of the reconstructed SDK/provider was modified to attach continued_from_execution_id only to native Continue-As-New starts, strip the reserved caller tag, and assign fresh execution IDs. Negative tests cover forged root tags, restart with copied checkpoint input, and purge followed by copied-root admission. The proposal tests reported 33 passed and one environment-specific deselection. This closes the local-model falsifier only; it is not integrated into DAFX, a released SDK, or a provider-backed recovery proof. Azure Storage provider source is open and was traced for its native action/history/queue/delete order, but the checkpoint-only candidate was not run through its recovery path. Managed Scheduler mapping remains unverified.",
+    "remaining_integration": "Automatic checkpoint emission and safe native continuation consumption are not integrated. The replay-fence proposal is a viable native write mechanism for drained frontiers, but the released durabletask 1.12.0 lacks this proposal surface. The isolated lineage proposal is not DAFX or published SDK code. The external SDK/host/provider contract and its Azure Storage integration remain required; managed Scheduler mapping is separately unverified. This investigation does not certify provider-level crash recovery.",
+    "sources": [
+      "https://github.com/Azure/durabletask/blob/4ac3f973afad8e7dab9ba943acf75cc3690cb9e3/src/DurableTask.AzureStorage/AzureStorageOrchestrationService.cs",
+      "https://github.com/Azure/durabletask/blob/4ac3f973afad8e7dab9ba943acf75cc3690cb9e3/src/DurableTask.AzureStorage/README.md",
+      "https://github.com/microsoft/durabletask-python/blob/main/durabletask/task.py"
+    ],
+    "proposal_source_pin": {
+      "provenance": "Cumulative SDK reconstruction from official durabletask 1.12.0 wheel using official-proposals-v9 patch; reconstructed source only, not a published SDK.",
+      "official_wheel_sha256": "994d7dc554cadf3be36d1996b0499c2a451abb896fac28aa3e159b182c81c22f",
+      "proposal_patch_sha256": "330f135cc9e827db6b6cd3393e0d76fbabe47252bbbece170fc7c7fac15e872f",
+      "reconstructed_files_sha256": {
+        "durabletask/task.py": "b5092f8adacd5d550ee826e8b050659ce97416b17e334eede2f9aa0f1c0bc19f",
+        "durabletask/worker.py": "beaf5df7830d09c2567aa34665756f33817a5f34b37fdbbaae7baae9f7367072",
+        "durabletask/history.py": "5bc2d5ab7d2e1f637d952f432cf50bcce88265331abc10ff56a33b2fa7f9317c",
+        "test_prepare_checkpoint.py": "a5fc952458c01d940cf920eae16b97b999a451a2ca4098ea27173e320a0dd706",
+        "test_fence_hardening.py": "fc2c51c7a4c5267a118ec1bd1054a30c02e3cdf17bb9bce5b5470d2f426ec4bf"
+      }
+    }
+  },
+  "all_supported_goal_blockers": [
+    "Automatic semantic checkpoint emission is absent from DAFX runtime wiring.",
+    "Native checkpoint-only continuation cannot safely distinguish a backend continue-as-new generation from a caller-supplied checkpoint-shaped root using the reconstructed SDK proposal's current acquired-history/event identity surface. An isolated SDK/provider model validates a minimal predecessor identity proposal against copied-root, restart, and purge falsifiers, but this proposal is not integrated or released.",
+    "The replay-fence and predecessor-identity SDK APIs are proposal-only, not present in released durabletask 1.12.0. Azure Storage provider source was traced, but this DAFX path was not integrated and exercised against that provider; managed Scheduler mapping remains unverified."
+  ],
+  "accepted_prefix_batch_invariant": {
+    "source_proven": "_prepare_all_tasks iterates original pending activity/child calls and first agent calls without yielding. It returns the full task list and metadata. run_workflow_orchestrator then reaches its first batch yield at line 1144. Sequential agent tails are different, with separate yields at line 1169.",
+    "compiler_invariant": "Accepted source calls must match contiguous original native scheduled rows. After the final accepted row, source lowering may describe genuinely future calls without historical input, result, request UUID or correlation receipts. Zero accepted calls remains prepare. A missing call amidst later accepted rows remains rejection.",
+    "consumer_invariant": "v5 preflights every accepted descriptor with existing replay fences and checks all scheduled acquired IDs for gaps/duplicates. Future descriptors require distinct schema, contiguous subsequent task positions, and absence or exact matching of any now-accepted suffix call. Replay accepted handles then dispatch only absent suffix in original order. Join the complete original task list using the target SDK's published-batch-join/1 contract.",
+    "missing_backend_invariant": "To rule out a stable accepted-prefix batch, prove that the complete ordered action set of one no-yield orchestration decision commits atomically and acquired history is a complete authoritative read of that commit. Synchronous source preparation alone proves neither fact.",
+    "smallest_model": "From source-parent-history.json retain completed activity 0 and original child creation 1, stop before child creation 2. v5 retains the accepted child 1 handle and authorizes only children 2 and 3 as future work at natural subsequent IDs. Tests cover both completed and unresolved accepted child 1, then replay actual emitted suffix calls as acquired and finish the whole source batch.",
+    "future_descriptor": "Every future descriptor has authorization=source-future-operation/1, kind and expected task_id. Activity adds name and original Python input string. Child adds name, deterministic instance/address and original Python input object. Entity adds canonical entity address, run operation and source-extracted text message. No source_input/source_result/native_request_id/correlation_id fields are allowed.",
+    "future_entity": "For absent future work, runtime calls public new_uuid at the original per-call public correlation position, constructs the current public RunRequest with explicit orchestration clock, and calls public call_entity without a supplied request_id. The selected SDK profile allocates the actual request UUID. If authoritative acquisition now contains that suffix call, replay validates its fixed request semantics and public correlation position, then preserves its actual acquired argument/time and, for classic, actual acquired native request UUID. No historical UUID is inferred. Previously accepted source entity replay likewise retains its exact native UUID and consumes its public correlation position first.",
+    "observed_models": "Focused checks include source-aligned modeled future activity/entity calls under classic and native profiles, accepted entity before a future second entity, child suffix with complete/unresolved prefix, no-effect rejection on conflicting accepted input, and later task failure arriving before an earlier sibling.",
+    "implementation_status": "Implemented in the original five capture files and current-only release wiring. SDK-first join semantics replace historical policy transfer. Automatic checkpoint emission is not yet implemented. The reconstructed SDK's native replay fence is a promising native Continue-As-New mechanism at drained frontiers. A minimal authenticated predecessor identity was tested only in an isolated copied SDK/provider model; safe continuation still requires that contract to be implemented in the SDK/host/providers and integrated with DAFX."
+  },
+  "external_runtime_requirements": [
+    {
+      "boundary": "native acquisition",
+      "kind": "required runtime API, supplied by coordinator SDK candidate",
+      "required": "OrchestrationContext.get_acquired_history() -> tuple[durabletask.history.HistoryEvent, ...]",
+      "owner": "coordinator SDK integration",
+      "target_contract": "Fail closed without actual acquired history, never signed capture history."
+    },
+    {
+      "boundary": "authenticated native checkpoint continuation",
+      "kind": "required SDK and host metadata contract, not in reconstructed candidate",
+      "required": "Expose a host-authenticated continued_from_execution_id on each ExecutionStartedEvent created by Continue-As-New, and surface it on OrchestrationContext/acquired history. The predecessor ID, current execution ID and exact checkpoint input must be part of the same native transition.",
+      "owner": "Durable Task SDK and each supported backend owner",
+      "target_contract": "A cold worker accepts checkpoint-only input only when the acquired native start proves the predecessor execution; it verifies predecessor admission and binds backend, hub, instance, definition/bundle and checkpoint bytes. Caller input shape and a separate sidecar write are never proof of commit. Uncommitted Continue-As-New replays the source dispatch under native at-least-once semantics; committed state and predecessor metadata recover together."
+    },
+    {
+      "boundary": "classic repeated suspension",
+      "kind": "concrete inherited counterexample corrected by coordinator SDK candidate",
+      "owner": "coordinator SDK integration",
+      "evidence": "Focused repository regression requires terminal completion for original control prefix plus explicitly labeled source-compatible modeled activity tail. Original artifact counterexample remains unchanged."
+    }
+  ],
+  "evidence_limits": [
+    "Recorded current-target tails include current-only is_hitl_response and hitl_admission fields. Tests remove these only in explicitly labeled copies used as models, never original evidence.",
+    "No live services or storage/Functions integration in this scope.",
+    "Original predicates/types/globals must be deterministic and available from the explicitly trusted customer closure. Lost arbitrary customer predicate state cannot be reconstructed.",
+    "Accepted-prefix/future-suffix coverage uses explicitly modeled source-aligned histories and real SDK producer/consumer actions. It does not exceed native at-least-once delivery guarantees. Authoritative acquisition remains mandatory before reusing accepted handles or scheduling a future suffix.",
+    "Source scheduling inventory is exhaustive for these pinned modules. Recorded service evidence is focused, not an exhaustive live matrix."
+  ],
+  "repository_verification": {
+    "tests": "Observed full standalone Durable Task package unit suite: 10271 passed, 55 skipped, 64 deselected. Focused regressions also verified new child dispatch wraps legacy source input, acquired old/current child inputs remain unchanged, native-parent logical ancestry accepts a physical-ordinal mismatch, and nested package registration loads. Capture fixture tests skip unless CHECKPOINT_CAPTURE_FIXTURES points to the operator-preserved complete fixture root; proposal-only SDK execution cases also skip on the published SDK. Observed Azure Functions unit suite: 1010 passed, 3 skipped, 47 deselected. Its isolated environment used durabletask 1.11.0, azure-functions 2.3.0, azure-functions-durable 2.0.0rc2, agent-framework-core 1.19.0 and pydantic 2.13.4.",
+    "test_command": "uv run --directory python --no-sync pytest -m \"not integration\" packages/durabletask/tests",
+    "azure_functions_test_command": "Isolated package environment: python -m pytest -m \"not integration\" tests from python/packages/azurefunctions.",
+    "environment": "Python 3.13.11 repository venv with published Durable Task SDK 1.11.0. The complete preserved capture fixture root and proposal SDK are not configured in this worktree.",
+    "typing": "Observed package-source Pyright passed for durabletask and Azure Functions. Durable Task test MyPy passed for 185 files. The new Azure Functions checkpoint test passed MyPy individually. Full Azure Functions test MyPy reports one pre-existing diagnostic in unchanged tests/test_app.py:666 (SemanticAgentStateReader has no schema_version); this candidate does not modify that file.",
+    "lint": "Ruff check passed for packages/durabletask and packages/azurefunctions. The broader repository lint task still reports 22 existing sample-file findings unrelated to this candidate.",
+    "build": "Observed final-candidate uv build succeeded for both durabletask and Azure Functions source and wheel distributions.",
+    "minimum_dependencies": "Not verified. The exact-minimum package installation attempt failed at the Python Package Index TLS handshake; no minimum-version test result is claimed.",
+    "historical_failures": "Initial integrated native tests failed closed on missing get_acquired_history(). Preserved artifact control falsifier was not modified. Final repository regression requires actual terminal commitment.",
+    "adversarial_review": "Observed fresh read-only review of the full uncommitted candidate at HEAD 18a867eda305cdcbf072b49d603b9874647d9d3a and all 17 modified plus 33 untracked files. No significant issues were reported. Reviewer did not rerun tests/builds and did not verify preserved capture fixtures, proposal SDK, live provider recovery, Functions-host integration, managed Scheduler behavior, or minimum-dependency installation. This is not deployment-readiness evidence.",
+    "publication": "The user authorized a separate WIP draft PR. Automatic semantic checkpoint emission and authenticated native continuation remain unimplemented upstream integration gates. No package release or publication is claimed; parent draft PR #145 is unchanged."
+  },
+  "test_inputs": {
+    "environment": "CHECKPOINT_CAPTURE_FIXTURES",
+    "root": "Operator-selected preserved migration root, never hardcoded in production.",
+    "sources": "published/{context,naming,serialization,runner_context,orchestrator,activity}.py",
+    "customers": [
+      "suspended_prefix_fixture.py",
+      "suspended_prefix_child_fixture.py",
+      "suspended_prefix_agent_fixture.py"
+    ],
+    "recordings": [
+      "suspended_prefix_case_f752b5f27e88/{capture-history,final-history}.json",
+      "suspended_prefix_child_case_7b5e7cdfde80/{source-parent-history,source-child-0-history,parent-suspended-after-child-outcome-history,failure-parent-history}.json",
+      "suspended_prefix_child_ordering_case_1945eceda151/parent-final-history.json",
+      "checkpoint-release-candidate/suspended-agent-live-500a5d7166e0/capture-history.json"
+    ],
+    "mixed_recording": "checkpoint-release-candidate/partial-batch-live-30bab6349021/{capture-history,identity}.json",
+    "mixed_customer_closure": "registration-candidate/{partial_batch_provider.py,partial_batch_customer.py,partial_batch.registration.json}",
+    "native_agent_producer_only": "release/python/packages/durabletask/agent_framework_durabletask/{_constants,_models}.py",
+    "runtime_policy_sources": "capture-runtime-policy/{durabletask-1.5.0,durabletask-1.7.2,durabletask-1.12.0}/durabletask/task.py and capture-runtime-policy/{azure_functions_durable-1.3.1,azure_functions_durable-1.6.0}/azure/durable_functions/models/Task.py, with adjacent original Python module dependencies for bounded source controls.",
+    "runtime_policy_wheels": "Explicit preserved source-runtime-wheels/{durabletask-1.5.0,durabletask-1.7.2,azure_functions_durable-1.3.1}-py3-none-any.whl and release-source-wheels/durabletask-1.12.0-py3-none-any.whl. Tests verify wheel hashes and exact extracted task bytes. Classic 1.6.0 uses the supplied original installed source, not an invented wheel pin.",
+    "no_downloads": true
+  }
+}

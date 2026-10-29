@@ -576,3 +576,18 @@ def test_registration_double_does_not_treat_mock_running_flag_as_true() -> None:
     agent.name = "test-agent"
     DurableAIAgentWorker(worker).add_agent(agent)
     worker.add_entity.assert_called_once()
+
+
+def test_default_workflow_batch_does_not_require_checkpoint_sdk_keywords(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_framework_durabletask._workflows import dt_context
+
+    tasks = [object()]
+    expected = object()
+
+    def published_when_all(values: list[Any]) -> Any:
+        assert values is tasks
+        return expected
+
+    monkeypatch.setattr(dt_context, "when_all", published_when_all)
+    context = dt_context.DurableTaskWorkflowContext(Mock())
+    assert context.task_all(tasks) is expected

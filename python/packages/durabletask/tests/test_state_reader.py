@@ -390,9 +390,11 @@ def test_all_fixtures_validate_but_only_v2_views_promise_lossless_snapshots(fixt
 def test_version_dispatch_keeps_legacy_reads_separate_from_v2_writer(version: str, as_json: bool) -> None:
     raw = _empty() if version == "2.0.0" else {"schemaVersion": version, "data": {"conversationHistory": []}}
     state = read_agent_state(json.dumps(raw) if as_json else raw)
+    if version == "2.0.0":
+        assert isinstance(state, SharedAgentStateReader)
+    else:
+        assert isinstance(state, LegacyDurableAgentState)
     assert state.schema_version == version
-    assert isinstance(state, SharedAgentStateReader) is (version == "2.0.0")
-    assert isinstance(state, LegacyDurableAgentState) is (version != "2.0.0")
     assert not isinstance(state, DurableAgentState)
     assert LegacyDurableAgentState().schema_version == "1.1.0"
     assert DurableAgentState().schema_version == "2.0.0"

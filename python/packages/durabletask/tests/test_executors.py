@@ -39,6 +39,7 @@ def mock_client() -> Mock:
 def mock_entity_task() -> Mock:
     """Provide a mock entity task."""
     task = Mock(spec=Task)
+    task._parents = {}
     task.is_complete = False
     task.is_failed = False
     return task

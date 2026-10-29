@@ -24,7 +24,7 @@ import inspect
 import json
 import logging
 from collections import Counter, defaultdict, deque
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from copy import copy
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -1624,6 +1624,8 @@ def _prepare_all_tasks(
     subworkflow_counter: list[int],
     address: dict[str, str],
     delivery_ledger: _WorkflowDeliveryLedger | None = None,
+    *,
+    child_instance_id_factory: Callable[[str, str, int], str] = subworkflow_instance_id,
 ) -> tuple[list[Any], list[TaskMetadata], list[tuple[str, Any, _MessageSources]]]:
     """Prepare all pending tasks for parallel execution.
 
@@ -1648,6 +1650,9 @@ def _prepare_all_tasks(
             ``{executor}~{ordinal}~`` hop for each dispatched sub-workflow child.
         delivery_ledger: Replay-local agent delivery receipts shared with sequential
             dispatch and later supersteps. Standalone calls default to a fresh ledger.
+        child_instance_id_factory: Deployment-selected physical address contract.
+            Ordinary current callers retain the bounded scheme. Migration may
+            explicitly retain the exact published address scheme.
     """
     # Shared state is already checkpoint-encoded. Validate the complete snapshot
     # before any task kind can be scheduled or advance a dispatch counter.
@@ -1671,7 +1676,7 @@ def _prepare_all_tasks(
                 # Derive a bounded, deterministic physical child ID. The run-wide
                 # ordinal distinguishes repeated invocations, including across waves.
                 ordinal = subworkflow_counter[0]
-                child_instance_id = subworkflow_instance_id(ctx.instance_id, executor_id, ordinal)
+                child_instance_id = child_instance_id_factory(ctx.instance_id, executor_id, ordinal)
                 subworkflow_counter[0] += 1
                 # Extend this orchestration's request-path prefix by one hop
                 # (``{executor}~{ordinal}~``) so an executor inside the child builds a
@@ -2270,3 +2275,17 @@ def run_workflow_orchestrator(
     if is_subworkflow:
         return {SUBWORKFLOW_RESULT_KEY: True, "outputs": workflow_outputs, "events": live_events}
     return workflow_outputs  # noqa: B901
+
+
+# Shared reducers for checkpoint continuation, without invoking the replay engine.
+HITLMessageSources = _HITLMessageSources
+WorkflowDeliveryLedger = _WorkflowDeliveryLedger
+prepare_all_tasks = _prepare_all_tasks
+process_activity_result = _process_activity_result
+process_subworkflow_result = _process_subworkflow_result
+collect_hitl_requests = _collect_hitl_requests
+index_subworkflows = _index_subworkflows
+validate_hitl_response_json = _validate_hitl_response_json
+route_hitl_response = _route_hitl_response
+resolve_workflow_address = _resolve_workflow_address
+coerce_initial_input = _coerce_initial_input

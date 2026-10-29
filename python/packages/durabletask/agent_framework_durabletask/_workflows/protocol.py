@@ -2,6 +2,7 @@
 
 """Explicit start-envelope versioning for the incompatible workflow execution engine."""
 
+from collections.abc import Callable
 from typing import Any, cast
 
 from .._shared_state_validation import _json_value  # pyright: ignore[reportPrivateUsage]
@@ -20,7 +21,10 @@ def validate_workflow_start_input(value: Any) -> None:
         raise ValueError("Workflow input must be strict JSON with string keys and finite numbers.") from exc
 
 
-def validate_workflow_start_provenance(value: Any, *, instance_id: str, parent_instance_id: Any) -> None:
+def validate_workflow_start_provenance(
+    value: Any, *, instance_id: str, parent_instance_id: Any,
+    child_instance_id_factory: Callable[[str, str, int], str] = subworkflow_instance_id,
+) -> None:
     """Gate internal child decoding on host-supplied immediate-parent metadata.
 
     Call only at generated workflow entries, after protocol unwrapping and before
@@ -33,6 +37,8 @@ def validate_workflow_start_provenance(value: Any, *, instance_id: str, parent_i
     root workflow name. Parent application code is trusted to construct internal
     checkpoint values and supply the root address. The checks below establish
     consistency with that claim, not authorization of arbitrary parent code.
+    The optional physical address factory is deployment-selected migration
+    configuration, never selected from an application envelope.
     """
     validate_workflow_start_input(value)
     if not isinstance(value, dict):
@@ -54,8 +60,7 @@ def validate_workflow_start_provenance(value: Any, *, instance_id: str, parent_i
     if not all(type(field) is str and field.strip() for field in (root, workflow_name, prefix)):
         raise ValueError("Invalid internal workflow child address.")
 
-    # Reconstruct each physical hop using the dispatch naming contract. Logical
-    # paths retain executor names, while physical IDs never expose their ancestry.
+    # Reconstruct each physical hop using the deployment's dispatch contract.
     claimed_parent = cast(str, root)
     remainder = cast(str, prefix)
     while remainder:
@@ -66,7 +71,7 @@ def validate_workflow_start_provenance(value: Any, *, instance_id: str, parent_i
         validate_executor_id(executor_id)
         if ordinal < 0 or remainder != f"{executor_id}~{ordinal}~{tail}":
             raise ValueError("Invalid internal workflow child address prefix.")
-        child = subworkflow_instance_id(claimed_parent, executor_id, ordinal)
+        child = child_instance_id_factory(claimed_parent, executor_id, ordinal)
         if not tail:
             if claimed_parent != parent_instance_id or child != instance_id:
                 raise ValueError("Internal workflow child address does not match SDK instance metadata.")

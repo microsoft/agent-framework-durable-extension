@@ -11,6 +11,8 @@ from typing import Any
 from agent_framework import Executor, Workflow, WorkflowBuilder, WorkflowContext, handler
 
 from agent_framework_durabletask import execute_workflow_activity, run_workflow_orchestrator
+from agent_framework_durabletask._checkpoints._admission import AdmissionLedger
+from agent_framework_durabletask._checkpoints._target import run as run_checkpoint_target
 
 
 class _InlineWorkflowHost:
@@ -118,3 +120,34 @@ def test_regular_union_initial_input_is_preserved() -> None:
     workflow = WorkflowBuilder(start_executor=executor, output_from=[executor]).build()
 
     assert _run_inline(workflow, {"message": "hello"}) == ["accepted"]
+
+
+def test_inline_host_runs_checkpoint_with_automatic_emission_disabled() -> None:
+    """The optional proposal capability is not required by ordinary checkpoint execution."""
+    executor = _NullableUnionStart()
+    workflow = WorkflowBuilder(start_executor=executor, output_from=[executor]).build()
+    checkpoint = AdmissionLedger.initial_state(
+        workflow,
+        {"message": "hello"},
+        address={
+            "root_instance_id": "test-instance",
+            "root_workflow_name": workflow.name,
+            "request_path_prefix": "",
+        },
+        is_child=False,
+        event_streaming=False,
+    )
+    orchestration = run_checkpoint_target(
+        _InlineWorkflowHost(workflow),
+        workflow,
+        checkpoint,
+        automatic_emission=None,
+    )
+    yielded = next(orchestration)
+
+    while True:
+        try:
+            yielded = orchestration.send(yielded)
+        except StopIteration as completed:
+            assert completed.value == ["accepted"]
+            return

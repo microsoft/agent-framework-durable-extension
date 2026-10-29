@@ -72,6 +72,7 @@ from agent_framework_durabletask import (
     validate_workflow_start_input,
     wrap_workflow_input,
 )
+from agent_framework_durabletask._checkpoints._reader import SemanticAgentStateReader
 from agent_framework_durabletask._entities import (
     _validation_diagnostic,  # pyright: ignore[reportPrivateUsage]
     create_agent_entity_class,
@@ -131,7 +132,7 @@ _WORKFLOW_WAIT_TIMEOUT_SECONDS_QUERY_PARAMETER = "timeoutSeconds"
 logger = logging.getLogger("agent_framework.azurefunctions")
 
 HandlerT = TypeVar("HandlerT", bound=Callable[..., Any])
-AgentStateReadView = SharedAgentStateReader | LegacyDurableAgentState
+AgentStateReadView = SharedAgentStateReader | LegacyDurableAgentState | SemanticAgentStateReader
 
 # The workflow HTTP endpoints have always emitted PascalCase runtime status names
 # ("Completed", "ContinuedAsNew"). durabletask's OrchestrationStatus renders as
@@ -2132,7 +2133,7 @@ class AgentFunctionApp(df.DFApp):
         message: str,
         session_id: str,
         correlation_id: str,
-        state: LegacyDurableAgentState,
+        state: LegacyDurableAgentState | SemanticAgentStateReader,
     ) -> dict[str, Any]:
         """Build the success result returned to the HTTP caller."""
         return self._build_response_payload(

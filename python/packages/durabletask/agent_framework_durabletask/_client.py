@@ -14,7 +14,7 @@ from agent_framework import AgentResponse
 from durabletask.client import TaskHubGrpcClient
 
 from ._constants import DEFAULT_MAX_POLL_RETRIES, DEFAULT_POLL_INTERVAL_SECONDS
-from ._executors import ClientAgentExecutor
+from ._executors import AcceptanceResponsePolicy, ClientAgentExecutor
 from ._shim import DurableAgentProvider, DurableAIAgent
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -51,6 +51,8 @@ class DurableAIAgentClient(DurableAgentProvider[AgentResponse]):
         client: TaskHubGrpcClient,
         max_poll_retries: int = DEFAULT_MAX_POLL_RETRIES,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+        *,
+        acceptance_response_policy: AcceptanceResponsePolicy = "current",
     ):
         """Initialize the client wrapper.
 
@@ -58,6 +60,8 @@ class DurableAIAgentClient(DurableAgentProvider[AgentResponse]):
             client: The durabletask client instance to wrap
             max_poll_retries: Maximum polling attempts when waiting for responses
             poll_interval_seconds: Delay in seconds between polling attempts
+            acceptance_response_policy: ``published-v1`` preserves the original
+                asynchronous-start envelope. ``current`` retains current metadata.
         """
         self._client = client
 
@@ -67,7 +71,10 @@ class DurableAIAgentClient(DurableAgentProvider[AgentResponse]):
             poll_interval_seconds if poll_interval_seconds > 0 else DEFAULT_POLL_INTERVAL_SECONDS
         )
 
-        self._executor = ClientAgentExecutor(self._client, self.max_poll_retries, self.poll_interval_seconds)
+        self._executor = ClientAgentExecutor(
+            self._client, self.max_poll_retries, self.poll_interval_seconds,
+            acceptance_response_policy=acceptance_response_policy,
+        )
         logger.debug("[DurableAIAgentClient] Initialized with client type: %s", type(client).__name__)
 
     def get_agent(self, agent_name: str) -> DurableAIAgent[AgentResponse]:

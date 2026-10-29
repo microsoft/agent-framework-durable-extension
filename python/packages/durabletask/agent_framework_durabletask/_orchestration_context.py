@@ -12,7 +12,7 @@ import logging
 
 from durabletask.task import OrchestrationContext
 
-from ._executors import DurableAgentTask, OrchestrationAgentExecutor
+from ._executors import AcceptanceResponsePolicy, DurableAgentTask, OrchestrationAgentExecutor
 from ._shim import DurableAgentProvider, DurableAIAgent
 
 logger = logging.getLogger("agent_framework.durabletask")
@@ -45,14 +45,21 @@ class DurableAIAgentOrchestrationContext(DurableAgentProvider[DurableAgentTask])
         ```
     """
 
-    def __init__(self, context: OrchestrationContext):
+    def __init__(
+        self, context: OrchestrationContext, *,
+        acceptance_response_policy: AcceptanceResponsePolicy = "current",
+    ):
         """Initialize the orchestration context wrapper.
 
         Args:
             context: The durabletask orchestration context to wrap
+            acceptance_response_policy: ``published-v1`` preserves the original
+                asynchronous-start envelope. ``current`` retains current metadata.
         """
         self._context = context
-        self._executor = OrchestrationAgentExecutor(self._context)
+        self._executor = OrchestrationAgentExecutor(
+            self._context, acceptance_response_policy=acceptance_response_policy,
+        )
         logger.debug("[DurableAIAgentOrchestrationContext] Initialized")
 
     def get_agent(self, agent_name: str) -> DurableAIAgent[DurableAgentTask]:

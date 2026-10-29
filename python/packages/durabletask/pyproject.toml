@@ -31,6 +31,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+checkpoint = [
+    "cryptography>=46,<51",
+]
 azure-blob-payloads = [
     "durabletask[azure-blob-payloads]>=1.11.0,<2",
     "aiohttp>=3.13.4,<4",

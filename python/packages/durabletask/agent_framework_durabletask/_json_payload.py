@@ -69,14 +69,31 @@ class _JsonPayloadConverter(DataConverter):
 def install_json_payload_converter(worker: TaskHubGrpcWorker, *, deserialize_untagged_json: bool = False) -> None:
     """Install the worker-local decoder before processing any work.
 
-    durabletask >=1.7.1 supplies converter-aware input discovery, task result
-    types and deferred raw state decoding. It has no public converter setter,
-    so this guarded private-field integration is confined to worker setup.
+    Prefer the public candidate configuration API when available. Released SDKs
+    without that surface retain the guarded setup-only compatibility path.
     Custom converters remain supported for native work. Framework payloads
     still require JSON, not an arbitrary custom wire format. Generated Functions
     agent entities also opt into plain JSON for untagged operation input.
     """
     native = cast(Any, worker)
+    configure = getattr(native, "configure_data_converter", None)
+    if callable(configure):
+        converter = getattr(native, "data_converter", None)
+        if converter is None or not all(
+            callable(getattr(converter, method, None))
+            for method in ("can_reconstruct", "serialize", "deserialize", "coerce")
+        ):
+            raise RuntimeError("Durable Task worker must expose the data converter interface from durabletask >=1.7.1.")
+        if isinstance(converter, _JsonPayloadConverter):
+            if deserialize_untagged_json and not converter.deserializes_untagged_json:
+                if getattr(native, "_is_running", False) is True:
+                    raise RuntimeError("Configure framework JSON decoding before starting the Durable Task worker.")
+                configure(converter.with_untagged_json())
+        else:
+            if getattr(native, "_is_running", False) is True:
+                raise RuntimeError("Configure framework JSON decoding before starting the Durable Task worker.")
+            configure(_JsonPayloadConverter(converter, deserialize_untagged_json=deserialize_untagged_json))
+        return
     converter = getattr(native, "_data_converter", None)
     if isinstance(converter, _JsonPayloadConverter):
         if deserialize_untagged_json and not converter.deserializes_untagged_json:

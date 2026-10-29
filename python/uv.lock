@@ -146,6 +146,9 @@ azure-blob-payloads = [
     { name = "aiohttp" },
     { name = "durabletask", extra = ["azure-blob-payloads"] },
 ]
+checkpoint = [
+    { name = "cryptography" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -156,6 +159,7 @@ dev = [
 requires-dist = [
     { name = "agent-framework-core", specifier = ">=1.19.0,<2" },
     { name = "aiohttp", marker = "extra == 'azure-blob-payloads'", specifier = ">=3.13.4,<4" },
+    { name = "cryptography", marker = "extra == 'checkpoint'", specifier = ">=46,<51" },
     { name = "durabletask", specifier = ">=1.11.0,<2" },
     { name = "durabletask", extras = ["azure-blob-payloads"], marker = "extra == 'azure-blob-payloads'", specifier = ">=1.11.0,<2" },
     { name = "durabletask-azuremanaged", specifier = ">=1.4.0,<2" },
@@ -163,7 +167,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "python-dateutil", specifier = ">=2.8.0,<3" },
 ]
-provides-extras = ["azure-blob-payloads"]
+provides-extras = ["azure-blob-payloads", "checkpoint"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "types-python-dateutil", specifier = "==2.9.0.20260518" }]

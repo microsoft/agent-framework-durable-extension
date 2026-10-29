@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent_framework import AgentResponse
 
@@ -21,9 +21,12 @@ from ._delivery_state import (
     _lookup_response,  # pyright: ignore[reportPrivateUsage]
     validate_delivery_state,
 )
-from ._durable_agent_state import DurableAgentState
 from ._shared_response import load_terminal_response
 from ._shared_state_validation import load_state_json
+
+if TYPE_CHECKING:
+    from ._checkpoints._reader import SemanticAgentStateReader
+    from ._durable_agent_state import DurableAgentState
 
 __all__ = ["SharedAgentStateReader", "read_agent_state"]
 
@@ -81,14 +84,17 @@ class SharedAgentStateReader:
         )
 
 
-def read_agent_state(raw: dict[str, Any] | str) -> SharedAgentStateReader | DurableAgentState:
+def read_agent_state(
+    raw: dict[str, Any] | str,
+) -> SharedAgentStateReader | DurableAgentState | SemanticAgentStateReader:
     """Dispatch exact shared versions to a read-only v2 view or the existing legacy loader.
 
     An empty object explicitly requests fresh legacy state. Other inputs must be
     objects with a supported schemaVersion and object-valued data. Legacy payloads
     retain the existing loader's capabilities and limitations, including nullable
     usage counts. They are not passed through strict shared snapshot validation.
-    No private prototype detection, migration or writer policy is applied.
+    An explicit semantic checkpoint is read through its versioned public
+    projection. Reading never imports legacy mutable state for that profile.
     """
     if isinstance(raw, str):
         try:
@@ -97,8 +103,14 @@ def read_agent_state(raw: dict[str, Any] | str) -> SharedAgentStateReader | Dura
             raise ValueError("The durable agent state is not valid JSON.") from None
     if not isinstance(raw, dict):
         raise ValueError("The durable agent state must be a JSON object.")
+    if raw.get("contract") == "agent-semantic-checkpoint/1":
+        from ._checkpoints._reader import SemanticAgentStateReader
+
+        return SemanticAgentStateReader(raw)
     state = raw
     if not state:
+        from ._durable_agent_state import DurableAgentState
+
         return DurableAgentState()
     version = state.get("schemaVersion")
     if not isinstance(version, str) or version not in ("1.0.0", "1.1.0", "1.2.0", "2.0.0"):
@@ -107,4 +119,6 @@ def read_agent_state(raw: dict[str, Any] | str) -> SharedAgentStateReader | Dura
         return SharedAgentStateReader(state)
     if not isinstance(state.get("data"), dict):
         raise ValueError("The durable agent state data must be a JSON object.")
+    from ._durable_agent_state import DurableAgentState
+
     return DurableAgentState.from_dict(state)
