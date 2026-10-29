@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+## v1.0.0b261029
+
+- **agent-framework-durabletask**, **agent-framework-azurefunctions**: Added two-phase in-place entity schema migration (`two_phase` deployment mode, `dafx-v2-` entity and workflow naming, work-item filtering, and `process_legacy_entities` cutover) ([#165](https://github.com/microsoft/agent-framework-durable-extension/pull/165))
 - **agent-framework-durabletask**, **agent-framework-azurefunctions**: Added opt-in Azure Blob payload offloading (`azure-blob-payloads` extra) for standalone Durable Task and Azure Functions hosts, including offloaded workflow result reference resolution ([#140](https://github.com/microsoft/agent-framework-durable-extension/pull/140))
 - [BREAKING] **agent-framework-azurefunctions**: Migrated `agent-framework-azurefunctions` hosting to `azure-functions-durable` 2.x (Python 3.13+), rejected missing human-in-the-loop targets, and unified Python hosting package validation ([#136](https://github.com/microsoft/agent-framework-durable-extension/pull/136))
 - [BREAKING] **agent-framework-durabletask**: Constrained standalone durable agent entity operations to explicit method references ([#135](https://github.com/microsoft/agent-framework-durable-extension/pull/135))

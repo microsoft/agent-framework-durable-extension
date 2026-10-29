@@ -3,12 +3,12 @@
     <!-- Central version prefix - applies to all nuget packages. -->
     <VersionPrefix>1.16.0</VersionPrefix>
     <RCNumber>1</RCNumber>
-    <DateSuffix>260922</DateSuffix>
+    <DateSuffix>261029</DateSuffix>
     <PackageVersion Condition="'$(IsReleaseCandidate)' == 'true'">$(VersionPrefix)-rc$(RCNumber)</PackageVersion>
     <PackageVersion Condition="'$(IsReleaseCandidate)' != 'true' AND '$(VersionSuffix)' != ''">$(VersionPrefix)-$(VersionSuffix).$(DateSuffix).1</PackageVersion>
     <PackageVersion Condition="'$(IsReleaseCandidate)' != 'true' AND '$(VersionSuffix)' == ''">$(VersionPrefix)-preview.$(DateSuffix).1</PackageVersion>
     <PackageVersion Condition="'$(IsReleased)' == 'true'">$(VersionPrefix)</PackageVersion>
-    <GitTag>1.16.0-preview.260922.1</GitTag>
+    <GitTag>1.16.0-preview.261029.1</GitTag>
 
     <Configurations>Debug;Release;Publish</Configurations>
     <IsPackable>true</IsPackable>
