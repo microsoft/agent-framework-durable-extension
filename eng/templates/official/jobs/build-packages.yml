@@ -95,46 +95,14 @@ jobs:
       # This runs after the unit tests so a failing build does not consume ESRP signing
       # operations, and before pack so the signed assemblies are the ones embedded in
       # the packages (the pack step below relies on --no-build to pick them up).
-      # Invoke v6 directly: ci/sign-files.yml@eng currently selects v5's removed Node16
-      # handler. Keep its authentication and dll/nuget signing operations unchanged.
       - ${{ if eq(parameters.publishDotNet, true) }}:
-        - task: EsrpCodeSigning@6
-          displayName: 'Sign .NET assemblies'
-          inputs:
-            ConnectedServiceName: azfunc-internal-esrp-prod
-            UseMSIAuthentication: true
-            AppRegistrationClientId: fea4fc15-5d12-4019-bf3c-69fbee7e8e40
-            AppRegistrationTenantId: 33e01921-4d64-4f8c-a055-5bdaffd5e33d
-            EsrpClientId: a31bf239-3e15-498e-a335-f6ec0c9d9ccf
-            AuthAKVName: kv-azfunc-esrp-prod
-            AuthSignCertName: esrp-signing
-            FolderPath: '$(Build.SourcesDirectory)/dotnet/src'
-            Pattern: '**/bin/Release/**/Microsoft.Agents.AI.*.dll'
-            UseMinimatch: true
-            signConfigType: inlineSignParams
-            inlineOperation: |
-              [
-                {
-                  "KeyCode": "CP-230012",
-                  "OperationCode": "SigntoolSign",
-                  "Parameters": {
-                    "OpusName": "Microsoft",
-                    "OpusInfo": "http://www.microsoft.com",
-                    "FileDigest": "/fd \"SHA256\"",
-                    "PageHash": "/NPH",
-                    "TimeStamp": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
-                  },
-                  "ToolName": "sign",
-                  "ToolVersion": "1.0"
-                },
-                {
-                  "KeyCode": "CP-230012",
-                  "OperationCode": "SigntoolVerify",
-                  "Parameters": {},
-                  "ToolName": "sign",
-                  "ToolVersion": "1.0"
-                }
-              ]
+        - template: ci/sign-files.yml@eng
+          parameters:
+            displayName: 'Sign .NET assemblies'
+            folderPath: '$(Build.SourcesDirectory)/dotnet/src'
+            pattern: '**/bin/Release/**/Microsoft.Agents.AI.*.dll'
+            minimatch: true
+            signType: dll
 
         # Fail loudly if signing matched nothing. A pattern that goes stale (for example
         # after a target-framework or output-path change) would otherwise sign zero files
@@ -170,37 +138,12 @@ jobs:
       # Sign the packages themselves. `*.nupkg` deliberately does not match the
       # co-located `.snupkg` symbol packages, which are not signed.
       - ${{ if eq(parameters.publishDotNet, true) }}:
-        - task: EsrpCodeSigning@6
-          displayName: 'Sign .NET NuGet packages'
-          inputs:
-            ConnectedServiceName: azfunc-internal-esrp-prod
-            UseMSIAuthentication: true
-            AppRegistrationClientId: fea4fc15-5d12-4019-bf3c-69fbee7e8e40
-            AppRegistrationTenantId: 33e01921-4d64-4f8c-a055-5bdaffd5e33d
-            EsrpClientId: a31bf239-3e15-498e-a335-f6ec0c9d9ccf
-            AuthAKVName: kv-azfunc-esrp-prod
-            AuthSignCertName: esrp-signing
-            FolderPath: '$(Build.ArtifactStagingDirectory)/packages/dotnet'
-            Pattern: '*.nupkg'
-            UseMinimatch: false
-            signConfigType: inlineSignParams
-            inlineOperation: |
-              [
-                {
-                  "KeyCode": "CP-401405",
-                  "OperationCode": "NuGetSign",
-                  "Parameters": {},
-                  "ToolName": "sign",
-                  "ToolVersion": "1.0"
-                },
-                {
-                  "KeyCode": "CP-401405",
-                  "OperationCode": "NuGetVerify",
-                  "Parameters": {},
-                  "ToolName": "sign",
-                  "ToolVersion": "1.0"
-                }
-              ]
+        - template: ci/sign-files.yml@eng
+          parameters:
+            displayName: 'Sign .NET NuGet packages'
+            folderPath: '$(Build.ArtifactStagingDirectory)/packages/dotnet'
+            pattern: '*.nupkg'
+            signType: nuget
 
         # Same rationale as the assembly check above: confirm the packages really carry a
         # signature rather than trusting that the pattern matched.
