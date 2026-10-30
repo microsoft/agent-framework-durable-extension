@@ -42,6 +42,10 @@ Package release also runs in Azure DevOps. The release pipeline builds the .NET 
 
 Publishing is disabled by default. Maintainers should first run the release pipeline as a dry run, inspect the generated artifacts, confirm the package versions, and only then rerun with the appropriate publish option enabled.
 
+When .NET publishing is enabled, the build uses `ci/sign-files.yml@eng` for assemblies before packing and for NuGet packages after packing. The pipeline references the shared engineering `refs/tags/release`, which now selects `EsrpCodeSigning@6` instead of the Node16-based v5 task. The signing runtime upgrade is supplied upstream; no local signing-task duplication is needed. Assembly, package, and packaged-assembly signature verification remains mandatory.
+
+Before validating an official release, an authorized pipeline owner must remove any saved `PreBuildEvent` that rewrites type-check configuration, restore the governed end-of-life Node restrictions, and remove stale Node-handler forcing overrides. A run with suppressed type errors or relaxed runtime restrictions is not a clean release validation. Keep the existing service-connection approvals, 1ES governance, and publishing gates in place.
+
 The release pipeline is structured to publish:
 
 - .NET NuGet packages and symbol packages

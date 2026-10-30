@@ -438,6 +438,7 @@ class DurableHistoryProvider(HistoryProvider):
             created_at,
             used_ids=used_ids,
         )
+        entry: DurableAgentStateRequest | DurableAgentStateResponse
         if response is None:
             entry = DurableAgentStateRequest(binding.correlation_id, created_at, stored_messages)
         else:

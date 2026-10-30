@@ -393,10 +393,10 @@ def _match_occurrences(
     """Match unique occurrences, including one ancestor copied into several branches."""
     aliases: dict[int, set[str]] = defaultdict(set)
     application_ids: dict[str, set[str]] = defaultdict(set)
-    for original, occurrence in zip(originals, ids, strict=True):
-        aliases[id(original)].add(occurrence)
+    for original, original_occurrence in zip(originals, ids, strict=True):
+        aliases[id(original)].add(original_occurrence)
         if original.message_id is not None:
-            application_ids[original.message_id].add(occurrence)
+            application_ids[original.message_id].add(original_occurrence)
     if allow_positional and selected and len(selected) == len(originals):
         copied_aliases: dict[int, int] = {}
         try:
@@ -425,9 +425,9 @@ def _match_occurrences(
             if fingerprint is not None:
                 if fingerprints is None:
                     fingerprints = defaultdict(set)
-                    for original, occurrence in zip(originals, ids, strict=True):
+                    for original, original_occurrence in zip(originals, ids, strict=True):
                         try:
-                            fingerprints[message_identity(original)].add(occurrence)
+                            fingerprints[message_identity(original)].add(original_occurrence)
                         except (TypeError, ValueError):
                             continue
                 candidates = fingerprints.get(fingerprint, set[str]())
@@ -645,10 +645,10 @@ def _identify_context_messages(
         combined_messages = list(prior.full_conversation)
         combined_ids = list(ids)
         full_ids = set(ids)
-        for message, occurrence in zip(latest, latest_ids, strict=True):
-            if occurrence not in full_ids:
+        for message, latest_occurrence in zip(latest, latest_ids, strict=True):
+            if latest_occurrence not in full_ids:
                 combined_messages.append(message)
-                combined_ids.append(occurrence)
+                combined_ids.append(latest_occurrence)
         latest_matches = _match_occurrences(selected, combined_messages, combined_ids, allow_positional=False)
         for index in unmatched:
             matches[index] = latest_matches[index]
@@ -750,12 +750,12 @@ def _prepare_agent_task(
         selected_ids.extend(staged.occurrence("input", executor_id, handoff, i) for i in range(len(inputs)))
     else:
         for response_ordinal, prior in enumerate(upstream):
-            selected = _select_context_messages(executor, prior)
-            selected_context.extend(selected)
+            selected_batch = _select_context_messages(executor, prior)
+            selected_context.extend(selected_batch)
             selected_ids.extend(
                 _identify_context_messages(
                     prior,
-                    selected,
+                    selected_batch,
                     executor_id,
                     handoff,
                     response_ordinal,
@@ -765,8 +765,8 @@ def _prepare_agent_task(
             )
 
     cache_only = isinstance(message, AgentExecutorRequest) and not message.should_respond
-    context_messages: list[dict[str, Any]] | None = []
-    context_message_ids: list[str] | None = []
+    context_messages: list[dict[str, Any]] = []
+    context_message_ids: list[str] = []
     pending_keys: set[tuple[str, str]] = set()
     message_content = ""
     sent = staged.sent.get(executor_id, set())
@@ -2128,11 +2128,11 @@ def run_workflow_orchestrator(
                         publish_live_status("failed", pending_requests={})
                         raise
 
-                    index = next((key for key, task in outstanding.items() if task is completed), None)
-                    if index is not None:
-                        del outstanding[index]
-                        meta = task_metadata_list[index]
-                        raw_by_index[index] = raw_result
+                    completed_index = next((key for key, task in outstanding.items() if task is completed), None)
+                    if completed_index is not None:
+                        del outstanding[completed_index]
+                        meta = task_metadata_list[completed_index]
+                        raw_by_index[completed_index] = raw_result
                         if meta.task_type == TaskType.ACTIVITY:
                             # Discovery is independent of the shared-state commit.
                             preview = _process_activity_result(raw_result, meta.executor_id, None, [])
