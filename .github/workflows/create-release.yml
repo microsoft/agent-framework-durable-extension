@@ -108,6 +108,7 @@ jobs:
           if [[ -n "$INPUT_PYTHON_VERSION" ]]; then
             args+=(--python-version "$INPUT_PYTHON_VERSION")
           fi
+
           python "$RUNNER_TEMP/generate-release-notes.py" "${args[@]}"
           cat artifacts/release-notes.md >> "$GITHUB_STEP_SUMMARY"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"

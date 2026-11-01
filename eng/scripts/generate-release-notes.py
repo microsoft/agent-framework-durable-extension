@@ -21,9 +21,7 @@ def read_dotnet_version(props_path: Path) -> str:
     prefix_match = re.search(r"<VersionPrefix>([^<]+)</VersionPrefix>", content)
     date_match = re.search(r"<DateSuffix>([^<]+)</DateSuffix>", content)
     if prefix_match and date_match:
-        return (
-            f"{prefix_match.group(1).strip()}-preview.{date_match.group(1).strip()}.1"
-        )
+        return f"{prefix_match.group(1).strip()}-preview.{date_match.group(1).strip()}.1"
     raise ValueError(f"Could not determine .NET version from {props_path}")
 
 
@@ -51,9 +49,7 @@ def package_status(version: str, ecosystem: str) -> str:
     return "Development" if ".dev" in version else "Stable"
 
 
-def extract_section_bullets(
-    changelog_path: Path, version: str, fallback_unreleased: bool = True
-) -> list[str]:
+def extract_section_bullets(changelog_path: Path, version: str, fallback_unreleased: bool = True) -> list[str]:
     if not changelog_path.exists():
         return []
     content = changelog_path.read_text(encoding="utf-8")
@@ -123,20 +119,8 @@ def build_release_notes(
     include_python: bool = True,
     source_ref: str | None = None,
 ) -> str:
-    dt_changelog = (
-        repo_root
-        / "dotnet"
-        / "src"
-        / "Microsoft.Agents.AI.DurableTask"
-        / "CHANGELOG.md"
-    )
-    af_changelog = (
-        repo_root
-        / "dotnet"
-        / "src"
-        / "Microsoft.Agents.AI.Hosting.AzureFunctions"
-        / "CHANGELOG.md"
-    )
+    dt_changelog = repo_root / "dotnet" / "src" / "Microsoft.Agents.AI.DurableTask" / "CHANGELOG.md"
+    af_changelog = repo_root / "dotnet" / "src" / "Microsoft.Agents.AI.Hosting.AzureFunctions" / "CHANGELOG.md"
     py_changelog = repo_root / "python" / "CHANGELOG.md"
     source_dotnet_version = (
         read_dotnet_version(repo_root / "dotnet" / "nuget" / "nuget-package.props")
@@ -166,10 +150,7 @@ def build_release_notes(
     ]
 
     if include_dotnet:
-        for package in (
-            "Microsoft.Agents.AI.DurableTask",
-            "Microsoft.Agents.AI.Hosting.AzureFunctions",
-        ):
+        for package in ("Microsoft.Agents.AI.DurableTask", "Microsoft.Agents.AI.Hosting.AzureFunctions"):
             lines.append(
                 f"| NuGet | `{package}` | `{source_dotnet_version}` | {package_status(source_dotnet_version, 'NuGet')} | Not verified |"
             )
@@ -177,10 +158,7 @@ def build_release_notes(
     python_versions: list[tuple[str, str]] = []
     overrides: list[tuple[str, str, str, str]] = []
     if include_dotnet and dotnet_version != source_dotnet_version:
-        for package in (
-            "Microsoft.Agents.AI.DurableTask",
-            "Microsoft.Agents.AI.Hosting.AzureFunctions",
-        ):
+        for package in ("Microsoft.Agents.AI.DurableTask", "Microsoft.Agents.AI.Hosting.AzureFunctions"):
             overrides.append(("NuGet", package, source_dotnet_version, dotnet_version))
     if include_python:
         for directory, package in (
@@ -220,16 +198,10 @@ def build_release_notes(
     package_sections: list[tuple[str, list[str]]] = []
     if include_dotnet:
         package_sections.append(
-            (
-                "Microsoft.Agents.AI.DurableTask",
-                extract_section_bullets(dt_changelog, dotnet_version),
-            )
+            ("Microsoft.Agents.AI.DurableTask", extract_section_bullets(dt_changelog, dotnet_version))
         )
         package_sections.append(
-            (
-                "Microsoft.Agents.AI.Hosting.AzureFunctions",
-                extract_section_bullets(af_changelog, dotnet_version),
-            )
+            ("Microsoft.Agents.AI.Hosting.AzureFunctions", extract_section_bullets(af_changelog, dotnet_version))
         )
 
     for version in dict.fromkeys(version for _, version in python_versions):
@@ -238,12 +210,7 @@ def build_release_notes(
             for package, package_version in python_versions
             if package_version == version
         )
-        package_sections.append(
-            (
-                packages,
-                extract_section_bullets(py_changelog, version),
-            )
-        )
+        package_sections.append((packages, extract_section_bullets(py_changelog, version)))
 
     breaking_by_pkg: list[tuple[str, list[str]]] = []
     all_fixes: list[str] = []
@@ -285,34 +252,13 @@ def build_release_notes(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--repo-root", type=Path, default=Path(__file__).resolve().parents[2]
-    )
-    parser.add_argument(
-        "--dotnet-version",
-        help=".NET release-note version override (source metadata is also shown)",
-    )
-    parser.add_argument(
-        "--python-version",
-        help="Override both Python release-note versions (source metadata is also shown)",
-    )
-    parser.add_argument(
-        "--source-ref",
-        help="Source commit for links (defaults to the checked-out HEAD)",
-    )
-    parser.add_argument(
-        "--skip-dotnet",
-        action="store_true",
-        help="Exclude .NET section from release notes",
-    )
-    parser.add_argument(
-        "--skip-python",
-        action="store_true",
-        help="Exclude Python section from release notes",
-    )
-    parser.add_argument(
-        "--output", type=Path, help="Write release notes to file instead of stdout"
-    )
+    parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--dotnet-version", help=".NET release-note version override (source metadata is also shown)")
+    parser.add_argument("--python-version", help="Override both Python release-note versions (source metadata is also shown)")
+    parser.add_argument("--source-ref", help="Source commit for links (defaults to the checked-out HEAD)")
+    parser.add_argument("--skip-dotnet", action="store_true", help="Exclude .NET section from release notes")
+    parser.add_argument("--skip-python", action="store_true", help="Exclude Python section from release notes")
+    parser.add_argument("--output", type=Path, help="Write release notes to file instead of stdout")
     args = parser.parse_args()
 
     repo_root: Path = args.repo_root.resolve()
