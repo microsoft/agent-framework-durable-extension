@@ -117,7 +117,7 @@ def deduplicate_preserving_order(items: list[str]) -> list[str]:
 
 def build_release_notes(
     repo_root: Path,
-    dotnet_version: str,
+    dotnet_version: str | None = None,
     python_version: str | None = None,
     include_dotnet: bool = True,
     include_python: bool = True,
@@ -138,6 +138,12 @@ def build_release_notes(
         / "CHANGELOG.md"
     )
     py_changelog = repo_root / "python" / "CHANGELOG.md"
+    source_dotnet_version = (
+        read_dotnet_version(repo_root / "dotnet" / "nuget" / "nuget-package.props")
+        if include_dotnet
+        else ""
+    )
+    dotnet_version = dotnet_version or source_dotnet_version
 
     if source_ref is None:
         source_ref = subprocess.check_output(
@@ -149,12 +155,13 @@ def build_release_notes(
         "",
         f"Source snapshot: [`{source_ref}`](https://github.com/microsoft/agent-framework-durable-extension/tree/{source_ref}).",
         "",
-        "**Publication pending verification.** These notes describe intended packages from this source snapshot,",
-        "not successful registry publication or signing. Complete the",
+        "**Registry publication not verified by this workflow.** This table records package versions",
+        "declared in the source snapshot, not successful registry publication or signing. Follow the recommended",
         "[publication checklist](https://github.com/microsoft/agent-framework-durable-extension/blob/main/eng/README.md#publishing-the-github-release)",
-        "before publishing the GitHub release, and identify any packages omitted from publication.",
+        "and identify any packages omitted from publication. GitHub release visibility",
+        "is independent of ADO package publishing.",
         "",
-        "| Ecosystem | Package | Version | Status | Publication |",
+        "| Ecosystem | Package | Source version | Status | Publication |",
         "| --- | --- | --- | --- | --- |",
     ]
 
@@ -164,23 +171,51 @@ def build_release_notes(
             "Microsoft.Agents.AI.Hosting.AzureFunctions",
         ):
             lines.append(
-                f"| NuGet | `{package}` | `{dotnet_version}` | {package_status(dotnet_version, 'NuGet')} | Pending verification |"
+                f"| NuGet | `{package}` | `{source_dotnet_version}` | {package_status(source_dotnet_version, 'NuGet')} | Not verified |"
             )
 
     python_versions: list[tuple[str, str]] = []
+    overrides: list[tuple[str, str, str, str]] = []
+    if include_dotnet and dotnet_version != source_dotnet_version:
+        for package in (
+            "Microsoft.Agents.AI.DurableTask",
+            "Microsoft.Agents.AI.Hosting.AzureFunctions",
+        ):
+            overrides.append(("NuGet", package, source_dotnet_version, dotnet_version))
     if include_python:
         for directory, package in (
             ("durabletask", "agent-framework-durabletask"),
             ("azurefunctions", "agent-framework-azurefunctions"),
         ):
-            version = python_version or read_python_version(
+            source_version = read_python_version(
                 repo_root / "python" / "packages" / directory / "pyproject.toml"
             )
+            version = python_version or source_version
             python_versions.append((package, version))
             lines.append(
-                f"| PyPI | `{package}` | `{version}` | {package_status(version, 'PyPI')} | Pending verification |"
+                f"| PyPI | `{package}` | `{source_version}` | {package_status(source_version, 'PyPI')} | Not verified |"
             )
+            if version != source_version:
+                overrides.append(("PyPI", package, source_version, version))
     lines.append("")
+    if overrides:
+        lines.extend(
+            [
+                "### Release-note version overrides",
+                "",
+                "The following effective overrides differ from the source metadata. They select the release-note",
+                "versions and changelog sections only; they do not change source files, built packages,",
+                "or ADO publishing. A .NET override may be supplied explicitly or derived from the release tag.",
+                "",
+                "| Ecosystem | Package | Source version | Release-note version | Release-note status |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for ecosystem, package, source_version, version in overrides:
+            lines.append(
+                f"| {ecosystem} | `{package}` | `{source_version}` | `{version}` | {package_status(version, ecosystem)} |"
+            )
+        lines.append("")
 
     package_sections: list[tuple[str, list[str]]] = []
     if include_dotnet:
@@ -255,11 +290,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--dotnet-version",
-        help=".NET version (defaults to GitTag in nuget-package.props)",
+        help=".NET release-note version override (source metadata is also shown)",
     )
     parser.add_argument(
         "--python-version",
-        help="Override both Python package versions for a notes preview",
+        help="Override both Python release-note versions (source metadata is also shown)",
     )
     parser.add_argument(
         "--source-ref",
@@ -281,10 +316,7 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root: Path = args.repo_root.resolve()
-    dotnet_version = (
-        args.dotnet_version
-        or read_dotnet_version(repo_root / "dotnet" / "nuget" / "nuget-package.props")
-    ).lstrip("v")
+    dotnet_version = args.dotnet_version.lstrip("v") if args.dotnet_version else None
     python_version = args.python_version.lstrip("v") if args.python_version else None
 
     notes = build_release_notes(

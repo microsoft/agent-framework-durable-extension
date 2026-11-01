@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to create or update (defaults to v<GitTag> from dotnet/nuget/nuget-package.props)"
+        description: "Release tag to create or update (defaults to v<dotnet_version>, or v<GitTag> from dotnet/nuget/nuget-package.props)"
         required: false
         type: string
       target:
@@ -15,10 +15,23 @@ on:
         required: false
         default: "main"
         type: string
+      dotnet_version:
+        description: "Optional .NET version override"
+        required: false
+        type: string
+      python_version:
+        description: "Optional Python version override"
+        required: false
+        type: string
       prerelease:
         description: "Mark release as prerelease"
         required: false
         default: true
+        type: boolean
+      draft:
+        description: "Create release as a draft"
+        required: false
+        default: false
         type: boolean
 
 permissions:
@@ -26,7 +39,7 @@ permissions:
 
 jobs:
   create-release:
-    name: Generate notes from release source and create draft GitHub Release
+    name: Generate notes from release source and create GitHub Release
     runs-on: ubuntu-latest
 
     steps:
@@ -59,6 +72,8 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DOTNET_VERSION: ${{ inputs.dotnet_version }}
+          INPUT_PYTHON_VERSION: ${{ inputs.python_version }}
         run: |
           set -euo pipefail
           if [[ "$EVENT_NAME" == "push" ]]; then
@@ -66,7 +81,10 @@ jobs:
           elif [[ -n "$INPUT_TAG" ]]; then
             tag="$INPUT_TAG"
           else
-            dotnet_ver=$(python -c "from pathlib import Path; import os, runpy; g = runpy.run_path(os.path.join(os.environ['RUNNER_TEMP'], 'generate-release-notes.py')); print(g['read_dotnet_version'](Path('dotnet/nuget/nuget-package.props')))")
+            dotnet_ver="$INPUT_DOTNET_VERSION"
+            if [[ -z "$dotnet_ver" ]]; then
+              dotnet_ver=$(python -c "from pathlib import Path; import os, runpy; g = runpy.run_path(os.path.join(os.environ['RUNNER_TEMP'], 'generate-release-notes.py')); print(g['read_dotnet_version'](Path('dotnet/nuget/nuget-package.props')))")
+            fi
             tag="v${dotnet_ver#v}"
           fi
 
@@ -81,18 +99,27 @@ jobs:
           fi
           git checkout --detach "$source_sha"
 
-          python "$RUNNER_TEMP/generate-release-notes.py" --repo-root "$GITHUB_WORKSPACE" \
-            --source-ref "$source_sha" --output artifacts/release-notes.md
+          args=(--repo-root "$GITHUB_WORKSPACE" --source-ref "$source_sha" --output artifacts/release-notes.md)
+          if [[ -n "$INPUT_DOTNET_VERSION" ]]; then
+            args+=(--dotnet-version "$INPUT_DOTNET_VERSION")
+          elif [[ "$tag" == v* ]]; then
+            args+=(--dotnet-version "${tag#v}")
+          fi
+          if [[ -n "$INPUT_PYTHON_VERSION" ]]; then
+            args+=(--python-version "$INPUT_PYTHON_VERSION")
+          fi
+          python "$RUNNER_TEMP/generate-release-notes.py" "${args[@]}"
           cat artifacts/release-notes.md >> "$GITHUB_STEP_SUMMARY"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
 
-      - name: Create or update draft GitHub Release
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.notes.outputs.tag }}
           TARGET: ${{ steps.notes.outputs.source_sha }}
           PRERELEASE: ${{ inputs.prerelease }}
+          DRAFT: ${{ inputs.draft }}
         run: |
           set -euo pipefail
           # Listing includes drafts for this token; API failures must not look like a missing release.
@@ -114,11 +141,14 @@ jobs:
               --target "$TARGET" \
               --notes-file artifacts/release-notes.md
           else
-            echo "Creating draft GitHub release $TAG..."
-            create_args=("$TAG" --draft --title "$TAG" --notes-file artifacts/release-notes.md --target "$TARGET")
+            echo "Creating GitHub release $TAG..."
+            create_args=("$TAG" --title "$TAG" --notes-file artifacts/release-notes.md --target "$TARGET")
             if [[ "$PRERELEASE" == "true" || "$TAG" == *-* ]]; then
               create_args+=(--prerelease)
             fi
+            if [[ "$DRAFT" == "true" ]]; then
+              create_args+=(--draft)
+            fi
             gh release create "${create_args[@]}"
           fi
-          echo "Draft $TAG remains pending. Follow eng/README.md's publication checklist to verify matching ADO publication before publishing it." >> "$GITHUB_STEP_SUMMARY"
+          echo "GitHub release $TAG does not confirm registry publication. Follow eng/README.md's recommended publication checklist; this workflow does not verify ADO publishing." >> "$GITHUB_STEP_SUMMARY"

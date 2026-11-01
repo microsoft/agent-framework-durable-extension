@@ -17,6 +17,12 @@ class ReleaseNotesTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.write(
+            "dotnet",
+            "nuget",
+            "nuget-package.props",
+            content="<Project><GitTag>1.16.0-preview.123.1</GitTag></Project>",
+        )
+        self.write(
             "python",
             "pyproject.toml",
             content='[project]\nversion = "9.9.9"\n',
@@ -69,20 +75,20 @@ class ReleaseNotesTests(unittest.TestCase):
         ]
         self.assertEqual(len(rows), 4)
         self.assertIn(
-            "| `agent-framework-durabletask` | `1.0.0b123` | Beta | Pending verification |",
+            "| `agent-framework-durabletask` | `1.0.0b123` | Beta | Not verified |",
             notes,
         )
         self.assertIn(
-            "| `agent-framework-azurefunctions` | `2.0.0b456` | Beta | Pending verification |",
+            "| `agent-framework-azurefunctions` | `2.0.0b456` | Beta | Not verified |",
             notes,
         )
         self.assertEqual(
-            notes.count("| `1.16.0-preview.123.1` | Preview | Pending verification |"),
+            notes.count("| `1.16.0-preview.123.1` | Preview | Not verified |"),
             2,
         )
         self.assertNotIn("9.9.9", notes)
         self.assertNotIn("Authenticode signed", notes)
-        self.assertIn("**Publication pending verification.**", notes)
+        self.assertIn("**Registry publication not verified by this workflow.**", notes)
 
     def test_changelog_links_are_pinned_and_fixes_are_preserved(self) -> None:
         notes = self.notes()
@@ -97,8 +103,44 @@ class ReleaseNotesTests(unittest.TestCase):
         notes = self.notes(python_version="3.0.0rc1", include_dotnet=False)
         self.assertNotIn("| NuGet |", notes)
         self.assertEqual(notes.count("| `3.0.0rc1` | Release candidate |"), 2)
+        self.assertIn("| `1.0.0b123` | Beta | Not verified |", notes)
+        self.assertIn("| `2.0.0b456` | Beta | Not verified |", notes)
         notes = self.notes(include_python=False)
         self.assertNotIn("| PyPI |", notes)
+
+    def test_dotnet_override_keeps_source_version_and_selects_override_changelog(
+        self,
+    ) -> None:
+        self.write(
+            "dotnet",
+            "src",
+            "Microsoft.Agents.AI.DurableTask",
+            "CHANGELOG.md",
+            content="## 7.0.0-rc1\n\n- Override fix.\n",
+        )
+        notes = generate["build_release_notes"](
+            self.root, "7.0.0-rc1", include_python=False, source_ref="a" * 40
+        )
+        self.assertEqual(
+            notes.count("| `1.16.0-preview.123.1` | Preview | Not verified |"), 2
+        )
+        self.assertEqual(
+            notes.count("| `1.16.0-preview.123.1` | `7.0.0-rc1` | Release candidate |"),
+            2,
+        )
+        self.assertIn("- Override fix.", notes)
+
+    def test_matching_overrides_need_no_mismatch_table(self) -> None:
+        self.write(
+            "python",
+            "packages",
+            "azurefunctions",
+            "pyproject.toml",
+            content='[project]\nversion = "1.0.0b123"\n',
+        )
+        self.assertNotIn(
+            "### Release-note version overrides", self.notes(python_version="1.0.0b123")
+        )
 
     def test_shared_python_changelog_does_not_duplicate_breaking_changes(self) -> None:
         self.write(
