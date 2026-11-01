@@ -20,6 +20,8 @@ For the full Agent Framework source, see [microsoft/agent-framework](https://git
 | Python | Self-hosted / console / containers / AKS | `agent-framework-durabletask` | [README](python/packages/durabletask/README.md) |
 | Python | Azure Functions (Python v2) | `agent-framework-azurefunctions` | [README](python/packages/azurefunctions/README.md) |
 
+For ecosystem-specific versions, coordinated release tags, and the distinction between GitHub releases and registry publication, see the [versioning and release model](eng/README.md#release-approach).
+
 ### .NET (NuGet)
 
 ```bash
