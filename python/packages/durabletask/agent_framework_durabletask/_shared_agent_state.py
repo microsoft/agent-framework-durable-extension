@@ -1534,7 +1534,7 @@ class DurableAgentStateUsage:
         for key, value in usage.items():
             if key in DurableAgentStateUsage._STANDARD_USAGE_FIELDS and value is not None:
                 validate_counter(value, "usage count")
-                counts[key] = int(value)
+                counts[key] = int(cast("int | float", value))
         extension_data: dict[str, Any] = {
             key: deepcopy(value)
             for key, value in usage.items()

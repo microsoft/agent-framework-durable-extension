@@ -71,7 +71,7 @@ def _shared_value_snapshot(response: AgentResponse[Any]) -> dict[str, Any] | Non
 
 
 @lru_cache(maxsize=3)
-def _constructor_fields(cls: type[AgentResponse[Any]] | type[Message] | type[Content]) -> tuple[str, ...]:
+def _constructor_fields(cls: type) -> tuple[str, ...]:
     """Cache explicit public parameters, never names supplied by a stored type."""
     return tuple(
         name
@@ -80,9 +80,7 @@ def _constructor_fields(cls: type[AgentResponse[Any]] | type[Message] | type[Con
     )
 
 
-def _constructor_kwargs(
-    data: Mapping[str, Any], cls: type[AgentResponse[Any]] | type[Message] | type[Content]
-) -> dict[str, Any]:
+def _constructor_kwargs(data: Mapping[str, Any], cls: type) -> dict[str, Any]:
     return {name: data[name] for name in _constructor_fields(cls) if name in data}
 
 

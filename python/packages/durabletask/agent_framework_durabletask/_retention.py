@@ -385,7 +385,7 @@ def _tool_call_links(messages: list[Message]) -> tuple[list[tuple[int, int]], se
         for content in message.contents:
             if content.type in call_kinds:
                 if content.call_id:
-                    key = (content.type, content.call_id)
+                    key: tuple[str, str] = (content.type, content.call_id)
                     completed.pop(key, None)
                     declarations = pending.setdefault(key, [])
                     if declarations:
