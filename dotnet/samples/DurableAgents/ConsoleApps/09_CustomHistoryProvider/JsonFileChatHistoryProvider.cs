@@ -322,11 +322,12 @@ public sealed class JsonFileChatHistoryProvider : ChatHistoryProvider, IDisposab
         }
 
         await using FileStream stream = File.OpenRead(path);
-        return await JsonSerializer.DeserializeAsync<List<StoredChatMessage>>(
-                stream,
-                s_jsonOptions,
-                cancellationToken)
-            ?? [];
+        List<StoredChatMessage>? stored = await JsonSerializer.DeserializeAsync<List<StoredChatMessage>>(
+            stream,
+            s_jsonOptions,
+            cancellationToken);
+        return stored ?? throw new JsonException(
+            "The external chat history document is JSON null instead of a message array.");
     }
 
     private async Task WriteStoredMessagesAsync(
