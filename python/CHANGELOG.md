@@ -2,7 +2,11 @@
 
 ## [Unreleased]
 
-- **agent-framework-durabletask**: Corrected source typing in state validation, response serialization, history retention, and workflow orchestration so release-build mypy checks run without error suppression.
+## v1.0.0
+
+- **agent-framework-durabletask**, **agent-framework-azurefunctions**: General Availability release of `agent-framework-durabletask` and `agent-framework-azurefunctions` `1.0.0`
+- **agent-framework-durabletask**: Corrected source typing in state validation, response serialization, history retention, and workflow orchestration so release-build mypy checks run without error suppression ([#170](https://github.com/microsoft/agent-framework-durable-extension/pull/170))
+- **agent-framework-durabletask**, **agent-framework-azurefunctions**: Updated transitive security and test dependencies (`certifi`, `mcp`, `pyjwt`, and `oauthlib`) ([#159](https://github.com/microsoft/agent-framework-durable-extension/pull/159), [#167](https://github.com/microsoft/agent-framework-durable-extension/pull/167), [#168](https://github.com/microsoft/agent-framework-durable-extension/pull/168), [#173](https://github.com/microsoft/agent-framework-durable-extension/pull/173))
 
 ## v1.0.0b261029
 

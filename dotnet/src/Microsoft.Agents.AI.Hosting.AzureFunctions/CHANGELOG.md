@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## v1.16.0
+
+- General Availability release of `Microsoft.Agents.AI.Hosting.AzureFunctions` `1.16.0`
+
 ## v1.16.0-preview.261029.1
 
 - [BREAKING] Emit `dafx-v2-{agent}` entity triggers by default and add `dafx-{agent}` triggers when `DurableAgentsOptions.ProcessLegacyEntities` (`DURABLE_AGENTS_PROCESS_LEGACY_ENTITIES`) is enabled in Phase 2, preserve full `@dafx-...` session IDs across HTTP/MCP round-trips when targeting legacy entities or `@`-prefixed session keys, reject cross-kind function name collisions across workflows, activities, and agent entities, and require `"workItemFilteringEnabled": true` in `host.json` (with `Microsoft.Azure.Functions.Worker` `2.52.0+`, `Microsoft.Azure.Functions.Worker.Extensions.DurableTask` `1.19.0+`, and `Microsoft.Azure.Functions.Worker.Extensions.DurableTask.AzureManaged` `1.10.0+`) for side-by-side rolling upgrades or an offline cutover when host filtering is not enabled ([#155](https://github.com/microsoft/agent-framework-durable-extension/pull/155))
