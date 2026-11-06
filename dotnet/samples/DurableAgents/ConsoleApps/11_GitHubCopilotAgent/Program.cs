@@ -56,22 +56,34 @@ try
     while (true)
     {
         OrchestrationMetadata? metadata = await firstHostClient.GetInstanceAsync(instanceId, getInputsAndOutputs: true);
-
-        // Check custom status published by the orchestration after Turn 1 finishes.
-        // Once the status contains the "Approval" event name, the orchestration is durably
-        // suspended waiting for operator input and the Turn 1 Copilot session ID is saved.
         string? customStatus = metadata?.ReadCustomStatusAs<string>();
-        if (customStatus?.Contains(GitHubCopilotDurableDemo.ApprovalEventName, StringComparison.Ordinal) is true)
-        {
-            Console.WriteLine($"[Host 1] {customStatus}");
-            break;
-        }
 
-        // Guard against unexpected early termination (e.g., if Turn 1 faulted or timed out).
+        // Guard against unexpected early termination (e.g., if Turn 1 faulted, was terminated, or timed out)
+        // before checking custom status (note that the SLA timeout custom status also contains "Approval").
         if (metadata?.RuntimeStatus is OrchestrationRuntimeStatus.Completed
             or OrchestrationRuntimeStatus.Failed
             or OrchestrationRuntimeStatus.Terminated)
         {
+            Console.WriteLine($"[Host 1] Orchestration '{instanceId}' reached terminal state '{metadata.RuntimeStatus}' before operator approval.");
+            if (!string.IsNullOrWhiteSpace(customStatus))
+            {
+                Console.WriteLine($"[Host 1] Custom status: {customStatus}");
+            }
+
+            if (metadata.FailureDetails is not null)
+            {
+                Console.WriteLine($"[Host 1] Failure: {metadata.FailureDetails.ErrorMessage}");
+            }
+
+            return;
+        }
+
+        // Check custom status published by the orchestration after Turn 1 finishes.
+        // Once the status contains the "Approval" event name, the orchestration is durably
+        // suspended waiting for operator input and the Turn 1 Copilot session ID is saved.
+        if (customStatus?.Contains(GitHubCopilotDurableDemo.ApprovalEventName, StringComparison.Ordinal) is true)
+        {
+            Console.WriteLine($"[Host 1] {customStatus}");
             break;
         }
 

@@ -113,15 +113,17 @@ public sealed class GitHubCopilotSampleTests
     [Fact]
     public async Task NegativeControl_ConcurrentSendsWithoutDurableEntityMailbox_RaisesMaxConcurrentSendsAboveOneAsync()
     {
-        await using FakeCopilotJsonRpcServer server = new();
+        await using FakeCopilotJsonRpcServer server = new(
+            concurrentSendRendezvousCount: 2,
+            concurrentSendRendezvousTimeout: TimeSpan.FromSeconds(5));
         await using CopilotClient copilotClient = new(
             GitHubCopilotDurableDemo.CreateClientOptions(server.Endpoint));
         AIAgent copilotAgent = GitHubCopilotDurableDemo.CreateCopilotAgent(copilotClient);
 
         // Negative control: issue two concurrent RunAsync calls over the same CopilotClient connection
-        // without the Durable Entity mailbox lock. FakeCopilotJsonRpcServer dispatches session.send
-        // handlers concurrently on the same TCP stream and observes overlapping in-flight sends
-        // (MaxConcurrentSends > 1).
+        // without the Durable Entity mailbox lock. FakeCopilotJsonRpcServer holds the first session.send
+        // at an explicit rendezvous (with a bounded timeout) until the second session.send arrives,
+        // deterministically observing overlapping in-flight sends (MaxConcurrentSends == 2).
         AgentSession firstSession = await copilotAgent.CreateSessionAsync();
         AgentSession secondSession = await copilotAgent.CreateSessionAsync();
 
@@ -644,12 +646,19 @@ public sealed class GitHubCopilotSampleTests
         private readonly List<string> _createdSessionIds = [];
         private readonly List<string> _resumedSessionIds = [];
         private readonly List<string> _sentPrompts = [];
+        private readonly int _concurrentSendRendezvousCount;
+        private readonly TimeSpan _concurrentSendRendezvousTimeout;
+        private readonly TaskCompletionSource _concurrentSendRendezvous = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _messageCounter;
         private int _activeSends;
         private int _maxConcurrentSends;
 
-        public FakeCopilotJsonRpcServer()
+        public FakeCopilotJsonRpcServer(
+            int concurrentSendRendezvousCount = 1,
+            TimeSpan? concurrentSendRendezvousTimeout = null)
         {
+            this._concurrentSendRendezvousCount = Math.Max(1, concurrentSendRendezvousCount);
+            this._concurrentSendRendezvousTimeout = concurrentSendRendezvousTimeout ?? TimeSpan.FromSeconds(5);
             this._listener = new TcpListener(IPAddress.Loopback, 0);
             this._listener.Start();
             int port = ((IPEndPoint)this._listener.LocalEndpoint).Port;
@@ -810,6 +819,11 @@ public sealed class GitHubCopilotSampleTests
                             while (active > observedMax &&
                                 Interlocked.CompareExchange(ref this._maxConcurrentSends, active, observedMax) != observedMax);
 
+                            if (active >= this._concurrentSendRendezvousCount)
+                            {
+                                this._concurrentSendRendezvous.TrySetResult();
+                            }
+
                             // Dispatch session.send handling without blocking the socket read loop so overlapping
                             // requests are read and processed concurrently.
                             Task sendTask = this.HandleSessionSendAsync(stream, id, sessionId, prompt, ct);
@@ -871,7 +885,20 @@ public sealed class GitHubCopilotSampleTests
                 string msgId = $"msg-{msgNum}";
                 string replyText = $"Reply to: {prompt}";
 
-                await Task.Delay(TimeSpan.FromMilliseconds(60), ct);
+                if (this._concurrentSendRendezvousCount > 1)
+                {
+                    try
+                    {
+                        await this._concurrentSendRendezvous.Task.WaitAsync(this._concurrentSendRendezvousTimeout, ct);
+                    }
+                    catch (TimeoutException)
+                    {
+                    }
+                }
+                else
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(60), ct);
+                }
 
                 await this.WriteRpcMessageAsync(
                     stream,
