@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>GitHubCopilotDurableAgent</AssemblyName>
+    <RootNamespace>GitHubCopilotDurableAgent</RootNamespace>
+    <!--
+      Skip downloading the native Copilot CLI binary from npm during build/CI.
+      At runtime, CopilotClient uses an installed `copilot` CLI on PATH or connects to
+      COPILOT_RUNTIME_URL via RuntimeConnection.ForUri(...).
+    -->
+    <CopilotSkipCliDownload>true</CopilotSkipCliDownload>
+    <NoWarn>$(NoWarn);GHCP001</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="GitHub.Copilot.SDK" />
+    <PackageReference Include="Microsoft.Agents.AI.GitHub.Copilot" />
+    <PackageReference Include="Microsoft.DurableTask.Client.AzureManaged" />
+    <PackageReference Include="Microsoft.DurableTask.Worker.AzureManaged" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+
+  <!-- Local project that should be switched to a package reference when using the sample outside of this repo. -->
+  <!--
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Agents.AI.DurableTask" />
+  </ItemGroup>
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\..\src\Microsoft.Agents.AI.DurableTask\Microsoft.Agents.AI.DurableTask.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+    <None Remove="tests\**\*" />
+  </ItemGroup>
+</Project>
