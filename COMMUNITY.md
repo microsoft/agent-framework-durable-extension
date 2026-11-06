@@ -4,7 +4,6 @@ Below are some ways that you can get involved in the Agent Framework Community.
 
 ## Engage on GitHub
 
-- [Discussions](https://github.com/microsoft/agent-framework-durable-extension/discussions): Ask questions, provide feedback and ideas to what you'd like to see from the Agent Framework Durable extension.
 - [Issues](https://github.com/microsoft/agent-framework-durable-extension/issues) - If you find a bug, unexpected behavior or have a feature request, please open an issue.
 - [Pull Requests](https://github.com/microsoft/agent-framework-durable-extension/pulls) - We welcome contributions! Please see our [Contributing Guide](https://github.com/microsoft/agent-framework-durable-extension/blob/main/CONTRIBUTING.md)
 
