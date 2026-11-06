@@ -149,7 +149,11 @@ public static class GitHubCopilotDurableDemo
     /// </summary>
     /// <param name="options">The durable agents options builder.</param>
     /// <param name="copilotAgent">The Copilot <see cref="AIAgent"/> to register.</param>
-    /// <param name="timeToLive">Optional entity time-to-live (defaults to 1 hour).</param>
+    /// <param name="timeToLive">
+    /// Optional entity time-to-live. Defaults to <see langword="null"/> so the durable entity and its persisted
+    /// <c>GitHubCopilotAgentSession.SessionId</c> do not expire while an orchestration is paused waiting for
+    /// human approval. If an explicit TTL is configured, ensure it exceeds the longest supported approval window.
+    /// </param>
     public static void RegisterCopilotAgent(
         DurableAgentsOptions options,
         AIAgent copilotAgent,
@@ -162,9 +166,11 @@ public static class GitHubCopilotDurableDemo
         // and calls CopilotClient.ResumeSessionAsync(sessionId) on subsequent turns.
         // Setting ReplayMode = CurrentRequestOnly with an explicit ProviderKey ensures AgentEntity
         // sends only the new turn's prompt instead of prepending prior turns into the prompt.
+        // Keep timeToLive null by default (or longer than the maximum approval SLA) so the entity
+        // and its Copilot session ID are not deleted before a valid approval arrives.
         options.AddAIAgent(
             copilotAgent,
-            timeToLive: timeToLive ?? TimeSpan.FromHours(1),
+            timeToLive: timeToLive,
             configureHistory: static history =>
             {
                 history.ReplayMode = DurableAgentHistoryReplayMode.CurrentRequestOnly;
@@ -274,8 +280,9 @@ public static class GitHubCopilotDurableDemo
                 FinalResolution: $"Remediation timed out after {slaMinutes} minutes waiting for operator approval.");
         }
 
-        // Step 4: Approval event arrived first—cancel the outstanding durable SLA timer.
-        await timerCts.CancelAsync();
+        // Step 4: Approval event arrived first—cancel the outstanding durable SLA timer synchronously
+        // so timer cancellation remains within the orchestration turn.
+        timerCts.Cancel();
         bool approved = await approvalTask;
 
         if (!approved)

@@ -7,8 +7,8 @@ This sample demonstrates capabilities that **only** `Microsoft.Agents.AI.Durable
    - With `ConfigureDurableAgents`, firing `Task.WhenAll(durableAgent.RunAsync(alert1, session), durableAgent.RunAsync(alert2, session))` at the same `DurableAgentSession` automatically queues and executes each turn strictly one at a time inside the Durable Entity mailbox (`@dafx-v2-copilotagent@{key}`) on the same underlying `GitHubCopilotAgentSession.SessionId`.
 2. **Scenario 2 — Long-Running HITL Orchestration with SLA Timer (`Task.WhenAny(WaitForExternalEvent, CreateTimer)`) + Full Worker Shutdown While Paused:**
    - Starts `RunIncidentOrchestrationAsync` on **Host 1**, runs Turn 1 on `context.GetAgent("CopilotAgent")` to propose a remediation plan, and pauses waiting for `"Approval"` bounded by a durable SLA timer (`context.CreateTimer`).
-   - **Stops and disposes Host 1 completely** while the orchestration is waiting—holding zero processes, sockets, or memory open during human review.
-   - Starts **Host 2**, raises the `"Approval"` event, replays the orchestration, cancels the SLA timer, rehydrates `@dafx-v2-copilotagent@{key}`, and resumes the **exact same `GitHubCopilotAgentSession.SessionId`** for Turn 2.
+   - **Stops and disposes Host 1 and its `CopilotClient` completely** while the orchestration is waiting—holding zero worker or Copilot CLI processes, sockets, or memory open during human review.
+   - Starts **Host 2** with a fresh `CopilotClient`, raises the `"Approval"` event, replays the orchestration, cancels the SLA timer, rehydrates `@dafx-v2-copilotagent@{key}`, and resumes the **exact same `GitHubCopilotAgentSession.SessionId`** for Turn 2.
 3. **Scenario 3 — Durable Workflows (`ConfigureDurableWorkflows` / `WorkflowBuilder`):**
    - Executes `GitHubCopilotAgent` as a stateful node inside a Durable Workflow superstep graph.
 
@@ -19,7 +19,7 @@ This sample demonstrates capabilities that **only** `Microsoft.Agents.AI.Durable
  While `GitHub.Copilot.SDK` already persists its own session history under `COPILOT_HOME/session-state/{sessionId}` and supports `ResumeSessionAsync(sessionId)`, wrapping `GitHubCopilotAgent` in Durable Task provides distributed systems guarantees that the raw SDK does not:
 
 1. **Per-Session Actor Serialization & Mailbox Queuing:** Durable Entities (`@dafx-v2-copilotagent@{key}`) serialize concurrent requests to the same session one turn at a time without requiring custom Redis distributed locks, and retain idempotent completion receipts (`TerminalResults` / `CompletionReceipts`) indexed by `CorrelationId`.
-2. **Long-Running Human-in-the-Loop (`WaitForExternalEvent`) & Durable Timers:** Orchestrations can ask `GitHubCopilotAgent` to diagnose an incident or propose a plan on Turn 1, dehydrate to storage for hours or days waiting for an operator approval event at **zero compute cost**, and then resume the **exact same `GitHubCopilotAgentSession`** on Turn 2.
+2. **Long-Running Human-in-the-Loop (`WaitForExternalEvent`) & Durable Timers:** Orchestrations can ask `GitHubCopilotAgent` to diagnose an incident or propose a plan on Turn 1, dehydrate to storage for hours or days waiting for an operator approval event at **zero compute cost**, and then resume the **exact same `GitHubCopilotAgentSession`** on Turn 2. By default, `RegisterCopilotAgent` leaves `timeToLive` unset (`null`) so the durable entity and its persisted `SessionId` do not expire while waiting; if you configure an explicit `timeToLive`, ensure it exceeds your longest approval SLA (and retain the underlying Copilot session state under `COPILOT_HOME/session-state/{sessionId}` or your shared runtime for the same window).
 3. **Crash Recovery & Automatic Retries for Background / Webhook Workloads:** If a worker crashes mid-orchestration or between turns, Durable Task automatically replays the orchestration and resumes the persisted `GitHubCopilotAgentSession.SessionId` on a healthy worker.
 4. **Multi-Agent & Workflow Composition:** `GitHubCopilotAgent` can participate in `WorkflowBuilder` graphs alongside `ChatClientAgent` (Azure OpenAI / Anthropic / Ollama) and `FoundryAgent`, with conditional routing, fan-out/fan-in supersteps, and request ports.
 5. **Centralized Observability in the Durable Task Scheduler (DTS) Dashboard:** Every turn, orchestration step, custom status, and entity state transition is inspectable in the DTS web UI.
@@ -33,12 +33,12 @@ This sample demonstrates capabilities that **only** `Microsoft.Agents.AI.Durable
 `GitHubCopilotAgent` derives directly from `AIAgent` (not `ChatClientAgent`), so `DurableAgentHistoryOwnershipResolver` classifies it as `NoContextPipeline`.
 
 - If you leave the default `ReplayMode = DurableAgentHistoryReplayMode.PreloadEntityHistory`, `AgentEntity` prepends all prior turns from `ConversationHistory` into `inputMessages`, **and** `GitHubCopilotAgent` simultaneously calls `ResumeSessionAsync(typedSession.SessionId)` and joins all `inputMessages` via `string.Join("\n", messages.Select(m => m.Text))`. On Turn 2+, that re-sends the entire prior conversation transcript inside the new user prompt to an already-resumed Copilot session.
-- Always configure `DurableAgentHistoryReplayMode.CurrentRequestOnly` together with an explicit `DurableAgentHistoryProviderKey`:
+- Always configure `DurableAgentHistoryReplayMode.CurrentRequestOnly` together with an explicit `DurableAgentHistoryProviderKey`, and leave `timeToLive` `null` (or longer than your longest human-approval window) so the entity does not expire while paused:
 
 ```csharp
 options.AddAIAgent(
     copilotAgent,
-    timeToLive: TimeSpan.FromHours(1),
+    timeToLive: null,
     configureHistory: history =>
     {
         history.ReplayMode = DurableAgentHistoryReplayMode.CurrentRequestOnly;

@@ -25,18 +25,17 @@ Console.WriteLine($"History ProviderKey: {GitHubCopilotDurableDemo.HistoryProvid
 Console.WriteLine($"Copilot Connection: {(string.IsNullOrWhiteSpace(copilotRuntimeUrl) ? "Local Copilot CLI" : copilotRuntimeUrl)}");
 Console.WriteLine();
 
-// Create the GitHub Copilot SDK client (connects to a shared COPILOT_RUNTIME_URL server or local Copilot CLI).
-await using CopilotClient copilotClient = new(
-    GitHubCopilotDurableDemo.CreateClientOptions(copilotRuntimeUrl, copilotBaseDirectory));
-
 string instanceId;
 
 // ---------------------------------------------------------------------------
 // Host 1: Start the incident remediation orchestration, run Turn 1 on
-//         CopilotAgent to propose a plan, then shut down Host 1 completely
-//         while the orchestration is dehydrated waiting for human approval.
+//         CopilotAgent to propose a plan, then shut down and dispose both
+//         Host 1 and its CopilotClient completely while the orchestration is
+//         dehydrated waiting for human approval.
 // ---------------------------------------------------------------------------
-IHost firstHost = CreateHost(copilotClient, dtsConnectionString);
+CopilotClient firstCopilotClient = new(
+    GitHubCopilotDurableDemo.CreateClientOptions(copilotRuntimeUrl, copilotBaseDirectory));
+IHost firstHost = CreateHost(firstCopilotClient, dtsConnectionString);
 await firstHost.StartAsync();
 try
 {
@@ -83,27 +82,30 @@ finally
 {
     // Once the orchestration has checkpointed at WaitForExternalEvent, both the orchestration
     // history and the DurableAgentSession (including GitHubCopilotAgentSession.SessionId) are
-    // durably persisted in DTS. We can shut down and dispose Host 1 completely so zero worker
-    // processes, threads, or memory are held open while waiting for the human operator.
-    await StopAndDisposeHostAsync(firstHost);
+    // durably persisted in DTS. We can shut down and dispose Host 1 and its CopilotClient
+    // completely so zero worker processes, CLI processes, sockets, or memory are held open
+    // while waiting for the human operator.
+    await StopAndDisposeHostAsync(firstHost, firstCopilotClient);
 }
 
 Console.WriteLine();
-Console.WriteLine("[Host 1] Stopped and disposed completely. Zero worker processes are running while awaiting operator approval.");
+Console.WriteLine("[Host 1] Stopped and disposed Host 1 and its CopilotClient completely. Zero worker or Copilot processes are running while awaiting operator approval.");
 Console.Write("Approve the proposed remediation plan? [y/n] (default: y): ");
 string? approvalInput = Console.ReadLine();
 bool approved = string.IsNullOrWhiteSpace(approvalInput) ||
     approvalInput.Trim().Equals("y", StringComparison.OrdinalIgnoreCase);
 
 // ---------------------------------------------------------------------------
-// Host 2: Start a brand-new worker host after the operator responds, raise the
-//         external approval event, replay the orchestration, cancel the SLA
-//         timer, and resume the exact same GitHubCopilotAgentSession.SessionId
-//         for Turn 2.
+// Host 2: Start a brand-new CopilotClient and worker host after the operator
+//         responds, raise the external approval event, replay the
+//         orchestration, cancel the SLA timer, and resume the exact same
+//         GitHubCopilotAgentSession.SessionId for Turn 2.
 // ---------------------------------------------------------------------------
 Console.WriteLine();
-Console.WriteLine("[Host 2] Starting new worker host to deliver approval event and resume Copilot session for Turn 2...");
-IHost secondHost = CreateHost(copilotClient, dtsConnectionString);
+Console.WriteLine("[Host 2] Starting a fresh CopilotClient and worker host to deliver approval event and resume Copilot session for Turn 2...");
+CopilotClient secondCopilotClient = new(
+    GitHubCopilotDurableDemo.CreateClientOptions(copilotRuntimeUrl, copilotBaseDirectory));
+IHost secondHost = CreateHost(secondCopilotClient, dtsConnectionString);
 await secondHost.StartAsync();
 try
 {
@@ -130,7 +132,7 @@ try
 }
 finally
 {
-    await StopAndDisposeHostAsync(secondHost);
+    await StopAndDisposeHostAsync(secondHost, secondCopilotClient);
 }
 
 // Helper to configure and build a worker + client host with the durable CopilotAgent and orchestration.
@@ -159,14 +161,21 @@ static IHost CreateHost(CopilotClient copilotClient, string dtsConnectionString)
         .Build();
 }
 
-static async Task StopAndDisposeHostAsync(IHost host)
+static async Task StopAndDisposeHostAsync(IHost host, CopilotClient copilotClient)
 {
     try
     {
-        await host.StopAsync();
+        try
+        {
+            await host.StopAsync();
+        }
+        finally
+        {
+            host.Dispose();
+        }
     }
     finally
     {
-        host.Dispose();
+        await copilotClient.DisposeAsync();
     }
 }

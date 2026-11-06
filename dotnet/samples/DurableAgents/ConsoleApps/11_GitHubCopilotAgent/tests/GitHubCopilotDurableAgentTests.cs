@@ -1,5 +1,6 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
@@ -110,6 +111,38 @@ public sealed class GitHubCopilotSampleTests
     }
 
     [Fact]
+    public async Task NegativeControl_ConcurrentSendsWithoutDurableEntityMailbox_RaisesMaxConcurrentSendsAboveOneAsync()
+    {
+        await using FakeCopilotJsonRpcServer server = new();
+        await using CopilotClient copilotClient = new(
+            GitHubCopilotDurableDemo.CreateClientOptions(server.Endpoint));
+        AIAgent copilotAgent = GitHubCopilotDurableDemo.CreateCopilotAgent(copilotClient);
+
+        // Negative control: issue two concurrent RunAsync calls over the same CopilotClient connection
+        // without the Durable Entity mailbox lock. FakeCopilotJsonRpcServer dispatches session.send
+        // handlers concurrently on the same TCP stream and observes overlapping in-flight sends
+        // (MaxConcurrentSends > 1).
+        AgentSession firstSession = await copilotAgent.CreateSessionAsync();
+        AgentSession secondSession = await copilotAgent.CreateSessionAsync();
+
+        Task<AgentResponse> firstOverlappingSend = copilotAgent.RunAsync(
+            "Overlapping alert #1",
+            firstSession);
+        Task<AgentResponse> secondOverlappingSend = copilotAgent.RunAsync(
+            "Overlapping alert #2",
+            secondSession);
+
+        AgentResponse[] responses = await Task.WhenAll(firstOverlappingSend, secondOverlappingSend);
+
+        Assert.Equal("Reply to: Overlapping alert #1", responses[0].Text);
+        Assert.Equal("Reply to: Overlapping alert #2", responses[1].Text);
+        Assert.True(
+            server.MaxConcurrentSends > 1,
+            $"Expected overlapping sends without entity mailbox serialization to raise MaxConcurrentSends above 1, but observed {server.MaxConcurrentSends}.");
+        Assert.Equal(2, server.MaxConcurrentSends);
+    }
+
+    [Fact]
     public async Task MultiTurn_CurrentRequestOnlyWithProviderKey_PreservesSessionIdWithoutDuplicatingHistoryAsync()
     {
         await using FakeCopilotJsonRpcServer server = new();
@@ -185,8 +218,6 @@ public sealed class GitHubCopilotSampleTests
     public async Task IncidentOrchestration_ApprovalAfterWorkerRestartAndSlaTimeout_VerifiesBothPathsAsync()
     {
         await using FakeCopilotJsonRpcServer server = new();
-        await using CopilotClient copilotClient = new(
-            GitHubCopilotDurableDemo.CreateClientOptions(server.Endpoint));
 
         string? persistedEntityStateJson = null;
         AgentResponse? turn1CachedResponse = null;
@@ -195,15 +226,18 @@ public sealed class GitHubCopilotSampleTests
 
         // ---------------------------------------------------------------------------
         // Part 1A (Host 1): Start orchestration, execute Turn 1, pause at WaitForExternalEvent,
-        //                   then dispose Host 1 completely while waiting for human approval!
+        //                   then dispose both Host 1 and its CopilotClient completely while
+        //                   waiting for human approval!
         // ---------------------------------------------------------------------------
         TaskCompletionSource<bool> neverCompletesOnHost1 = new(TaskCreationOptions.RunContinuationsAsynchronously);
         TaskCompletionSource turn1ReachedWait = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        await using (CopilotClient host1CopilotClient = new(
+            GitHubCopilotDurableDemo.CreateClientOptions(server.Endpoint)))
         using (ServiceProvider host1Services = CreateServiceProvider(options =>
             GitHubCopilotDurableDemo.RegisterCopilotAgent(
                 options.Agents,
-                GitHubCopilotDurableDemo.CreateCopilotAgent(copilotClient))))
+                GitHubCopilotDurableDemo.CreateCopilotAgent(host1CopilotClient))))
         {
             Mock<TaskOrchestrationEntityFeature> host1Entities = new();
             host1Entities
@@ -254,14 +288,18 @@ public sealed class GitHubCopilotSampleTests
         }
 
         // ---------------------------------------------------------------------------
-        // Part 1B (Host 2): Host 1 is now disposed. Start Host 2, replay orchestration
-        //                   with Approval=true, cancel SLA timer, and execute Turn 2 on Host 2!
+        // Part 1B (Host 2): Both Host 1 and host1CopilotClient are now disposed.
+        //                   Start a fresh host2CopilotClient and Host 2, replay orchestration
+        //                   with Approval=true, cancel SLA timer synchronously, and execute
+        //                   Turn 2 on Host 2!
         // ---------------------------------------------------------------------------
         bool timerTokenCancelled = false;
+        await using (CopilotClient host2CopilotClient = new(
+            GitHubCopilotDurableDemo.CreateClientOptions(server.Endpoint)))
         using (ServiceProvider host2Services = CreateServiceProvider(options =>
             GitHubCopilotDurableDemo.RegisterCopilotAgent(
                 options.Agents,
-                GitHubCopilotDurableDemo.CreateCopilotAgent(copilotClient))))
+                GitHubCopilotDurableDemo.CreateCopilotAgent(host2CopilotClient))))
         {
             int callIndex = 0;
             Mock<TaskOrchestrationEntityFeature> host2Entities = new();
@@ -330,10 +368,12 @@ public sealed class GitHubCopilotSampleTests
         // ---------------------------------------------------------------------------
         // Part 2: Verify SLA timer expiration path (timeoutTask wins Task.WhenAny)
         // ---------------------------------------------------------------------------
+        await using (CopilotClient timeoutCopilotClient = new(
+            GitHubCopilotDurableDemo.CreateClientOptions(server.Endpoint)))
         using (ServiceProvider timeoutServices = CreateServiceProvider(options =>
             GitHubCopilotDurableDemo.RegisterCopilotAgent(
                 options.Agents,
-                GitHubCopilotDurableDemo.CreateCopilotAgent(copilotClient))))
+                GitHubCopilotDurableDemo.CreateCopilotAgent(timeoutCopilotClient))))
         {
             int timeoutEntityCalls = 0;
             Mock<TaskOrchestrationEntityFeature> timeoutEntities = new();
@@ -596,7 +636,14 @@ public sealed class GitHubCopilotSampleTests
 
         private readonly TcpListener _listener;
         private readonly CancellationTokenSource _cts = new();
+        private readonly SemaphoreSlim _writeLock = new(1, 1);
         private readonly Task _acceptLoopTask;
+        private readonly ConcurrentBag<Task> _backgroundTasks = [];
+        private readonly ConcurrentBag<TcpClient> _clients = [];
+        private readonly object _stateLock = new();
+        private readonly List<string> _createdSessionIds = [];
+        private readonly List<string> _resumedSessionIds = [];
+        private readonly List<string> _sentPrompts = [];
         private int _messageCounter;
         private int _activeSends;
         private int _maxConcurrentSends;
@@ -614,18 +661,68 @@ public sealed class GitHubCopilotSampleTests
 
         public int MaxConcurrentSends => Volatile.Read(ref this._maxConcurrentSends);
 
-        public List<string> CreatedSessionIds { get; } = [];
+        public IReadOnlyList<string> CreatedSessionIds
+        {
+            get
+            {
+                lock (this._stateLock)
+                {
+                    return [.. this._createdSessionIds];
+                }
+            }
+        }
 
-        public List<string> ResumedSessionIds { get; } = [];
+        public IReadOnlyList<string> ResumedSessionIds
+        {
+            get
+            {
+                lock (this._stateLock)
+                {
+                    return [.. this._resumedSessionIds];
+                }
+            }
+        }
 
-        public List<string> SentPrompts { get; } = [];
+        public IReadOnlyList<string> SentPrompts
+        {
+            get
+            {
+                lock (this._stateLock)
+                {
+                    return [.. this._sentPrompts];
+                }
+            }
+        }
 
         private async Task AcceptLoopAsync(CancellationToken ct)
         {
             try
             {
-                using TcpClient tcp = await this._listener.AcceptTcpClientAsync(ct);
-                using NetworkStream stream = tcp.GetStream();
+                while (!ct.IsCancellationRequested)
+                {
+                    TcpClient tcp = await this._listener.AcceptTcpClientAsync(ct);
+                    this._clients.Add(tcp);
+                    Task clientTask = Task.Run(() => this.HandleClientAsync(tcp.GetStream(), ct), CancellationToken.None);
+                    this._backgroundTasks.Add(clientTask);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (SocketException)
+            {
+            }
+        }
+
+        private async Task HandleClientAsync(NetworkStream stream, CancellationToken ct)
+        {
+            List<Task> inFlightSends = [];
+
+            try
+            {
                 while (!ct.IsCancellationRequested)
                 {
                     string? raw = await ReadRpcMessageAsync(stream, ct);
@@ -648,7 +745,7 @@ public sealed class GitHubCopilotSampleTests
                     switch (method)
                     {
                         case "connect":
-                            await WriteRpcMessageAsync(
+                            await this.WriteRpcMessageAsync(
                                 stream,
                                 JsonSerializer.Serialize(new
                                 {
@@ -662,8 +759,12 @@ public sealed class GitHubCopilotSampleTests
                         case "session.create":
                         {
                             string sessionId = @params.GetProperty("sessionId").GetString()!;
-                            this.CreatedSessionIds.Add(sessionId);
-                            await WriteRpcMessageAsync(
+                            lock (this._stateLock)
+                            {
+                                this._createdSessionIds.Add(sessionId);
+                            }
+
+                            await this.WriteRpcMessageAsync(
                                 stream,
                                 JsonSerializer.Serialize(new
                                 {
@@ -678,8 +779,12 @@ public sealed class GitHubCopilotSampleTests
                         case "session.resume":
                         {
                             string sessionId = @params.GetProperty("sessionId").GetString()!;
-                            this.ResumedSessionIds.Add(sessionId);
-                            await WriteRpcMessageAsync(
+                            lock (this._stateLock)
+                            {
+                                this._resumedSessionIds.Add(sessionId);
+                            }
+
+                            await this.WriteRpcMessageAsync(
                                 stream,
                                 JsonSerializer.Serialize(new
                                 {
@@ -693,6 +798,9 @@ public sealed class GitHubCopilotSampleTests
 
                         case "session.send":
                         {
+                            string sessionId = @params.GetProperty("sessionId").GetString()!;
+                            string prompt = @params.GetProperty("prompt").GetString()!;
+
                             int active = Interlocked.Increment(ref this._activeSends);
                             int observedMax;
                             do
@@ -702,97 +810,16 @@ public sealed class GitHubCopilotSampleTests
                             while (active > observedMax &&
                                 Interlocked.CompareExchange(ref this._maxConcurrentSends, active, observedMax) != observedMax);
 
-                            try
-                            {
-                                string sessionId = @params.GetProperty("sessionId").GetString()!;
-                                string prompt = @params.GetProperty("prompt").GetString()!;
-                                this.SentPrompts.Add(prompt);
-                                int msgNum = Interlocked.Increment(ref this._messageCounter);
-                                string msgId = $"msg-{msgNum}";
-                                string replyText = $"Reply to: {prompt}";
-
-                                await Task.Delay(TimeSpan.FromMilliseconds(20), ct);
-
-                                await WriteRpcMessageAsync(
-                                    stream,
-                                    JsonSerializer.Serialize(new
-                                    {
-                                        jsonrpc = "2.0",
-                                        id,
-                                        result = new { messageId = msgId },
-                                    }),
-                                    ct);
-
-                                await WriteRpcMessageAsync(
-                                    stream,
-                                    JsonSerializer.Serialize(new
-                                    {
-                                        jsonrpc = "2.0",
-                                        method = "session.event",
-                                        @params = new
-                                        {
-                                            sessionId,
-                                            @event = new
-                                            {
-                                                type = "assistant.message_delta",
-                                                id = "00000000-0000-0000-0000-000000000001",
-                                                timestamp = "2026-10-24T00:00:00Z",
-                                                data = new { messageId = msgId, deltaContent = replyText },
-                                            },
-                                        },
-                                    }),
-                                    ct);
-
-                                await WriteRpcMessageAsync(
-                                    stream,
-                                    JsonSerializer.Serialize(new
-                                    {
-                                        jsonrpc = "2.0",
-                                        method = "session.event",
-                                        @params = new
-                                        {
-                                            sessionId,
-                                            @event = new
-                                            {
-                                                type = "assistant.message",
-                                                id = "00000000-0000-0000-0000-000000000002",
-                                                timestamp = "2026-10-24T00:00:01Z",
-                                                data = new { messageId = msgId, content = replyText },
-                                            },
-                                        },
-                                    }),
-                                    ct);
-
-                                await WriteRpcMessageAsync(
-                                    stream,
-                                    JsonSerializer.Serialize(new
-                                    {
-                                        jsonrpc = "2.0",
-                                        method = "session.event",
-                                        @params = new
-                                        {
-                                            sessionId,
-                                            @event = new
-                                            {
-                                                type = "session.idle",
-                                                id = "00000000-0000-0000-0000-000000000003",
-                                                timestamp = "2026-10-24T00:00:02Z",
-                                                data = new { },
-                                            },
-                                        },
-                                    }),
-                                    ct);
-                            }
-                            finally
-                            {
-                                Interlocked.Decrement(ref this._activeSends);
-                            }
-
+                            // Dispatch session.send handling without blocking the socket read loop so overlapping
+                            // requests are read and processed concurrently.
+                            Task sendTask = this.HandleSessionSendAsync(stream, id, sessionId, prompt, ct);
+                            inFlightSends.Add(sendTask);
+                            this._backgroundTasks.Add(sendTask);
                             break;
                         }
 
                         default:
-                            await WriteRpcMessageAsync(
+                            await this.WriteRpcMessageAsync(
                                 stream,
                                 JsonSerializer.Serialize(new
                                 {
@@ -813,6 +840,115 @@ public sealed class GitHubCopilotSampleTests
             }
             catch (IOException)
             {
+            }
+            finally
+            {
+                try
+                {
+                    await Task.WhenAll(inFlightSends);
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or IOException)
+                {
+                }
+            }
+        }
+
+        private async Task HandleSessionSendAsync(
+            NetworkStream stream,
+            long id,
+            string sessionId,
+            string prompt,
+            CancellationToken ct)
+        {
+            try
+            {
+                lock (this._stateLock)
+                {
+                    this._sentPrompts.Add(prompt);
+                }
+
+                int msgNum = Interlocked.Increment(ref this._messageCounter);
+                string msgId = $"msg-{msgNum}";
+                string replyText = $"Reply to: {prompt}";
+
+                await Task.Delay(TimeSpan.FromMilliseconds(60), ct);
+
+                await this.WriteRpcMessageAsync(
+                    stream,
+                    JsonSerializer.Serialize(new
+                    {
+                        jsonrpc = "2.0",
+                        id,
+                        result = new { messageId = msgId },
+                    }),
+                    ct);
+
+                await this.WriteRpcMessageAsync(
+                    stream,
+                    JsonSerializer.Serialize(new
+                    {
+                        jsonrpc = "2.0",
+                        method = "session.event",
+                        @params = new
+                        {
+                            sessionId,
+                            @event = new
+                            {
+                                type = "assistant.message_delta",
+                                id = "00000000-0000-0000-0000-000000000001",
+                                timestamp = "2026-10-24T00:00:00Z",
+                                data = new { messageId = msgId, deltaContent = replyText },
+                            },
+                        },
+                    }),
+                    ct);
+
+                await this.WriteRpcMessageAsync(
+                    stream,
+                    JsonSerializer.Serialize(new
+                    {
+                        jsonrpc = "2.0",
+                        method = "session.event",
+                        @params = new
+                        {
+                            sessionId,
+                            @event = new
+                            {
+                                type = "assistant.message",
+                                id = "00000000-0000-0000-0000-000000000002",
+                                timestamp = "2026-10-24T00:00:01Z",
+                                data = new { messageId = msgId, content = replyText },
+                            },
+                        },
+                    }),
+                    ct);
+
+                await this.WriteRpcMessageAsync(
+                    stream,
+                    JsonSerializer.Serialize(new
+                    {
+                        jsonrpc = "2.0",
+                        method = "session.event",
+                        @params = new
+                        {
+                            sessionId,
+                            @event = new
+                            {
+                                type = "session.idle",
+                                id = "00000000-0000-0000-0000-000000000003",
+                                timestamp = "2026-10-24T00:00:02Z",
+                                data = new { },
+                            },
+                        },
+                    }),
+                    ct);
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or IOException)
+            {
+            }
+            finally
+            {
+                Interlocked.Decrement(ref this._activeSends);
             }
         }
 
@@ -859,13 +995,24 @@ public sealed class GitHubCopilotSampleTests
             return Encoding.UTF8.GetString(body);
         }
 
-        private static async Task WriteRpcMessageAsync(Stream stream, string json, CancellationToken ct)
+        private async Task WriteRpcMessageAsync(
+            Stream stream,
+            string json,
+            CancellationToken ct)
         {
             byte[] body = Encoding.UTF8.GetBytes(json);
             byte[] header = Encoding.ASCII.GetBytes($"Content-Length: {body.Length}\r\n\r\n");
-            await stream.WriteAsync(header, ct);
-            await stream.WriteAsync(body, ct);
-            await stream.FlushAsync(ct);
+            await this._writeLock.WaitAsync(ct);
+            try
+            {
+                await stream.WriteAsync(header, ct);
+                await stream.WriteAsync(body, ct);
+                await stream.FlushAsync(ct);
+            }
+            finally
+            {
+                this._writeLock.Release();
+            }
         }
 
         public async ValueTask DisposeAsync()
@@ -875,11 +1022,18 @@ public sealed class GitHubCopilotSampleTests
             try
             {
                 await this._acceptLoopTask;
+                await Task.WhenAll(this._backgroundTasks);
             }
-            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or IOException)
+            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or IOException or SocketException)
             {
             }
 
+            foreach (TcpClient client in this._clients)
+            {
+                client.Dispose();
+            }
+
+            this._writeLock.Dispose();
             this._cts.Dispose();
         }
     }
