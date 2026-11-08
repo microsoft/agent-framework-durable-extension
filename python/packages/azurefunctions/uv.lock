@@ -31,7 +31,7 @@ overrides = [
 
 [[package]]
 name = "agent-framework-azurefunctions"
-version = "1.0.0b261029"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-framework-core" },
@@ -136,7 +136,7 @@ wheels = [
 
 [[package]]
 name = "agent-framework-durabletask"
-version = "1.0.0b261029"
+version = "1.0.0"
 source = { editable = "../durabletask" }
 dependencies = [
     { name = "agent-framework-core" },

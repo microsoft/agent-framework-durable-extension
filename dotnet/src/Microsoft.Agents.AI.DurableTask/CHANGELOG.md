@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## v1.16.0
+
+- General Availability release of `Microsoft.Agents.AI.DurableTask` `1.16.0`
+
 ## v1.16.0-preview.261029.1
 
 - [BREAKING] Default new agent sessions to `dafx-v2-{agent}` entities writing schema 2.0.0 state with automatic worker work-item filtering, reserve `v{digits}-` agent-name prefixes, add `DurableAgentsOptions.ProcessLegacyEntities` (`DURABLE_AGENTS_PROCESS_LEGACY_ENTITIES`) for Phase 2 registration and in-place 1.x to 2.0.0 migration of legacy `dafx-{agent}` entities after v1 workers are stopped, and expose public `HistoryRetentionMode` (`KeepAll`/`Auto`), `MaxStateBytes` (1 MiB default under `Auto`), `HistoryRetentionHighWatermark`, `HistoryRetentionLowWatermark`, and `ResultRetentionPeriod` on `DurableAgentsOptions` ([#155](https://github.com/microsoft/agent-framework-durable-extension/pull/155))
