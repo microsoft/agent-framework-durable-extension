@@ -24,20 +24,20 @@ For the full Agent Framework source, see [microsoft/agent-framework](https://git
 
 ```bash
 # Self-hosted durable agents and workflows
-dotnet add package Microsoft.Agents.AI.DurableTask --prerelease
+dotnet add package Microsoft.Agents.AI.DurableTask
 
 # Azure Functions (.NET isolated worker) hosting
-dotnet add package Microsoft.Agents.AI.Hosting.AzureFunctions --prerelease
+dotnet add package Microsoft.Agents.AI.Hosting.AzureFunctions
 ```
 
 ### Python (PyPI)
 
 ```bash
 # Self-hosted durable agents and workflows
-pip install agent-framework-durabletask --pre
+pip install agent-framework-durabletask
 
 # Azure Functions (Python v2) hosting
-pip install agent-framework-azurefunctions --pre
+pip install agent-framework-azurefunctions
 ```
 
 ## Repository layout

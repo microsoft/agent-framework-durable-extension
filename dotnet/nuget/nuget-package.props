@@ -3,20 +3,20 @@
     <!-- Central version prefix - applies to all nuget packages. -->
     <VersionPrefix>1.16.0</VersionPrefix>
     <RCNumber>1</RCNumber>
-    <DateSuffix>261029</DateSuffix>
+    <DateSuffix>261108</DateSuffix>
     <PackageVersion Condition="'$(IsReleaseCandidate)' == 'true'">$(VersionPrefix)-rc$(RCNumber)</PackageVersion>
     <PackageVersion Condition="'$(IsReleaseCandidate)' != 'true' AND '$(VersionSuffix)' != ''">$(VersionPrefix)-$(VersionSuffix).$(DateSuffix).1</PackageVersion>
     <PackageVersion Condition="'$(IsReleaseCandidate)' != 'true' AND '$(VersionSuffix)' == ''">$(VersionPrefix)-preview.$(DateSuffix).1</PackageVersion>
     <PackageVersion Condition="'$(IsReleased)' == 'true'">$(VersionPrefix)</PackageVersion>
-    <GitTag>1.16.0-preview.261029.1</GitTag>
+    <GitTag>1.16.0</GitTag>
 
     <Configurations>Debug;Release;Publish</Configurations>
     <IsPackable>true</IsPackable>
 
     <!-- Package validation. Baseline Version should be the latest version available on NuGet. -->
     <PackageValidationBaselineVersion>1.0.0</PackageValidationBaselineVersion>
-    <!-- Enable validation for GA packages -->
-    <EnablePackageValidation Condition="'$(IsReleased)' == 'true'">true</EnablePackageValidation>
+    <!-- 1.16.0 is the first non-preview GA release on NuGet, so no 1.0.0 baseline package exists yet. -->
+    <EnablePackageValidation>false</EnablePackageValidation>
     <!-- Validate assembly attributes only for Publish builds -->
     <NoWarn Condition="'$(Configuration)' != 'Publish'">$(NoWarn);CP0003</NoWarn>
     <!-- Do not validate reference assemblies -->
