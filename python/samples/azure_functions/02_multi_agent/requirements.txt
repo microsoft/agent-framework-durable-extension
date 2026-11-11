@@ -1,14 +1,12 @@
-# Agent Framework packages
-# To use the deployed version, uncomment the lines below and comment out the local installation lines
-# agent-framework-foundry
-# agent-framework-azurefunctions
-
-# Local installation (for development and testing)
-# Each package must be listed explicitly because pip doesn't resolve uv workspace sources.
-# Without explicit entries, pip would fetch transitive dependencies from PyPI instead of local source.
-agent-framework-foundry>=1.10.1,<2  # Foundry support from PyPI (pulls in core)
--e ../../../packages/durabletask  # Durable Task support - dependency of azurefunctions
--e ../../../packages/azurefunctions  # Azure Functions integration - the main package for this sample
+# Published packages matching this sample's release and repository lock.
+# Keep this folder installable without the monorepo's sibling packages.
+agent-framework-azurefunctions==1.0.0b260922
+agent-framework-durabletask==1.0.0b260922
+agent-framework-core==1.16.0
+agent-framework-foundry==1.10.1
+agent-framework-openai==1.10.1
+durabletask==1.7.2
+durabletask-azuremanaged==1.7.2
 
 # Azure authentication
 azure-identity
