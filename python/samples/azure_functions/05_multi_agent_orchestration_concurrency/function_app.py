@@ -14,13 +14,12 @@ import json
 import logging
 import os
 from collections.abc import Generator
-from datetime import timezone
 from typing import Any, cast
 
 import azure.functions as func
 from agent_framework import Agent, AgentResponse
 from agent_framework.foundry import FoundryChatClient
-from agent_framework_azurefunctions import AgentFunctionApp, runtime_status_name
+from agent_framework_azurefunctions import AgentFunctionApp
 from azure.durable_functions import DurableFunctionsClient
 from azure.identity.aio import AzureCliCredential
 from dotenv import load_dotenv
@@ -142,70 +141,13 @@ async def start_multi_agent_concurrent_orchestration(
     )
 
 
-# 6. HTTP endpoint to retrieve orchestration status and aggregated outputs.
-@app.route(route="multiagent/status/{instanceId}", methods=["GET"])
-@app.durable_client_input(client_name="client")
-async def get_orchestration_status(
-    req: func.HttpRequest,
-    client: DurableFunctionsClient,
-) -> func.HttpResponse:
-    instance_id = req.route_params.get("instanceId")
-    if not instance_id:
-        return func.HttpResponse(
-            body=json.dumps({"error": "Missing instanceId"}),
-            status_code=400,
-            mimetype="application/json",
-        )
-
-    status = await client.get_orchestration_state(instance_id)
-    if status is None:
-        return func.HttpResponse(
-            body=json.dumps({"error": f"No orchestration found for instance '{instance_id}'"}),
-            status_code=404,
-            mimetype="application/json",
-        )
-
-    response_data: dict[str, Any] = {
-        "instanceId": status.instance_id,
-        "runtimeStatus": runtime_status_name(status.runtime_status),
-        # durabletask timestamps are naive UTC, so add the offset explicitly.
-        "createdTime": status.created_at.replace(tzinfo=timezone.utc).isoformat() if status.created_at else None,
-        "lastUpdatedTime": (
-            status.last_updated_at.replace(tzinfo=timezone.utc).isoformat() if status.last_updated_at else None
-        ),
-    }
-
-    orchestration_input = _read_json(status.serialized_input)
-    if orchestration_input is not None:
-        response_data["input"] = orchestration_input
-
-    output = _read_json(status.serialized_output)
-    if output is not None:
-        response_data["output"] = output
-
-    return func.HttpResponse(
-        body=json.dumps(response_data),
-        status_code=200,
-        mimetype="application/json",
-    )
+# 6. Status endpoint for the orchestration. The app scopes the lookup to this
+# orchestration's name, so an instance ID from any other orchestration in the task hub
+# reads as "not found" instead of leaking its status.
+app.add_orchestration_status_route("multi_agent_concurrent_orchestration", route="multiagent/status/{instanceId}")
 
 
-# 7. Helpers that read status fields as plain JSON and construct durable status URLs.
-def _read_json(serialized: str | None) -> Any:
-    """Read a serialized status field as plain JSON.
-
-    The status getters decode through the Functions converter, which rebuilds objects from
-    ``__class__`` and ``__module__`` markers. Reading the serialized value keeps such data as
-    plain JSON. A value that is not JSON, such as a plain termination reason, stays a string.
-    """
-    if not serialized:
-        return None
-    try:
-        return json.loads(serialized)
-    except json.JSONDecodeError:
-        return serialized
-
-
+# 7. Helper that constructs durable status URLs.
 def _build_status_url(request_url: str, instance_id: str, *, route: str) -> str:
     base_url, _, _ = request_url.partition("/api/")
     if not base_url:
@@ -230,9 +172,13 @@ HTTP/1.1 200 OK
 {
     "instanceId": "<guid>",
     "runtimeStatus": "Completed",
+    "customStatus": null,
     "output": {
         "physicist": "Temperature measures the average kinetic energy of particles in a system.",
         "chemist": "Temperature reflects how molecular motion influences reaction rates and equilibria."
-    }
+    },
+    "error": null,
+    "createdTime": "2024-01-01T00:00:00+00:00",
+    "lastUpdatedTime": "2024-01-01T00:00:10+00:00"
 }
 """

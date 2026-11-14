@@ -48,6 +48,10 @@ Sample completed status payload:
 {
   "instanceId": "ebb5c1df123e4d6fb8e7d703ffd0d0b0",
   "runtimeStatus": "Completed",
-  "output": "Learning is a journey where curiosity turns effort into mastery."
+  "customStatus": null,
+  "output": "Learning is a journey where curiosity turns effort into mastery.",
+  "error": null,
+  "createdTime": "2024-01-01T00:00:00+00:00",
+  "lastUpdatedTime": "2024-01-01T00:00:10+00:00"
 }
 ```

@@ -34,7 +34,7 @@ from durabletask.entities import EntityInstanceId, EntityMetadata
 from durabletask.serialization import DEFAULT_DATA_CONVERTER
 from durabletask.task import FailureDetails, OrchestrationContext
 
-from agent_framework_azurefunctions import AgentFunctionApp
+from agent_framework_azurefunctions import AgentFunctionApp, build_orchestration_status_response
 from agent_framework_azurefunctions._app import (
     _DEFAULT_WORKFLOW_WAIT_TIMEOUT_SECONDS,
     _MAX_WORKFLOW_WAIT_TIMEOUT_SECONDS,
@@ -1187,6 +1187,17 @@ class TestWorkflowStatusRoute:
         body = json.loads(response.get_body())
         assert body["runtimeStatus"] == "Terminated"
         assert body["output"] == "stopped by operator"
+
+    async def test_response_shape_matches_the_canonical_builder(self) -> None:
+        """The workflow route and custom endpoints share one response contract."""
+        handler = self._get_status_handler("test_workflow")
+        client = AsyncMock()
+        state = _orchestration_state("instance-1", OrchestrationStatus.COMPLETED, output="done")
+        client.get_orchestration_state.return_value = state
+
+        body = json.loads((await handler(self._request(), client)).get_body())
+
+        assert set(body) == set(build_orchestration_status_response(state))
 
 
 class TestWorkflowRunRoute:

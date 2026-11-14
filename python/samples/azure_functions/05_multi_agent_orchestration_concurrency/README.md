@@ -50,9 +50,13 @@ Example completed status payload:
 {
   "instanceId": "94d56266f0a04e5a8f9f3a1f77a4c597",
   "runtimeStatus": "Completed",
+  "customStatus": null,
   "output": {
     "physicist": "Temperature measures the average kinetic energy of particles in a system.",
     "chemist": "Temperature reflects how molecular motion influences reaction rates and equilibria."
-  }
+  },
+  "error": null,
+  "createdTime": "2024-01-01T00:00:00+00:00",
+  "lastUpdatedTime": "2024-01-01T00:00:10+00:00"
 }
 ```
