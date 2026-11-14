@@ -9,8 +9,6 @@ internal static class DurableAgentSamples
 {
     private const string AzureFunctionsSkipReason =
         "Requires Azure Functions Core Tools runtime and starts a web host.";
-    private const string ExperimentalMailboxSkipReason =
-        "Draft only: schema 2 mailbox writes remain behind an internal, default-disabled rollout gate.";
 
     public static IReadOnlyList<SampleDefinition> ConsoleApps { get; } =
     [
@@ -97,7 +95,6 @@ internal static class DurableAgentSamples
         {
             Name = "DurableAgents_Console_08_FoundryManagedAgent",
             ProjectPath = "samples/DurableAgents/ConsoleApps/08_FoundryManagedAgent",
-            SkipReason = ExperimentalMailboxSkipReason,
             RequiredEnvironmentVariables =
             [
                 "FOUNDRY_PROJECT_ENDPOINT",
@@ -117,7 +114,6 @@ internal static class DurableAgentSamples
         {
             Name = "DurableAgents_Console_09_CustomHistoryProvider",
             ProjectPath = "samples/DurableAgents/ConsoleApps/09_CustomHistoryProvider",
-            SkipReason = ExperimentalMailboxSkipReason,
             RequiredEnvironmentVariables =
             [
                 "FOUNDRY_PROJECT_ENDPOINT",

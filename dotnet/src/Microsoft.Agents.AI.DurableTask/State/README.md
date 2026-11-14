@@ -74,19 +74,21 @@ other revised semantic checks consistently on read and write.
 ## Revised execution-state foundation
 
 > [!IMPORTANT]
-> Schema `2.0.0` is being adopted through a staged cross-runtime rollout. Production .NET readers and writers currently default to
-> schema `1.2.0` and reject schema 2 until the mailbox-aware runtime rollout requirements are met.
+> Schema `2.0.0` is being adopted through a staged cross-runtime rollout. New .NET durable sessions write
+> schema `2.0.0` by default (`dafx-v2-{agent}` entities); legacy `dafx-{agent}` entities keep writing `1.2.0`
+> until Phase 2 migration. In mixed-runtime deployments, every other reader must meet the mailbox-aware
+> rollout floor before it can consume schema 2 state.
 
 The mailbox contract and optional opaque history profile use schema `2.0.0`. This is intentionally a fail-closed major
 version: a 1.x worker preserves unknown fields but does not understand completion receipts, so allowing it to
-process revised state could rerun work whose transcript result was already removed. The .NET reader now
-supports mailbox-aware 2.0 lookup, while new state continues to default to `1.2.0`.
-Producer activation is an internal test-only gate, disabled by default. There is no public opt-in until
-the compatible-reader deployment floor is enforced; this draft does not authorize production activation. Existing 2.0 state
-is preserved rather than downgraded, and committed duplicates remain readable with writes disabled.
-New requests against existing 2.0 state fail before agent execution when the internal write gate is disabled.
-The internal passive contract path remains available for serializer/fixture tests without authorizing new
-production writes.
+process revised state could rerun work whose transcript result was already removed. The .NET reader
+supports mailbox-aware 2.0 lookup, and new durable sessions write `2.0.0` by default. New
+`DurableAgentState` DTO instances still default to `1.2.0`, which remains the legacy write version.
+The internal writer authorization defaults to enabled; its setter is retained for legacy-writer execution
+tests. Existing 2.0 state is preserved rather than downgraded. When the internal write gate is explicitly
+disabled, committed duplicates remain readable with writes disabled, and new requests against existing
+2.0 state fail before agent execution.
+The internal passive contract path remains available for serializer/fixture tests.
 
 In revised state, `terminalResults` stores immutable result envelopes by correlation ID outside
 `conversationHistory`, while `completionReceipts` retains completion evidence after a result payload expires.
@@ -103,7 +105,7 @@ The shared DTOs retain their schema contract. Delivery lookup and polling use th
 layouts. `ResultRetentionPeriod` defaults to the portable 60-second delivery window and accepts another
 positive duration or `null` for no payload expiry; expiry never removes the completion receipt. Binding
 selection/enforcement and transcript retention are not implemented by this layer.
-With the internal mailbox-writer gate enabled, successful new runs and the scheduled/explicit
+With mailbox writes enabled (the default for new sessions), successful new runs and the scheduled/explicit
 `CheckAndExpireResults` entity operation durably remove due `terminalResults` entries and transition
 their existing receipts to `unavailable`. The operation uses an independent state copy and commits its
 next self-signal with that state; it does not refresh whole-entity TTL or require the independent deletion
@@ -147,10 +149,11 @@ profile, and foreign runtimes preserve it opaquely without any requirement to ho
 schedulers honor the token contract. Do not roll back to an older scheduler that merely preserves the
 extension but starts a fresh chain on every run.
 
-Under the internal schema-2 test gate, one successful durable entity operation atomically stages the
-terminal result and receipt together with that operation's session continuation, ingestion bookkeeping,
-entity-local transcript, whole-entity TTL, optional binding, and other local control state. External provider
-writes and tool side effects are outside that entity-local transaction. A failed outer invocation or durable
+Under the schema-2 mailbox profile (the default for new sessions), one successful durable entity operation
+atomically stages the terminal result and receipt together with that operation's session continuation,
+ingestion bookkeeping, entity-local transcript, whole-entity TTL, optional binding, and other local control
+state. External provider writes and tool side effects are outside that entity-local transaction. A failed
+outer invocation or durable
 commit does not establish a new completion receipt. The only exception is an internal, default-off provider
 finalization capability: a certified adapter must explicitly attest accepted input, provider phase, and
 non-retryable/exhausted finality; the resulting session must serialize and the failed result, receipt, session,
@@ -159,17 +162,19 @@ is permitted. Legacy conversion uses only retained authoritative
 terminal evidence, never calls the model/tools, and cannot invent receipts for already-evicted results.
 Previously persisted legacy state stays legacy unless independently authorized as complete history;
 retained transcript alone does not establish that authorization. Known truncation/compaction prevents
-conversion. New missing-state generations can initialize 2.0 only under the internal gate.
-Whole-entity deletion of 2.0 state has a separate internal gate, disabled by default. Stored legacy
-deadlines cannot erase receipts, and there is no implicit schema-2 entity TTL.
+conversion. New-session missing-state generations initialize 2.0 by default; legacy entities keep
+initializing 1.2.
+Whole-entity deletion of 2.0 state is enabled by default but still requires an explicitly configured
+entity TTL; unconfigured default TTLs never delete revised state. Stored legacy deadlines cannot erase
+receipts, and there is no implicit schema-2 entity TTL.
 
-Schema 2.0 must not be activated as a cross-language write format until every participating runtime either
+Schema 2.0 must not be consumed as a cross-language write format until every participating runtime either
 implements the mailbox/binding contract or explicitly rejects the new major version. The current C# reader is
-fail-closed for unsupported versions and defaults new writes to 1.2. Other runtimes require coordinated version
-gating before a 2.0 producer is enabled; preserving unknown fields alone is not sufficient because an
-unaware worker could ignore completion receipts and rerun completed work.
-Production activation remains inaccessible through public options in this layer. An actual isolated
-backend/worker run proving state-and-outbox rollback, restart and duplicate dispatch is a mandatory
+fail-closed for unsupported versions; new .NET sessions write 2.0 by default while legacy entities keep
+writing 1.2. Other runtimes require coordinated version gating before they consume or produce 2.0 state;
+preserving unknown fields alone is not sufficient because an unaware worker could ignore completion
+receipts and rerun completed work. An actual isolated backend/worker run proving state-and-outbox rollback,
+restart and duplicate dispatch is a mandatory
 **merge and release gate**, not a claim established by mock-only coverage or a skipped integration test.
 A clearly documented gated skip permits draft readiness only: do not merge or release this correction
 until the actual isolated-backend test passes. See the
@@ -177,9 +182,10 @@ until the actual isolated-backend test passes. See the
 
 ## State Examples
 
-### Current schema 1.2
+### Schema 1.2 (legacy write format)
 
-This illustrative document uses the current production write format. It includes conversation history and
+This illustrative document uses the schema 1.2 write format, which legacy `dafx-{agent}` entities keep
+writing until Phase 2 migration. It includes conversation history and
 representative optional fields that may be written by interoperating producers; producers omit fields they do
 not use. The current .NET runtime preserves but does not populate `ingestedPositions`. Each value is a scalar
 highest-seen position for one producer, not an array or proof that every earlier position was delivered.
@@ -318,9 +324,9 @@ highest-seen position for one producer, not an array or proof that every earlier
 
 ### Schema 2.0
 
-This example is for contract review and contributor guidance only. Production runtimes must not emit schema 2
-until the activation requirements above are met. An `available` receipt has a matching terminal result; an
-`unavailable` receipt remains after its result payload has been removed.
+This example illustrates the format that new .NET durable sessions write by default. Other runtimes must
+not emit schema 2 until the cross-runtime activation requirements above are met. An `available` receipt has
+a matching terminal result; an `unavailable` receipt remains after its result payload has been removed.
 
 ```json
 {

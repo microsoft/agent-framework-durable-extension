@@ -14,14 +14,6 @@ using Microsoft.Extensions.Logging;
 
 const string FoundryServiceHistoryProviderKey = "foundry-managed-service.v1";
 
-if (!IsExperimentalMailboxRuntimeAvailable())
-{
-    Console.Error.WriteLine(
-        "DRAFT SAMPLE: schema 2 mailbox writes are protected by an internal, default-disabled rollout gate. " +
-        "This sample cannot run against production or mixed-language runtimes yet.");
-    return 2;
-}
-
 string projectEndpoint = Environment.GetEnvironmentVariable("FOUNDRY_PROJECT_ENDPOINT")
     ?? throw new InvalidOperationException("FOUNDRY_PROJECT_ENDPOINT is not set.");
 string deploymentName = Environment.GetEnvironmentVariable("FOUNDRY_MODEL")
@@ -182,8 +174,6 @@ static IHost CreateHost(AIAgent foundryAgent, string dtsConnectionString)
         })
         .Build();
 }
-
-static bool IsExperimentalMailboxRuntimeAvailable() => false;
 
 static async Task StopAndDisposeHostAsync(IHost host)
 {

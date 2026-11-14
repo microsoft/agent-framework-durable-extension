@@ -2,12 +2,6 @@
 
 This sample wraps a server-managed, versioned Microsoft Foundry agent as a Microsoft Agent Framework `FoundryAgent`, registers it as a durable `AIAgent`, and restores its opaque service continuation across a host restart.
 
-> [!WARNING]
-> This is a draft, experimental sample. Schema 2 mailbox writes remain behind an internal,
-> default-disabled C# runtime gate, so the executable exits before creating any Foundry resource.
-> Do not enable this scenario in mixed-runtime production until Python, the dashboard, pollers, and
-> every other reader meet the schema 2 rollout floor.
-
 ## Architecture
 
 ```text
@@ -29,7 +23,7 @@ The application:
 
 1. Creates a uniquely named Foundry agent version with `CreateAgentVersionAsync`.
 2. Wraps that exact version with `AIProjectClient.AsAIAgent`, producing a `FoundryAgent`.
-3. Registers the `FoundryAgent` with `ConfigureDurableAgents`, keeps `HistoryRetentionMode.KeepAll`, and sets the stable logical key `foundry-managed-service.v1`. Deterministic tests activate schema 2 through the runtime's internal test hook; the sample does not expose or bypass that gate.
+3. Registers the `FoundryAgent` with `ConfigureDurableAgents`, keeps `HistoryRetentionMode.KeepAll`, and sets the stable logical key `foundry-managed-service.v1`.
 4. Resolves the keyed durable `AIAgent` proxy and creates a `DurableAgentSession`.
 5. Sends a generated marker on the first turn. Foundry establishes the service conversation, and the durable entity persists the inner `ChatClientAgent` session containing that conversation identity.
 6. Stops the host, creates a fresh `FoundryAgent` wrapper and host, and sends a second turn using the same `DurableAgentSession`. The durable entity restores the opaque inner session. The deterministic registration test verifies that the same service conversation ID survives serialization and restoration; the live marker recall is an additional smoke signal, not the proof of identity.
@@ -41,7 +35,7 @@ The host restart is intentional: it demonstrates that continuity comes from dura
 
 After Foundry establishes a conversation, Foundry owns the transcript. The durable entity keeps the fixed logical owner binding, execution/delivery records, and opaque inner-session continuation. It does not keep or replay a duplicate transcript in `conversationHistory`.
 
-Schema 2 terminal results and completion receipts are required because the service-owned transcript is not mirrored into durable state. Activation is deliberately unavailable through the public options API. The deterministic tests use the existing internal test hook, while this sample remains gated and retains `HistoryRetentionMode.KeepAll` rather than opting into automatic transcript eviction.
+Schema 2 terminal results and completion receipts carry delivery because the service-owned transcript is not mirrored into durable state; new durable sessions write them by default. The sample retains `HistoryRetentionMode.KeepAll` rather than opting into automatic transcript eviction.
 
 This fixed ownership is an intentional C# durable runtime contract. `HistorySampleRegistrationTests.FoundryAgentRegistrationRestoresServiceContinuationAcrossProxyRestartAsync` invokes the actual versioned `FoundryAgent` through the registered durable proxy and verifies the entity-to-service transition, mailbox-only state, cold-host continuation, and a second call without credentials or network access. `FoundryAgentRegistrationTests.ServerManagedFoundryAgentRestoresFixedServiceOwnershipAsync` separately verifies wrapper discovery and the stable provider key. `AgentEntityHistoryTests.ServiceManagedConversationStoresOnlyMailboxAndContinuationAsync`, `AgentEntityHistoryTests.FirstServiceManagedTurnDoesNotLeaveEntityOwnedTranscriptAsync`, and `AgentEntityHistoryTests.WrappedServerManagedSessionSurvivesColdEntityInvocationAsync` cover the durable entity state shape and cold continuation.
 
@@ -68,17 +62,14 @@ Under this sample's model policy, configure an OpenAI model deployment that is s
 
 ## Run
 
-The source is retained as the intended end-to-end flow, but it is not currently runnable. Invoking it
-prints the draft-gate message and exits before reading credentials, creating a Foundry agent version,
-or contacting DTS:
+Run the end-to-end flow against a Foundry project and a Durable Task Scheduler endpoint:
 
 ```powershell
 cd dotnet\samples\DurableAgents\ConsoleApps\08_FoundryManagedAgent
 dotnet run --framework net10.0
 ```
 
-Once the cross-runtime rollout floor is met and the production gate is approved, a successful run is
-expected to print both responses and `Marker recall after durable restart: PASS`. Model wording is
+A successful run prints both responses and `Marker recall after durable restart: PASS`. Model wording is
 nondeterministic. The marker check is only a smoke signal; the deterministic tests prove the fixed
 binding and restored service conversation ID.
 

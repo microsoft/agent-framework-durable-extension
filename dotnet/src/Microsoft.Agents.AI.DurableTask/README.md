@@ -287,6 +287,29 @@ a new durable session. When an imported provisional binding already supplies a v
 uses that persisted key if registration omits one, then seals the same identity; a later explicit key must
 match it.
 
+A custom `ChatHistoryProvider` must also satisfy the continuation contract on every turn: each key it
+declares in `StateKeys` must hold a usable value in `session.StateBag` before the turn is sealed. A usable
+value is a non-blank string, a number, or a non-empty object or array; `null`, blank strings, `{}`, `[]`,
+and booleans are rejected. Providers that keep their transcript in an external store should write the
+store reference (for example a file name or row ID) into the state bag during their load or store callback:
+
+```csharp
+context.Session?.StateBag.SetValue(MyStateKey, historyId);
+```
+
+> [!IMPORTANT]
+> **Upgrading from 1.16.0-preview.260922.1 or earlier with a custom `ChatHistoryProvider`.**
+> New sessions now use schema 2.0.0 (`dafx-v2-{agent}`), which binds each session to one fixed history
+> owner. Register a stable, non-secret provider key
+> (`configureHistory: h => h.ProviderKey = new("contoso.history.v1")`) and make sure each declared
+> `StateKeys` entry holds a non-empty `session.StateBag` value after each turn. Without the key, every
+> turn fails with "History ownership 'ExternalProvider' requires an explicit stable logical provider
+> key". Without a usable state-bag value, turns fail at finalization with a
+> `DurableAgentHistoryBindingMismatchException` that names the provider and the missing keys. Do not
+> change the provider key for an existing session; a different key is rejected as a different history
+> owner. Built-in in-memory history needs no changes. See the
+> [custom history provider sample](../../samples/DurableAgents/ConsoleApps/09_CustomHistoryProvider/README.md).
+
 Provider/model/session work, mailbox completion, TTL preparation, and entity transcript updates share
 one isolated working-state commit boundary. External provider and model-service stores are outside that
 transaction. Their adapters must make writes idempotent and treat an exception or lost acknowledgement as

@@ -19,15 +19,6 @@ const int SeedMessageBytes = 4 * 1024;
 const int ModelHistoryMessageLimit = 12;
 const int ModelHistoryByteLimit = 32 * 1024;
 
-if (!IsExperimentalMailboxRuntimeAvailable())
-{
-    Console.Error.WriteLine(
-        "DRAFT SAMPLE: schema 2 mailbox writes are protected by an internal, default-disabled rollout gate. " +
-        "This sample cannot run against production or mixed-language runtimes yet.");
-    Environment.ExitCode = 2;
-    return;
-}
-
 // Get the Foundry project endpoint and model deployment name from environment variables.
 string projectEndpoint = Environment.GetEnvironmentVariable("FOUNDRY_PROJECT_ENDPOINT")
     ?? throw new InvalidOperationException("FOUNDRY_PROJECT_ENDPOINT is not set.");
@@ -210,5 +201,3 @@ static IHost CreateHost(
         })
         .Build();
 }
-
-static bool IsExperimentalMailboxRuntimeAvailable() => false;

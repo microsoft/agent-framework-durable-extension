@@ -296,7 +296,8 @@ internal static class DurableAgentHistoryBinding
         DurableAgentHistoryOwnership ownership,
         AgentSession session,
         ChatClientAgent? chatClientAgent,
-        bool remoteTransitionDetectedAfterExecution = false)
+        bool remoteTransitionDetectedAfterExecution = false,
+        bool restoredSession = true)
     {
         bool valid = ownership switch
         {
@@ -314,11 +315,47 @@ internal static class DurableAgentHistoryBinding
             return;
         }
 
+        string message = ownership == DurableAgentHistoryOwnership.ExternalProvider
+            ? GetMissingProviderContinuationMessage(
+                session,
+                chatClientAgent?.ChatHistoryProvider,
+                restoredSession)
+            : $"The {(restoredSession ? "restored" : "new")} {ownership} session does not contain the public " +
+              "continuation evidence required by its fixed durable history binding. The runtime will not " +
+              "initialize a replacement logical conversation; restore the missing continuation or start a " +
+              "new durable session.";
         throw new DurableAgentHistoryBindingMismatchException(
-            $"The restored {ownership} session does not contain the public continuation evidence " +
-            "required by its fixed durable history binding. The runtime will not initialize a replacement " +
-            "logical conversation; restore the missing continuation or start a new durable session." +
-            GetRemoteTransitionSuffix(remoteTransitionDetectedAfterExecution));
+            message + GetRemoteTransitionSuffix(remoteTransitionDetectedAfterExecution));
+    }
+
+    private static string GetMissingProviderContinuationMessage(
+        AgentSession session,
+        ChatHistoryProvider? provider,
+        bool restoredSession)
+    {
+        string sessionKind = restoredSession ? "restored" : "new";
+        string providerName = provider?.GetType().Name ?? "ChatHistoryProvider";
+        if (provider?.StateKeys is not { Count: > 0 } stateKeys)
+        {
+            return $"The {sessionKind} ExternalProvider session cannot prove history continuation because " +
+                $"{providerName} declares no StateKeys. Declare at least one StateKey and write a usable " +
+                "value for each declared key into session.StateBag before the turn is sealed.";
+        }
+
+        System.Text.Json.JsonElement stateBag = session.StateBag.Serialize();
+        string unusableKeys = string.Join(
+            ", ",
+            stateKeys.Where(
+                key => !stateBag.TryGetProperty(key, out System.Text.Json.JsonElement value) ||
+                    !HasUsableProviderContinuationValue(value)));
+        return $"The {sessionKind} ExternalProvider session does not contain the public continuation evidence " +
+            $"required by its fixed durable history binding: {providerName} declares StateKeys " +
+            $"[{string.Join(", ", stateKeys)}] but session.StateBag has no usable value for [{unusableKeys}]. " +
+            "Write a non-empty value (such as your history ID) for each declared key; null, blank strings, " +
+            "empty objects or arrays, and booleans are rejected. " +
+            (restoredSession
+                ? "Restore the missing continuation or start a new durable session."
+                : "Fix the provider's store callback before retrying; the runtime will not seal the turn without it.");
     }
 
     public static void ValidatePreExecutionContinuationContract(

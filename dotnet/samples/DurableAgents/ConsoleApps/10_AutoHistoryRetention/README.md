@@ -1,16 +1,13 @@
 # Opt-in Pressure Retention Sample
 
-> [!IMPORTANT]
-> This is a draft/experimental sample. Automatic transcript retention requires schema 2 mailbox
-> state, whose writer is internal and disabled by default. The runnable entry point fails closed
-> before reading credentials or contacting the model or DTS. Do not enable this scenario in
-> mixed-runtime production until Python, the dashboard, pollers, rollback tooling, and every other
-> reader meet the schema 2 rollout floor.
+This sample opts into automatic transcript pressure retention through the public
+`DurableAgentsOptions` surface: `HistoryRetentionMode.Auto` with a 32 KiB `MaxStateBytes` budget and
+explicit watermarks. New durable sessions write the schema 2 mailbox state that retention protects,
+so no internal activation hook is needed.
 
-The public sample source preserves the intended prompts, bounded model options, marker diagnostic,
-and OpenTelemetry registration. It does **not** configure a retention mode or state budget because
-those activation settings are internal. The real package unit tests apply the draft profile through
-the existing internal, default-disabled test hook.
+> [!NOTE]
+> Schema 2 is the .NET default for new sessions. If other runtimes read the same task hub, they must
+> meet the schema 2 rollout floor before this scenario is used in mixed-runtime production.
 
 ## Scenario
 
@@ -54,8 +51,8 @@ This is durable entity **pressure retention**, not Microsoft Agent Framework sta
 compaction or `FollowCompaction`. It does not summarize old messages. It removes old transcript
 from later model input while durable execution and delivery evidence remains available.
 
-This release exposes no public retention-mode selection. Internal `KeepAll` remains the
-default-off policy and performs no proactive transcript deletion.
+`KeepAll` remains the default and performs no proactive transcript deletion; this sample explicitly
+opts into `Auto`.
 
 `Auto` cannot make every payload fit. A single oversized protected newest inline `DataContent`,
 tool result, terminal result, or other protected state can still exceed the high watermark. The
@@ -100,15 +97,17 @@ behavior when correctness matters.
 
 ## Run the sample
 
-The entry point is intentionally unsupported and exits before accessing credentials or services:
+The sample requires Foundry credentials and a Durable Task Scheduler endpoint (the connection string
+defaults to the local emulator):
 
 ```bash
 cd dotnet/samples/DurableAgents/ConsoleApps/10_AutoHistoryRetention
 dotnet run --framework net10.0
 ```
 
-It prints the draft-gate explanation and exits with code 2. A future public activation design must
-be reviewed before this becomes runnable.
+A successful run prints the original marker, the diagnostic question, the model response, and an
+honest marker observation. The observation is illustrative; the deterministic unit tests prove the
+eviction behavior.
 
 ## Tests
 
@@ -129,6 +128,7 @@ dotnet test --project ..\..\..\..\tests\Microsoft.Agents.AI.DurableTask.UnitTest
     --filter-method "*DraftSampleProfileEvictsTranscriptButPreservesCompletionAndIdempotencyAsync"
 ```
 
-That regression applies the draft profile through the internal test gate and proves transcript
+That regression applies the sample's retention profile through the public `DurableAgentsOptions`
+surface and proves transcript
 eviction, connected tool grouping, mailbox and receipt preservation, persisted-state reload,
 idempotent duplicate delivery, later model-input removal, and product retention telemetry.
