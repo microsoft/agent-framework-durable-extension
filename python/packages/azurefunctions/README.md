@@ -67,6 +67,23 @@ With the default `/api` prefix, generated routes are
 `enable_health_check` controls `/api/health` (both default true). `enable_mcp_tool_trigger` opts
 agents into native MCP tools (default false).
 
+### Scoping a status endpoint to one orchestration
+
+For orchestrations registered with `@app.orchestration_trigger` (rather than workflows),
+`add_orchestration_status_route` registers a GET status endpoint that only resolves instance IDs
+belonging to that orchestration. The durable client resolves IDs across the whole task hub, so
+without this guard an ID from another orchestration would leak its status; here it reads as `404`:
+
+```python
+app.add_orchestration_status_route("single_agent_orchestration", route="singleagent/status/{instanceId}")
+```
+
+The route defaults to `orchestration/{name}/status/{instanceId}` when `route` is omitted. The
+response is the canonical status shape (runtime status, output, custom status, timestamps, and the
+failure message without the stack trace; the orchestration input is never echoed). To customise
+the response, register your own endpoint and start from `build_orchestration_status_response(status)`,
+applying the same orchestration-name guard. The workflow status route uses the same builder.
+
 Agent requests accept a JSON `message` with optional `sessionId`, `role`, `response_format` and
 `enable_tool_calls`, or a plain-text body. `sessionId` also works in the query string. Reuse the returned
 `sessionId` for later turns. JSON requests or `Accept: application/json` select JSON responses.

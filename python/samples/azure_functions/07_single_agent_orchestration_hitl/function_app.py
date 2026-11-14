@@ -20,7 +20,7 @@ from typing import Any
 import azure.functions as func
 from agent_framework import Agent
 from agent_framework.foundry import FoundryChatClient
-from agent_framework_azurefunctions import AgentFunctionApp, runtime_status_name
+from agent_framework_azurefunctions import AgentFunctionApp, build_orchestration_status_response
 from azure.durable_functions import DurableFunctionsClient
 from azure.identity.aio import AzureCliCredential
 from durabletask.task import OrchestrationContext, when_any
@@ -284,7 +284,11 @@ async def send_human_approval(
     )
 
 
-# 7. Endpoint that mirrors Durable Functions status plus custom workflow messaging.
+# 7. Hand-written status endpoint showing how to customise the canonical response.
+# Most apps should use app.add_orchestration_status_route(...) instead; this sample keeps
+# its own endpoint to rename fields for the HITL flow. A custom endpoint must apply the
+# orchestration-name guard itself: the durable client resolves instance IDs across the
+# whole task hub, so an ID from another orchestration must read as "not found".
 @app.route(route="hitl/status/{instanceId}", methods=["GET"])
 @app.durable_client_input(client_name="client")
 async def get_orchestration_status(
@@ -300,31 +304,19 @@ async def get_orchestration_status(
         )
 
     status = await client.get_orchestration_state(instance_id)
-
-    if status is None or status.runtime_status is None:
+    if status is None or (status.name or "").casefold() != "content_generation_hitl_orchestration":
         return func.HttpResponse(
             body=json.dumps({"error": "Instance not found."}),
             status_code=404,
             mimetype="application/json",
         )
 
-    response_data: dict[str, Any] = {
-        "instanceId": status.instance_id,
-        "runtimeStatus": runtime_status_name(status.runtime_status),
-        "workflowStatus": _read_json(status.serialized_custom_status),
-    }
-
-    orchestration_input = _read_json(status.serialized_input)
-    if orchestration_input is not None:
-        response_data["input"] = orchestration_input
-
-    output = _read_json(status.serialized_output)
-    if output is not None:
-        response_data["output"] = output
-
-    if status.failure_details is not None:
-        # Return the message only. The failure details also carry the stack trace.
-        response_data["failureDetails"] = status.failure_details.message
+    response_data = build_orchestration_status_response(status)
+    # Customise the canonical shape: surface the HITL progress under a friendlier name
+    # and report the failure message without the stack trace.
+    response_data["workflowStatus"] = response_data.pop("customStatus")
+    if response_data["error"] is not None:
+        response_data["failureDetails"] = response_data.pop("error")
 
     return func.HttpResponse(
         body=json.dumps(response_data),
@@ -333,22 +325,7 @@ async def get_orchestration_status(
     )
 
 
-# 8. Helper utilities keep parsing logic deterministic.
-def _read_json(serialized: str | None) -> Any:
-    """Read a serialized status field as plain JSON.
-
-    The status getters decode through the Functions converter, which rebuilds objects from
-    ``__class__`` and ``__module__`` markers. Reading the serialized value keeps such data as
-    plain JSON. A value that is not JSON, such as a plain termination reason, stays a string.
-    """
-    if not serialized:
-        return None
-    try:
-        return json.loads(serialized)
-    except json.JSONDecodeError:
-        return serialized
-
-
+# 8. Helper utilities keep URL construction and approval parsing deterministic.
 def _build_status_url(request_url: str, instance_id: str, *, route: str) -> str:
     base_url, _, _ = request_url.partition("/api/")
     if not base_url:
@@ -415,6 +392,9 @@ HTTP/1.1 200 OK
     "workflowStatus": "Content published successfully at 2024-01-01T12:00:00",
     "output": {
         "content": "Thank you for joining the Contoso product launch..."
-    }
+    },
+    "error": null,
+    "createdTime": "2024-01-01T00:00:00+00:00",
+    "lastUpdatedTime": "2024-01-01T00:00:10+00:00"
 }
 """

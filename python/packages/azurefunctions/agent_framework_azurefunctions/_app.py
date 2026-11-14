@@ -204,6 +204,37 @@ def _utc_isoformat(value: datetime | None) -> str | None:
     return (value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)).isoformat()
 
 
+def build_orchestration_status_response(status: OrchestrationState) -> dict[str, Any]:
+    """Build the canonical JSON response for an orchestration status endpoint.
+
+    This is the single source of truth for the status response shape: the workflow
+    status route, :meth:`AgentFunctionApp.add_orchestration_status_route`, and custom
+    endpoints all emit these fields, so the contract cannot drift between them.
+    Custom endpoints should start from this dict and add or rename fields rather than
+    hand-rolling the shape.
+
+    The orchestration ``input`` is deliberately omitted: echoing the caller's payload
+    back on a status URL is the field most likely to expose something unwanted.
+    Serialized fields are read as plain JSON so marker-shaped data stays data, runtime
+    status uses the PascalCase wire name, and timestamps carry an explicit UTC offset.
+    A failed orchestration reports the failure message without the stack trace.
+    """
+    output = _read_json_field(status.serialized_output)
+    return {
+        "instanceId": status.instance_id,
+        "runtimeStatus": runtime_status_name(status.runtime_status),
+        "customStatus": _read_json_field(status.serialized_custom_status),
+        "output": output,
+        "error": (
+            _workflow_error(status, output)
+            if status.runtime_status == OrchestrationStatus.FAILED
+            else None
+        ),
+        "createdTime": _utc_isoformat(status.created_at),
+        "lastUpdatedTime": _utc_isoformat(status.last_updated_at),
+    }
+
+
 def _agent_entity_id(session_id: AgentSessionId) -> EntityInstanceId:
     """Address the entity behind an agent session.
 
@@ -505,6 +536,7 @@ class AgentFunctionApp(df.DFApp):
         # Initialize agent metadata dictionary
         self._agent_metadata = {}
         self._workflows: dict[str, Workflow] = {}
+        self._orchestration_status_routes: dict[str, str] = {}
         # Every workflow whose orchestration has been registered (top-level plus
         # nested sub-workflows), keyed by case-folded name -> the registered instance,
         # so a shared sub-workflow is registered once while two different workflows
@@ -775,6 +807,69 @@ class AgentFunctionApp(df.DFApp):
             response_delivery_window_seconds=response_delivery_window_seconds,
         )
         self.workflow = next(iter(self._workflows.values())) if len(self._workflows) == 1 else None
+
+    def add_orchestration_status_route(
+        self,
+        orchestration_name: str,
+        *,
+        route: str | None = None,
+    ) -> None:
+        """Register a GET status endpoint scoped to a single orchestration name.
+
+        The durable client resolves instance IDs across every orchestration in the task
+        hub, so an endpoint that looks up by ``instanceId`` alone would return any
+        orchestration's status. This route treats an ID belonging to a different
+        orchestration as "not found", the same guard the workflow status route applies.
+        The response is built by :func:`build_orchestration_status_response`; register a
+        custom endpoint with that helper when the response needs extra fields.
+
+        Args:
+            orchestration_name: Name of the orchestration to scope the endpoint to, as
+                passed to ``schedule_new_orchestration``. Matched case-insensitively.
+            route: HTTP route template; must contain ``{instanceId}``. Defaults to
+                ``orchestration/{orchestration_name}/status/{instanceId}``.
+
+        Raises:
+            ValueError: If the name is blank, the route lacks ``{instanceId}``, or a
+                status route is already registered for this orchestration.
+        """
+        self._ensure_registration_usable()
+        if not isinstance(orchestration_name, str) or not orchestration_name.strip():
+            raise ValueError("Orchestration status route requires a nonblank orchestration name.")
+        resolved_route = (
+            route if route is not None else f"orchestration/{orchestration_name}/status/{{instanceId}}"
+        )
+        if "{instanceId}" not in resolved_route:
+            raise ValueError("Orchestration status route must contain '{instanceId}'.")
+        key = orchestration_name.casefold()
+        if key in self._orchestration_status_routes:
+            raise ValueError(f"A status route is already registered for orchestration '{orchestration_name}'.")
+        self._orchestration_status_routes[key] = resolved_route
+
+        @self.function_name(f"{orchestration_name}-status")
+        @self.route(route=resolved_route, methods=["GET"])
+        @self.durable_client_input(client_name="client")
+        async def get_orchestration_status(
+            req: func.HttpRequest, client: df.DurableFunctionsClient
+        ) -> func.HttpResponse:
+            """HTTP endpoint to get orchestration status, scoped to one orchestration."""
+            instance_id = req.route_params.get("instanceId")
+            if not instance_id:
+                return self._build_error_response("Instance ID is required", status_code=400)
+
+            status = await client.get_orchestration_state(instance_id)
+            name = getattr(status, "name", None)
+            if status is None or not isinstance(name, str) or name.casefold() != key:
+                return self._build_error_response("Instance not found", status_code=404)
+
+            return func.HttpResponse(
+                json.dumps(build_orchestration_status_response(status), default=_json_default),
+                status_code=200,
+                mimetype="application/json",
+            )
+
+        # Ensure the route handler is registered (prevents unused function warnings)
+        _ = get_orchestration_status
 
     def _collect_workflows(
         self,
@@ -1104,19 +1199,10 @@ class AgentFunctionApp(df.DFApp):
             decoded_output = deserialize_workflow_output(raw_output) if raw_output is not None else None
             custom_status = _read_json_field(status.serialized_custom_status)
 
-            response = {
-                "instanceId": status.instance_id,
-                "runtimeStatus": runtime_status_name(status.runtime_status),
-                "customStatus": custom_status,
-                "output": decoded_output,
-                "error": (
-                    _workflow_error(status, decoded_output)
-                    if status.runtime_status == OrchestrationStatus.FAILED
-                    else None
-                ),
-                "createdTime": _utc_isoformat(status.created_at),
-                "lastUpdatedTime": _utc_isoformat(status.last_updated_at),
-            }
+            response = build_orchestration_status_response(status)
+            response["output"] = decoded_output
+            if status.runtime_status == OrchestrationStatus.FAILED:
+                response["error"] = _workflow_error(status, decoded_output)
 
             # Add pending HITL requests info if available. Requests originating in a
             # nested sub-workflow are bubbled up here with a qualified requestId

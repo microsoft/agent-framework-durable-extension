@@ -2,7 +2,7 @@
 
 import importlib.metadata
 
-from ._app import AgentFunctionApp, runtime_status_name
+from ._app import AgentFunctionApp, build_orchestration_status_response, runtime_status_name
 from ._hitl_context import WorkflowHitlContext
 
 try:
@@ -14,5 +14,6 @@ __all__ = [
     "AgentFunctionApp",
     "WorkflowHitlContext",
     "__version__",
+    "build_orchestration_status_response",
     "runtime_status_name",
 ]
