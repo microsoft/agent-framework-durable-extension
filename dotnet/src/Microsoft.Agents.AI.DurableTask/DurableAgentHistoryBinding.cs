@@ -351,8 +351,9 @@ internal static class DurableAgentHistoryBinding
         return $"The {sessionKind} ExternalProvider session does not contain the public continuation evidence " +
             $"required by its fixed durable history binding: {providerName} declares StateKeys " +
             $"[{string.Join(", ", stateKeys)}] but session.StateBag has no usable value for [{unusableKeys}]. " +
-            "Write a non-empty value (such as your history ID) for each declared key; null, blank strings, " +
-            "empty objects or arrays, and booleans are rejected. " +
+            "Write a usable value (such as your history ID) for each declared key: a non-blank string, a number, " +
+            "or an object or array that recursively contains a non-blank string or number. Null, booleans, blank " +
+            "strings, and containers holding only unusable values (for example {} or {\"ready\":true}) are rejected. " +
             (restoredSession
                 ? "Restore the missing continuation or start a new durable session."
                 : "Fix the provider's store callback before retrying; the runtime will not seal the turn without it.");

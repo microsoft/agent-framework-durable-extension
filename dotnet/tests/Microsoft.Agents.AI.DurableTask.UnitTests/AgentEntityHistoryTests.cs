@@ -1395,6 +1395,8 @@ public sealed class AgentEntityHistoryTests
     [InlineData("false")]
     [InlineData("{}")]
     [InlineData("[]")]
+    [InlineData("{\"ready\":true}")]
+    [InlineData("[\"\"]")]
     public async Task BoundExternalProviderRejectsInvalidDeclaredStateBeforeCallbacksAsync(
         string continuationJson)
     {
@@ -1518,6 +1520,8 @@ public sealed class AgentEntityHistoryTests
     [InlineData("[]")]
     [InlineData("true")]
     [InlineData("false")]
+    [InlineData("{\"ready\":true}")]
+    [InlineData("[\"\"]")]
     public async Task DefaultSchemaCustomProviderWithUnusableContinuationValueFailsAtSealAsync(
         string unusableValue)
     {

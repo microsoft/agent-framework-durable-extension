@@ -287,11 +287,13 @@ a new durable session. When an imported provisional binding already supplies a v
 uses that persisted key if registration omits one, then seals the same identity; a later explicit key must
 match it.
 
-A custom `ChatHistoryProvider` must also satisfy the continuation contract on every turn: each key it
-declares in `StateKeys` must hold a usable value in `session.StateBag` before the turn is sealed. A usable
-value is a non-blank string, a number, or a non-empty object or array; `null`, blank strings, `{}`, `[]`,
-and booleans are rejected. Providers that keep their transcript in an external store should write the
-store reference (for example a file name or row ID) into the state bag during their load or store callback:
+A custom `ChatHistoryProvider` must also satisfy the continuation contract on every turn: it must declare
+at least one key in `StateKeys`, and each declared key must hold a usable value in `session.StateBag`
+before the turn is sealed. A usable value is a non-blank string, a number, or an object or array that
+recursively contains a non-blank string or number; `null`, booleans, blank strings, `{}`, `[]`, and
+containers holding only unusable values (such as `{"ready":true}` or `[""]`) are rejected. Providers that
+keep their transcript in an external store should write the store reference (for example a file name or
+row ID) into the state bag during their load or store callback:
 
 ```csharp
 context.Session?.StateBag.SetValue(MyStateKey, historyId);
@@ -301,8 +303,9 @@ context.Session?.StateBag.SetValue(MyStateKey, historyId);
 > **Upgrading from 1.16.0-preview.260922.1 or earlier with a custom `ChatHistoryProvider`.**
 > New sessions now use schema 2.0.0 (`dafx-v2-{agent}`), which binds each session to one fixed history
 > owner. Register a stable, non-secret provider key
-> (`configureHistory: h => h.ProviderKey = new("contoso.history.v1")`) and make sure each declared
-> `StateKeys` entry holds a non-empty `session.StateBag` value after each turn. Without the key, every
+> (`configureHistory: h => h.ProviderKey = new("contoso.history.v1")`), declare at least one `StateKeys`
+> entry, and make sure each declared entry holds a usable `session.StateBag` value after each turn: a
+> non-blank string, a number, or an object or array that recursively contains one. Without the key, every
 > turn fails with "History ownership 'ExternalProvider' requires an explicit stable logical provider
 > key". Without a usable state-bag value, turns fail at finalization with a
 > `DurableAgentHistoryBindingMismatchException` that names the provider and the missing keys. Do not
