@@ -792,7 +792,8 @@ internal partial class AgentEntity(IServiceProvider services, CancellationToken 
                 finalOwnership,
                 session,
                 chatClientAgent,
-                remoteServiceTransition);
+                remoteServiceTransition,
+                restoredSession: existingHistoryBinding is not null);
         }
 
         if (finalOwnership != DurableAgentHistoryOwnership.Entity)

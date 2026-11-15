@@ -6,8 +6,11 @@ namespace Microsoft.Agents.AI.DurableTask;
 /// Configures history persistence for one durable agent registration.
 /// </summary>
 /// <remarks>
-/// These settings participate in the fixed-owner schema 2 profile. While schema 2 writes remain
-/// internally gated off, schema 1 operations preserve the pre-profile Agent Framework behavior.
+/// These settings participate in the fixed-owner schema 2 profile that new durable sessions use by
+/// default. A custom history provider must be registered with a stable <see cref="ProviderKey"/> and
+/// must write a usable continuation value for every key it declares in <c>StateKeys</c> into the
+/// session state bag on each turn. Legacy entities and explicit opt-outs preserve the pre-profile
+/// schema 1 behavior.
 /// </remarks>
 public sealed class DurableAgentHistoryOptions
 {
@@ -31,5 +34,11 @@ public sealed class DurableAgentHistoryOptions
     /// <summary>
     /// Gets or sets the stable logical identity of a non-entity history owner.
     /// </summary>
+    /// <remarks>
+    /// Required under the default schema 2 profile when a custom <c>ChatHistoryProvider</c> or a
+    /// model service owns history. The key must be stable across deployments, must not contain
+    /// secrets, and must not change for an existing session; a different key is rejected as a
+    /// different history owner.
+    /// </remarks>
     public DurableAgentHistoryProviderKey? ProviderKey { get; set; }
 }

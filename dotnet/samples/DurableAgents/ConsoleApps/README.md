@@ -9,14 +9,14 @@ This directory contains samples for console app hosting of durable agents. These
 - **[05_AgentOrchestration_HITL](05_AgentOrchestration_HITL)**: A sample that demonstrates how to implement a human-in-the-loop workflow using durable orchestration, including interactive approval prompts.
 - **[06_LongRunningTools](06_LongRunningTools)**: A sample that demonstrates how agents can start and interact with durable orchestrations from tool calls to enable long-running tool scenarios.
 - **[07_ReliableStreaming](07_ReliableStreaming)**: A sample that demonstrates how to implement reliable streaming for durable agents using Redis Streams, enabling clients to disconnect and reconnect without losing messages.
-- **[08_FoundryManagedAgent](08_FoundryManagedAgent)**: Draft/experimental source for binding a server-managed, versioned Microsoft Foundry agent to a stable logical service owner and restoring its opaque service continuation across a host restart. Runtime execution remains gated.
-- **[09_CustomHistoryProvider](09_CustomHistoryProvider)**: Draft/experimental JSON-file external history provider with a stable logical key, more than 1 MiB of cumulative history, a bounded model window, and cold-restored external references. Runtime execution remains gated.
-- **[10_AutoHistoryRetention](10_AutoHistoryRetention)**: Draft/experimental opt-in transcript-pressure retention sample with protected completion evidence and OpenTelemetry observations. Runtime execution remains gated.
+- **[08_FoundryManagedAgent](08_FoundryManagedAgent)**: A sample that binds a server-managed, versioned Microsoft Foundry agent to a stable logical service owner and restores its opaque service continuation across a host restart.
+- **[09_CustomHistoryProvider](09_CustomHistoryProvider)**: A sample that demonstrates a JSON-file external history provider with a stable logical key, more than 1 MiB of cumulative history, a bounded model window, and cold-restored external references.
+- **[10_AutoHistoryRetention](10_AutoHistoryRetention)**: A sample that demonstrates opt-in transcript-pressure retention with protected completion evidence and OpenTelemetry observations.
 - **[11_GitHubCopilotAgent](11_GitHubCopilotAgent)**: Demonstrates hosting `GitHubCopilotAgent` (`Microsoft.Agents.AI.GitHub.Copilot` / `GitHub.Copilot.SDK`) for concurrent webhook/alert bursts serialized by the Durable Entity mailbox (`Task.WhenAll` on one session without Redis locks), long-running Human-in-the-Loop orchestrations with durable SLA timers that survive full worker shutdown while paused, and Durable Workflows using `DurableAgentHistoryReplayMode.CurrentRequestOnly`.
 
-Samples 08 through 10 require schema 2 mailbox state, whose writer remains internal and disabled by
-default. They cannot be enabled in mixed-runtime production until Python, the dashboard, pollers, and
-all other readers meet the rollout floor.
+Samples 08 through 10 use the schema 2 mailbox state that new .NET durable sessions write by default.
+In mixed-runtime deployments, Python, the dashboard, pollers, and all other readers must still meet
+the schema 2 rollout floor before they can consume that state.
 
 ## Running the Samples
 

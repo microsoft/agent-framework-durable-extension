@@ -287,7 +287,7 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
-    public async Task DefaultSchemaWritesPreserveCustomProviderCompatibilityAsync()
+    public async Task Schema1WritesPreserveCustomProviderCompatibilityAsync()
     {
         RecordingChatClient client = new();
         RecordingHistoryProvider provider = new();
@@ -310,7 +310,7 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
-    public async Task DefaultSchemaCustomProviderIsSoleHistorySourceAcrossColdRestartAsync()
+    public async Task Schema1CustomProviderIsSoleHistorySourceAcrossColdRestartAsync()
     {
         RecordingHistoryProvider firstProvider = new() { PersistTranscript = true };
         RecordingChatClient firstClient = new();
@@ -349,7 +349,7 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
-    public async Task DefaultSchemaCustomProviderToolLoopStoresAndReplaysOneOuterTurnAsync()
+    public async Task Schema1CustomProviderToolLoopStoresAndReplaysOneOuterTurnAsync()
     {
         AIFunction tool = AIFunctionFactory.Create(
             (string value) => $"tool result: {value}",
@@ -408,7 +408,7 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
-    public async Task DefaultSchemaWritesPreserveFirstServiceTransitionCompatibilityAsync()
+    public async Task Schema1WritesPreserveFirstServiceTransitionCompatibilityAsync()
     {
         RecordingChatClient client = new() { ResponseConversationId = "service-id" };
         EntityHarness harness = CreateHarness(
@@ -428,7 +428,7 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
-    public async Task DefaultSchemaServiceSessionIsSoleHistorySourceAcrossColdRestartAsync()
+    public async Task Schema1ServiceSessionIsSoleHistorySourceAcrossColdRestartAsync()
     {
         RecordingChatClient firstClient = new() { ResponseConversationId = "service-id" };
         EntityHarness firstHarness = CreateHarness(
@@ -1395,6 +1395,8 @@ public sealed class AgentEntityHistoryTests
     [InlineData("false")]
     [InlineData("{}")]
     [InlineData("[]")]
+    [InlineData("{\"ready\":true}")]
+    [InlineData("[\"\"]")]
     public async Task BoundExternalProviderRejectsInvalidDeclaredStateBeforeCallbacksAsync(
         string continuationJson)
     {
@@ -1492,7 +1494,63 @@ public sealed class AgentEntityHistoryTests
     }
 
     [Fact]
-    public async Task DefaultSchemaWritesPreserveExplicitInMemoryProviderCompatibilityAsync()
+    public async Task DefaultSchemaCustomProviderWithoutProviderKeyFailsBeforeCallbacksAsync()
+    {
+        RecordingHistoryProvider provider = new();
+        RecordingChatClient client = new();
+        EntityHarness harness = CreateHarness(
+            CreateAgentWithProvider(client, provider),
+            new DurableAgentState());
+
+        DurableAgentHistoryBindingMismatchException exception =
+            await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
+                () => harness.RunAsync(new RunRequest("first") { CorrelationId = "first" }));
+
+        Assert.Contains("requires an explicit stable logical provider key", exception.Message);
+        Assert.Equal(0, provider.LoadCount);
+        Assert.Equal(0, provider.StoreCount);
+        Assert.Equal(0, client.InvocationCount);
+        Assert.False(harness.StateWasPersisted);
+    }
+
+    [Theory]
+    [InlineData("\"\"")]
+    [InlineData("\"   \"")]
+    [InlineData("{}")]
+    [InlineData("[]")]
+    [InlineData("true")]
+    [InlineData("false")]
+    [InlineData("{\"ready\":true}")]
+    [InlineData("[\"\"]")]
+    public async Task DefaultSchemaCustomProviderWithUnusableContinuationValueFailsAtSealAsync(
+        string unusableValue)
+    {
+        using JsonDocument continuationDocument = JsonDocument.Parse(unusableValue);
+        RecordingHistoryProvider provider = new()
+        {
+            ContinuationValue = continuationDocument.RootElement.Clone(),
+        };
+        RecordingChatClient client = new();
+        EntityHarness harness = CreateHarness(
+            CreateAgentWithProvider(client, provider),
+            new DurableAgentState(),
+            options => options.ProviderKey = new("external-history.v1"));
+
+        DurableAgentHistoryBindingMismatchException exception =
+            await Assert.ThrowsAsync<DurableAgentHistoryBindingMismatchException>(
+                () => harness.RunAsync(new RunRequest("first") { CorrelationId = "first" }));
+
+        Assert.Contains("new ExternalProvider session", exception.Message);
+        Assert.Contains(nameof(RecordingHistoryProvider), exception.Message);
+        Assert.Contains("external-history", exception.Message);
+        Assert.Equal(1, provider.LoadCount);
+        Assert.Equal(1, provider.StoreCount);
+        Assert.Equal(1, client.InvocationCount);
+        Assert.False(harness.StateWasPersisted);
+    }
+
+    [Fact]
+    public async Task Schema1WritesPreserveExplicitInMemoryProviderCompatibilityAsync()
     {
         RecordingChatClient client = new();
         ChatClientAgent agent = new(

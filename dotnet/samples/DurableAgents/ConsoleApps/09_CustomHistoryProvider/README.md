@@ -3,16 +3,12 @@
 This sample demonstrates a durable Azure OpenAI agent whose cumulative conversation history is
 stored by a custom JSON-file `ChatHistoryProvider`.
 
-> [!WARNING]
-> This is a draft, experimental sample. Schema 2 mailbox writes remain behind an internal,
-> default-disabled C# runtime gate, so the executable exits before reading credentials or contacting
-> the model or DTS. Do not enable this scenario in mixed-runtime production until Python, the
-> dashboard, pollers, and every other reader meet the schema 2 rollout floor.
-
 ## Key Concepts Demonstrated
 
 - Persisting the full transcript outside the durable entity.
 - Binding the durable session to the stable logical provider key `sample-json-file-history.v1`.
+- Writing a usable continuation value (the external history file reference) into `session.StateBag`
+  for the provider's declared `StateKeys` entry on every turn, as the default schema 2 profile requires.
 - Restoring the same external history reference with a compatible provider instance after a host restart.
 - Growing external history beyond 1 MiB with many simulated 4 KiB records.
 - Projecting only the newest 12 records, capped at 32 KiB of UTF-8 text, into model history.
@@ -29,10 +25,9 @@ provider continuation/reference. It does not keep a second external-owned reques
 in `conversationHistory`, and mailbox results are not replayed into model input. External provider
 writes are not transactionally coupled to the durable entity commit.
 
-External ownership requires schema 2 terminal results and completion receipts, but activation is
-deliberately unavailable through the public options API. Deterministic tests use the existing
-internal test hook; the sample itself does not expose or bypass that gate. It separately keeps
-`HistoryRetentionMode.KeepAll`, so mailbox activation remains independent of automatic retention.
+External ownership uses the schema 2 terminal results and completion receipts that new durable
+sessions write by default. The sample keeps `HistoryRetentionMode.KeepAll`, so mailbox delivery
+remains independent of automatic retention.
 
 This JSON implementation reads the full file before selecting the bounded model-history suffix.
 It is text-focused, local to one process/filesystem, and not a distributed, idempotent, exactly-once,
@@ -54,11 +49,10 @@ cd dotnet/samples/DurableAgents/ConsoleApps/09_CustomHistoryProvider
 dotnet run --framework net10.0
 ```
 
-The source retains the intended flow: enter a short marker, create more than 1 MiB of cumulative
-external history, ask the agent to remember the marker, restart the host with a compatible provider
-instance, verify marker recall and the same external history reference, and delete the exact
-sample-local JSON directory. Until the rollout gate is approved, invoking the executable prints the
-draft-gate message and exits before performing those operations.
+The sample flow: enter a short marker, create more than 1 MiB of cumulative external history, ask
+the agent to remember the marker, restart the host with a compatible provider instance, verify
+marker recall and the same external history reference, and delete the exact sample-local JSON
+directory.
 
 ## Tests
 
@@ -70,10 +64,10 @@ The sample-local tests cover marker validation at the 1,024-byte boundary (inclu
 ASCII and multibyte input), the stable logical key, external storage above 1 MiB, bounded model-history
 projection, provider-reference restoration, framework-filtered persistence, unsupported content
 failure, and cancellation without requiring Foundry or DTS. The durable runtime registration tests
-exercise the configured keyed proxy across a cold host restart, verify schema 2 mailbox and completion
-state without a transcript mirror through the internal test hook, and verify that the default,
-non-activated runtime continues using legacy entity history while the external provider runs, without
-authorizing or writing schema 2 outcomes. Additional durable runtime tests
+in the package unit-test project exercise the configured keyed proxy across a cold host restart,
+verify schema 2 mailbox and completion state without a transcript mirror, and verify that an
+explicit schema 1 opt-out continues using legacy entity history while the external provider runs,
+without writing schema 2 outcomes. Additional durable runtime tests
 `AgentEntityHistoryTests.RecreatedExternalProviderWithSameLogicalKeyContinuesWithoutTranscriptMirrorAsync`,
 `AgentEntityHistoryTests.ChangedExternalProviderKeyRejectsBeforeProviderOrModelCallbacksAsync`,
 `AgentEntityHistoryTests.CustomProviderOwnsTranscriptAndEntityStoresOnlyMailboxAndContinuationAsync`,
