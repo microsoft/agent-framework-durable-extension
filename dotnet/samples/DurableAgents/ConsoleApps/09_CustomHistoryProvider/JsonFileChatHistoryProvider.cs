@@ -326,7 +326,7 @@ public sealed class JsonFileChatHistoryProvider : ChatHistoryProvider, IDisposab
                 stream,
                 s_jsonOptions,
                 cancellationToken)
-            ?? [];
+            ?? throw new JsonException("The external chat history must be a JSON array.");
     }
 
     private async Task WriteStoredMessagesAsync(
